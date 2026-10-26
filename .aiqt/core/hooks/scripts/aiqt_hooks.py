@@ -481,8 +481,12 @@ _Segment = collections.namedtuple(
 # command expansion (a '$' or a backquote, unquoted or inside double quotes, as the reader reads it as opaque: a
 # '$' bash reads literally, as in 'x$', counts too), an ANSI-C quote $'...', a locale quote $"..." (with locale
 # False its '$' is such a '$'), or a brace expansion; a word read right after a ')' or inside an open '${...}'
-# continues one that carried a substitution, so none of it is.
-_WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace"))
+# continues one that carried a substitution, so none of it is. unquoted, True where such a part came from outside
+# double quotes other than through a brace: an unquoted parameter or command expansion (an unquoted '$' or
+# backquote, a '$' bash reads literally included, or a word read right after a ')' or inside an open '${...}'),
+# which bash may split into several words, or an ANSI-C or locale quote. A word whose every such part stands inside
+# double quotes, which bash does not split, has it False, as does one whose only such part is a brace.
+_WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace", "unquoted"))
 
 
 class _SpelledWords(list):
@@ -502,7 +506,7 @@ class _WordSpellings:
     _SpelledWords, whose words are those every other lex returns, with the _WordSpelling of each beside them.
     Outside it argv is a plain list and nothing is recorded. The git alias readers read the record where it is
     there (_git_alias_defined_at, _git_local_alias); protected_line, gate_weakening, git_discard and branch_root
-    lex inside this context, and so does the partial lex of _git_alias_recovered (HOW A KEY IS SPELLED, above
+    lex inside this context, and so does the partial lex of _git_alias_recovered (HOW A WORD IS SPELLED, above
     _GIT_ALIAS_KEY_RE). It restores the previous setting on exit, as _SubstHeredocFloor does."""
 
     on = False
@@ -1219,10 +1223,12 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     chars = []
     opaque = bool(glued) or (nest is not None and "${" in nest)
     # The decoded length where the first character not spelled as plain literal text begins (-1 while none has),
-    # and whether an unquoted '{' may open a brace expansion (_WordSpelling). Each is set only on a character that
-    # also makes the word opaque, so an ordinary character pays nothing for it.
+    # whether an unquoted '{' may open a brace expansion, and whether such a part came from outside double quotes
+    # other than through a brace (_WordSpelling). Each is set only on a character that also makes the word opaque,
+    # so an ordinary character pays nothing for it.
     literal = 0 if opaque else -1
     brace = False
+    unquoted = opaque
     started = False
     all_digits = True
     leading_tilde = False
@@ -1278,6 +1284,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
             # replace the text at run time.
             opaque = True
+            unquoted = True
             if literal < 0:
                 literal = sum(map(len, chars))
             i += 1
@@ -1350,6 +1357,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 tilde_prefix_open = False
             if literal < 0:
                 literal = sum(map(len, chars))
+            unquoted = True
             i += 2
             while True:
                 if i >= n:
@@ -1399,7 +1407,9 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 # '{' right after a '$', or inside an open '${...}', opens a parameter expansion, not a brace one.
                 if literal < 0:
                     literal = sum(map(len, chars))
-                if c == "{" and dollar_end != i and (nest is None or "${" not in nest):
+                if c != "{":
+                    unquoted = True
+                elif dollar_end != i and (nest is None or "${" not in nest):
                     brace = True
         elif c == "/" and tilde_prefix_open:
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
@@ -1420,7 +1430,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
         i += 1
     text = "".join(chars)
     if spelling is not None:
-        spelling[0] = _WordSpelling(len(text) if literal < 0 else literal, brace)
+        spelling[0] = _WordSpelling(len(text) if literal < 0 else literal, brace, unquoted)
     return text, opaque, started, all_digits, leading_tilde, i
 
 
@@ -4866,24 +4876,41 @@ def _git_sub_and_args(tokens):
 # an assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
 # built at run time, a definition or git word built at run time, and a definition inside the text of another word
 # (an sh -c, bash -c or eval body), which is one word here.
-# HOW A KEY IS SPELLED. The decoded word a reader matches is not the word bash builds where part of it comes from
+# HOW A WORD IS SPELLED. The decoded word a reader matches is not the word bash builds where part of it comes from
 # an expansion: '-c "${A:-alias}.l"=log', "-c $'\x61lias.l'=log", '-c $"alias".l=log' and '-c {alias,x}.l=log'
-# each pass alias.l to git while the decoded key names no alias section. So where the lexer records how each word
-# was spelled (_WordSpellings, read from argv's _SpelledWords record), a -c value or a --config-env word whose key
-# part (the text before its first '=', or the whole word when it has none) holds a character not spelled as plain
-# literal text (_WordSpelling: a parameter or command expansion, an ANSI-C or locale quote, or a brace expansion)
-# defines a git alias whatever it decodes to (_git_alias_defined_at), and so does a word holding an unquoted brace
-# and a comma in the region between a git word and its subcommand, the word read as the subcommand included
-# (_git_local_alias), since bash expands it into several words that can be global options and a definition ('git
-# {-c,alias.l=log} l' runs 'git -c alias.l=log l'). A -c value or a --config-env word is no such brace word: its key
-# part decides, and a value spelled through an expansion behind a literal key ('-c core.pager="$P"') defines
-# nothing. Disclosed over-refusal (the safe direction): a key that is literal in effect but spelled through an
-# expansion ("-c $'core.pager'=cat", '-c "${K:-core.pager}"=cat') now reads as an alias, and so does a brace word
-# there that expands to no option ('git {log,status}'). protected_line, gate_weakening, git_discard and branch_root
-# lex inside _WordSpellings, and _git_alias_spelled reads the same rule from the de-quoted text of an unparseable
-# command. A reader given words with no record reads the decoded key alone, as before: git_explicit_binding,
-# commit_identity and commit_msg_subst lex outside _WordSpellings, so on a parsed command they read no spelling,
-# while commit_msg_subst's unparseable fallback reads it through _git_alias_recovered.
+# each pass alias.l to git while the decoded key names no alias section, and bash splits what an unquoted expansion
+# yields into several words, so with D set to '/r -c alias.l=log', 'git -C $D l' passes git -C /r -c alias.l=log l
+# while 'git -C "$D" l' passes one word (bash 5.3 printed both). So where the lexer records how each word was
+# spelled (_WordSpellings, read from argv's _SpelledWords record), the rule is closed over the whole region a git
+# word's walk reads, from the word after it through its subcommand word (_git_local_alias): a word there that
+# carries an unquoted parameter or command expansion, or whose text came through an ANSI-C or locale quote
+# (_WordSpelling.unquoted), defines a git alias whatever it decodes to and whatever its position (an option word,
+# any option's value, or the word read as the subcommand). So does a word there holding an unquoted brace and a
+# comma, since bash expands it into several words that can be global options and a definition ('git
+# {-c,alias.l=log} l' runs 'git -c alias.l=log l'), except a -c or --config-env word and its value; and so does a
+# -c value or a --config-env word whose key part (the text before its first '=', or the whole word when it has
+# none) holds a character not spelled as plain literal text (_WordSpelling.literal: a parameter or command
+# expansion, inside double quotes too, an ANSI-C or locale quote, or a brace expansion) (_git_alias_defined_at). A
+# word whose every expansion stands inside double quotes is one word to bash and keeps the plain reading: behind a
+# literal key ('-c core.pager="$P"'), as another option's value ('git -C "$D" log') or as the subcommand it
+# defines nothing. Disclosed over-refusal (the safe direction): an unquoted variable in a git option or subcommand
+# position now reads as an alias ('git -C $D log', 'git $SUB', 'git -c core.pager=$P log'), as does one after any
+# other word the readers take for a git word ('grep -r git $D'), and a git command inside an unquoted backquote
+# substitution whose closing backquote the lexer reads into the subcommand word ('echo `git status`'); quoting
+# the expansion restores the plain reading. A key that is literal in effect but spelled through an expansion ("-c
+# $'core.pager'=cat", '-c "${K:-core.pager}"=cat') reads as an alias, and so does a brace word in the region that
+# expands to no option ('git {log,status}'). protected_line, gate_weakening, git_discard and branch_root lex inside
+# _WordSpellings, and _git_alias_spelled reads the same rule from the de-quoted text of an unparseable command,
+# where a quoted '$' or backquote counts as an unquoted one. A reader given words with no record reads the decoded
+# key alone, as before: git_explicit_binding, commit_identity and commit_msg_subst lex outside _WordSpellings, so on
+# a parsed command they read no spelling, while commit_msg_subst's unparseable fallback reads it through
+# _git_alias_recovered. Outside this reading: a word past the subcommand word; the git word itself, read by its
+# decoded text alone (an unquoted expansion in it, "git$IFS-c$IFS'alias.l=log' l", or a brace word that is the git
+# word, '{git,-c,alias.l=log} l', each passed -c alias.l=log); a word in the region that bash builds by filename
+# expansion (an unquoted '*', '?' or '[': '-[c]' passed -c where a file named -c existed) or by a brace sequence
+# expression ('-{c..c}' passed -c; it holds no comma), each printed so by bash 5.3; and a word whose every expansion
+# stands inside double quotes, which keeps the plain reading by decision, so one that names an option at run time
+# ('git -"$C" alias.l=log l' with C set to c) is not read as one.
 _GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
 _GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
 
@@ -4902,8 +4929,10 @@ def _git_alias_defined_at(tokens, i):
     --config-env=KEY=ENVVAR with such a key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment whose
     value names such a section. Where tokens carries the lexer's spelling record (_SpelledWords), a separated -c
     or --config-env whose next word has a key part not spelled as plain literal text, or an attached
-    --config-env=KEY=ENVVAR whose KEY is not, defines one too, whatever the key decodes to (HOW A KEY IS SPELLED,
-    above); a value spelled so behind a literal key does not."""
+    --config-env=KEY=ENVVAR whose KEY is not, defines one too, whatever the key decodes to (HOW A WORD IS SPELLED,
+    above). This reads the key part alone, so a value spelled so behind a literal key defines nothing here; the
+    region rule of _git_local_alias reads such a value as a definition where it carries an unquoted expansion or
+    came through an ANSI-C or locale quote, and as none where its every expansion stands inside double quotes."""
     token = tokens[i]
     spelling = getattr(tokens, "spelling", None)
     if token in ("-c", "--config-env"):
@@ -4925,10 +4954,15 @@ def _git_local_alias(tokens):
     command word or among the git global options after that git word, walked as _git_sub_and_args walks them.
     That git command's subcommand is then unknown and possibly mutating. One pass: a git word inside the options
     an earlier git word's walk has read is the value of one of them, so its own walk would read the same options.
-    Where tokens carries the lexer's spelling record (_SpelledWords), a word of that walk spelled with an unquoted
-    brace and holding a comma defines one too: an option word, the value of an option other than -c and
-    --config-env, or the word the walk stops at, which it reads as the subcommand (HOW A KEY IS SPELLED, above).
-    A -c or --config-env word and its value are read by their key part instead."""
+    Where tokens carries the lexer's spelling record (_SpelledWords), the rule is closed over the region the walk
+    reads after that git word, through the word it stops at, which it reads as the subcommand (HOW A WORD IS
+    SPELLED, above): a word there that carries an unquoted parameter or command expansion or came through an ANSI-C
+    or locale quote (_WordSpelling.unquoted) defines one, whatever its position (an option word, any option's
+    value, or the subcommand word), and so does a word there spelled with an unquoted brace and holding a comma,
+    other than a -c or --config-env word and its value, which are read by their key part instead. The git word
+    itself is read by its decoded text alone: the lexer reads a backquote substitution's opening backquote, or a
+    whole ANSI-C quoted sh -c body, into the word that names git ('cd `git rev-parse --show-toplevel`', "bash -c
+    $'git status'"), where no word of the region carries an expansion."""
     start = _command_word_index(tokens)
     assigned = any(_git_alias_defined_at(tokens, j) for j in range(start))
     spelling = getattr(tokens, "spelling", None)
@@ -4945,11 +4979,12 @@ def _git_local_alias(tokens):
                 return True
             step = 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
             config = tokens[i] in ("-c", "--config-env") or tokens[i].startswith("--config-env=")
-            if spelling is not None and not config and any(
-                    spelling[j].brace and "," in tokens[j] for j in range(i, min(i + step, n))):
+            if spelling is not None and any(
+                    spelling[j].unquoted or (not config and spelling[j].brace and "," in tokens[j])
+                    for j in range(i, min(i + step, n))):
                 return True
             i += step
-        if spelling is not None and i < n and spelling[i].brace and "," in tokens[i]:
+        if spelling is not None and i < n and (spelling[i].unquoted or (spelling[i].brace and "," in tokens[i])):
             return True
         end = i
     return False
@@ -5048,9 +5083,11 @@ _GIT_ALIAS_TEXT_SPLIT_RE = re.compile(r"[\s;&|<>(){}`]+")
 _GIT_ALIAS_SPELLED_TOKEN_RE = re.compile(
     r"(?P<redirect>&>>?|>\||[<>]+&?)|(?P<sep>\n|[;&|()]+)|(?P<word>[^\s;&|<>()]+)")
 # Where a de-quoted word's plain literal text ends: its first '$', backquote or '{'. A '{' that may open a brace
-# expansion in such a word: one not right after a '$', which opens a parameter expansion instead.
+# expansion in such a word: one not right after a '$', which opens a parameter expansion instead. A part of such a
+# word that may come from an unquoted expansion or an ANSI-C or locale quote: any '$' or backquote.
 _GIT_ALIAS_SPELLED_MARK_RE = re.compile(r"[$`{]")
 _GIT_ALIAS_SPELLED_BRACE_RE = re.compile(r"(?<!\$)\{")
+_GIT_ALIAS_SPELLED_UNQUOTED_RE = re.compile(r"[$`]")
 
 
 def _git_alias_spelled_segments(command):
@@ -5059,9 +5096,9 @@ def _git_alias_spelled_segments(command):
     is a '$'), split into commands at each separator and into words at blanks (_GIT_ALIAS_SPELLED_TOKEN_RE), with
     each redirection, its target word, and an all-digit or '{name}' word right before it left out, as the lexer
     leaves them out of argv. Each command is a _SpelledWords whose record reads a word's first '$', backquote or
-    '{' as where its plain literal text ends, and a '{' not right after a '$' as a brace. The de-quoted text cannot
-    tell a quoted or escaped '$', backquote, '{' or operator character from an unquoted one, so each counts as an
-    unquoted one would."""
+    '{' as where its plain literal text ends, a '{' not right after a '$' as a brace, and any '$' or backquote as an
+    unquoted expansion. The de-quoted text cannot tell a quoted or escaped '$', backquote, '{' or operator character
+    from an unquoted one, so each counts as an unquoted one would."""
     text = _join_continuations(command)[0].replace("'", "").replace('"', "").replace(chr(92), "")
     segments = []
     words = []
@@ -5095,7 +5132,8 @@ def _git_alias_spelled_segments(command):
         for word in seg:
             mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
             spelling.append(_WordSpelling(len(word) if mark is None else mark.start(),
-                                          bool(_GIT_ALIAS_SPELLED_BRACE_RE.search(word))))
+                                          bool(_GIT_ALIAS_SPELLED_BRACE_RE.search(word)),
+                                          bool(_GIT_ALIAS_SPELLED_UNQUOTED_RE.search(word))))
         spelled.append(_SpelledWords(seg, spelling))
     return spelled
 
@@ -5111,13 +5149,14 @@ def _git_alias_spelled(command):
     recovered part included, so neither where the lexer stopped nor which git command a definition belongs to is
     needed. Disclosed over-refusal (the safe direction): a definition spelling in any word of such a command counts,
     one in an echo, a quoted sh -c body, a heredoc or here-string body or a 'grep -c alias.x' included. The rule
-    for a key or brace word spelled through an expansion (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE) applies
-    here to the de-quoted words too, through the same reader: each command of the de-quoted text, its spelling read
-    from the '$', backquote and '{' left in its words (_git_alias_spelled_segments), defines one where
-    _git_local_alias finds one in it, in the region between a git word and its subcommand, past a here-string,
-    heredoc or '{fd}' redirect included. Since those words cannot tell a quoted or escaped '$', backquote or '{'
-    from an unquoted one, a quoted one counts too, a disclosed over-refusal. Read only for a command whose lex
-    failed; it only ever denies."""
+    for a word spelled through an expansion, a quote or a brace (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE)
+    applies here to the de-quoted words too, through the same reader: each command of the de-quoted text, its
+    spelling read from the '$', backquote and '{' left in its words (_git_alias_spelled_segments), defines one where
+    _git_local_alias finds one in it, in the region after a git word through its subcommand word, past a here-string,
+    heredoc or '{fd}' redirect included, so any '$' or backquote there counts as an unquoted expansion. Since those
+    words cannot tell a quoted or escaped '$', backquote or '{' from an unquoted one, a quoted one counts too, a
+    disclosed over-refusal: here a double-quoted expansion in that region ('git -C "$D" log') defines one as well.
+    Read only for a command whose lex failed; it only ever denies."""
     if not _GIT_WORD_RE.search(command):
         return False
     words = _GIT_ALIAS_TEXT_SPLIT_RE.split(_dequoted_text(command))
@@ -5132,8 +5171,10 @@ def _git_alias_recovered(command):
     lexer stopped (_git_alias_spelled), or a segment that a partial lex recovers runs git under one
     (_git_alias_segment). The segment the lexer was still inside is kept: the words of it already read stand
     whatever follows, and this reading only ever denies. The partial lex records how each word was spelled
-    (_WordSpellings), so a recovered key or brace word spelled through an expansion counts as on a parsed command
-    (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE)."""
+    (_WordSpellings), so a recovered word spelled through an expansion, a quote or a brace counts as on a parsed
+    command (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE), where the de-quoted reading of _git_alias_spelled
+    splits the text otherwise (a quoted blank or ';' moves its subcommand word: 'git -C "a b" $X' is read there as
+    git -C a with the subcommand b)."""
     if _git_alias_named(command) or _git_alias_spelled(command):
         return True
     try:
@@ -8461,7 +8502,10 @@ def git_discard(data):
     'any wrapper DENIES' is still NOT
     categorical: a command word or verb no raw, joined or de-quoted reading assembles (an escape decoded
     inside $'...', a word built by a parameter expansion or a command substitution at run time) reads as 'no
-    recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual. A real discard whose VERB is
+    recognized lossy verb'. Where that verb is the subcommand word and an ANSI-C quote or an unquoted expansion
+    builds it, the git alias reading denies it (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE); a verb built
+    inside double quotes ("${r}set") and a command word built at run time are silently ALLOWED - a DISCLOSED
+    best-effort residual. A real discard whose VERB is
     outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
     worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
     closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
@@ -8484,12 +8528,14 @@ def git_discard(data):
     reads that text too (and the joined text), and such a command holds the form's '"', '$', '(' and '<<',
     so it is never pristine and the closed allowlist grammar denies it (as does the missing session
     directory); where the fallback allows, this guard's own decision is at least as strict. A git alias the
-    command defines denies however its key is spelled (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE): the lex
-    here runs inside _WordSpellings, so a -c or --config-env key part spelled through a parameter or command
-    expansion, an ANSI-C or locale quote or a brace expansion, or a brace word with a comma between a git word
-    and its subcommand, defines one, parsed or unparseable (_git_alias_recovered); a value so spelled behind a
-    literal key defines nothing, and a key literal in effect but so spelled now reads as an alias, a disclosed
-    over-refusal.
+    command defines denies however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): the lex here
+    runs inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
+    unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
+    --config-env key part spelled through any expansion, quote or brace defines one, parsed or unparseable
+    (_git_alias_recovered); a word whose every expansion stands inside double quotes keeps the plain reading, so a
+    value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a git
+    option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -8638,8 +8684,10 @@ def git_discard(data):
         # scan, and the grammar denies it (eval and a concatenated quote are outside it). A verb
         # obfuscated so thoroughly that it evades even that scan (built by an escape decoded inside
         # $'...' or by a parameter expansion at run time, so no raw, joined or de-quoted reading holds a
-        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at
-        # the in-scope boundary above, a DISCLOSED best-effort residual, not something this path closes.
+        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: as the subcommand
+        # word spelled through an ANSI-C quote or an unquoted expansion it denies above as a git alias, and
+        # built inside double quotes it is ALLOWED at the in-scope boundary above, a DISCLOSED best-effort
+        # residual, not something this path closes.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
         if np_base is None:
@@ -10567,13 +10615,17 @@ def protected_line(data):
     on a commit-free command (a commit the grammar proves cannot carry that body, since
     a '$' is outside the literal grammar).
 
-    A git alias the command defines denies however its key is spelled (HOW A KEY IS
-    SPELLED, above _GIT_ALIAS_KEY_RE): the commit syntax is lexed inside _WordSpellings,
-    so a -c or --config-env key part spelled through a parameter or command expansion,
-    an ANSI-C or locale quote or a brace expansion, or a brace word with a comma between
-    a git word and its subcommand, defines one, on an unparseable command too
-    (_git_alias_spelled). A value so spelled behind a literal key defines nothing; a key
-    literal in effect but so spelled now reads as an alias, a disclosed over-refusal.
+    A git alias the command defines denies however it is spelled (HOW A WORD IS SPELLED,
+    above _GIT_ALIAS_KEY_RE): the commit syntax is lexed inside _WordSpellings, so in the
+    region after a git word through its subcommand word a word carrying an unquoted
+    parameter or command expansion or an ANSI-C or locale quote, a brace word with a
+    comma, or a -c or --config-env key part spelled through any expansion, quote or brace
+    defines one, on an unparseable command too (_git_alias_spelled). A word whose every
+    expansion stands inside double quotes keeps the plain reading, so a value so spelled
+    behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in
+    a git option or subcommand position, or after any word naming git, now denies
+    ('git -C $D log'; quoting it restores the plain reading), and so does a key literal
+    in effect but spelled through an expansion or quote.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -11198,12 +11250,14 @@ def branch_root(data):
     beside its own), and where it fails the segments main's partial lex recovers, past the body, are judged
     too, after the clean lex's own, so a creation either list holds is checked (a cd in the clean lex's
     segments also counts for a creation in the recovered ones, the stricter way). A git alias the command
-    defines counts however its key is spelled (HOW A KEY IS SPELLED, above _GIT_ALIAS_KEY_RE): each lex here
-    runs inside _WordSpellings, so a -c or --config-env key part spelled through a parameter or command
-    expansion, an ANSI-C or locale quote or a brace expansion, or a brace word with a comma between a git word
-    and its subcommand, defines one, on an unparseable command too (_git_alias_spelled); a value so spelled
-    behind a literal key defines nothing, and a key literal in effect but so spelled now reads as an alias, a
-    disclosed over-refusal."""
+    defines counts however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): each lex here runs
+    inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
+    unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
+    --config-env key part spelled through any expansion, quote or brace defines one, on an unparseable command
+    too (_git_alias_spelled); a word whose every expansion stands inside double quotes keeps the plain reading,
+    so a value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a
+    git option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -12355,12 +12409,14 @@ def gate_weakening(data):
     GIT_CONFIG_KEY_ anywhere and git (_git_alias_named), every git command of which runs under an alias the
     command may define. On a parse error such a command DENIES too (_git_alias_recovered: the text, a definition
     anywhere in it, past where the lexer stopped included, or a git segment the partial lex recovers), after the
-    recovered sink. A definition counts however its key is spelled (HOW A KEY IS SPELLED, above
-    _GIT_ALIAS_KEY_RE): the lex here runs inside _WordSpellings, so a -c or --config-env key part spelled through
-    a parameter or command expansion, an ANSI-C or locale quote or a brace expansion, or a brace word with a comma
-    between a git word and its subcommand, defines one, parsed or unparseable; a value so spelled behind a literal
-    key defines nothing, and a key literal in effect but so spelled now reads as an alias, a disclosed
-    over-refusal.
+    recovered sink. A definition counts however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE):
+    the lex here runs inside _WordSpellings, so in the region after a git word through its subcommand word a word
+    carrying an unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma,
+    or a -c or --config-env key part spelled through any expansion, quote or brace defines one, parsed or
+    unparseable; a word whose every expansion stands inside double quotes keeps the plain reading, so a value so
+    spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a git option or
+    subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it restores the
+    plain reading), and so does a key literal in effect but spelled through an expansion or quote.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
