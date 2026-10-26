@@ -1915,10 +1915,10 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             # each type it could stand for is incomplete.
             unread.update(_moved_row_types(mid, mtype, enabled_types))
         if moved and not wl_moved:
-            # gemini/claude round-11 BLOCKER: per-bucket rotation binding. A bucket that rotates non-worklog
-            # records MUST carry an archived worklog span to bind them to a released period (spec 12).
-            # archive_wl_ids aggregates GLOBALLY, so the caller's released-only check can be satisfied by
-            # ANOTHER bucket's span; the binding is therefore enforced here, per bucket.
+            # Per-bucket rotation binding: a bucket that rotates non-worklog records MUST carry an archived
+            # worklog span to bind them to a released period (spec 12). archive_wl_ids aggregates GLOBALLY,
+            # so the caller's released-only check can be satisfied by ANOTHER bucket's span; the binding is
+            # therefore enforced here, per bucket.
             rotatable.append("C-ROTATION: {} record(s) are rotated to bucket {!r} with no archived worklog "
                              "span to bind them to a released period (spec 12)".format(len(moved), bucket_rel))
         enumerated_ids = {mid for mid, _mtype, _dest in moved}
@@ -2156,9 +2156,10 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
                     if r.location != "imported" and r.rtype == "backlog_item" and isinstance(r.id, str)}
     target_state.update(bi_state)
     # The items _check_importer_receipts grades: every receipt_of naming them comes from an importer-authored
-    # done, read exactly as that arm reads its receipts.
+    # clean done, read exactly as that arm reads its receipts. An imported-series row is skipped here as in
+    # the join: it confers no receipt, so it never hands an item to that arm or keeps one from it.
     receipt_kinds = {}
-    for r in recs:
+    for r in clean:
         if r.rtype == "done":
             for rel, tid in r.links:
                 if rel == "receipt_of" and isinstance(tid, str):
@@ -2979,10 +2980,12 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
         handoffs on every store.
     The imported-to-clean link refusal is per-record (validate_imported_record, under
     C-IMPORTED-SCHEMA), and an imported row never joins `recs`, so no imported record enters a clean
-    join here. The section 8.6 obligations this engine is known not to grade (blocks granting a stop,
-    actionability, supersession discharge outside a pending_decision chain, the module-tier current-state
-    joins, field-borne authority, approval, and extension or adoption-approval authority) are named in
-    _FIREWALL_RESIDUALS and _IMPORTED_RESIDUALS, so a PASS never reads as full section 8.6 coverage.
+    join here; the link rule and both arms skip one a direct caller passes, so an imported row's own
+    links are never graded as a clean record's. The section 8.6 obligations this engine is known not to
+    grade (blocks granting a stop, actionability, supersession discharge outside a pending_decision
+    chain, the module-tier current-state joins, field-borne authority, approval, and extension or
+    adoption-approval authority) are named in _FIREWALL_RESIDUALS and _IMPORTED_RESIDUALS, so a PASS
+    never reads as full section 8.6 coverage.
     The check never passes over a partial population (spec 8.6: missing or unreadable evidence fails
     closed); each of these causes is a CANNOT-EVALUATE naming it:
       - `unevaluated` names the clean-record readers (C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM)
@@ -3011,7 +3014,7 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
         rep.cant("C-IMPORTED-SEGREGATION: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the "
                  "clean-to-imported link rule (spec 8.6) is not evaluated over the records not read or not "
                  "interpreted".format(_partial_causes(unread, links_uninterpreted, "links")))
-    for r in recs:
+    for r in clean:
         own_ns = _ROSTER_NAMESPACES.get(r.rtype)
         for rel, tid in r.links:
             shape = parse_series_id(tid)
@@ -3080,13 +3083,16 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
     (_FIREWALL_RESIDUALS discloses both). The arm reads the backlog_item, done and maintainer_decision
     records, so when one of those types is in `unread` or a record of one has a status, links or actor
     kind that could not be interpreted, it is CANNOT-EVALUATE naming the cause and is not run
-    (_firewall_partial): a receipt or remedy whose author is unknown neither confers nor withholds."""
+    (_firewall_partial): a receipt or remedy whose author is unknown neither confers nor withholds. An
+    imported-series row is skipped, as in the receipt join: it is no receipt and no remedy, and owes no
+    receipt (the driver never passes one; the skip is the backstop for a direct caller)."""
     if _firewall_partial(recs, rep, cid, unread, {"backlog_item", "done", "maintainer_decision"},
                          "receipt firewall"):
         return
+    clean = [r for r in recs if r.location != "imported"]
     receipts = {}
     remedied = set()
-    for r in recs:
+    for r in clean:
         if r.rtype == "done":
             for rel, tid in r.links:
                 if rel == "receipt_of" and isinstance(tid, str):
@@ -3097,7 +3103,7 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
             for rel, tid in r.links:
                 if rel == "corrects" and isinstance(tid, str):
                     remedied.add(tid)
-    for r in recs:
+    for r in clean:
         if (r.rtype != "backlog_item" or not isinstance(r.id, str) or r.state != "done" or r.qual is not None
                 or r.actor_kind == "importer"):
             continue
@@ -9093,7 +9099,7 @@ def self_test():
         _r1_kinds = {k: _r1_kind_run(k) for k in ("importer",) + _r13_kinds}
         _r1_kind_cause = ("C-RECEIPTS: the actor kind of 'done' records is absent or unreadable, or not a "
                           "kind the schema admits (see C-RECORDS")
-        check("r1-importer-lookalike-kinds-confer-receipt",
+        check("r1-importer-lookalike-kinds-cannot-evaluate-receipt-join-and-firewall",
               len(_r1_kinds["importer"][0]) == 1 and _r1_kinds["importer"][1] == []
               and all(_r1_kinds[k][0] == [] and len(_r1_kinds[k][1]) == 2
                       and all(m.startswith(_r1_kind_cause) for m in _r1_kinds[k][1])
@@ -9123,10 +9129,27 @@ def self_test():
         check("r1-imported-series-rows-neither-confer-nor-owe-receipts",
               _r1_srep.findings == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt "
                                     "(the receipt is one-to-one; spec 8.5)"])
-        # The count hands an item to the firewall arm only where that arm grades it, every receipt naming
-        # it importer-authored: an item whose receipts are an importer-authored done and an imported-series
-        # row stays the count's finding, so the count and the arm never pass it between them (red when the
-        # hand-off widens to an item with any importer-authored receipt).
+        # ... and an imported-series done authored by an importer, as an item's only apparent receipt,
+        # neither confers it nor hands the item to the firewall arm: the item is the count's finding on the
+        # join alone and beside the arm (red when the count's hand-off or the arm's receipts read the
+        # imported row).
+        _r1_no_receipt = ("C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt (the "
+                          "receipt is one-to-one; spec 8.5)")
+        _r1_irecs = [_make_rec(bi(1, "done"), "backlog_item", "active"),
+                     _make_rec(_with_kind(dn(1, "BI-1"), "importer"), "done", "imported")]
+        _r1_irep = _Report()
+        _r1_irep.ran("C-RECEIPTS")
+        _check_receipts(_r1_irecs, {r.id: r for r in _r1_irecs}, _r1_irep)
+        _r1_ijoin = list(_r1_irep.findings)
+        _check_importer_receipts(_r1_irecs, _r1_irep, "C-RECEIPTS")
+        check("r1-imported-importer-authored-done-confers-no-receipt",
+              _r1_ijoin == [_r1_no_receipt] and _r1_irep.findings == [_r1_no_receipt]
+              and _r1_irep.cannot == [])
+        # The count hands an item to the firewall arm only where that arm grades it, every clean receipt
+        # naming it importer-authored, and both read an imported-series row as no receipt: an item whose
+        # receipts are an importer-authored done and an imported-series row is the arm's finding alone, so
+        # the count and the arm neither pass it between them nor both report it (red when either reads the
+        # imported row as a receipt).
         _r1_hrecs = [_make_rec(bi(1, "done"), "backlog_item", "active"),
                      _make_rec(_with_kind(dn(1, "BI-1"), "importer"), "done", "active"),
                      _make_rec(dn(2, "BI-1"), "done", "imported")]
@@ -9134,9 +9157,53 @@ def self_test():
         _r1_hrep.ran("C-RECEIPTS")
         _check_receipts(_r1_hrecs, {r.id: r for r in _r1_hrecs}, _r1_hrep)
         _check_importer_receipts(_r1_hrecs, _r1_hrep, "C-RECEIPTS")
+        _r1_arm_dn1 = ("C-RECEIPTS: ratified backlog_item 'BI-1' is authored by a non-importer actor but its "
+                       "only receipt(s) 'DN-1' are importer-authored; it MUST hold a clean receipt authored by "
+                       "a non-importer actor, or a maintainer-authored maintainer_decision correcting it (spec "
+                       "8.6)")
         check("r1-receipt-handoff-only-where-the-arm-grades",
-              _r1_hrep.findings == ["C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt "
-                                    "(the receipt is one-to-one; spec 8.5)"])
+              _r1_hrep.findings == [_r1_arm_dn1])
+        # The firewall arm reads an imported-series row as no remedy and as owing nothing: a
+        # maintainer-authored imported maintainer_decision correcting an item whose only clean receipt is
+        # importer-authored leaves the arm's finding standing, where the same decision in the clean series
+        # remedies it, and an imported ratified backlog_item whose only receipt is importer-authored is not
+        # graded, where the same item in the clean series is the finding (red when the arm's remedy or
+        # item loop reads imported rows).
+        def _r1_arm_run(*recs):
+            _arep = _Report()
+            _arep.ran("C-RECEIPTS")
+            _check_receipts(list(recs), {r.id: r for r in recs}, _arep)
+            _check_importer_receipts(list(recs), _arep, "C-RECEIPTS")
+            return _arep.findings, _arep.cannot
+
+        def _r1_remedy_run(location):
+            return _r1_arm_run(_make_rec(bi(1, "done"), "backlog_item", "active"),
+                               _make_rec(_with_kind(dn(1, "BI-1"), "importer"), "done", "active"),
+                               _make_rec(md(1, links=[{"rel": "corrects", "id": "BI-1"}]),
+                                         "maintainer_decision", location))
+
+        def _r1_item_run(location):
+            return _r1_arm_run(_make_rec(bi(1, "done"), "backlog_item", location),
+                               _make_rec(_with_kind(dn(1, "BI-1"), "importer"), "done", "active"))
+        check("r1-imported-maintainer-decision-remedies-nothing",
+              _r1_remedy_run("imported") == ([_r1_arm_dn1], []) and _r1_remedy_run("active") == ([], []))
+        check("r1-imported-backlog-item-owes-no-firewall-receipt",
+              _r1_item_run("imported") == ([], []) and _r1_item_run("active") == ([_r1_arm_dn1], []))
+        # C-IMPORTED-SEGREGATION's link rule grades the links of clean records alone: an imported-series row
+        # a direct caller passes, linking receipt_of to an imported id, is not read as a clean record, while
+        # the same link on a clean done is the finding (red when the link rule reads imported rows).
+        def _seg_link_run(location):
+            _lrecs = [_make_rec(dn(1, "imported:BI-1"), "done", location)]
+            _lrep = _Report()
+            _lrep.ran("C-IMPORTED-SEGREGATION")
+            _check_imported_segregation(_lrecs, {r.id: r for r in _lrecs}, [], _lrep)
+            return _lrep.findings, _lrep.cannot
+        check("imported-segregation-imported-row-links-not-graded-as-clean",
+              _seg_link_run("imported") == ([], [])
+              and _seg_link_run("active")
+              == (["C-IMPORTED-SEGREGATION: clean record 'DN-1' links 'receipt_of' -> 'imported:BI-1'; a "
+                   "clean-to-imported link is limited to relates, derives_from, follows and same-type "
+                   "supersedes (spec 8.6)"], []))
         # A clean receipt's target is read among every clean backlog_item: one naming a proposed
         # importer-authored item is the finding, one naming a ratified importer-authored item is not, and an
         # importer-authored record sharing a clean item's id never makes that item read as ratified (red
