@@ -1297,7 +1297,7 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     return out
 
 
-def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
+def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=None):
     """E4 (spec 1262): a confirmed-dead stale lock is broken ONLY after (a) its recorded owner is confirmed
     dead AND (b) the journal is reconciled to a consistent (terminal) state. Under a kernel advisory lock on
     a STABLE, never-replaced arbitration file (<journal>/lock.break) that serializes recoverers (C1), RE-READ
@@ -1309,6 +1309,12 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
     concurrent recoverer already re-acquired (now live) is left untouched and reported 'possibly-live'.
     Returns 'acquired' or 'possibly-live'; JournalError on a lost O_EXCL acquire, an unreadable current lock,
     or a journal that does not reconcile to terminal (fail-closed: the stale lock is NOT broken).
+
+    `claim`, when given, is called with no arguments under the arbitration lock once the current owner is
+    confirmed dead and BEFORE the first recover(), so a caller takes its own further exclusion (the adoption
+    reconcile's store leases) with the journal's exclusion already held and before any recovery write; an
+    exception it raises propagates as itself, nothing recovered and the stale lock kept. It is not called
+    when the lock is already gone (a concurrent recoverer broke it), since this call then recovers nothing.
 
     PORTABILITY: fcntl is POSIX-only. On a platform without it (e.g. Windows) this FAILS CLOSED, refusing
     to break the stale lock rather than falling back to the unguarded race, consistent with the engine's
@@ -1351,6 +1357,8 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
                 return "possibly-live"                       # a concurrent recoverer re-acquired: never break
             # (b) reconcile every transaction to terminal BEFORE breaking the stale lock (spec 1262), the
             # stale lease RETAINED throughout so a crash mid-reconcile leaves the stale lock in place.
+            if claim is not None:
+                claim()                                      # the caller's exclusion, before any recovery write
             for txn_dir in _journal_txn_dirs(jr_fd, journal_root):
                 recover(jr_fd, txn_dir, root_fd)
             for txn_dir in _journal_txn_dirs(jr_fd, journal_root):
