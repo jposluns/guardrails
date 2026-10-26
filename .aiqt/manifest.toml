@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3ed7bedd07b1e3d932a25c5d6caef44e31952c202077a035f45778f7cb41dea6"
+tree-sha256 = "2ff3473b26deac83fc7c6cbdf9dad08b9f3180acc3b7fedbab79992ac4d131b4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2281,13 +2281,13 @@ sha256 = "bf66c50abfed931d124e7bf29b6060b0b3528cc99a789bdcac663c586115a7fa"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 68178
-sha256 = "f55b690cf732fcb13c9e062d05a539c7a4badb40f20420ebf6ec29a48caa010f"
+bytes = 68884
+sha256 = "e5924f69aee67e42e2d11365861c147a93c81b9d6b6f9f92d8ff61dfa240e4fe"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "9f95b7adb5c1ab322a274d29bf7cf4bc98f6e06a0c5312cb0c884812302b4ee3"
+sha256 = "6d76d7e2235927ad11109a71a8863659ffc9d6dd7e4ea2849ec27960131ed229"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2311,8 +2311,8 @@ sha256 = "1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348"
 
 [[sources]]
 path = ".preview/pattern-self-match.py"
-bytes = 183724
-sha256 = "75e0a9256de7036fb5ea3f4230b70660d45af1749863078053e7ef0f854b80e9"
+bytes = 189452
+sha256 = "b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f"
 
 [[sources]]
 path = ".preview/record-remove-check.py"

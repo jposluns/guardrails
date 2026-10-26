@@ -185,7 +185,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `75e0a9256de7036fb5ea3f4230b70660d45af1749863078053e7ef0f854b80e9` | [pattern-self-match.py](pattern-self-match.py) |
+| `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
@@ -723,7 +723,14 @@ section of its opening docstring. Read that section before relying on a hook; in
   its `pgrep` runs first). A
   pattern built when the command runs (holding `$` or a backtick) gets nothing. Its notes come from an
   approximate reading of the words, so some are missed or given wrongly, and a matcher word counts even
-  as an argument. Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to
+  as an argument. For `pgrep` and `pkill` it also looks for the pattern past the value of each option
+  that takes one, and passes over exactly these value spellings: one word as Python's `shlex` reads it,
+  other than an operator or a matcher name (`-u NAME`, `-u "$USER"`, `-u "$(id -u)"`), and an unquoted
+  `$(...)` or `$((...))` that is the whole value, through the `)` that balances it, nested ones included
+  (`-u $((UID))`, `-u $(echo $(id -u) )`); a `$(...)` value is also read a second way, through its first
+  `)`. After any other spelling (a backtick substitution holding a blank, a substitution joined to other
+  text in one word, or one holding a `(` or `)` that does not pair up) the pattern can be missed.
+  Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to
   you, has not been checked.
 
 `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` also allow commands over 64 KiB or

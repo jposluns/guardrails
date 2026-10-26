@@ -92,15 +92,27 @@ WHAT IT DOES
     self-test checks that with bash -n over each deny example.
 
     NOTE (allow, with a systemMessage) when the command is not denied, names a process matcher (pgrep, pkill,
-    killall or pidof, or grep in a command that also names ps), and that matcher's pattern (the first later word
-    that does not start with `-`, or the word just after `--`; for pgrep and pkill, also the word found that way
-    after passing over the value of each option that takes one, such as `-u NAME` or `-P PID`, so that
-    `pkill -u "$USER" -f x/` is noted) is text the command itself holds. The words are read
-    with Python's shlex; a word that holds a blank and names a matcher is read again, up to four layers deep
-    (`bash -c '...'`). A pattern holding `$` or a backtick is built when the command runs and is passed over
-    silently. A command that names a matcher and that shlex cannot read, or that is over 64 KiB, gets a note that
-    it could not be read. An internal error gets a note that the command was not checked. Everything else is
-    silent.
+    killall or pidof, or grep in a command that also names ps), and that matcher's pattern is text the command
+    itself holds. The pattern is the first later word that does not start with `-`, or the word just after `--`;
+    for pgrep and pkill, it is also the word found that way after passing over the value of each option that
+    takes one (-d, -g, -G, -O, -P, -q, -s, -t, -u, -U, -F, -r and their long forms, --signal, --cgroup, --ns and
+    --nslist; -d is pgrep's only, -q pkill's only), so that `pkill -u "$USER" -f x/` is noted. Exactly these
+    values are passed over: the next word as shlex reads it (`-u NAME`, `-P "$PPID"`, `-u "$(id -u)"`), unless it
+    is an operator or names a matcher; and an unquoted `$(...)` or `$((...))` that is the whole value, through the
+    `)` that balances its parentheses, so that a nested `$(...)` or `(...)` inside it is passed over too
+    (`-u $((UID))`, `-u $(echo $(id -u) )`). Where shlex gives that value's first `(` as a word of its own (as in
+    `$(id -u)`, but not `$((` or `$(<`), the value is also passed over through its first word that starts with
+    `)`, in a reading of its own; any of these readings can note. A reading of a value ends, with no pattern, at a
+    word inside it that names a matcher, at the end of the command when the value is not closed, and at a `)`
+    joined to another operator character (`);`). No other value spelling is passed over as a whole: a backtick
+    substitution holding a blank (only its first word is passed over, and the reading goes on inside it), a
+    substitution joined to other text in one word (`-u x$(id -u)`), and one holding a `(` or `)` that does not
+    pair up (a quoted one, or a `case` pattern's), so the pattern after such a value can be missed, or a word of
+    the value taken for it. The words are read with Python's shlex; a word that holds a blank and names a matcher
+    is read again, up to four layers deep (`bash -c '...'`). A pattern holding `$` or a backtick is built when the
+    command runs and is passed over silently. A command that names a matcher and that shlex cannot read, or that
+    is over 64 KiB, gets a note that it could not be read. An internal error gets a note that the command was not
+    checked. Everything else is silent.
 
 OPT-OUT
     When selecting the running shell is intended, end the command with a real shell comment whose text starts
@@ -432,11 +444,12 @@ _DQ_SPECIAL = "$`\\"
 _SEPS = (("op", ";", None), ("op", "\n", None))
 # The note scan: the matcher words, the operator characters that end a simple command, and the layers read.
 _MATCHERS = frozenset(("pgrep", "pkill", "killall", "pidof"))
-# The pgrep and pkill options that read the next word as their value (pgrep --help, procps-ng 4.0.4; an option only
-# pkill takes was not checked): the note scan also reads a pattern past each such value (_pattern).
+# The pgrep and pkill options that read the next word as their value (pgrep --help and pkill --help, procps-ng
+# 4.0.4; -d and --delimiter are pgrep's only, -q and --queue pkill's only): the note scan also reads a pattern past
+# each such value (_pattern).
 _VALUED = frozenset(("-d", "--delimiter", "-g", "--pgroup", "-G", "--group", "-O", "--older", "-P", "--parent",
-                     "-s", "--session", "--signal", "-t", "--terminal", "-u", "--euid", "-U", "--uid", "-F",
-                     "--pidfile", "-r", "--runstates", "--cgroup", "--ns", "--nslist"))
+                     "-q", "--queue", "-s", "--session", "--signal", "-t", "--terminal", "-u", "--euid", "-U",
+                     "--uid", "-F", "--pidfile", "-r", "--runstates", "--cgroup", "--ns", "--nslist"))
 _PUNCT = frozenset("();<>|&")
 _NOTE_DEPTH = 4
 _MATCHER_RE = re.compile(r"\b(?:pgrep|pkill|killall|pidof)\b")
@@ -929,12 +942,36 @@ def _words(text):
     return list(lexer)
 
 
-def _pattern(words, k, valued=None):
+def _balanced(words, j):
+    """The index of the word holding the `)` that balances the parentheses opened from words[j] on, counted in the
+    words made only of operator characters (shlex gives each run of them as one word: `$((UID))` is `$`, `((`, `UID`
+    and `))`); None at a word that names a matcher, at the end of the words, or where that word goes on past the
+    balancing `)` (as `));` does: the command ends there)."""
+    depth = 0
+    while j < len(words):
+        w = words[j]
+        if w[w.rfind("/") + 1:] in _MATCHERS:
+            return None
+        if w and all(ch in _PUNCT for ch in w):
+            for n, ch in enumerate(w):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if not depth:
+                        return None if w[n + 1:] else j
+        j += 1
+    return None
+
+
+def _pattern(words, k, valued=None, nested=False):
     """The pattern operand after the matcher words[k]: the first later word that does not start with `-`, or the
     word just after `--`; None at an operator word or the end. Given valued (options that take a value), a word in
     it also passes over the next word unless that word is an operator or names a matcher, or over an unquoted
-    `$(...)` (which shlex splits into words) through its closing `)`; a word starting with `-` that names a matcher,
-    or one inside such a `$(...)`, ends the reading (None), so that reading never reads past the next matcher."""
+    `$(...)` (which shlex splits into words): through its first word that starts with `)`, or, when nested, from
+    a `$` and a word that starts with `(` (`$(` or `$((`) through the `)` that balances them (_balanced); a word
+    starting with `-` that names a matcher, or one inside such a `$(...)`, ends the reading (None), so that reading
+    never reads past the next matcher."""
     j = k + 1
     while j < len(words):
         w = words[j]
@@ -949,7 +986,12 @@ def _pattern(words, k, valued=None):
             if w[w.rfind("/") + 1:] in _MATCHERS:
                 return None
             v = words[j + 1] if j + 1 < len(words) else ""
-            if w in valued and v == "$" and words[j + 2:j + 3] == ["("]:
+            u = words[j + 2] if j + 2 < len(words) else ""
+            if nested and w in valued and v == "$" and u.startswith("(") and all(ch in _PUNCT for ch in u):
+                j = _balanced(words, j + 2)
+                if j is None:
+                    return None
+            elif w in valued and v == "$" and words[j + 2:j + 3] == ["("]:
                 j += 3
                 while j < len(words) and not words[j].startswith(")"):
                     if words[j][words[j].rfind("/") + 1:] in _MATCHERS:
@@ -973,8 +1015,8 @@ def _self_text(text, raw, depth, seen):
         name = w[w.rfind("/") + 1:]
         if name in _MATCHERS or (ps and name == "grep"):
             pats = (_pattern(words, k),)
-            if name in ("pgrep", "pkill"):  # and read past option values (_VALUED): either reading can note
-                pats += (_pattern(words, k, _VALUED),)
+            if name in ("pgrep", "pkill"):  # and read past option values (_VALUED) both ways: any reading can note
+                pats += (_pattern(words, k, _VALUED), _pattern(words, k, _VALUED, True))
             for pat in pats:
                 if pat is not None and "$" not in pat and "`" not in pat and pat not in seen:
                     if pat in raw:
@@ -1930,7 +1972,10 @@ def _self_test():
                          # but the last is absent from the raw text, so every matcher is read)
                          lambda k: "'pg'rep -d " * k + "'x'y; pkill x/",
                          lambda k: "pgrep " + "-u 'v'w -x/pgrep " * k + "; pkill x/",
-                         lambda k: "pkill -u $(echo " * k + "x" + ")" * k + " -f 'q'x/; pkill x/"):
+                         lambda k: "pkill -u $(echo " * k + "x" + ")" * k + " -f 'q'x/; pkill x/",
+                         # and the reading through the balancing `)` is one pass that stops at the next matcher too
+                         lambda k: "pkill -u " + "$(echo " * k + "x" + " )" * k + " -f 'q'x/; pkill x/",
+                         lambda k: "pkill -u $( " * k + "; pkill x/"):
                 small, large = lines_run(make(30)), lines_run(make(240))
                 self.assertLess(large / small, 16, (small, large, make(2)))
 
@@ -2874,8 +2919,22 @@ def _self_test():
                              "note", "silent")
             # the first reading is kept: reading only past the values loses the note this command had
             real = _pattern
-            self.kill_mutant(dict(_pattern=lambda words, k, valued=None: real(words, k, _VALUED)),
+            self.kill_mutant(dict(_pattern=lambda words, k, valued=None, nested=False: real(words, k, _VALUED)),
                              ['pkill -u qa-other -f "$PAT"'], "note", "silent")
+            # a `$((...))` value, or a `$(...)` with a nested `$(...)` or `(...)` closed by a separate `)`, is read
+            # through the `)` that balances it: reading only through the first `)` leaves these silent
+            def first_close(words, k, valued=None, nested=False):
+                return real(words, k, valued)
+
+            def balanced_only(words, k, valued=None, nested=False):
+                return real(words, k, valued, valued is not None)
+            self.kill_mutant(dict(_pattern=first_close),
+                             ["pkill -u $((UID)) -f qa-x/", "pkill -u $(( $(id -u) )) -f qa-x/",
+                              "pkill -u $(echo $(id -u) ) -f qa-x/", "pkill -U $( (id -u) ) -f qa-x/",
+                              "while pgrep -u $((EUID)) -f qa-x/; do sleep 1; done"], "note", "silent")
+            # and the reading through the first `)` is kept: reading only through the balancing `)` loses this note
+            self.kill_mutant(dict(_pattern=balanced_only), ['pkill -u $(echo $(id -u) qa-x/) -f "$PAT"'], "note",
+                             "silent")
 
         def test_m56_blank_pattern_boundary(self):
             # an OWN does not widen LITERAL: a pattern holding a blank still takes the note
@@ -2924,6 +2983,18 @@ def _self_test():
             with patched(pwd=user_db(other), _ACCOUNTS={}):
                 self.kill_mutant(dict(_own=by_name), ["pkill -u %s -f qa-x/" % other], "note", "deny")
 
+        def test_m59_valued_options(self):
+            # each option that takes a value (pgrep --help and pkill --help, procps-ng 4.0.4) is read past: dropped
+            # from _VALUED, a variable value there is taken for the pattern and the command is silent
+            options = ("-d", "--delimiter", "-g", "--pgroup", "-G", "--group", "-O", "--older", "-P", "--parent",
+                       "-q", "--queue", "-s", "--session", "--signal", "-t", "--terminal", "-u", "--euid", "-U",
+                       "--uid", "-F", "--pidfile", "-r", "--runstates", "--cgroup", "--ns", "--nslist")
+            self.assertEqual(set(options), set(_VALUED))
+            only = {"-d": "pgrep", "--delimiter": "pgrep", "-q": "pkill", "--queue": "pkill"}
+            for option in options:
+                vectors = ['%s %s "$V" -f qa-x/' % (m, option) for m in ("pgrep", "pkill") if only.get(option, m) == m]
+                self.kill_mutant(dict(_VALUED=_VALUED - frozenset((option,))), vectors, "note", "silent")
+
         def test_15_adjacent_redirection_probe(self):
             # non-signalling: pgrep -c in the wrapper form (a command after the eval), in its own process group,
             # under a timeout, the group killed if it still runs; the pattern selects the shell running it
@@ -2970,6 +3041,12 @@ def _self_test():
             self.assertSilent('pkill -u "$USER" -f "$PAT"')
             self.assertNote('pkill -u qa-other -f "$PAT"')
             self.assertSilent("pkill -u $(id -u); echo -f qa-x/")
+            # a value read through the `)` that balances it: closed there, the pattern after it is read; one `)`
+            # short or one over is a syntax error in bash, which runs nothing; after `));` pkill gets no pattern
+            self.assertNote("pkill -u $((UID)) -f qa-x/")
+            for command in ("pkill -u $((UID) -f qa-x/", "pkill -u $((UID))) -f qa-x/",
+                            "pkill -u $((UID)); echo -f qa-x/"):
+                self.assertSilent(command)
 
         def test_16_own_account_name(self):
             # on a stand-in user database: a name is compared with the account name of the hook's own uid, read at
