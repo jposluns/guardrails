@@ -152,13 +152,11 @@ workflow on a metadata-only change. quality.yml must list exactly
 QUALITY_PULL_REQUEST_TYPES (labeled) on its pull_request event and carry no
 pull_request_target, because a pull request run of it is scheduled only by the
 label the merge lane applies to the train pull request, so a member head gets
-no Quality run; a quality.yml whose on: block names no pull_request event is a
-trigger finding too, because a train head then gets no Quality run either
-(tools/ci-status.sh reads that as missing, never as passing, but this rule
-names the cause). A quality.yml with no top-level on: line draws no trigger
-finding (GitHub's workflow syntax requires on:, so such a workflow is expected
-to schedule no run, which tools/ci-status.sh reads as missing; not verified
-live here). Each departure is a trigger finding (exit
+no Quality run; a quality.yml whose on: block names no pull_request event, and
+one with no top-level on: line at all, is a trigger finding too, because a
+train head then gets no Quality run either (tools/ci-status.sh reads that as
+missing, never as passing, but this rule names the cause). Each departure is a
+trigger finding (exit
 1). The rule reads the top-level on: block: an event key at indent 2 with no
 value reads as GitHub's default types (opened, synchronize, reopened); types:
 at indent 4 is a one-line flow list, one plain scalar, or a block list at
@@ -2757,10 +2755,18 @@ def _edit_event_types(lines, source, diagnostics):
 def _quality_trigger_findings(events, source):
     """Hold quality.yml's pull_request types to QUALITY_PULL_REQUEST_TYPES
     and refuse pull_request_target there (module docstring, TRIGGER). An
-    on: block with no pull_request event is a finding too; a file with no
-    top-level on: line (events is None) draws none here."""
-    if source != CI_SOURCE or events is None:
+    on: block with no pull_request event is a finding too, and so is a file
+    with no top-level on: line (events is None)."""
+    if source != CI_SOURCE:
         return []
+    if events is None:
+        return [Finding(
+            "trigger",
+            source,
+            "{} has no top-level on: line: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none".format(source),
+        )]
     findings = []
     types = events.get("pull_request")
     if types is None:
@@ -4286,13 +4292,18 @@ def self_test():
             "      - uses: actions/checkout@v4",
         ))
 
-    # A quality.yml fixture carries the pinned concurrency: block, which the
+    # A quality.yml fixture carries the labeled pull_request trigger the
+    # TRIGGER rule requires there and the pinned concurrency: block, which the
     # LANES rule requires there, plus the heavy jobs and the Quality gates
     # aggregator the multi-job rules then require; a msg-leaks.yml fixture
-    # passes top=() and heavy=False.
+    # passes trigger=(), top=() and heavy=False.
+    labeled_trigger = ("on:", "  pull_request:", "    branches: [main]",
+                       "    types: [labeled]", "  push:",
+                       "    branches: [main]")
+
     def ci_fixture(commands=(), extra_steps=(), top=CONCURRENCY_BLOCK,
-                   heavy=True):
-        lines = ["name: Test"] + list(top) + [
+                   heavy=True, trigger=labeled_trigger):
+        lines = ["name: Test"] + list(trigger) + list(top) + [
             "jobs:",
             "  quality:",
             "    runs-on: ubuntu-latest",
@@ -4314,6 +4325,13 @@ def self_test():
                          for job in ["quality"] + sorted(HEAVY_JOBS))
             lines.extend(REQUIRED_STATUS_JOB[3:])
         return "\n".join(lines) + "\n"
+
+    def without_trigger(text):
+        # A quality.yml fixture's labeled trigger removed, so the vector sets
+        # its own.
+        return text.replace(
+            "name: Test\n" + "\n".join(labeled_trigger) + "\n", "name: Test\n",
+            1)
 
     def case(
             name,
@@ -6085,7 +6103,8 @@ def self_test():
     # without the change.
     def multi_job_ci(aggregator, first=("python3 tools/a.py",),
                      second=("python3 tools/b.py",), run_tail=()):
-        lines = ["name: Test"] + list(CONCURRENCY_BLOCK) + ["jobs:"]
+        lines = (["name: Test"] + list(labeled_trigger)
+                 + list(CONCURRENCY_BLOCK) + ["jobs:"])
         for job, commands in (("one", common + first), ("two", second)):
             lines.extend((
                 "  " + job + ":",
@@ -6296,7 +6315,7 @@ def self_test():
                  ()),
         "duplicate-key")
     case("31m a key under a later top-level on: is not read as a job",
-         evaluate(multi_local, good_multi
+         evaluate(multi_local, without_trigger(good_multi)
                   + "on:\n  pull_request:\n    types: [labeled]\n  push:\n", ()), 0)
 
     # 32 RESULT-MASKING KEYS: continue-on-error, uses, defaults and container
@@ -6611,12 +6630,14 @@ def self_test():
     local_msg = local_fixture(common + (msg_selftest,))
 
     def with_on(text, on_block):
-        return text.replace("name: Test\n", "name: Test\non:\n" + on_block, 1)
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\non:\n" + on_block, 1)
 
     def with_on_header(text, header):
         # Insert a raw top-level header (no on: line is added), for vectors
         # that exercise the on: header spelling itself.
-        return text.replace("name: Test\n", "name: Test\n" + header, 1)
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\n" + header, 1)
 
     def pr_types(types):
         return ("  pull_request:\n    branches: [main]\n    types: " + types
@@ -6627,7 +6648,8 @@ def self_test():
     # quality.yml lists the labeled type alone (module docstring, TRIGGER).
     labeled = pr_types("[labeled]")
     quality_side = with_on(ci_fixture(common), labeled)
-    scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False)
+    scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False,
+                           trigger=())
     msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
 
     def scan_case(name, quality, scan, want_code, kinds=(), local_only=None,
@@ -6683,8 +6705,8 @@ def self_test():
     # 35k: a one-line on: list on quality.yml is read: it lists no edited, so
     # it draws no edited finding, and it lists no pull_request, so its one
     # finding is the missing-trigger finding (41i holds that on the block form).
-    one_line_quality = ci_fixture(common).replace(
-        "name: Test\n", "name: Test\non: [push, workflow_dispatch]\n", 1)
+    one_line_quality = with_on_header(
+        ci_fixture(common), "on: [push, workflow_dispatch]\n")
     scan_case("35k a one-line on: list on quality.yml with no pull_request draws "
               "only the missing-trigger finding",
               one_line_quality, msg_side, 1, ("trigger",))
@@ -6965,7 +6987,7 @@ def self_test():
                   item for item in common if item != moved)), labeled),
               ((MSG_LEAKS_CI_SOURCE, with_on(
                   ci_fixture((msg_selftest, msg_scan, moved), top=(),
-                             heavy=False),
+                             heavy=False, trigger=()),
                   edited)),),
               1, ("relocation",))
 
@@ -7022,7 +7044,7 @@ def self_test():
                 local_msg, quality_side, msg_waiver,
                 ((MSG_LEAKS_CI_SOURCE, with_on(
                     ci_fixture((msg_selftest, msg_scan), expr_step, top=(),
-                               heavy=False),
+                               heavy=False, trigger=()),
                     edited)),))
             expr_source = MSG_LEAKS_CI_SOURCE
         case("35x a GitHub expression in a run: shell comment is "
@@ -7433,7 +7455,7 @@ def self_test():
                 light_commands=None, opf_id="opf",
                 opf_commands=("python3 tools/b.py",), drop_heavy=()):
         other_heavy = sorted(HEAVY_JOBS - {"opf"} - set(drop_heavy))
-        lines = ["name: Test"] + list(top) + ["jobs:"]
+        lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
         for job, commands, condition in (
                 ("secrets",
                  common + ("python3 tools/a.py",)
@@ -7815,9 +7837,11 @@ def self_test():
     labeled_case("41h control: types: [labeled] passes", labeled, 0)
     labeled_case("41h control: a plain scalar types: labeled passes",
                  pr_types("labeled"), 0)
-    case("41h control: a quality.yml with no top-level on: line draws no "
-         "trigger finding",
-         evaluate(local_msg, ci_fixture(common), msg_waiver, msg_side), 0)
+    # A quality.yml with no top-level on: line schedules no Quality run for the
+    # train pull request either; this vector passed clean before the missing
+    # on: finding.
+    labeled_case("41h a quality.yml with no top-level on: line is a trigger "
+                 "finding", "", 1, "has no top-level on: line", header=True)
     # A quality.yml whose on: block names no pull_request event schedules no
     # Quality run for the train pull request either; this vector passed clean
     # before the missing-trigger finding.

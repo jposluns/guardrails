@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b733da1903327b7f6203d12a9f2f414088f54802952a44bd7457f5b02d2a4cf9"
+tree-sha256 = "49b4b115677c09e6f5f2b0aaae57e4eff29ed5714466975be5305910df0f4c2d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 460407
-sha256 = "7520b3a760dd751f52d618b4baf5fde446ea1348ade2a6f83bd00fd79b234355"
+bytes = 460810
+sha256 = "133cc81cf772209252df8a9052220a8950a3472dea5cc152f09722b6afa51ecf"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -821,8 +821,8 @@ sha256 = "7854ba7c7fa8221a2b408deaf73505b492ff2d39f67d5addac1b20ed98ac2ba6"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 725584
-sha256 = "e1db95b044ead558ed3e0dab4dbf2aa6d60cc7d614d21a9d3ed5d84491ded770"
+bytes = 725370
+sha256 = "d10636b5e4d2aeb0b3ebe83618f684b8607eba5df7e0dacb78351740ab8cd9aa"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2356,8 +2356,8 @@ sha256 = "a774875eea19a3157fea5127bcd61fbc659d1d56679592bcd3d6e2d2c0d196b1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 428996
-sha256 = "5df47aa22ba41eb8a007e04819e2adb779badfbb4e855c56c7043e93c0c6ec26"
+bytes = 428782
+sha256 = "c41168394edf47f0849630a9f77add1e9959a9a685a2f1f01b0575780d4cf4ae"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3171,8 +3171,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 485968
-sha256 = "fde5010a73a549e0184095977f3e3797c97afce683d3a1a4f2959b649d95c8fa"
+bytes = 485754
+sha256 = "932645e084c5ca31180bfbe6efc5f8187a3cbc7a96adf4c2eb5241b4dcf9a743"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3341,8 +3341,8 @@ sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 357652
-sha256 = "2dcb6b2a73879afe535b9d01d4affdac9f9c2f8015beaf6d6b909a4132f1078a"
+bytes = 358652
+sha256 = "bc7153dd68a51848c685a60ea79e5647ee912170739b64600d031e8daf9ffcfa"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3391,8 +3391,8 @@ sha256 = "8452eefa4ea89f00c6cac593951443ba4e6113cd804655fb040eb3e29d85b833"
 
 [[sources]]
 path = "tools/check_gitleaks_pin.py"
-bytes = 18097
-sha256 = "a511bcff253b2a33049b8f5c66f848c98c3a37dfa38b31f6ce205c96035e36e1"
+bytes = 26868
+sha256 = "09052057a56211e555766615b7c2088987dc37c87a1fb93e4537622f2e828ad7"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
