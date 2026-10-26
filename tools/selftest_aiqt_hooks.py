@@ -13801,6 +13801,54 @@ def _main_isolated(monitor):
                 "git merge --no-verify-signatures topic", "allow")
         gexpect("(gw-n4) positive --verify allows", "git commit --verify -m 'x'", "allow")
 
+        # A commit whose quoted message only quotes a hook-skip spelling is a disclosed over-deny; every deny
+        # it can draw keeps its decision and names the way on (_GATE_FILE_ROUTE): commit the message from a
+        # file, which the guard never opens. One row per deny site (parsed, de-quoted, parse-error, raw
+        # fallback, opaque '#' doubt and doubt bypass), each failing on code that drops the route from it.
+        for _fr_label, _fr_cmd in (
+                ("gw-fr-behind", "git commit -m 'docs: git commit -n is banned'"),
+                ("gw-fr-grammar", "git commit -m 'look at git --namespace'"),
+                ("gw-fr-seg", "git commit -m 'docs' '-n'"),
+                ("gw-fr-pseg", "git commit -m 'docs' '-n' <<<x"),
+                ("gw-fr-pbehind", "git commit -m 'docs: git commit -n is banned'; cat <<<x"),
+                ("gw-fr-unread", 'git commit -m "docs: git commit -n is banned'),
+                ("gw-fr-fb-noverify", "git commit -m \"$(cat <<'EOF'\nDon't use --no-verify\nEOF\n)\""),
+                ("gw-fr-fb-shortn", "git commit -m \"$(cat <<'EOF'\nDon't use -n\nEOF\n)\""),
+                ("gw-fr-fb-grammar", 'git commit -m "x" $y "unbalanced'),
+                ("gw-fr-opaque", "x=`true #`\ngit commit -m 'docs: git commit -n is banned'"),
+                ("gw-fr-doubt", "x=`true #`\ngit commit -m \" git commit -n \"")):
+            gdeny_names("({}) a quoted-message commit denies and its reason names -F".format(_fr_label), _fr_cmd,
+                        "git commit -F FILE")
+        # The 'bypass' branch of the grammar messages, parsed and unparsed: the walks before it catch every
+        # bypass spelling these rows can write, so the message is read directly.
+        for _fr_unparsed in (False, True):
+            if "git commit -F FILE" not in aiqt_hooks._gate_grammar_messages(
+                    "bypass", "commit", "the short -n", _fr_unparsed)[0]:
+                failures.append("(gw-fr-grammar-bypass-{}) the bypass grammar reason does not name -F"
+                                .format(_fr_unparsed))
+        # The route named allows: the commands are read out of the reason text itself (FILE an absolute
+        # path), so a route the guard does not allow, or a reason that names none, fails here.
+        _fr_route = aiqt_hooks._GATE_FILE_ROUTE
+        for _fr_form in ("git commit -F FILE", "cat FILE | git commit -F -"):
+            if _fr_form not in _fr_route:
+                failures.append("(gw-fr-route) the route does not name {!r}".format(_fr_form))
+            gexpect("(gw-fr-route-allows) the named route {!r} allows".format(_fr_form),
+                    _fr_form.replace("FILE", "/tmp/msg.txt"), "allow")
+        gexpect("(gw-fr-allow-file) a commit from a message file allows", "git commit -F /tmp/msg.txt", "allow")
+        gexpect("(gw-fr-allow-long) the --file spelling allows too", "git commit --file /tmp/msg.txt", "allow")
+        gexpect("(gw-fr-allow-pipe) the message piped from a file to -F - allows",
+                "cat /tmp/msg.txt | git commit -F -", "allow")
+        # Controls: the route is a file the guard does not read; a '<' redirection or a here-document on the
+        # git segment stays outside the closed grammar, and a stage whose own text names the spelling is read.
+        gexpect("(gw-fr-ctl-redir) control: -F - fed by a '<' redirection still denies",
+                "git commit -F - < /tmp/msg.txt", "deny")
+        gexpect("(gw-fr-ctl-heredoc) control: -F - fed by a here-document still denies",
+                "git commit -F - <<'EOF'\ndocs: git commit -n is banned\nEOF", "deny")
+        gexpect("(gw-fr-ctl-printf) control: a printf naming the spelling before -F - still denies",
+                "printf 'docs: git commit -n is banned' | git commit -F -", "deny")
+        gexpect("(gw-fr-ctl-flag) control: a real -n beside -F still denies", "git commit -F /tmp/msg.txt -n",
+                "deny")
+
         # ROUND-2 FINDING 14: the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
         # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. These previously
         # denied; each swallow now allows with a note. The truncating-pipe vectors here (gw-s, gw-t) are

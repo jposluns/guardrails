@@ -10876,6 +10876,12 @@ _GATE_ALTS = (
     "Safe route: run the gate as-is and let its exit status stand; a failing gate is signal, so fix "
     "the artefact it guards. A genuinely broken hook or check is repaired or retired at its source "
     "through a reviewed change, never bypassed for one run.")
+# The way on named in every hook-skip and grammar deny a git commit whose quoted message only quotes a
+# hook-skip spelling can draw: the message read from a file is never opened here, so git commit -F FILE and
+# cat FILE | git commit -F - allow (a '<' redirection or a here-document on the git segment still denies).
+_GATE_FILE_ROUTE = (
+    "If a commit message only quotes a hook-skip spelling, write it to a file and commit with git commit -F FILE "
+    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
@@ -12157,7 +12163,8 @@ def _gate_grammar_messages(kind, what, how, unparsed):
             "AIQT rule gatdis (gate-discipline): {}names a git {} carrying {}, a deliberate bypass "
             "of the verification hooks that gate it. The gate reads the raw text, so a bypass "
             "spelling inside quoted data denies too; never weaken a gate to obtain a pass, and keep "
-            "hook-bypass spellings out of command text. {}".format(lead, what, how, _GATE_ALTS),
+            "hook-bypass spellings out of command text. {} {}".format(lead, what, how, _GATE_ALTS,
+                                                                     _GATE_FILE_ROUTE),
             "AIQT guardrail: denied a command whose text names a git verification-hook bypass "
             "(--no-verify family) (rule gatdis, fail-closed).")
     where = ("where its subcommand or a global option's value is expected, so the verb bash would "
@@ -12173,7 +12180,7 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "skipping the verification hooks), and this gate does not model those rewrites; it denies "
         "fail-closed. Re-issue the command plainly: spell every word of the git command literally, "
         "resolve any expansion before the call, and keep comments, redirections and here-documents "
-        "off the git segment. {}".format(lead, what[:60], how, where, _GATE_ALTS),
+        "off the git segment. {} {}".format(lead, what[:60], how, where, _GATE_ALTS, _GATE_FILE_ROUTE),
         "AIQT guardrail: denied a git command whose word {!r} is outside the gate's closed literal "
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
@@ -12196,7 +12203,7 @@ def _gate_weakening_fallback(command, heredoc_message=False):
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
-            "spelling; failing closed. {}".format(_GATE_ALTS),
+            "spelling; failing closed. {} {}".format(_GATE_ALTS, _GATE_FILE_ROUTE),
             "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
             "hooks (rule gatdis, fail-safe).")
     if kind == "short-n":
@@ -12204,8 +12211,8 @@ def _gate_weakening_fallback(command, heredoc_message=False):
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
             "which on those verbs bypasses the verification hooks; it is denied fail-safe. Never weaken a "
-            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {}"
-            .format(_GATE_ALTS),
+            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {} {}"
+            .format(_GATE_ALTS, _GATE_FILE_ROUTE),
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
     grammar_hit = _gate_closed_grammar_scan(command, heredoc_message)
@@ -12823,7 +12830,11 @@ def gate_weakening(data):
     the end of such a span (git commit -m 'look at git --namespace') fails closed and denies too. An
     interior naming only an OFF-roster git (git commit -m 'see git log for history'), or no git at all, or
     a benign operator message (git commit -m "a; b | c") still allows; re-issue anything else plainly with
-    every word literal, or keep git-with-roster-verb spellings out of quoted data.
+    every word literal, or keep git-with-roster-verb spellings out of quoted data. Every hook-skip and grammar
+    deny such a message can draw (parsed, de-quoted, parse-error fallback and opaque '#' doubt) ends with the
+    way on (_GATE_FILE_ROUTE): commit the message from a file with git commit -F FILE, or cat FILE | git
+    commit -F -, which allows because this guard never opens the file; a '<' redirection or here-document on
+    the git segment, or a stage before it whose own text names the spelling, still denies.
     DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
     git (printf ... | xargs git commit) is not reconstructed, and an alias or shell function that renames
     git is not resolved. A command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid,
@@ -12964,7 +12975,7 @@ def gate_weakening(data):
                 return _deny(
                     "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
                     "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
-                    "artefact instead. {}".format(sub, spelling, _GATE_ALTS),
+                    "artefact instead. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
                     "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
                     "(rule gatdis).")
         for seg in recovered:
@@ -12980,7 +12991,8 @@ def gate_weakening(data):
                     "no list, an assignment or option value, a redirection or quoted text), a deliberate bypass "
                     "of the verification hooks that gate it whatever runs that git; it is denied fail-closed. "
                     "Never weaken a gate to obtain a pass; fix the artefact instead. If the text only names "
-                    "such a command, keep that spelling out of it. {}".format(sub, spelling, _GATE_ALTS),
+                    "such a command, keep that spelling out of it. {} {}".format(sub, spelling, _GATE_ALTS,
+                                                                                 _GATE_FILE_ROUTE),
                     "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another "
                     "word of the command (rule gatdis, fail-closed).")
         hit = _verification_sink(recovered)
@@ -13005,7 +13017,7 @@ def gate_weakening(data):
                     "and its text from the segment the lexer stopped in onward, with quotes and backslashes removed, "
                     "names a git {} carrying {}, a deliberate bypass of the verification hooks that gate it; "
                     "it is denied fail-closed. Never weaken a gate to obtain a pass; fix the artefact instead. "
-                    "{}".format(sub, spelling, _GATE_ALTS),
+                    "{} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
                     "AIQT guardrail: denied an unparseable command whose de-quoted text names a git "
                     "verification-hook bypass (--no-verify family) (rule gatdis, fail-closed).")
             return _gate_weakening_fallback(command)
@@ -13014,7 +13026,7 @@ def gate_weakening(data):
         if _hash_doubt_opaque(command):
             return _hash_doubt_opaque_deny("gatdis (gate-discipline)", "a git hook bypass (a --no-verify "
                                            "spelling, or -n on commit or am) or a verification run piped into "
-                                           "a truncating sink", _GATE_ALTS)
+                                           "a truncating sink", _GATE_ALTS + " " + _GATE_FILE_ROUTE)
         # Behind a '#' the lexer could not judge under both readings, a sink word the deny tier lists
         # (head, tail, grep, egrep, fgrep, rg) anywhere in text that holds a '|' may receive a verification
         # run's output past that '#' whatever stands between or around them (a blank or comment continuation
@@ -13043,7 +13055,7 @@ def gate_weakening(data):
                                    "carries a dash-prefixed option this guard cannot bind to that "
                                    "subcommand's grammar past that '#', so a verification-hook bypass "
                                    "spelling cannot be ruled out") + " " +
-                _GATE_ALTS,
+                _GATE_ALTS + " " + _GATE_FILE_ROUTE,
                 "AIQT guardrail: denied a git call that could bypass verification hooks behind a '#' this "
                 "guard could not read (rule gatdis, fail-closed).")
         # The closed literal grammar reads the raw text and needs no lex, so it judges this command as it
@@ -13082,7 +13094,7 @@ def gate_weakening(data):
             return _deny(
                 "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
                 "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
-                "artefact instead. {}".format(sub, spelling, _GATE_ALTS),
+                "artefact instead. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
                 "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) (rule gatdis).")
         # A git behind any other word of the segment (a wrapper on no list, an option value, quoted text), before
         # its own git, or in a redirection of a segment with no command word, which bash still expands, is read
@@ -13096,7 +13108,7 @@ def gate_weakening(data):
                 "assignment or option value, a redirection or quoted text), a deliberate bypass of the "
                 "verification hooks that gate it whatever runs that git; it is denied fail-closed. Never weaken a "
                 "gate to obtain a pass; fix the artefact instead. If the text only names such a command, keep "
-                "that spelling out of it. {}".format(sub, spelling, _GATE_ALTS),
+                "that spelling out of it. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
                 "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another word "
                 "of the command (rule gatdis, fail-closed).")
         if not tokens or not _is_checker_segment(tokens):
