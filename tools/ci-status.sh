@@ -151,7 +151,7 @@ if [ -n "$EXPECT_VALUE" ]; then
   exit 2
 fi
 if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
-  printf 'ERROR: --require-workflow is read only under --require-base; alone it would be a silent no-op.\n' >&2
+  printf 'ERROR: --require-workflow is accepted only with --require-base; a read without --require-base always requires the workflow file .github/workflows/quality.yml.\n' >&2
   exit 2
 fi
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
@@ -342,9 +342,11 @@ SETTLE_OBSERVATIONS=5
 # inside jq on the run's raw recorded .path, never its display name; under --require-base that run
 # must also conform (see below). Absent one the head reads as missing, never as passing (exit 1,
 # naming the workflow file): report-once refuses on its single snapshot, and --wait keeps polling
-# within the settle window first, because a run can still be registered late on this head. Without
-# --require-base the path is not otherwise validated: a path that is not a string never matches, so
-# such a run cannot be the required one, while the path column stays display-only.
+# within the settle window first, because a run can still be registered late on this head. In every
+# mode each run of the commit must record its workflow path as a nonempty string: a run whose .path
+# is missing, not a string, or empty is a malformed run record (exit 2, naming the run id, in
+# one-shot and --wait mode alike), never skipped and never read as some other file, because whether
+# it is the required workflow file cannot be evaluated.
 #
 # THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
 # a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
@@ -384,8 +386,8 @@ SETTLE_OBSERVATIONS=5
 # run set this option trusts; a MISSING run of the required workflow file beside an otherwise
 # conforming set needs no new head: a qualifying run on this same head (which re-applying the
 # merge-train label schedules) satisfies it. A record of this commit that under this option lacks a usable
-# event, pull_requests or path field entirely is a malformed run record (exit 2, API error),
-# in one-shot and --wait mode alike:
+# event or pull_requests field entirely is a malformed run record (exit 2, API error), in one-shot and
+# --wait mode alike (a record without a usable path is one in every mode; see THE REQUIRED WORKFLOW):
 # malformed evidence is a property of the stored record, which polling re-reads unchanged, not a
 # retryable API condition.
 # RESIDUAL (disclosed, not closed): that the stored array is never rewritten is observed GitHub
@@ -412,8 +414,9 @@ SETTLE_OBSERVATIONS=5
 # the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
 # "unmet") and the required-workflow verdict (a fixed token: "match" or "other", in every mode) come
 # FIRST in every TSV row, then the base verdict's display detail, then the run's recorded workflow
-# path (display-only; anything but a nonempty string reads as "-", so an empty or non-string path in
-# plain mode can neither shift later columns nor abort the row), then id, name and URL. The step
+# path (display-only; the read is refused before any row is emitted unless every run of the commit
+# records its path as a nonempty string, so an empty or non-string path can neither shift later
+# columns nor abort the row), then id, name and URL. The step
 # mode keeps each run's path in every mode, so a run only the scan sees can still be the required one.
 # The required-workflow match is computed INSIDE jq, on the run's raw JSON .path
 # against the required path passed in as --arg require_workflow, and only the fixed token reaches
@@ -494,10 +497,10 @@ def malformed_run:
   or (($require_base != "")
       and (((.event | type) != "string")
            or ((.event | length) == 0)
-           or ((.path | type) != "string")
-           or ((.path | length) == 0)
            or ((.pull_requests | type) != "array")
            or any(.pull_requests[]; (type != "object") or ((.base | type) != "object"))));
+def malformed_path:
+  ((.path | type) != "string") or ((.path | length) == 0);
 def terminal_page:
   ((.workflow_runs | length) < 100)
   or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
@@ -529,8 +532,6 @@ def base_requirement:
   end;
 def workflow_requirement:
   if .path == $require_workflow then "match" else "other" end;
-def display_path:
-  if ((.path | type) == "string") and ((.path | length) > 0) then .path else "-" end;
 if $mode == "step" then
   if (length != 1) or (.[0] | malformed_page) then
     error("malformed workflow-runs response")
@@ -563,6 +564,13 @@ else
           or any($scan_all[]; malformed_scan_record)
           or any($scan_all[]; (.head_sha == $requested_sha) and malformed_run) then
           error("malformed workflow run record")
+        elif any($filtered_all[], $scan_all[]; (.head_sha == $requested_sha) and malformed_path) then
+          error("malformed workflow run record: run(s) "
+                + ([$filtered_all[], $scan_all[]
+                    | select((.head_sha == $requested_sha) and malformed_path) | .id]
+                   | unique | map(tostring) | join(", "))
+                + " of this commit record no workflow path (.path is missing, not a string, or"
+                + " empty), so whether each is the required workflow file cannot be evaluated")
         elif $page_count > $max_pages then
           error("unfiltered workflow-runs listing not bounded within the page limit")
         elif any($scan_pages[:-1][]; (.workflow_runs | length) != 100)
@@ -606,7 +614,7 @@ else
                    | .[0]
                    | [(.status // "-"), (.conclusion // "-")]
                      + base_requirement
-                     + [workflow_requirement, display_path,
+                     + [workflow_requirement, .path,
                         (.id | tostring), .name, .html_url]
                    | @tsv)
                 end
@@ -1101,7 +1109,7 @@ while :; do
     # anything other than "met" (under --require-base) or "match" fails closed, so an unexpected
     # token never passes. base_detail is display-only (@tsv-escaped); path is display-only too:
     # the required-workflow match is wf_state, computed in jq on the run's raw JSON
-    # .path (validated nonempty under --require-base), never on this escaped column; name stays
+    # .path (validated as a nonempty string in every mode), never on this escaped column; name stays
     # display-only.
     if [ -n "$REQUIRE_BASE" ] && [ "$base_state" != "met" ]; then
       base_unmet+=("${name}: ${base_detail}")

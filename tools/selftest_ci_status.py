@@ -1276,7 +1276,7 @@ def _run_checks():
                             "--require-workflow", quality_path), "needs a workflow path"),
                 (require + ("--require-workflow", quality_path,
                             "--require-workflow", quality_path), "more than once"),
-                (("--require-workflow", quality_path), "only under --require-base")):
+                (("--require-workflow", quality_path), "only with --require-base")):
             rc, output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=extra)
             wf_refused.append((rc, fixture.gh_argv == [], fixture.git_argv == [],
                                needle in output))
@@ -1361,7 +1361,7 @@ def _run_checks():
         check("ci/require-workflow-file-binding", bound,
               [(1, 1, True), (1, 5, True), (0, 5, False)])
 
-        # Under --require-base a run record whose workflow path is missing, empty
+        # Under --require-base, as in every mode, a run record whose workflow path is missing, empty
         # or not a string is a malformed run record (exit 2), in one-shot and --wait mode
         # alike: without a usable path the required-workflow match cannot be evaluated, and
         # reading such a run as some other file would be the name-collision fail-open again.
@@ -1441,20 +1441,42 @@ def _run_checks():
         check("ci/require-base-single-source-malformed", single_source,
               [(2, 1, True, False)] * 8)
 
-        # Without --require-base the path column is
-        # display-only and unvalidated, so a path that is not a nonempty string reads as "-"
-        # rather than collapsing the TSV row (IFS=tab folds an empty field, shifting every later
-        # column) or aborting it (@tsv refuses an object). Status, conclusion, name and URL must
-        # all land in their own columns. Each read also holds a quality.yml run, which every read
-        # requires.
-        plain_rows = []
-        for raw_path in ("", {"x": 1}):
+        # Without --require-base too, a run of the commit whose workflow path is missing, empty or
+        # not a string (an object, a number) is a malformed run record (exit 2, one read, never a
+        # timeout) naming the run, in one-shot and --wait mode alike, even beside a valid quality.yml
+        # run: whether it is the required workflow file cannot be evaluated. A plain read formerly
+        # validated no path, so such a sibling beside a valid Quality run read green (exit 0).
+        pathless_note = "malformed workflow run record: run(s) 920 of this commit record no workflow path"
+        plain_pathless = []
+        for raw_path in (None, "", {"x": 1}, 7):
             pathological = workflow_run(920, "completed", "success", "Web generator health",
                                         head_sha, path=raw_path)
-            rc, output, _calls = fixture.invoke([[page([pathological, success_b])]])
-            plain_rows.append((rc, "Web generator health: completed / success" in output,
-                               "  https://example.invalid/runs/920" in output))
-        check("ci/plain-mode-path-column-inert", plain_rows, [(0, True, True)] * 2)
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke([[page([pathological, success_b])]], wait=wait)
+                plain_pathless.append((rc, calls, pathless_note in output, "TIMEOUT" in output))
+        check("ci/plain-mode-path-malformed-refused", plain_pathless, [(2, 1, True, False)] * 8)
+
+        # The plain-mode path refusal holds from EITHER listing alone, and names every such run once:
+        # the vectors above feed the malformed run through both listings at once, so they alone would
+        # let a path check on one listing (or one confined to --require-base again) hide behind the
+        # other listing's.
+        empty_path = workflow_run(920, "completed", "success", "Web generator health", head_sha,
+                                  path="")
+        object_path = workflow_run(921, "completed", "success", "Sibling", head_sha, path={"x": 1})
+        single_pathless = []
+        for polls, note in (
+                ([{"filtered": [page([success_b, empty_path])], "scan": [page([success_b])]}],
+                 pathless_note),
+                ([{"filtered": [page([success_b])], "scan": [page([success_b, empty_path])]}],
+                 pathless_note),
+                ([{"filtered": [page([success_b, object_path, empty_path])],
+                   "scan": [page([empty_path, success_b, object_path])]}],
+                 "malformed workflow run record: run(s) 920, 921 of this commit record no workflow path")):
+            for wait in (False, True):
+                rc, output, calls = fixture.invoke(polls, wait=wait)
+                single_pathless.append((rc, calls, note in output, "TIMEOUT" in output))
+        check("ci/plain-mode-path-single-source-refused", single_pathless,
+              [(2, 1, True, False)] * 6)
 
         # Without --require-base too, a head whose only run is its msg-leaks.yml run (a member head,
         # which the merge lane never labels) has no Quality evidence: it reads as missing (exit 1,

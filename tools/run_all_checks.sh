@@ -320,8 +320,11 @@ if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"
   exit 1
 fi
+# The gitleaks scan did not run (bash found no gitleaks) while every gate passed, which needs the
+# gitleaks-pin gate's own PATH lookup to have found one: the run still fails, as that gate requires,
+# never passes with the scan not run.
 if [ "$notrun" -ne 0 ]; then
-  echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"
-  exit 0
+  echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"
+  exit 1
 fi
 echo "RESULT: PASS"

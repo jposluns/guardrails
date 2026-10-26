@@ -14,10 +14,10 @@ signed; the independently published digest is the authenticated reference.
 
 ## Steps
 
-Each pull request below, like every change to main, gets a Quality run only when a label is added to it
-(the merge lane adds the `merge-train` label), and its heavy jobs run only when its head is a
-`merge-train-*` branch of this repository, so "merged on green" means green on such a labelled train pull
-request (CLAUDE.md, Gates and CI).
+Each pull request below, like every pull request into main, gets a Quality run only when a label is
+added to it (the merge lane adds the `merge-train` label), and its heavy jobs run only when its head is
+a `merge-train-*` branch of this repository, so "merged on green" means green on such a labelled train
+pull request (CLAUDE.md, Gates and CI).
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. That run FAILS when gitleaks is not on
