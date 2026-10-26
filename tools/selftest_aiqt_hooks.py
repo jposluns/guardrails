@@ -12616,23 +12616,41 @@ def _main_isolated(monitor):
         # quoted blank or separator shifts, allowed each before. gku2-<form>-<guard>: each guard denies, gate_weakening,
         # git_discard and branch_root naming a word built at run time (protected_line's commit recognizer denies it as
         # an unverifiable commit). open-log is the disclosed over-refusal of an open region with a literal subcommand.
-        # The reading past the stop begins only at a command position the lexer reaches, never inside quoted or
-        # here-document text, and is scoped to a segment that runs git as its own command (_segment_runs_git_command):
-        # past-echo reaches the real git command past a quoted git word that the old reading mis-read as the command.
-        # gku2c-<form>-<guard>: a literal region the lexer read in full, or that the reading past the stop reads in
-        # full, keeps its allow; the nongit-* controls name no git command (git is an operand of grep, echo or a
-        # pull-request body), so the unread-region rule does not reach them and the over-refusal is gone.
+        # The reading past the stop is the union of the measured re-lex and the every-git-word reading (A GIT
+        # REGION THE LEXER DID NOT READ): past-echo reaches the real git command past a quoted git word that the
+        # old reading mis-read as the command; heredoc and fd deny through the unmeasured-construct union (red
+        # where that fallback returns False); split-* deny where a here-string splits a resolved wrapper's words
+        # (the resume is not at a separator); procsub-esc denies with the escaped parenthesis honoured in the
+        # measure; wrapper-flock and wrapper-ionice deny through the plain git word a command off the wrapper
+        # list carries; hash-resume denies where a '#' right after the measured construct hides the rest from
+        # the re-lex; procsub-body denies through the git region inside the measured construct's own text.
+        # gku2c-<form>-<guard>: a literal region the lexer read in full, or that the reading past the stop reads
+        # in full, keeps its allow; the nongit-* controls carry git only as quoted text or a pre-stop operand
+        # (grep), so the scoping and the proven-quoted narrowing keep them allowed; esc-literal and
+        # heredoc-literal keep a literal closed region allowed past an escaped parenthesis or a heredoc.
         _gku2_forms = (
             ("qblank", 'git <<<x -C "a b" $X l'), ("squote", "git <<<x -C 'a b' $X l"),
             ("qsep", 'git <<<x -C "a;b" $X l'), ("key", 'git <<<x -C "a b" -c "$K"=v l'),
             ("lead", '<<<x git -C "a b" $X l'), ("past", 'cat <<<x; git -C "a b" $X l'),
             ("past-echo", 'cat <<<x; echo "git log"; git -C "a b" $X l'),
-            ("open-log", "git <<<x log"))
+            ("open-log", "git <<<x log"),
+            ("heredoc", 'cat <<EOF\nx\nEOF\ngit -C "a b" $X l'),
+            ("fd", 'exec {fd}>/dev/null; git -C "a b" $X l'),
+            ("fd-lead", 'exec {fd}>/dev/null; git <<<y -C "a b" $X l'),
+            ("split-nice", 'nice <<<x -n 5 git -C "a b" $X l'),
+            ("split-env", 'env <<<x -u V git -C "a b" $X l'),
+            ("procsub-esc", 'cat <(echo \\(); git -C "a b" $X l; case a in a) true;; esac'),
+            ("wrapper-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l'),
+            ("wrapper-ionice", 'cat <<<x; ionice -c3 git -C "a b" $X l'),
+            ("hash-resume", 'cat <(a)#; git -C "a b" $X l'),
+            ("procsub-body", 'cat <(git -C "a b" $X l); true'))
         _gku2_controls = (
             ("trail", "git log --oneline <<<x"), ("past-literal", "cat <<<x; git status"),
             ("past-quoted", 'cat <<<x; git log "$a"'), ("procsub", "diff <(git show HEAD:f) f"),
             ("nongit-echo", 'cat <<<x; echo "run git"'), ("nongit-grep", 'grep -c git <<<"$s"'),
-            ("nongit-gh", 'gh pr create --body "$(cat <<\'EOF\'\nmentions git here\nEOF\n)"'))
+            ("nongit-gh", 'cat <<<x; gh pr create --body "mentions git here"'),
+            ("esc-literal", 'cat <(echo \\(); git status'),
+            ("heredoc-literal", "cat <<EOF\nx\nEOF\ngit status"))
         for _gks_handler, _gks_cwd in _gks_guards:
             _gks_name = _gks_handler.__name__
             for _gku2_label, _gku2_rows, _gku2_want in (("gku2", _gku2_forms, "deny"),
@@ -12674,11 +12692,80 @@ def _main_isolated(monitor):
             if _gku2_got != _gku2_want:
                 failures.append("({}) _git_region_read({!r}, 0): expected {!r}, got {!r}".format(
                     _gku2_label, _gku2_cmd, _gku2_want, _gku2_got))
+        # The construct measure at its edges (gku2-measure-*): an escaped parenthesis opens and closes nothing,
+        # so the measure ends at the real ')' and records the escape it met; an unescaped extra '(' leaves the
+        # body unterminated (None); a here-string's measure ends just past its target word; a heredoc and a
+        # '{fd}' redirect stay unmeasured (None).
+        for _gku2_label, _gku2_cmd, _gku2_want, _gku2_esc_want in (
+                ("gku2-measure-esc", 'cat <(echo \\(); true', 14, True),
+                ("gku2-measure-esc-close", 'cat <(echo \\)); true', 14, True),
+                ("gku2-measure-plain", "cat <(true); true", 11, False),
+                ("gku2-measure-unbalanced", "cat <(echo (; true", None, False),
+                ("gku2-measure-herestring", "cat <<<x; true", 8, False),
+                ("gku2-measure-heredoc", "cat <<EOF\nx\nEOF\ntrue", None, False),
+                ("gku2-measure-fd", "exec {fd}>/dev/null; true", None, False)):
+            _gku2_esc = [False]
+            _gku2_got = aiqt_hooks._construct_end(_gku2_cmd, 4, _gku2_esc)
+            if _gku2_got != _gku2_want or _gku2_esc[0] is not _gku2_esc_want:
+                failures.append("({}) _construct_end({!r}, 4): expected ({!r}, escape {}), got ({!r}, {})".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_esc_want, _gku2_got, _gku2_esc[0]))
+        # The resume test at its boundary: a separator right after the construct (or nothing but blanks) is a
+        # command position; the first word character, redirect or '#' is not, however many blanks precede it.
+        for _gku2_label, _gku2_rest, _gku2_want in (
+                ("gku2-resume-empty", "", True), ("gku2-resume-blanks", "  \t", True),
+                ("gku2-resume-semi", " ; git", True), ("gku2-resume-newline", "\ngit", True),
+                ("gku2-resume-amp", " && git", True), ("gku2-resume-pipe", " | git", True),
+                ("gku2-resume-word", " -n 5 git", False), ("gku2-resume-hash", " #x\ngit", False),
+                ("gku2-resume-redirect", " >f; git", False)):
+            _gku2_got = aiqt_hooks._resumes_at_separator(_gku2_rest)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _resumes_at_separator({!r}): expected {}, got {}".format(
+                    _gku2_label, _gku2_rest, _gku2_want, _gku2_got))
+        # The union view of a recovered segment: a plain git word any command carries keeps the walk (flock),
+        # a git word proven quoted text is neutralized (echo "run git" has no walkable git word), and one beside
+        # a '$' or backquote defers to the raw reading (expansion True).
+        with aiqt_hooks._WordSpellings():
+            _gku2_flock = aiqt_hooks._lex_command('flock /tmp/l git -C "a b" $X l')[0][0]
+            _gku2_quoted = aiqt_hooks._lex_command('echo "run git"')[0][0]
+            _gku2_subst = aiqt_hooks._lex_command('echo "$(git log)"')[0][0]
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_flock)
+        if (_gku2_union is None or _gku2_exp
+                or not (aiqt_hooks._git_region_open(_gku2_union) or aiqt_hooks._git_local_alias(_gku2_union))):
+            failures.append("(gku2-union-flock) _segment_union_words kept no walkable git word for the flock "
+                            "carrier, or its walk read no run-time word: got ({!r}, {})".format(
+                                _gku2_union, _gku2_exp))
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_quoted)
+        if _gku2_union is not None or _gku2_exp:
+            failures.append("(gku2-union-quoted) _segment_union_words on a quoted git word: expected "
+                            "(None, False), got ({!r}, {})".format(_gku2_union, _gku2_exp))
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_subst)
+        if _gku2_exp is not True:
+            failures.append("(gku2-union-subst) _segment_union_words on a substitution carrying git: expected "
+                            "expansion True, got ({!r}, {})".format(_gku2_union, _gku2_exp))
+        # The every-git-word reading on raw text: a region holding a run-time word or stopped by a construct
+        # denies, a closed literal region does not, and reading starts at pos (a git word before it is skipped).
+        for _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want in (
+                ("gku2-raw-runtime", '<<EOF\ngit -C "a b" $X l', 0, True),
+                ("gku2-raw-construct", "<<<x; foo git <<<y -C a l", 0, True),
+                ("gku2-raw-literal", "<<<x; git status", 0, False),
+                ("gku2-raw-before-pos", 'git -C "a b" $X l; true', 18, False)):
+            _gku2_got = aiqt_hooks._git_alias_unread_everyword(_gku2_cmd, _gku2_pos)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_alias_unread_everyword({!r}, {}): expected {}, got {}".format(
+                    _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want, _gku2_got))
         for _gku2_label, _gku2_cmd, _gku2_want in (
                 ("gku2-unread-lead", 'git <<<x -C "a b" $X l', True),
                 ("gku2-unread-past", 'cat <<<x; git -C "a b" $X l', True),
                 ("gku2-unread-trail", 'git -C "a b" log <<<x', False),
-                ("gku2-unread-literal", "cat <<<x; git status", False)):
+                ("gku2-unread-literal", "cat <<<x; git status", False),
+                ("gku2-unread-heredoc", 'cat <<EOF\nx\nEOF\ngit -C "a b" $X l', True),
+                ("gku2-unread-fd", 'exec {fd}>/dev/null; git -C "a b" $X l', True),
+                ("gku2-unread-split", 'nice <<<x -n 5 git -C "a b" $X l', True),
+                ("gku2-unread-escparen", 'cat <(echo \\(); git -C "a b" $X l; case a in a) true;; esac', True),
+                ("gku2-unread-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l', True),
+                ("gku2-unread-body", 'cat <(git -C "a b" $X l); true', True),
+                ("gku2-unread-esc-literal", 'cat <(echo \\(); git status', False),
+                ("gku2-unread-heredoc-literal", "cat <<EOF\nx\nEOF\ngit status", False)):
             with aiqt_hooks._LexStops() as _gku2_stops:
                 aiqt_hooks._lex_command(_gku2_cmd, partial=True)
             _gku2_got = aiqt_hooks._git_alias_unread(_gku2_cmd, _gku2_stops.seen)

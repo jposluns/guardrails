@@ -10758,10 +10758,13 @@ def _oracle_fake_git_source():
 
 def _oracle_corpus():
     """A bounded corpus of shell commands from a small grammar: a git word (option or subcommand region) built
-    by the unquoted, double-quoted list, indirect, list, brace, glob and here-string forms, each with and
-    without a leading here-string separator or quoted git text before it, plus the three past-stop shift
-    families (A GIT REGION THE LEXER DID NOT READ). Each entry is (label, command). The alias builders expand
-    to '-c alias.qx=version'; the control builders build a non-alias word. Size and runtime are reported by the
+    by the unquoted, double-quoted list, indirect, list, brace, glob and here-string forms, each in every
+    past-stop context (plain; a here-string separator; quoted git text; an unquoted heredoc; a '{fd}' redirect;
+    a process substitution, with and without an escaped parenthesis in its body; and a here-string that splits
+    a resolved wrapper's words), plus the past-stop shift families (A GIT REGION THE LEXER DID NOT READ),
+    which put a quoted blank in the built word's region through the same contexts and inside a process
+    substitution's own body. Each entry is (label, command). The alias builders expand to
+    '-c alias.qx=version'; the control builders build a non-alias word. Size and runtime are reported by the
     caller; every command runs real bash once (well under 60 seconds total)."""
     alias = "-c " + _ORACLE_ALIAS
     # (label, setup, args): command = setup + context + "git " + args; builders that define an alias.
@@ -10789,7 +10792,10 @@ def _oracle_corpus():
         ("glob-sub", "", "lo* "),
         ("dq-scalar", "P=less; ", '-c core.pager="$P" qx'),
     )
-    contexts = (("plain", ""), ("sep", "cat <<<x; "), ("quoted", 'cat <<<x; echo "git log"; '))
+    contexts = (("plain", ""), ("sep", "cat <<<x; "), ("quoted", 'cat <<<x; echo "git log"; '),
+                ("heredoc", "cat <<EOF\nx\nEOF\n"), ("fd", "exec {fd}>/dev/null; "),
+                ("procsub", "cat <(true); "), ("procsub-esc", "cat <(echo \\(); "),
+                ("wrapper-split", "nice <<<x -n 5 "))
     corpus = []
     for bl, setup, args in builders + controls:
         for cl, ctx in contexts:
@@ -10802,6 +10808,13 @@ def _oracle_corpus():
         ("shift-C", shift + 'cat <<<x; echo "git log"; git -C "a b" $X qx'),
         ("shift-past", shift + 'cat <<<x; git -C "a b" $X qx'),
         ("shift-lead", shift + 'cat <<<x; git <<<y -C "a b" $X qx'),
+        ("shift-heredoc", shift + 'cat <<EOF\nx\nEOF\ngit -C "a b" $X qx'),
+        ("shift-fd", shift + 'exec {fd}>/dev/null; git -C "a b" $X qx'),
+        ("shift-fd-lead", shift + 'exec {fd}>/dev/null; git <<<y -C "a b" $X qx'),
+        ("shift-procsub", shift + 'cat <(true); git -C "a b" $X qx'),
+        ("shift-procsub-esc", shift + 'cat <(echo \\(); git -C "a b" $X qx; case a in a) true;; esac'),
+        ("shift-procsub-body", shift + 'cat <(git -C "a b" $X qx); true'),
+        ("shift-wrapper-split", shift + 'nice <<<x -n 5 git -C "a b" $X qx'),
     ))
     return corpus
 
@@ -10853,6 +10866,12 @@ def _gitalias_oracle_cases(tmp):
     git_fixture = bindir / "git"
     git_fixture.write_text(_oracle_fake_git_source(), encoding="utf-8")
     os.chmod(str(git_fixture), 0o755)
+    # The wrapper-split context runs git under nice; the fixture bindir carries only git, so the real nice
+    # (resolved from this test process's own PATH) is linked beside it. Where nice is absent the wrapper-split
+    # commands record no argv and the hermeticity check reports them.
+    nice_path = shutil.which("nice")
+    if nice_path:
+        os.symlink(nice_path, str(bindir / "nice"))
     record = root / "argv.jsonl"
     repo = root / "repo"
     repo.mkdir()
@@ -10871,7 +10890,9 @@ def _gitalias_oracle_cases(tmp):
     corpus = _oracle_corpus()
     alias_labels = {"literal", "unquoted", "list", "positional", "brace", "indirect", "indirect-op",
                     "indirect-sub", "indirect-sub-op", "indirect-sub-var", "indirect-assoc", "indirect-star-op",
-                    "indirect-pos", "indirect-args", "shift-c", "shift-C", "shift-past", "shift-lead"}
+                    "indirect-pos", "indirect-args", "shift-c", "shift-C", "shift-past", "shift-lead",
+                    "shift-heredoc", "shift-fd", "shift-fd-lead", "shift-procsub", "shift-procsub-esc",
+                    "shift-procsub-body", "shift-wrapper-split"}
     fail_open = []
     hermeticity = []
     for label, command in corpus:
