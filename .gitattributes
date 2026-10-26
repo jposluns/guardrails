@@ -500,6 +500,7 @@ docs/teams.md text eol=lf
 opf/enforcement/ci/github-actions.yml text eol=lf
 opf/enforcement/ci/opf-ci.sh text eol=lf
 opf/enforcement/claude/pretooluse_deny.py text eol=lf
+opf/enforcement/claude/settings.opf.json text eol=lf
 opf/enforcement/codex/AGENTS.opf.md text eol=lf
 opf/enforcement/cursor/opf.mdc text eol=lf
 opf/enforcement/gemini-cli/GEMINI.opf.md text eol=lf
