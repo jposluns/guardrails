@@ -4908,12 +4908,37 @@ def _git_alias_inherited():
     return any(_git_alias_defined_at(inherited, j) for j in range(len(inherited)))
 
 
+# The words _git_alias_spelled reads: the de-quoted text split at blanks, newlines and the shell operator and opener
+# characters (; & | < > ( ) { } and the backquote), so a word next to a redirect, a here-string or a '{fd}' name
+# reads as the word the lexer would have read there.
+_GIT_ALIAS_TEXT_SPLIT_RE = re.compile(r"[\s;&|<>(){}`]+")
+
+
+def _git_alias_spelled(command):
+    """Whether the text of a command the lexer could not read to its end defines a git alias: it names git as a word
+    (_GIT_WORD_RE) and one of its words starts a definition (_git_alias_defined_at: a -c or --config-env whose next
+    word has an alias, include or includeIf key, an attached --config-env=KEY with one, or a GIT_CONFIG_PARAMETERS
+    or GIT_CONFIG_KEY_<n> assignment naming one), the words being those of the de-quoted text (_dequoted_text) split
+    at _GIT_ALIAS_TEXT_SPLIT_RE. The lexer stops at a here-string, an unquoted heredoc, a '{fd}' redirect or an
+    unbalanced quote and recovers no word after it, so a definition there is in no segment a partial lex recovers
+    (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an alias FILE defined). The whole text is read, the
+    recovered part included, so neither where the lexer stopped nor which git command a definition belongs to is
+    needed. Disclosed over-refusal (the safe direction): a definition spelling in any word of such a command counts,
+    one in an echo, a quoted sh -c body, a heredoc or here-string body or a 'grep -c alias.x' included. Read only
+    for a command whose lex failed; it only ever denies."""
+    if not _GIT_WORD_RE.search(command):
+        return False
+    words = _GIT_ALIAS_TEXT_SPLIT_RE.split(_dequoted_text(command))
+    return any(_git_alias_defined_at(words, j) for j in range(len(words)))
+
+
 def _git_alias_recovered(command):
     """Whether an unparseable command runs git under a git alias the command defines: its text names git while its
-    git commands run under one defined outside their segment (_git_alias_named), or a segment that a partial lex
-    recovers runs git under one (_git_alias_segment). The segment the lexer was still inside is kept: the words of
-    it already read stand whatever follows, and this reading only ever denies."""
-    if _git_alias_named(command):
+    git commands run under one defined outside their segment (_git_alias_named), its text defines one wherever the
+    lexer stopped (_git_alias_spelled), or a segment that a partial lex recovers runs git under one
+    (_git_alias_segment). The segment the lexer was still inside is kept: the words of it already read stand
+    whatever follows, and this reading only ever denies."""
+    if _git_alias_named(command) or _git_alias_spelled(command):
         return True
     try:
         recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
@@ -6385,9 +6410,10 @@ def _git_discard_fallback(command):
     removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
     plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
     quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot. A command that runs git
-    under a git alias it defines (_git_alias_recovered: its text names a git configuration variable and git, or
-    a git segment a partial lex recovers defines one or runs under one the session environment carries) denies
-    first, as on a parsed command, since the alias may name no work-losing verb this scan can see."""
+    under a git alias it defines (_git_alias_recovered: its text names a git configuration variable and git, its
+    text names git and defines one anywhere, past where the lexer stopped included, or a git segment a partial lex
+    recovers defines one or runs under one the session environment carries) denies first, as on a parsed command,
+    since the alias may name no work-losing verb this scan can see."""
     if _git_alias_recovered(command):
         return _git_discard_alias_deny()
     if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
@@ -9261,8 +9287,9 @@ def _commit_command_syntax(command):
         apparent = apparent or not _commit_quote_bytes_known(command)
         # Every git command of a command whose text names a git configuration variable, or that runs under an
         # alias the hook's environment carries, is apparent, the ones the partial lex does not recover included
-        # (_git_alias_named).
-        apparent = apparent or _git_alias_named(command)
+        # (_git_alias_named), and so is a command whose text defines a git alias wherever the lexer stopped
+        # (_git_alias_spelled).
+        apparent = apparent or _git_alias_named(command) or _git_alias_spelled(command)
         named = _git_alias_outside(command)
         apparent = apparent or any(_commit_apparent_segment(seg, named) for seg in partial)
         status = "unverifiable" if apparent else "outside"
@@ -10375,7 +10402,9 @@ def protected_line(data):
     # (_git_local_alias), and every git command of a command whose text names a git configuration variable or that
     # runs under an alias the hook's environment carries (_git_alias_named, _git_alias_segment), parsed or not,
     # wherever its git word stands. The commit recognizer reads the same segments as apparent commits
-    # (_commit_apparent_segment), which covers main's reading of the floor.
+    # (_commit_apparent_segment), which covers main's reading of the floor, and on an unparseable command it reads a
+    # definition anywhere in the text, past where the lexer stopped included, as an apparent commit too
+    # (_git_alias_spelled), which denies below as an unverifiable commit.
     outside = _git_alias_outside(command)
     if _git_alias_named(command) or any(_git_alias_segment(seg.argv, outside) for seg in syntax.records):
         return _deny(
@@ -10945,7 +10974,9 @@ def branch_root(data):
     both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
     git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
     decode (_hash_doubt_opaque), DENIES fail-safe, since the lexer reads nothing past that '#'; any other
-    unparseable command takes the partial-recovery path below. Where a lex read a quoted here-document's body
+    unparseable command takes the partial-recovery path below, where one whose text names git and defines a git
+    alias anywhere, past where the lexer stopped included (_git_alias_spelled), DENIES as a form this guard cannot
+    classify. Where a lex read a quoted here-document's body
     that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments
     are judged beside the lex's own where main's reading lexes (a partial lex returns main's partial reading
     beside its own), and where it fails the segments main's partial lex recovers, past the body, are judged
@@ -10988,6 +11019,10 @@ def branch_root(data):
                                    "rooted"),
                 "AIQT guardrail: denied a branch-capable git command behind a '#' this guard could not read "
                 "(rule brnrot, fail-closed).")
+        # A git alias the text defines past where the lexer stopped is in no segment the partial lex recovers
+        # (_git_alias_spelled), so every git command of the command counts as running under it, as under a text
+        # naming a git configuration variable: a form this guard cannot classify.
+        named = named or _git_alias_spelled(command)
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
@@ -12093,8 +12128,9 @@ def gate_weakening(data):
     environment carries (_git_alias_inherited), DENIES: the subcommand and options it runs cannot be read, so a
     hook bypass cannot be ruled out; so does a command whose text names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or
     GIT_CONFIG_KEY_ anywhere and git (_git_alias_named), every git command of which runs under an alias the
-    command may define. On a parse error such a command DENIES too (_git_alias_recovered: the text, or a git
-    segment the partial lex recovers), after the recovered sink.
+    command may define. On a parse error such a command DENIES too (_git_alias_recovered: the text, a definition
+    anywhere in it, past where the lexer stopped included, or a git segment the partial lex recovers), after the
+    recovered sink.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -12131,9 +12167,9 @@ def gate_weakening(data):
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
         # A git command that runs under a git alias the command defines denies as on a parsed command
-        # (_git_alias_recovered: a text naming a git configuration variable and git, or a recovered git segment):
-        # its subcommand and options cannot be read, and the raw probes below may see no bypass spelling in an
-        # alias value they cannot reach.
+        # (_git_alias_recovered: a text naming a git configuration variable and git, a text naming git that defines
+        # one past where the lexer stopped, or a recovered git segment): its subcommand and options cannot be read,
+        # and the raw probes below may see no bypass spelling in an alias value they cannot reach.
         if _git_alias_recovered(command):
             return _gate_alias_deny()
         if not isinstance(exc, _UncertainHashError):
@@ -12383,8 +12419,9 @@ def _commit_msg_subst_fallback(command):
     a HAZARD-class (command-injection) case this guard cannot parse, so it DENIES-and-educates (hooks never
     ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named).
     A command that runs git under a git alias it defines (_git_alias_recovered: its text names a git
-    configuration variable and git, or a git segment a partial lex recovers defines one or runs under one the
-    session environment carries) may run git commit under another name, so a marker anywhere in it denies too.
+    configuration variable and git, its text names git and defines one anywhere, past where the lexer stopped
+    included, or a git segment a partial lex recovers defines one or runs under one the session environment
+    carries) may run git commit under another name, so a marker anywhere in it denies too.
     Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
     if (_RAW_COMMIT_MSG_MARKER_RE.search(command)
             and (_RAW_COMMIT_MSG_GIT_RE.search(command) or _git_alias_recovered(command))):

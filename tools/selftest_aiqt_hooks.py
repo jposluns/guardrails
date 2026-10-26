@@ -11654,6 +11654,45 @@ def _main_isolated(monitor):
                     os.environ.pop(_glx_name, None)
                 else:
                     os.environ[_glx_name] = _glx_value
+        # A git alias definition after a construct the lexer stops at (a here-string, an unquoted heredoc, a '{fd}'
+        # redirect) is in no segment the partial lex recovers, so the parse-error reading reads the text for one
+        # (_git_alias_spelled): glx-p-<guard>-<shape> denies under each of the four guards, and glx-p-msg under
+        # commit_msg_subst's fallback; each allowed before (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an
+        # alias FILE defined). glx-pc1 to glx-pc4 keep the deny of a definition the lexer reads (no construct, or the
+        # construct after it). glx-pc5 to glx-pc9 keep the allow of an unparseable git command that defines no alias,
+        # a -c with a key outside the alias, include and includeIf sections included. glx-po1 is the disclosed
+        # over-refusal: a definition spelling in any word of an unparseable command that names git counts.
+        for _glp_shape, _glp_full in (
+                ("herestring", "git <<<x -c include.path=/abs/aliases.cfg c"),
+                ("config-env", "git <<<x --config-env alias.c=CCMD c"),
+                ("heredoc", "git <<EOF -c include.path=/abs/aliases.cfg c\nbody\nEOF"),
+                ("fdvar", "git {fd}>/dev/null -c include.path=/abs/aliases.cfg c")):
+            for _glp_handler, _glp_cwd in ((aiqt_hooks.gate_weakening, None), (aiqt_hooks.protected_line, plr),
+                                           (aiqt_hooks.git_discard, str(_glx_dirty)),
+                                           (aiqt_hooks.branch_root, str(_glx_branch))):
+                _glp_got = _decision(_glp_handler, _glp_full, cwd=_glp_cwd)
+                if _glp_got != "deny":
+                    failures.append("(glx-p-{}-{}) {} on {!r}: expected deny, got {}".format(
+                        _glp_handler.__name__, _glp_shape, _glp_handler.__name__, _glp_full, _glp_got))
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-p-msg", aiqt_hooks.commit_msg_subst, 'git <<<x --config-env alias.c=CCMD c -m "$(date)"', None,
+                 "deny"),
+                ("glx-pc1", aiqt_hooks.protected_line, "git -c include.path=/abs/aliases.cfg c", plr, "deny"),
+                ("glx-pc2", aiqt_hooks.gate_weakening, "git --config-env alias.c=CCMD c", None, "deny"),
+                ("glx-pc3", aiqt_hooks.git_discard, "git -c include.path=/abs/aliases.cfg c <<<x", str(_glx_dirty),
+                 "deny"),
+                ("glx-pc4", aiqt_hooks.branch_root, "git -c include.path=/abs/aliases.cfg c <<<x", str(_glx_branch),
+                 "deny"),
+                ("glx-pc5", aiqt_hooks.gate_weakening, "git status <<<x", None, "allow"),
+                ("glx-pc6", aiqt_hooks.protected_line, "git log <<EOF\nbody\nEOF", plr, "allow"),
+                ("glx-pc7", aiqt_hooks.git_discard, "git status {fd}>/dev/null", str(_glx_dirty), "allow"),
+                ("glx-pc8", aiqt_hooks.branch_root, "git status <<<x", str(_glx_branch), "allow"),
+                ("glx-pc9", aiqt_hooks.gate_weakening, "git <<<x -c core.pager=cat log", None, "allow"),
+                ("glx-po1", aiqt_hooks.gate_weakening, "echo -c alias.x=y; git status <<<x", None, "deny")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
         # The text rule at its edges (_git_config_env_named): the name in a word (glx-t1), in quotes (glx-t2), in a
         # here-string (glx-t3), split across lines by a continuation (glx-t4) or on a line before the git command
         # (glx-t5), escaped (glx-t6), in an unparseable command (glx-t7), and a git command inside an eval word
