@@ -1514,6 +1514,24 @@ def _test_note_literal_sites(failures, tmp):
     rd = orch.RdpFixture(base, "review-dispatch")
     note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
          rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
+    rw = base / "review-hold"
+    rw.mkdir()
+    orch._rdp_git(base, "init", "-q", "-b", "main", str(rw))
+    (rw / "seed.txt").write_text("s\n", encoding="utf-8")
+    orch._rdp_git(rw, "add", "seed.txt")
+    orch._rdp_git(rw, "commit", "-q", "-m", "seed")
+    rw_holds = rw / ".git" / "aiqt" / "review-holds"
+    rw_holds.mkdir(parents=True)
+    (rw_holds / "expired.json").write_text(json.dumps(dict(
+        version=1, workdir=str(rw), head=orch._rdp_git(rw, "rev-parse", "HEAD"),
+        dispatch_id="nl-hold", created_utc=orch._rwh_iso(-2), expires_utc=orch._rwh_iso(-1))),
+        encoding="utf-8")
+    note("(nl-review-hold-expired) an expired review-hold marker is ignored with a note on the next "
+         "Bash call, so a crashed dispatcher cannot pin a worktree forever",
+         aiqt_hooks.review_workdir_hold(dict(
+             hook_event_name="PreToolUse", cwd=str(rw), session_id="s1", tool_name="Bash",
+             tool_input=dict(command="ls"))),
+         "expired review-hold marker")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -2330,7 +2348,14 @@ def _test_git_stash_ref(failures):
              "FOO=x command env git -C /tmp/repo stash pop"),
             ("(sr-w20) several bare segments", "git stash pop; git stash apply"),
             ("(sr-w21) quote-decoded command and verb", "g'it' stash p'op'"),
-            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }")):
+            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }"),
+            # An ordinary parse failure is not passed clean where a bare pop/apply cannot be ruled out: text
+            # naming git and then stash, as written or de-quoted, keeps the note.
+            ("(sr-w23) parse failure naming stash pop notes", 'git stash pop "unbalanced'),
+            ("(sr-w24) parse failure with visible relocation notes", 'cd /abs && git stash pop "unbalanced'),
+            ("(sr-w25) here-string beside stash pop notes", "git stash pop <<<x"),
+            ("(sr-w26) here-string + quote-fragmented stash notes", "git st'ash' pop <<<x"),
+            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x")):
         expect_warn(label, command)
 
     for label, command in (
@@ -2355,7 +2380,6 @@ def _test_git_stash_ref(failures):
             ("(sr-a18) echo quoted prose", 'echo "git stash pop"'),
             ("(sr-a19) decoded subcommand with ref", "git 'st''ash' pop stash@{1}"),
             ("(sr-a20) unrelated command", "ls -la"),
-            ("(sr-a21) unbalanced quote", 'git stash pop "unbalanced'),
             ("(sr-a22) wrapper option", "env -i git stash pop"),
             ("(sr-a23) sudo option", "sudo -u u git stash apply"),
             ("(sr-a24) wrapper assignment", "env FOO=x git stash pop"),
@@ -2368,10 +2392,11 @@ def _test_git_stash_ref(failures):
             ("(sr-a31) empty quoted operand", 'git stash apply ""'),
             ("(sr-a32) dash operand after separator", "git stash apply -- -ref"),
             ("(sr-a33) command substitution operand", "git stash apply $(printf x)"),
-            ("(sr-a34) parse failure with visible relocation",
-             'cd /abs && git stash pop "unbalanced'),
             ("(sr-a35) parse failure with sibling hazard",
              'git add -A && git push "unbalanced'),
+            ("(sr-a40) parse failure naming no stash", "wc -l <<<x"),
+            ("(sr-a41) parse failure with a quoted commit message naming no stash",
+             'git commit -m "fix bug" <<<x'),
             ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
             ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
             ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
@@ -3271,6 +3296,15 @@ _DEADLINE_SHAPES = {
     # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does.
     "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
         "<(x) >(x) ", n - 4, "; git push --force origin main")}),
+    # A run of ANSI-C quotes beside a here-string (an ordinary parse failure), whose escapes the gatdis and
+    # stash fallbacks decode for their de-quoted reading (_decoded_readings), and the same run before a
+    # --no-verify spelled through an escape, which only the decoded reading shows, so that deny has to
+    # arrive within the bound as well (at 1 MB about 0.65 s of CPU for gate_weakening on the run, 0.50 s for
+    # its deny after it, and 0.21 s for git_stash_ref, in-process on a 24-core host with Python 3.14.4,
+    # 2026-10-25 UTC).
+    "ansi_c_herestr": lambda n, base: ("Bash", {"command": _repeat("git $'\\x41' ", n, " <<<x")}),
+    "ansi_c_noverify_after": lambda n, base: ("Bash", {"command": _repeat(
+        "git $'\\x41' ", n, "; git commit --no-$'\\x76'erify -m x <<<x")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -3280,6 +3314,23 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
+    "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
+    "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
+    "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
+    "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
+    # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
+    # subshell parentheses above, every closer takes the glued branch of the note scan's `)` handling.
+    # That branch once tested the enclosed text for emptiness by slicing it (one copy per closer, so
+    # the characters copied grew with the square of the nesting depth); the running-index test reads
+    # each enclosed position at most once, keeping the scan linear on this shape. The bounds here are
+    # not what pins the running-index test (the sliced test measured about 3.6 s of CPU for both scan
+    # passes at 1 MB, in-process on a 24-core host with Python 3.14.4, 2026-10-24, under that size's
+    # 7 s bound, against about 0.49 s for the running index); the orch-behaviour self-test's
+    # running-index-walk row does.
+    "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
+                                                        + ")" * (n // 5 - 1)}),
+    "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -3322,11 +3373,12 @@ _DEADLINE_CASES = {
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
-    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after"),
+    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
+                       "ansi_c_herestr", "ansi_c_noverify_after"),
     "gensrc_guard": ("write_content", "write_deep_path"),
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
-    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
+    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -3335,15 +3387,43 @@ _DEADLINE_CASES = {
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
+    "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
+}
+# Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
+# from the orchestration repository: the truncation guard scans a foreground command there too, for its
+# out-of-scope detach note.
+_DEADLINE_PLAIN_CASES = {
+    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredoc_ops_open",
+                              "fg_subshells", "fg_nested_glued_substs", "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
-    ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
+    ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
+    ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
+# The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
+# a detach or detacher (fg_detach_after, fg_setsid_options), or a construct left open at the end of the
+# scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
+# unreadable instead of a silent allow.
+_DEADLINE_NOTE_CASES = frozenset((
+    ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open")))
+# The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
+# bound: the plain-delimiter heredoc bodies (their `&`
+# and apostrophe are skipped data and every body is closed; a quoted delimiter would note, and its early
+# note would also cut the
+# timing short), the balanced subshells and the nested glued command
+# substitutions are all skipped, provably closed or carry no outer
+# detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
+# mistook one for a detach.
+_DEADLINE_ALLOW_CASES = frozenset((
+    ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_subshells"),
+    ("orch_truncation_guard", "fg_nested_glued_substs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -3420,7 +3500,36 @@ def _deadline_shape_runs(tmp, sizes):
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+    with _no_registry_above(plain):
+        for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
+            for shape in shapes:
+                for size in sorted(sizes):
+                    runs.append((name, shape, size, str(plain))
+                                + _deadline_shape_case(name, shape, size, str(plain)))
     return runs
+
+
+@contextlib.contextmanager
+def _no_registry_above(root):
+    """While the block runs, every directory STRICTLY ABOVE root (matched by device and inode on root's
+    resolved path) reads as carrying no orchestration registry, so a registry on the host above the
+    fixture cannot scope a no-registry case in; root and the directories under it are probed as usual."""
+    above = set()
+    path = os.path.realpath(str(root))
+    while os.path.dirname(path) != path:
+        path = os.path.dirname(path)
+        st = os.stat(path)
+        above.add((st.st_dev, st.st_ino))
+    probe = aiqt_hooks._orch_dirfd_has_registry
+
+    def ceiling(dirfd):
+        st = os.fstat(dirfd)
+        return False if (st.st_dev, st.st_ino) in above else probe(dirfd)
+    aiqt_hooks._orch_dirfd_has_registry = ceiling
+    try:
+        yield
+    finally:
+        aiqt_hooks._orch_dirfd_has_registry = probe
 
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
@@ -3435,6 +3544,10 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
+        problems.append("expected allow-note, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_ALLOW_CASES and outcome != "allow":
+        problems.append("expected allow, got {}".format(outcome))
     elif shape in _DEADLINE_HASH_SHAPES and outcome != _deadline_hash_decision(name, shape, size):
         problems.append("expected {}, got {}".format(_deadline_hash_decision(name, shape, size), outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
@@ -7060,14 +7173,48 @@ def _main_isolated(monitor):
                cwd=rh)
 
         # === malformed / robustness (F-66.7) ================================================
-        # A malformed tool_input (a string, not a dict) -> DENY (fail closed), not a crash: a missing or
-        # non-string command cannot be read as a discard or not, so git_discard denies it as the other git
-        # guards deny unreadable input (it allowed before).
+        # A malformed tool_input (a string, not a dict) is a Bash call whose command cannot be read: a
+        # cannot-evaluate input, NOT the true fail-open boundary (which is a non-Bash tool, a non-git
+        # command, or no recognized lossy verb). A discard could hide in what was not read, so it DENIES
+        # under the shared fail-closed contract rather than passing clean, and never crashes.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
         code, stdout_obj, _stderr = handler(malformed)
         if _reduce_result(code, stdout_obj) != "deny":
-            failures.append("(robust-a) malformed tool_input: expected deny, got code={!r}, stdout={!r}"
-                            .format(code, stdout_obj))
+            failures.append("(robust-a) malformed tool_input: expected the fail-closed deny, got code={!r}, "
+                            "stdout={!r}".format(code, stdout_obj))
+        # The same contract for an EMPTY tool_input object (no command member at all): deny, fail closed.
+        missing_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
+        code, stdout_obj, _stderr = handler(missing_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a2) missing tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        # And for a present but non-string command; a present EMPTY STRING is readable (it runs nothing)
+        # and stays at the true boundary (allow), the just-inside case of the same boundary.
+        nonstr_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": 42}}
+        code, stdout_obj, _stderr = handler(nonstr_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a3) non-string tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        empty_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": ""}}
+        code, stdout_obj, _stderr = handler(empty_cmd)
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a4) empty-string command is readable and out of scope: expected allow, "
+                            "got code={!r}, stdout={!r}".format(code, stdout_obj))
+        # A Bash-shaped payload (a tool_input with a discard command) whose tool_name is missing or null is
+        # malformed, not another tool: the shared missing-tool_name deny. A PRESENT non-Bash tool_name stays
+        # out of scope (allow), even carrying the same command.
+        for _rb_label, _rb_fields in (("(robust-a5) missing tool_name", {}),
+                                      ("(robust-a6) null tool_name", {"tool_name": None})):
+            _rb_result = handler(dict({"hook_event_name": "PreToolUse",
+                                       "tool_input": {"command": "git reset --hard"}}, **_rb_fields))
+            if _rb_result != aiqt_hooks._deny_missing_tool_name("prsunc"):
+                failures.append("{} on a Bash-shaped payload: expected the shared missing-tool_name deny, got "
+                                "{!r}".format(_rb_label, _rb_result))
+        code, stdout_obj, _stderr = handler({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                             "tool_input": {"command": "git reset --hard"}})
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a7) a present non-Bash tool_name is out of scope: expected allow, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
         # No cwd and a dir-simple lossy verb: the worktree cannot be resolved -> ASK, never silent-allow.
         expect("(robust-b) no-cwd reset --hard denies", "git reset --hard", "deny")
 
@@ -13692,10 +13839,15 @@ def _main_isolated(monitor):
                        ("cd-checkout-b", "\ncd foo; git checkout -b feat; true"),
                        ("cd-commit", "\ncd foo; git commit -m y; true"),
                        ("cd-add-push", "\ncd foo; git add -A; git push; true"))
+        # AMENDED RECORDS (two letters): on the cd-add-push rows the recorded module gave
+        # git_explicit_binding the relocate note through its failed-lex fallback, where the visible
+        # breadth+push pairing must deny; the fallback now tests the publish deny before the
+        # directory-change note (the parsed pre-scan's precedence), so those two rows record D at the
+        # git_explicit_binding position in place of the recorded N. Every other letter is the record.
         _hdx_main = {"E": ("AAAADAAAAA", "AAAADAAAAA", "AAAAADDAAA", "AAAAADDAAA", "AAAAADAAAA", "AANANDDAAA",
-                           "AANANAAADD", "AANANAAAAA"),
+                           "AANANAAADD", "AADANAAAAA"),
                      "F": ("AAAADAAADD", "AANADAAADD", "AAAAADDADD", "AAAAADDADD", "AAAAADAADD", "AANANDDADD",
-                           "AANANAAADD", "AANANAAADD")}
+                           "AANANAAADD", "AADANAAADD")}
         _hd_main_rows = [("early-close-switch", "git commit -m \"$(cat <<'EOF'\n)\"; git switch -c test origin/other; "
                           "echo \"\nEOF\n)\"", "AAAAADDADD")]
         for _hdxf, _hdxform in (("E", _hdx_e), ("F", _hdx_f)):
@@ -15307,6 +15459,62 @@ def _main_isolated(monitor):
         gexpect("(gw-ae) unparseable checker + swallow allows-with-note (finding 14; fallback relaxed)",
                 'pytest || true "unbalanced', "allow-note")
         gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
+        # A bypass the raw text hides behind quoting, behind an ordinary parse failure (a here-string): the
+        # fallback also reads the de-quoted text (quote characters, backslashes and a '$' before a quote
+        # removed, line continuations joined, each ANSI-C quote's escapes decoded), so the fragmented
+        # spelling keeps the deny its plain spelling earns. Each reads as no bypass in the raw text alone.
+        gexpect("(gw-pf1) here-string + quote-fragmented commit verb with --no-verify denies (the "
+                "fallback reads the de-quoted text)",
+                "git co'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf2) here-string + ANSI-C-fragmented commit verb with --no-verify denies (the '$' "
+                "before the quote is removed too)",
+                "git co$'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf6) here-string + quote-fragmented --no-verify denies", 'git commit "-"-no-verify -m x <<<x',
+                "deny")
+        gexpect("(gw-pf7) here-string + continuation-split --no-verify denies",
+                "git commit -\\\n-no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf8) here-string + quote-fragmented short -n on commit denies", 'git commit -m x -"n" <<<x',
+                "deny")
+        gexpect("(gw-pf9) here-string + ANSI-C hex escape spelling --no-verify denies (escapes decoded)",
+                "git commit --no-$'\\x76'erify -m x <<<x", "deny")
+        gexpect("(gw-pf10) here-string + ANSI-C octal escape spelling --no-verify denies",
+                "git commit $'--no-\\166erify' -m x <<<x", "deny")
+        gexpect("(gw-pf11) here-string + ANSI-C Unicode escape spelling the commit verb denies",
+                "git $'\\u0063'ommit --no-verify -m x <<<x", "deny")
+        # Quoting alone is no ground to deny: an ordinary command whose quotes touch letters, behind a
+        # here-string or a process substitution, and that spells no bypass in any reading keeps the raw
+        # probes' allow (the same decision the main branch gives it).
+        gexpect("(gw-pf3) here-string commit with a quoted message allows", 'git commit -m "fix bug" <<<x',
+                "allow")
+        gexpect("(gw-pf12) here-string with a quoted word allows", 'wc -l <<<"hello"', "allow")
+        gexpect("(gw-pf13) quoted pattern and here-string allows", 'grep "foo" <<<"bar"', "allow")
+        gexpect("(gw-pf14) commit message from a process substitution with a quoted word allows",
+                'git commit -F <(echo "msg")', "allow")
+        gexpect("(gw-pf15) two process substitutions with quoted paths allow",
+                'diff <(sort "a.txt") <(sort "b.txt")', "allow")
+        gexpect("(gw-pf16) an ANSI-C here-string whose escapes decode to no bypass allows",
+                "cat <<<$'line1\\nline2'", "allow")
+        gexpect("(gw-pf4) here-string commit with no bypass flag still allows", "git commit -m x <<<x",
+                "allow")
+        gexpect("(gw-pf5) here-string non-git command still allows", "wc -l <<<x", "allow")
+        # The ANSI-C decoder behind gw-pf9 to gw-pf11, at each escape's bounds (just inside, at, just past):
+        # \x reads one or two hex digits, an octal escape one to three digits (its value keeps its low
+        # eight bits, 0o377 the last value kept whole), \u one to four and \U one to eight hex digits (a
+        # code point past U+10FFFF reads as nothing), \cX a control character, an unknown letter stays
+        # escaped, an escaped quote does not end the body, and an unclosed $' is left as written.
+        for _ac_raw, _ac_want in (
+                ("$'\\x7'", "\x07"), ("$'\\x76'", "v"), ("$'\\x766'", "v6"),
+                ("$'\\7'", "\x07"), ("$'\\166'", "v"), ("$'\\1666'", "v6"),
+                ("$'\\377'", "\xff"), ("$'\\400'", "\x00"), ("$'\\555'", "m"),
+                ("$'\\u63'", "c"), ("$'\\u0063'", "c"), ("$'\\u00633'", "c3"),
+                ("$'\\U00000063'", "c"), ("$'\\U000000631'", "c1"),
+                ("$'\\U0010FFFE'", "\U0010fffe"), ("$'\\U0010FFFF'", "\U0010ffff"), ("$'\\U00110000'", ""),
+                ("$'\\cA\\c?'", "\x01\x7f"), ("$'\\z'", "\\z"), ("$'it\\'s'", "it's"),
+                ("a$'b'c", "abc"), ("\"$'\"", "\"$'\"")):
+            _ac_got = aiqt_hooks._ansi_c_decoded(_ac_raw)
+            if _ac_got != _ac_want:
+                failures.append("(gw-ansi-c) _ansi_c_decoded({!r}) must be {!r}, got {!r}".format(
+                    _ac_raw, _ac_want, _ac_got))
         # DENY outranks the parse error only over complete segments: the segment the lexer was still inside
         # is dropped, and a segment the scan had already closed (by ';', '&&' or a newline) before the
         # unparseable construct begins is judged, so the closed verification-into-sink pipeline denies as it
@@ -15694,10 +15902,11 @@ def _main_isolated(monitor):
                 "(true #'\n)\ntools/testı.py | cut -c1", "allow-note")
         gexpect("(gw-dbt-note-latest) control: 'latest' carries no checker part, allows",
                 "(true #'\n)\ntools/latest.py | cut -c1", "allow")
-        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings: the plain
-        # parse-error fallback and the failed-main-reading floor keep the conservative raw probes, so
-        # these commands keep the allow the probes have always given them (each was denied while widened
-        # spelling probes ran on every fallback path, though no path here can read a bypass in them).
+        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings; the plain
+        # parse-error fallback keeps the conservative raw probes (adding only a deny for a bypass that a
+        # de-quoted reading spells), and the failed-main-reading floor keeps the raw probes alone, so these
+        # commands keep the allow the probes have always given them (each was denied while widened spelling
+        # probes ran on every fallback path, though no path here can read a bypass in them).
         gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
                 "operand in another segment still allows",
                 "git commit -m x && find . -name z <<<y", "allow")
@@ -20405,6 +20614,30 @@ def _main_isolated(monitor):
                  "git add -A && git commit -m x", "allow")
         ebexpect("(eb-e10e) a push BEFORE the breadth stage does not fire (publishes pre-breadth state)",
                  "git push && git add -A", "allow")
+        # The fallback's deny precedence: behind a '#' the lexer cannot judge under both readings (the
+        # backquote prefix), a visible cd+mutate pairing must not note its way past the visible
+        # breadth+push pairing - the raw fallback tests the publish deny first, like the parsed pre-scan.
+        ebexpect("(eb-e10f) fallback: cd+mutate beside breadth+push still DENIES (the cd note cannot mask "
+                 "the publish deny)",
+                 "x=`true #`\ncd /abs/repo && git add --all && git commit -m x && git push", "deny")
+        # Order state is judged one reading of an uncertain '#' at a time: flattening the readings would
+        # read the first reading's trailing breadth into the second reading's push and invent a
+        # stage-then-publish sequence no single reading holds, so the prefixed spelling of eb-e10e must
+        # keep its control's allow.
+        ebexpect("(eb-e10g) per-reading order: push before breadth behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit push && git add -A", "allow")
+        ebexpect("(eb-e10h) control for eb-e10g: the unprefixed push-before-breadth command allows",
+                 "git push && git add -A", "allow")
+        # The directory-change scan is judged one reading at a time too: flattening the readings would read
+        # the first reading's trailing cd into the second reading's commit and invent a cd-then-mutation
+        # sequence no single reading holds, so a cd AFTER the commit keeps its control's allow, while a cd
+        # BEFORE the commit inside one reading still notes.
+        ebexpect("(eb-e10i) per-reading order: a cd after the commit behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit commit -m y && cd /abs", "allow")
+        ebexpect("(eb-e10j) control for eb-e10i: the unprefixed commit-then-cd command allows",
+                 "git commit -m y && cd /abs", "allow")
+        ebexpect("(eb-e10k) per-reading order: a cd before the commit behind the same prefix still notes",
+                 "x=$(true)#\ncd /abs && git commit -m y", "allow-note")
         ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
         ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
         ebexpect("(eb-e13) bare discard remains the git_discard control's boundary",
@@ -21633,6 +21866,35 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-note) orch_truncation_guard must ALLOW WITH A NOTE a background "
                             "dispatch whose shell syntax it does not parse (a redirect, no truncating sink) "
                             "on a real repo; got {}".format(_f18_note))
+        # (noask-trunc-out-of-scope-note) with NO orchestration registry, a foreground bare-& detach reaches
+        # the out-of-scope allow-with-note. Falsifiable: the silent allow reads "allow", a deny "deny".
+        _f18_plain = _f18_tmp / "plain"
+        _f18_plain.mkdir()
+        with _no_registry_above(_f18_plain):
+            _f18_oos = _decision_any(aiqt_hooks.orch_truncation_guard, {
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "sleep 1 &", "run_in_background": False}, "cwd": str(_f18_plain)})
+        if _f18_oos != "allow-note":
+            failures.append("(noask-trunc-out-of-scope-note) orch_truncation_guard must ALLOW WITH A NOTE a "
+                            "foreground bare-& detach where no orchestration registry is found; got {}"
+                            .format(_f18_oos))
+        # (noask-trunc-oos-unreadable-input) with NO orchestration registry, input the guard cannot read
+        # draws the unreadable-input note naming the field, never the silent allow it was and never ask
+        # or deny: a tool_input that is not an object, a command that is not a string, and a
+        # run_in_background that is present but not a real boolean, one probe per note site.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_badinput = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": _f18_ti, "cwd": str(_f18_plain)})
+                for _f18_ti in ("long_job &",
+                                {"command": 7},
+                                {"command": "long_job &", "run_in_background": "true"})]
+        if _f18_oos_badinput != ["allow-note"] * 3:
+            failures.append("(noask-trunc-oos-unreadable-input) orch_truncation_guard must ALLOW WITH A "
+                            "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
+                            "tool_input, a non-string command, a non-boolean run_in_background); got {}"
+                            .format(_f18_oos_badinput))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
