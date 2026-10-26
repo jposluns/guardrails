@@ -14556,13 +14556,13 @@ def _main_isolated(monitor):
         # probes' allow (the same decision the main branch gives it).
         # Except on a roster-verb git segment: the closed literal grammar refuses a here-string or a process
         # substitution there, so a git commit carrying one denies, quoted message or not (the stricter
-        # fail-closed choice where the two readings disagree, pending maintainer review).
+        # fail-closed choice where the two readings disagree).
         gexpect("(gw-pf3) here-string commit with a quoted message denies by the closed grammar",
                 'git commit -m "fix bug" <<<x', "deny")
         gexpect("(gw-pf12) here-string with a quoted word allows", 'wc -l <<<"hello"', "allow")
         gexpect("(gw-pf13) quoted pattern and here-string allows", 'grep "foo" <<<"bar"', "allow")
         # A process substitution on a roster-verb git commit segment denies by the closed grammar (the
-        # stricter fail-closed choice, pending maintainer review), as gw-fb-procsub pins.
+        # stricter fail-closed choice), as gw-fb-procsub pins.
         gexpect("(gw-pf14) commit message from a process substitution with a quoted word denies by the closed "
                 "grammar", 'git commit -F <(echo "msg")', "deny")
         gexpect("(gw-pf15) two process substitutions with quoted paths allow",
@@ -14570,7 +14570,7 @@ def _main_isolated(monitor):
         gexpect("(gw-pf16) an ANSI-C here-string whose escapes decode to no bypass allows",
                 "cat <<<$'line1\\nline2'", "allow")
         # A here-string on a roster-verb git commit segment denies by the closed grammar even with no bypass
-        # flag (the stricter fail-closed choice, pending maintainer review).
+        # flag (the stricter fail-closed choice).
         gexpect("(gw-pf4) here-string commit with no bypass flag denies by the closed grammar",
                 "git commit -m x <<<x", "deny")
         gexpect("(gw-pf5) here-string non-git command still allows", "wc -l <<<x", "allow")

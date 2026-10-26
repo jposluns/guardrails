@@ -13291,7 +13291,7 @@ def gate_weakening(data):
     running wrapper (sudo, xargs, setsid, stdbuf) FAIL CLOSED instead: the dequoted words are scanned
     (_gate_novrf_dequoted_bypass) and a roster git carrying a no-verify spelling denies even when the git
     word is a quote-concatenation (g'i't) the raw \bgit\b scan cannot see. DISCLOSED
-    OVER-DENIAL (the deliberate cost of the closed grammar, pending maintainer review): outside that one
+    OVER-DENIAL (the deliberate cost of the closed grammar): outside that one
     accepted here-document message form, a roster-verb git command carrying ANY live expansion denies even
     where it is a safe operand or value (git commit -m
     "$msg", git push origin "$branch", git merge "release-$v"), and so does one carrying a comment, a
