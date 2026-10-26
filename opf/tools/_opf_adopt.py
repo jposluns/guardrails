@@ -702,9 +702,13 @@ def rewrite_preservations(ops, manifest, run_id, root="."):
     manifest when a register-unmanaged chain rewrites a LIVE manifest, of the first link's old bytes. A
     manifest an init-store member scaffolds in this program is created, not overwritten, so its chain
     preserves nothing. Each copy lies at the run's adoption preimage home composed under the frozen store
-    root, as a source preservation does. Without a usable run id (already a finding) or manifest path, the
-    rows that need one add nothing. enable-hook, the one other rewriting op, executes in no slice yet; its
-    slice settles its own preservation."""
+    root, as a source preservation does. That composition is reached only at root ".", where it equals the
+    product-root archive path apply creates (_opf_adopt_apply.archive_rel): validate_plan refuses every
+    other store_root, so a sub-store spelling here is unreachable and only the self-test exercises it.
+    Admitting another store_root means re-rooting apply's archive path under that root in the same change,
+    or the plan would bind an archive copy apply never creates. Without a usable run id (already a finding)
+    or manifest path, the rows that need one add nothing. enable-hook, the one other rewriting op, executes
+    in no slice yet; its slice settles its own preservation."""
     out = []
     created = set(_compose(row["store_root"], m["path"]) for row in ops if row["op"] == "init-store"
                   for m in row["members"])

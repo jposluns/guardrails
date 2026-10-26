@@ -363,7 +363,8 @@ DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
+    "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard", "_redirect_deny",
+    "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -6138,7 +6139,7 @@ def _segment_repo_dir(tokens, cwd):
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs."""
-    if _segment_has_gitdir_redirect(tokens):
+    if _segment_has_gitdir_redirect(tokens, appended=False):
         return None
     cw = _command_word_index(tokens)
     has_worktree = any(tok.startswith("GIT_WORK_TREE=") for tok in tokens[:cw])
@@ -6881,15 +6882,20 @@ def _deny_with_recovery(kind, snap, note=""):
     return _discard_deny(kind, recovery + note)
 
 
-def _segment_has_gitdir_redirect(tokens):
+def _segment_has_gitdir_redirect(tokens, appended=True):
     """True when a git segment carries a --git-dir / GIT_DIR= redirect. Unlike --work-tree (which moves only
     the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it changes which repo a `git stash
     drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny) a stash discard whose target
     repository this guard cannot confidently resolve to a plain `git -C <dir>` invocation, rather than
     preserve the wrong repo's stash (round-3 finding 2)."""
+    # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches a caller: a
+    # non-cosmetic ambient GIT_* takes the override path first), so it counts too, which only sends more
+    # segments to the session-read denies. appended=False reads the '=' spelling alone: _segment_repo_dir keeps
+    # that reading, so the -C directory it returns for a GIT_DIR+= segment (the snapshot base git_discard
+    # reads before asking git, and the repository the branch-root guard probes) is unchanged.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
-        if tok.startswith("GIT_DIR="):
+        if tok.startswith("GIT_DIR=") or (appended and tok.startswith("GIT_DIR+=")):
             return True
     i = cw + 1
     n = len(tokens)
@@ -6916,6 +6922,12 @@ def _segment_gitdir_value(tokens):
     for tok in tokens[:cw]:
         if tok.startswith("GIT_DIR="):
             val = tok[len("GIT_DIR="):]  # last-wins
+        elif tok.startswith("GIT_DIR+="):
+            # With no earlier GIT_DIR assignment on the segment, GIT_DIR+= sets the value as GIT_DIR= does.
+            # After one it appends, and this reading does not build that joined value: it reads as empty,
+            # which names no repository, so _gitdir_is_session_repo fails closed (never a looser answer than
+            # the earlier assignment alone gave).
+            val = tok[len("GIT_DIR+="):] if val is None else ""
     i = cw + 1
     n = len(tokens)
     while i < n:
@@ -6968,6 +6980,239 @@ def _gitdir_is_session_repo(tokens, cwd):
     except (OSError, ValueError):
         return None
     return gd_c == sess_c
+
+
+# The global options the read-only target oracle (_segment_git_target) hands to git: the three that
+# name a directory (-C, --git-dir and --work-tree, separated or '='-attached), --bare (which makes the
+# directory git is in at that point the git dir), and the value-less flags that cannot change which git
+# dir or worktree git resolves. Any other global option (-c, --config-env, --exec-path, --namespace,
+# --super-prefix, --attr-source, -p, --help, --version, --html-path and the rest) is never handed over:
+# one prints and exits, pages, starts a program or loads configuration, so a redirect standing beside it
+# cannot be resolved read-only and the caller fails closed.
+_GIT_TARGET_VALUE_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
+_GIT_TARGET_FLAGS = frozenset((
+    "--bare", "-P", "--no-pager", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+    "--icase-pathspecs", "--no-replace-objects", "--no-optional-locks"))
+# A leading GIT_DIR / GIT_WORK_TREE assignment ('=' or '+=') on a git segment: (name, operator, value).
+_GIT_TARGET_ASSIGN_RE = re.compile(r"(GIT_DIR|GIT_WORK_TREE)(\+?=)(.*)\Z", re.DOTALL)
+
+
+def _segment_has_path_redirect(tokens):
+    """True when a git segment carries a path-valued redirect besides -C: a --git-dir or --work-tree global
+    option (separated or '='-attached), --bare, or a leading GIT_DIR / GIT_WORK_TREE assignment ('=' or
+    '+='). Each names the git dir or the worktree outright, and git takes a relative value only AFTER the
+    whole -C chain, so git_discard asks git itself where such a command lands (_segment_git_target) rather
+    than joining the value to the session directory."""
+    cw = _command_word_index(tokens)
+    if any(_GIT_TARGET_ASSIGN_RE.match(tok) for tok in tokens[:cw]):
+        return True
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok in ("--git-dir", "--work-tree", "--bare") or tok.startswith(("--git-dir=", "--work-tree=")):
+            return True
+        if "=" not in tok and tok in _GIT_ARG_OPTS:   # a separated value-consuming global option: skip both
+            i += 2
+            continue
+        i += 1
+    return False
+
+
+def _two_abs_lines(out):
+    """(first, second), each a realpath, when out is exactly two newline-terminated absolute paths, else None.
+    A path holding a newline cannot be told apart from two paths, so it is never guessed at."""
+    if not isinstance(out, str) or out.count("\n") != 2 or not out.endswith("\n"):
+        return None
+    first, second = out[:-1].split("\n")
+    if not (os.path.isabs(first) and os.path.isabs(second)):
+        return None
+    try:
+        return os.path.realpath(first), os.path.realpath(second)
+    except (OSError, ValueError):
+        return None
+
+
+def _segment_git_target(tokens, cwd):
+    """The (git dir, worktree) pair, each a realpath, that git itself resolves for a git segment run from the
+    session directory cwd, or None when it cannot be resolved unambiguously. git is the oracle: `git -C <cwd>
+    <the segment's -C, --git-dir, --work-tree and --bare options, in order> rev-parse --absolute-git-dir
+    --show-toplevel`, run through the scrubbed _recovery_git primitive (every ambient GIT_* removed) with the
+    segment's own leading GIT_DIR / GIT_WORK_TREE assignments re-applied, so every relative value is taken
+    after the whole -C chain exactly as git takes it and a --git-dir option overrides an inline GIT_DIR as it
+    does in git. rev-parse only reads. None (the caller fails closed) when there is no session directory,
+    when the segment carries any global option outside _GIT_TARGET_VALUE_OPTS and _GIT_TARGET_FLAGS or any
+    other non-cosmetic leading GIT_* assignment, when git errors or times out, or when its answer is not
+    exactly two absolute lines (a git dir with no worktree prints no toplevel)."""
+    if not (isinstance(cwd, str) and cwd):
+        return None
+    cw = _command_word_index(tokens)
+    extra = {}
+    for tok in tokens[:cw]:
+        m = _GIT_TARGET_ASSIGN_RE.match(tok)
+        if m:
+            # '+=' appends to the value an earlier assignment on this segment set; the ambient environment
+            # holds none (a non-cosmetic ambient GIT_* never reaches this oracle).
+            extra[m.group(1)] = (extra.get(m.group(1), "") if m.group(2) == "+=" else "") + m.group(3)
+            continue
+        name = tok.split("=", 1)[0].rstrip("+")
+        if name.startswith("GIT_") and name not in _COSMETIC_GIT_VARS:
+            return None
+    opts = []
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok in _GIT_TARGET_VALUE_OPTS:
+            if i + 1 >= n:
+                return None
+            opts += [tok, tokens[i + 1]]
+            i += 2
+            continue
+        if tok.startswith(("--git-dir=", "--work-tree=")) or tok in _GIT_TARGET_FLAGS:
+            opts.append(tok)
+            i += 1
+            continue
+        return None
+    try:
+        r = _recovery_git(cwd, opts + ["rev-parse", "--absolute-git-dir", "--show-toplevel"],
+                          env_extra=extra, timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    return _two_abs_lines(r.stdout)
+
+
+def _discovered_git_target(path):
+    """The (git dir, toplevel) pair, each a realpath, that git discovers from path as a plain `git -C <path>`
+    with every ambient GIT_* scrubbed, or None when path lies in no worktree or git cannot answer."""
+    try:
+        r = _recovery_git(path, ["rev-parse", "--absolute-git-dir", "--show-toplevel"], timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    return _two_abs_lines(r.stdout)
+
+
+def _segment_c_dir(tokens, cwd):
+    """The directory a git segment's -C chain leaves git in, applied left to right from cwd as git changes
+    directory (an empty -C value is skipped, as git skips it), or None when a relative step has no directory
+    to start from or a -C has no value."""
+    base = cwd if isinstance(cwd, str) and cwd else None
+    i = _command_word_index(tokens) + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok == "-C":
+            if i + 1 >= n:
+                return None
+            d = tokens[i + 1]
+            if d and os.path.isabs(d):
+                base = d
+            elif d:
+                if base is None:
+                    return None
+                base = os.path.join(base, d)
+            i += 2
+            continue
+        if "=" not in tok and tok in _GIT_ARG_OPTS:   # a separated value-consuming global option: skip both
+            i += 2
+            continue
+        i += 1
+    return base
+
+
+def _redirect_snapshot_plan(tokens, cwd, sub, args):
+    """Where a destructive discard carrying a path-valued redirect (_segment_has_path_redirect) is
+    snapshotted, decided from git's own answer (_segment_git_target):
+      ('base', dir)      : snapshot dir. Either the worktree git resolved, when git discovers that same git
+                           dir from it (the redirect only restates that worktree's own repository, so its
+                           snapshot holds the worktree content and the index the command discards), or, for an
+                           index-only form (_discard_index_only), the -C directory or the session directory
+                           when git discovers that git dir there (the index is all such a form discards).
+      ('deny', why, wt)  : fail closed. git could not resolve the target unambiguously (wt None), or it splits
+                           the git dir and the worktree across repositories, which no single snapshot holds
+                           (wt is that worktree when it lies in some repository, for the caller's best-effort
+                           recovery snapshot of it, else None)."""
+    tgt = _segment_git_target(tokens, cwd)
+    if tgt is None:
+        return ("deny", "git could not report, read-only, which git dir and worktree it would act on", None)
+    gd, wt = tgt
+    own = _discovered_git_target(wt)
+    if own is not None and own[0] == gd and (wt == own[1] or os.path.commonpath([wt, own[1]]) == own[1]):
+        return ("base", wt)
+    if _discard_index_only(sub, args):
+        for cand in (_segment_c_dir(tokens, cwd), cwd):
+            if isinstance(cand, str) and cand:
+                found = _discovered_git_target(cand)
+                if found is not None and found[0] == gd:
+                    return ("base", cand)
+    return ("deny", "git resolves its git dir to {} and its worktree to {}, which is not that git dir's own "
+                    "worktree".format(gd, wt), wt if own is not None else None)
+
+
+def _redirect_recovery_text(base, sub):
+    """The recovery sentence a redirect DENY folds into its reason (the denied command itself runs nothing):
+    when base is a directory inside a repository that is not provably clean, that repository is snapshotted
+    first, best-effort, and the sentence names the snapshot or the failure; empty when base is None or the
+    tree is provably clean."""
+    snap = None
+    if base is not None and _tree_is_clean(base) is not True:
+        snap = _record_recovery(base, sub)
+    return _recovery_outcome_text(snap)
+
+
+def _recovery_outcome_text(snap):
+    """The sentence a reason folds in for a recovery snapshot already attempted: the pointer when snap is
+    ('ok', info), the failure when it is ('fail', reason), and empty when snap is None (none was taken)."""
+    if snap is not None and snap[0] == "ok":
+        return " " + _recovery_pointer(snap[1])
+    if snap is not None and snap[0] == "fail":
+        return " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
+    return ""
+
+
+def _snapshot_bases_differ(first, second):
+    """False only when the directories first and second provably lie in one repository (the same toplevel,
+    compared by realpath), so a recovery snapshot of either holds the same tree; True otherwise, a side git
+    cannot resolve included, so the caller snapshots both (fail closed)."""
+    try:
+        if os.path.realpath(first) == os.path.realpath(second):
+            return False
+    except (OSError, ValueError, TypeError):
+        return True
+    top_first, top_second = _recovery_toplevel(first), _recovery_toplevel(second)
+    if not (top_first and top_second):
+        return True
+    try:
+        return os.path.realpath(top_first) != os.path.realpath(top_second)
+    except (OSError, ValueError):
+        return True
+
+
+def _redirect_deny(kind, why, wt, sub, alts):
+    """The fail-closed DENY for a destructive discard whose path-valued redirect git does not resolve to one
+    snapshottable repository (_redirect_snapshot_plan). When git placed the worktree inside a repository that
+    is not provably clean, that repository is snapshotted first, best-effort, and the outcome is folded into
+    the reason (_redirect_recovery_text)."""
+    recovery = _redirect_recovery_text(wt, sub)
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir, --work-tree, --bare or inline "
+        "GIT_DIR=/GIT_WORK_TREE= redirect, and {}, so this guard cannot snapshot the one repository the "
+        "command would discard from; denied rather than run on a possibly unrecoverable discard.{} Re-issue "
+        "it as a plain 'git -C <repo> <verb>' command for the target repository, or commit or stash your "
+        "work first. {}".format(kind, why, recovery, alts),
+        "AIQT guardrail: denied a --git-dir/--work-tree-redirected git discard whose repository git does not "
+        "resolve to one snapshottable target (rule prsunc); run it from the target repo, or commit or stash "
+        "first.")
 
 
 # PR #423: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
@@ -8053,7 +8298,9 @@ def git_discard(data):
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
     config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
     A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
-    --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
+    --force/--discard-changes) on a probed-DIRTY tree DENIES, and so does the same command behind any git
+    global option or leading assignment when the tree it targets probes dirty (an ambient GIT_* override
+    keeps its best-effort snapshot-then-allow). EVERYTHING ELSE in scope is judged by the
     POSITIVE LITERAL closed allowlist grammar (_discard_positive_grammar,
     judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
     token is a bare literal word over the closed character class (letters, digits and
@@ -8396,9 +8643,15 @@ def git_discard(data):
         # ambient GIT_* override, resolve the ACTUAL target worktree and snapshot THAT repo, not the session
         # cwd, so the recovery ref contains the state the command will discard. If the redirect target cannot
         # be resolved, or a destructive verb's target cannot be snapshotted, DENY - never allow-note a discard
-        # whose recovery ref does not contain the discarded state. A --git-dir/GIT_DIR/-c redirect (which does
-        # NOT move the worktree) resolves to None and keeps the sound session-cwd snapshot; the ambient-GIT_*
-        # case (unreadable from the command) keeps its disclosed best-effort session-cwd snapshot.
+        # whose recovery ref does not contain the discarded state. _segment_repo_dir reads a --git-dir/GIT_DIR/-c
+        # redirect as None, the session directory. A destructive discard carrying --git-dir, --work-tree, --bare
+        # or a leading GIT_DIR/GIT_WORK_TREE assignment is then resolved by git below (beside -C, a relative
+        # --git-dir is taken after the whole -C chain) and snapshotted at the repository git resolves; the -C or
+        # session directory read here stays a floor, snapshotted as well (when not provably clean) whenever it
+        # lies in another repository; a failed snapshot there DENIES unless the repository git resolved was
+        # probed and is provably clean or was snapshotted successfully. A -c or other global option with no
+        # -C keeps the session-cwd snapshot; the ambient-GIT_* case (unreadable from the command) keeps its
+        # disclosed best-effort session-cwd snapshot.
         # ROUND-7 (codex findings 1 and 2): resolve the REPO git's index/ref/stash op acts on via
         # _segment_repo_dir (-C/ambient, --work-tree treated as worktree-only), NOT _segment_redirect_worktree
         # (which returned the --work-tree VALUE and so landed the snapshot/stash/probe on the wrong repo). A
@@ -8406,6 +8659,7 @@ def git_discard(data):
         # closed just below.
         repo_dir = None if ambient_override else _segment_repo_dir(pristine, cwd_base)
         has_wt = False if ambient_override else _segment_has_worktree_redirect(pristine)
+        resolved_by_git = False
         destructive = sub in _SNAPSHOTTABLE_VERBS and role != "allow"
         # CLAUDE-F1 (round-7): a discard that entered this view-override branch (an ambient GIT_* view-override,
         # OR a command-local -C/--git-dir/--work-tree/-c/inline-GIT_*= redirect) whose raw scan flagged a lossy
@@ -8428,24 +8682,51 @@ def git_discard(data):
                 "recognized, provable form, or commit or stash your work first. {}".format(sub, alts),
                 "AIQT guardrail: denied a redirected git command whose subcommand this guard cannot prove "
                 "non-destructive (rule prsunc); commit or stash first, or re-issue in a recognized form.")
+        # A destructive discard carrying a path-valued redirect (--git-dir, --work-tree or --bare, or a
+        # leading GIT_DIR/GIT_WORK_TREE assignment) is resolved by git itself, never by joining a value to the
+        # session directory: git takes a relative --git-dir/--work-tree only after the WHOLE -C chain, so
+        # 'git -C <dirty repo> --git-dir=.git reset --hard' from a clean session acts on the -C repository,
+        # and an absolute --git-dir naming the session repository beside '-C <other>' makes that other
+        # directory the worktree it overwrites. _redirect_snapshot_plan reads git's answer: a worktree whose
+        # own repository is that git dir is snapshotted there (an index-only form wherever git discovers that
+        # git dir), and every other case DENIES - a git dir and worktree split across repositories, which no
+        # single snapshot holds (a --work-tree outside the repository, or a --git-dir naming a repository
+        # other than the worktree's own), or a target git cannot resolve read-only - with a best-effort
+        # snapshot of the worktree's own repository folded into the reason. A non-cosmetic ambient GIT_*
+        # variable beside such a redirect leaves the actual command's view unprovable, so that DENIES too.
+        redirect_base = None
+        if destructive and _segment_has_path_redirect(pristine):
+            plan = (("deny", "a non-cosmetic ambient GIT_* variable also shapes the repository it acts on",
+                     None) if ambient_override else _redirect_snapshot_plan(pristine, cwd_base, sub, args))
+            if plan[0] == "deny":
+                return _redirect_deny(kind or "a git work-losing verb", plan[1], plan[2], sub, alts)
+            redirect_base = plan[1]
+        # The two denies below decided these redirects before git resolved them, and they still DENY when
+        # git resolves the command to one snapshottable repository, so resolving through git never turns
+        # one of them into a snapshot-then-allow: a --git-dir/GIT_DIR whose value, read from the session
+        # directory, is not the session repository's git dir ('git -C <repo> --git-dir=<repo>/.git reset
+        # --hard'), and a worktree-content discard whose --work-tree/GIT_WORK_TREE worktree lies outside the
+        # repository read from the -C or session directory ('git -C <repo> --git-dir=.git --work-tree=. reset
+        # --hard'). The repository git resolved is snapshotted first when it is not provably clean, and the
+        # outcome is folded into the reason.
         # ROUND-6 FINDING 5: a destructive discard carrying a --git-dir/GIT_DIR redirect (which does NOT move
         # the worktree, so redir_wt is None and the code below would snapshot the SESSION worktree) destroys
         # the REDIRECTED repository's INDEX/refs - which a session-worktree+index snapshot does NOT capture -
         # when that git-dir names a DIFFERENT repository than the session cwd (e.g. 'git --git-dir=T/.git
         # restore --staged'). Resolving the worktree alone cannot identify the redirected index, so a
         # --git-dir staged/worktree discard whose git-dir is not PROVABLY the session repo DENIES rather than
-        # allow-note a session snapshot lacking that index. A --git-dir naming the SAME repo as cwd (the
-        # session index IS the one discarded) still allows via the session snapshot below (dir-e).
+        # allow-note a session snapshot lacking that index. A --git-dir naming the SAME repo as cwd passes this
+        # check, and the repository git resolved above is the one snapshotted below.
         if destructive and _segment_has_gitdir_redirect(pristine):
             if _gitdir_is_session_repo(pristine, cwd_base) is not True:
                 return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir/GIT_DIR redirect to "
-                    "a repository this guard cannot prove is the session repository, so the index and refs "
-                    "the command would discard live in a DIFFERENT repository than the session worktree; a "
-                    "session snapshot cannot capture that redirected index, so this discard could be "
-                    "unrecoverable and is denied rather than run. Re-issue it as a plain 'git -C <repo> "
-                    "<verb>' command run from the target repository, or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", alts),
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir/GIT_DIR redirect whose "
+                    "value, read from the session directory, does not name the session repository's git dir, so "
+                    "the index and refs the command would discard may live in a DIFFERENT repository than the "
+                    "session worktree; this guard denies such a redirect rather than run it, even where git "
+                    "resolves the command to one repository it could snapshot.{} Re-issue it as a plain 'git -C "
+                    "<repo> <verb>' command run from the target repository, or commit or stash your work first. {}"
+                    .format(kind or "a git work-losing verb", _redirect_recovery_text(redirect_base, sub), alts),
                     "AIQT guardrail: denied a --git-dir/GIT_DIR-redirected git discard whose repository this "
                     "guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or commit "
                     "or stash first.")
@@ -8464,16 +8745,31 @@ def git_discard(data):
             if not _worktree_within_repo(wt_dir, repo_probe):
                 return _deny(
                     "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --work-tree/GIT_WORK_TREE "
-                    "redirect that relocates ONLY the working tree, so git discards WORKING-TREE content from "
-                    "that directory while the index and refs stay in the ambient (or --git-dir) repository; "
-                    "a single recovery snapshot cannot capture that split state, so this guard cannot snapshot "
-                    "the exact content the command would discard and denies rather than run on a possibly "
-                    "unrecoverable discard. Re-issue it as a plain 'git <verb>' command run FROM the target "
-                    "working tree (without --work-tree), or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", alts),
+                    "redirect whose worktree lies outside the repository this guard reads from the -C or "
+                    "session directory, so git may discard WORKING-TREE content from that directory while the "
+                    "index and refs stay in another repository, a split state a single recovery snapshot "
+                    "cannot hold; this guard denies such a discard rather than run it, even where git resolves "
+                    "the command to one repository it could snapshot.{} Re-issue it as a plain 'git <verb>' "
+                    "command run FROM the target working tree (without --work-tree), or commit or stash your "
+                    "work first. {}".format(kind or "a git work-losing verb",
+                                            _redirect_recovery_text(redirect_base, sub), alts),
                     "AIQT guardrail: denied a --work-tree-redirected worktree-content git discard whose split "
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
+        # The base read above without asking git (the -C directory, or the session directory beside a
+        # --git-dir or leading GIT_DIR=) also stays a floor under git's answer: when it lies in another
+        # repository than the one git resolved, it is probed and, when not provably clean, snapshotted as well
+        # below. A failed snapshot there is allowed past, with the failure named, only when the repository git
+        # resolved, which the command acts on, was probed and is provably clean or was snapshotted
+        # successfully; otherwise it DENIES. The repository git resolved is snapshotted in either case.
+        pre_base = pre_desc = None
+        if redirect_base is not None and repo_dir != "opaque":
+            if _snapshot_bases_differ(repo_dir if isinstance(repo_dir, str) else cwd_base, redirect_base):
+                pre_base = repo_dir if isinstance(repo_dir, str) else cwd_base
+                pre_desc = ("the -C target ({})".format(repo_dir)
+                            if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+            repo_dir = redirect_base
+            resolved_by_git = True
         # ROUND-3 FINDING 2: a redirected/ambient 'git stash drop'/'clear' must PRESERVE the stash of the
         # repository it actually clears (drop/clear is NOT reflog-recoverable afterwards) or DENY when that
         # repository cannot be resolved. stash is not snapshottable, so the destructive/worktree logic below
@@ -8483,6 +8779,8 @@ def git_discard(data):
         if sub == "stash":
             stash_op = next((a for a in args if not a.startswith("-")), None)
             if stash_op in ("drop", "clear"):
+                # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches
+                # here), so it denies alike: _segment_has_gitdir_redirect reads both spellings.
                 if ambient_override or repo_dir == "opaque" or _segment_has_gitdir_redirect(pristine):
                     return _deny(
                         "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
@@ -8526,8 +8824,11 @@ def git_discard(data):
         # ROUND-7 (codex findings 1/2): snapshot the REPO git acts on (repo_dir: a -C target, or the session
         # cwd when only --work-tree/--git-dir/-c is present), never the --work-tree value.
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
-        target_desc = ("the -C target ({})".format(repo_dir)
-                       if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        if resolved_by_git and repo_dir != cwd_base:
+            target_desc = "the repository git resolves for it ({})".format(repo_dir)
+        else:
+            target_desc = ("the -C target ({})".format(repo_dir)
+                           if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
         # ROUND-8 (class-width of the orchestrator-confirmed fail-open): a DESTRUCTIVE verb deciding on this
         # view-override branch with NO resolvable base (no session cwd and no resolved -C target: a benign
         # leading assignment such as FOO=1, a -c or other global option, or an ambient GIT_* override, each
@@ -8544,24 +8845,73 @@ def git_discard(data):
                 .format(kind or "a git work-losing verb", alts),
                 "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
                 "(rule prsunc); run it from the target repo, or commit or stash first.")
+        # The floor base (pre_base, set only beside a redirect git resolved to another repository) is probed
+        # and snapshotted first, exactly as the base itself was before git was asked, and the repository git
+        # resolved is probed and snapshotted next. A successful floor snapshot is named in the outcome below,
+        # after the resolved snapshot. A failed one is named too, and it alone does not deny when the
+        # repository git resolved (the one the command acts on) was probed and is provably clean or was
+        # snapshotted successfully; when that probe did not complete or that snapshot failed, it DENIES with
+        # both outcomes named.
+        pre_snap = None
+        pre_text = ""
+        if pre_base is not None and _tree_is_clean(pre_base) is not True:
+            pre_snap = _record_recovery(pre_base, sub)
         ao_snap = None
-        if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
+        ao_clean = _tree_is_clean(target_base) if (target_base is not None and destructive) else None
+        if target_base is not None and destructive and ao_clean is not True:
             ao_snap = _record_recovery(target_base, sub)
-            if ao_snap is not None and ao_snap[0] == "fail":
+        if pre_snap is not None and pre_snap[0] == "fail":
+            if not (ao_clean is True or (ao_clean is False and ao_snap is not None and ao_snap[0] == "ok")):
                 return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
-                    "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
-                    "than run. Re-issue it as a plain git command from the target repository, or commit or "
-                    "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
-                                                       ao_snap[1], alts),
-                    "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
-                    "run it from the target repo, or commit or stash first.")
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a redirect that git resolves to {}, "
+                    "but this guard also snapshots {}, the directory it reads that redirect from without asking "
+                    "git, and could not snapshot it ({}); a discard whose snapshot there fails is allowed only "
+                    "when the repository git resolved was probed and is provably clean or was snapshotted, and "
+                    "{}, so it is denied rather than run.{} Re-issue it as a plain 'git -C <repo> <verb>' command "
+                    "run from the target repository, or commit or stash your work first. {}".format(
+                        kind or "a git work-losing verb", target_base, pre_desc, pre_snap[1],
+                        "its probe did not complete" if ao_clean is None else "its snapshot failed",
+                        _recovery_outcome_text(ao_snap), alts),
+                    "AIQT guardrail: denied a redirected git discard because a directory it reads could not be "
+                    "snapshotted (rule prsunc); run it from the target repo, or commit or stash first.")
+            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, could not "
+                        "be snapshotted ({}); that failure alone does not deny the command, because the "
+                        "repository git resolved, which it acts on, {}.".format(
+                            pre_desc[:1].upper(), pre_desc[1:], pre_snap[1],
+                            "was probed and is provably clean" if ao_clean is True else "was snapshotted first"))
+        elif pre_snap is not None:
+            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, was "
+                        "snapshotted as well.{}".format(pre_desc[:1].upper(), pre_desc[1:],
+                                                        _recovery_outcome_text(pre_snap)))
+        if ao_snap is not None and ao_snap[0] == "fail":
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
+                "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
+                "than run. Re-issue it as a plain git command from the target repository, or commit or "
+                "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
+                                                   ao_snap[1], alts),
+                "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
+                "run it from the target repo, or commit or stash first.")
+        # A whole-tree clobber (reset --hard, an operand-free checkout -f, switch --force/--discard-changes)
+        # on a target the probe confirms DIRTY denies here exactly as the bare command does below, with the
+        # snapshot just taken folded into the reason. A command-local cause of this branch (any git global
+        # option, value-taking or flag-only, known or unknown, or a leading assignment) only makes the
+        # repository view less certain; it never makes a certain whole-tree loss acceptable, so it must not
+        # turn the bare deny into a snapshot-then-allow. An ambient GIT_* override keeps its best-effort
+        # snapshot-then-allow: it is unreadable from the command, which may not act on the probed tree at
+        # all. A probe that did not complete keeps the bare path's snapshot-then-allow. Either outcome names
+        # the floor base's snapshot or its failure (pre_text) ahead of `note`, which still ends the reason or
+        # note.
+        if role == "clobber" and ao_clean is False and not ambient_override:
+            return _deny_with_recovery(kind, ao_snap, pre_text + note)
         return _discard_recovery_result(
             kind or "a git work-losing verb",
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
             "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment); the recovery "
-            "snapshot targets {} (a --git-dir/GIT_DIR alone leaves the worktree at the session directory)"
-            .format(target_desc), ao_snap, note)
+            "snapshot targets {}{}".format(
+                target_desc, " (git itself, asked read-only, resolved the git dir and worktree that redirect "
+                             "acts on, after the whole -C chain)" if resolved_by_git else ""),
+            ao_snap, pre_text + note)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _deny(
