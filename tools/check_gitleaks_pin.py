@@ -35,9 +35,13 @@ step name: given as a block scalar, or holding an escape YAML does not define, i
 entry decides: any other line of quality.yml naming GITLEAKS_VERSION (another step's or job's env:, a run
 script assigning it), other than a comment and a ${GITLEAKS_VERSION} expansion in that step's run: script,
 is refused, so a value set elsewhere can never stand in for the step's own. The file is read as LF lines
-once one trailing carriage return is removed from each: a line that still carries a carriage return, or
-carries U+0085, U+2028 or U+2029, is refused, because a YAML reader may break a line there and read a
-key this line reader would not see. The local binary is the first
+once one trailing carriage return is removed from each, and every line is screened before any is parsed:
+a line that still carries a carriage return, or carries U+0085, U+2028 or U+2029, is refused, because a
+YAML reader may break a line there and read a key this line reader would not see; and so is a line that
+carries any other character outside YAML's printable set (tab, LF, CR, U+0020-U+007E, U+0085,
+U+00A0-U+D7FF, U+E000-U+FFFD and U+10000-U+10FFFF), that is a C0 control other than tab, LF and CR, DEL,
+a C1 control other than U+0085, a surrogate, U+FFFE or U+FFFF, because a YAML reader refuses the whole
+file there. The local binary is the first
 gitleaks on PATH; its version is the whole output of gitleaks version, read as X.Y.Z with an optional
 leading v. It fails (exit 1) when no gitleaks is on PATH and when the version it reports differs from the
 pin, so a member push cannot rest on a local run that skipped the scan or ran another version. Any other
@@ -47,12 +51,13 @@ Exit convention (matches the repo's gates):
   0  the gitleaks on PATH reports the pinned version
   1  gitleaks is not on PATH, or it reports another version
   2  cannot evaluate: quality.yml is unreadable; a line of it still carries a carriage return once its
-     one trailing CR is removed, or carries U+0085, U+2028 or U+2029; a line of it is outside the
-     accepted subset above, or repeats a key of its mapping; it holds no step item named
-     Secrets (gitleaks) or more than one, or a step name: this reader does not decode; that step has no
-     env: or no run:, or an env: that is not a block mapping; its env: has no GITLEAKS_VERSION entry, or
-     one whose value is not a bare X.Y.Z; another line names GITLEAKS_VERSION; gitleaks version fails,
-     times out or prints anything but one version; or the arguments are not recognized
+     one trailing CR is removed, or carries U+0085, U+2028 or U+2029, or carries any other character
+     outside YAML's printable set; a line of it is outside the accepted subset above, or repeats a key of
+     its mapping; it holds no step item named Secrets (gitleaks) or more than one, or a step name: this
+     reader does not decode; that step has no env: or no run:, or an env: that is not a block mapping; its
+     env: has no GITLEAKS_VERSION entry, or one whose value is not a bare X.Y.Z; another line names
+     GITLEAKS_VERSION; gitleaks version fails, times out or prints anything but one version; or the
+     arguments are not recognized
 
 NOT CHECKED: the binary's checksum (CI verifies the downloaded archive; this gate trusts the version a
 local binary reports, so a binary that misreports its version passes), the scan's own result (the gitleaks
@@ -118,6 +123,10 @@ VERSION_TIMEOUT = 60
 # hidden behind one would be read there and not here; each is refused once a line's one trailing CR
 # is removed.
 LINE_BREAKS = ("\r", "\x85", "\u2028", "\u2029")
+# A character outside YAML's printable set (tab, LF, CR, U+0020-U+007E, U+0085, U+00A0-U+D7FF, U+E000-U+FFFD
+# and U+10000-U+10FFFF): a C0 control other than tab, LF and CR, DEL, a C1 control other than U+0085, a
+# surrogate, U+FFFE or U+FFFF. A YAML reader refuses the whole file there, where this reader would read on.
+NONPRINTABLE_RE = re.compile(r"[^\t\n\r\x20-\x7e\x85\xa0-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def _value(rest):
@@ -179,6 +188,9 @@ def _open(stack, column, kind):
         node[1] = kind()
         stack[-1] = (column, node[1], False)
         return node[1], None
+    # An indentless sequence. A sibling refusal also covers this case: the open key's mapping sits at the
+    # item's column, so without this check the kind check below still refuses the line, as a sequence item
+    # at the column of the keys above it. This check names the line for what it is.
     if is_open and kind is list and len(stack) > 1 and type(stack[-2][1]) is dict:
         return None, "holds a sequence item at the column of the key whose value it would be"
     if is_open:
@@ -236,6 +248,9 @@ def _parse(lines):
         indent = len(line) - len(text)
         if not text or text.startswith("#"):
             continue
+        # A sibling refusal also covers this case: such a line holds no key or sequence item, so without this
+        # check it is still refused, as a scalar with no key or item before it, a reserved first character (%),
+        # a ': ' in a plain scalar or a tab outside a comment. This check names the line for what it is.
         if indent == 0 and DOCUMENT_RE.match(text):
             return None, "line {} is a YAML document marker or directive".format(index + 1)
         if "\t" in text.split(" #", 1)[0]:
@@ -337,6 +352,10 @@ def read_pin(workflow_text):
     for index, line in enumerate(lines):
         if any(mark in line for mark in LINE_BREAKS):
             return None, "line {} carries a carriage return, U+0085, U+2028 or U+2029".format(index + 1)
+        outside = NONPRINTABLE_RE.search(line)
+        if outside is not None:
+            return None, "line {} carries U+{:04X}, a character outside YAML's printable set".format(
+                index + 1, ord(outside.group()))
     root, why = _parse(lines)
     if why is not None:
         return None, why
@@ -739,6 +758,46 @@ def self_test():
         for name, mark in (("cr-hides-key", "\r"), ("nel-hides-key", "\x85"),
                            ("ls-hides-key", "\u2028"), ("ps-hides-key", "\u2029")):
             check(name, evaluate(workflow.replace(sha_line, sha_line[:-1] + mark + hidden), pinned_path)[0], 2)
+        # The same marks in a comment line, which no other refusal reads, so a reader without this one reads
+        # the step and passes each.
+        comment = "      # Bump"
+        for name, mark in (("cr-in-comment", "\r"), ("nel-in-comment", "\x85"),
+                           ("ls-in-comment", "\u2028"), ("ps-in-comment", "\u2029")):
+            check(name, read_pin(workflow.replace(comment, comment + mark, 1)),
+                  (None, "line 5 carries a carriage return, U+0085, U+2028 or U+2029"))
+        # A character outside YAML's printable set: a YAML reader refuses the whole file, but a reader without
+        # the screen reads the step and passes each, the character sitting in a plain scalar (another step's
+        # name:), a comment, a quoted scalar, the step's run: text and a plain value.
+        for name, text in (
+                ("form-feed-in-plain-scalar",
+                 workflow.replace("- name: Leak denylist", "- name: Leak\x0cdenylist")),
+                ("c0-control-in-comment", workflow.replace(comment, comment + "\x01", 1)),
+                ("del-in-quoted-scalar", in_job("    note: 'a\x7fb'\n")),
+                ("c1-control-in-run-text", workflow.replace("set -euo pipefail\n", "set -euo pipefail\x9b\n")),
+                ("noncharacter-in-plain-value", in_job("    note: a\ufffeb\n"))):
+            check(name, evaluate(text, pinned_path)[0], 2)
+        check("nonprintable-names-line", read_pin(in_job("    note: a\x0cb\n")),
+              (None, "line 4 carries U+000C, a character outside YAML's printable set"))
+        # Each end of each range of that set, in a comment: just inside it the step is read, just outside it
+        # the line is refused (CR, U+0085, U+2028 and U+2029, inside it, are refused above as line breaks, and
+        # LF ends the line).
+        for point, inside in ((0x08, False), (0x09, True), (0x0B, False), (0x0C, False), (0x0E, False),
+                              (0x1F, False), (0x20, True), (0x7E, True), (0x7F, False), (0x80, False),
+                              (0x84, False), (0x86, False), (0x9F, False), (0xA0, True), (0xD7FF, True),
+                              (0xD800, False), (0xDFFF, False), (0xE000, True), (0xFFFD, True), (0xFFFE, False),
+                              (0xFFFF, False), (0x10000, True), (0x10FFFF, True)):
+            check("printable-set-end-U+{:04X}".format(point),
+                  read_pin(workflow.replace(comment, comment + chr(point), 1)),
+                  ("8.30.1", None) if inside else (
+                      None, "line 5 carries U+{:04X}, a character outside YAML's printable set".format(point)))
+        # A second step named Secrets (gitleaks) with no env: after the real one (a reader that takes the first
+        # such step passes it), and the step with its env: but no run:.
+        check("second-step-without-env",
+              read_pin(workflow + "      - name: Secrets (gitleaks)\n        run: echo\n"),
+              (None, "2 steps are named Secrets (gitleaks), not one"))
+        check("step-without-run",
+              read_pin(workflow.replace("        run: |\n          set -euo pipefail\n" + curl_line, "")),
+              (None, "the Secrets (gitleaks) step has 1 env: and 0 run: keys, not one each"))
         # End to end over this checkout's quality.yml: the gate itself, launched isolated with PATH set to
         # a stub directory, exits 0 on the pinned version and 1 on another version and on no gitleaks.
         live_pin, live_why = read_pin((ROOT / WORKFLOW_REL).read_bytes().decode("utf-8"))
