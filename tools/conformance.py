@@ -386,10 +386,11 @@ def check_c3(root):
     the .claude/rules it judged, so the orchestrator keeps control of reporting and counts what was
     checked. The tree is never read by name: every listing is made through a held descriptor, and
     every family directory and vendored source is opened, and every rule file read, beneath its
-    parent's descriptor with O_NOFOLLOW. So a .claude/rules swapped for a symlink or another directory
-    between the probe and its open, a symlink at any entry the walk inspects (a family directory, a
-    rule file or a vendored source included) and a rule file that is not a regular file are each
-    MALFORMED (exit 2) naming the path, never followed. Runs unconditionally: it needs only
+    parent's descriptor with O_NOFOLLOW. So a .claude/rules swapped for a symlink or another directory,
+    or removed, between the probe and its open, a symlink at any entry the walk inspects (a family
+    directory, a rule file or a vendored source included) and a rule file that is not a regular file,
+    whatever its name, are each MALFORMED (exit 2) naming the path, never followed. Runs
+    unconditionally: it needs only
     .claude/rules/, which every adopter has. An absent tree, or one holding no rule file or vendored
     source, validated nothing and is NOT APPLICABLE, never a hollow PASS."""
     rules = root / ".claude" / "rules"
@@ -1519,6 +1520,18 @@ def self_test_main():
                 failures.append("a .claude/rules swapped for a {} after C3's probe expected C3 MALFORMED "
                                 "naming it, got {}: {}".format(label, got.status, got.detail))
 
+        # 16j. A .claude/rules removed between C3's probe's lstat and its open changed under the
+        #      probe: C3 MALFORMED naming it, never NOT APPLICABLE as an absent tree.
+        vanished = (tmp / "rules-vanished").resolve()
+        vanished.mkdir()
+        _build_conformant(vanished)
+        rules = vanished / ".claude" / "rules"
+        with crp._patched_lstat(_standards, crp._replacing_lstat(_standards._lstat, rules, vanish=True)):
+            got = check_c3(vanished)
+        if got.status != MALFORMED or not got.detail.startswith("cannot read {}: ".format(rules)):
+            failures.append("a .claude/rules removed after C3's probe expected C3 MALFORMED naming it, "
+                            "got {}: {}".format(got.status, got.detail))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1551,8 +1564,8 @@ def self_test_main():
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
           "hooks subtree), a live or dangling symlinked .claude, a symlinked family directory or rule "
-          "file below .claude/rules, a .claude/rules swapped for a symlink or replaced after C3's probe, "
-          "and a bad --root fail closed" + skip_note)
+          "file below .claude/rules, a .claude/rules swapped for a symlink, replaced or removed after "
+          "C3's probe, and a bad --root fail closed" + skip_note)
     return 0
 
 

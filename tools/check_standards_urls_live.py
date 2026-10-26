@@ -78,13 +78,14 @@ def _reachable(url, timeout):
     return (False, "HEAD refused and GET did not resolve")
 
 
-def run(std_dir, timeout, *, root):
-    # std_dir is probed beneath root (the repository root for the default dir; a --std directory is its
-    # own root, which main first probes from the filesystem root down with _standards.std_root), so a
-    # symlinked or dangling .aiqt or standards, or a --std that is a symlink or has one at any
-    # component, fails closed (exit 2).
+def run(std_dir, timeout, *, root, search_only=False):
+    # std_dir is held and read beneath root (the repository root for the default dir; for a --std
+    # directory the filesystem root, which main takes from _standards.std_root after probing from it
+    # down, and passes with search_only), so a symlinked or dangling .aiqt or standards, or a --std
+    # that is a symlink or has one at any component, swapped in after the probe included, fails
+    # closed (exit 2).
     try:
-        manifests = load_manifests(std_dir, root=root)
+        manifests = load_manifests(std_dir, root=root, search_only=search_only)
     except (ManifestError, OSError) as exc:
         print("MALFORMED: {}".format(exc), file=sys.stderr)
         return 2
@@ -116,8 +117,9 @@ def run(std_dir, timeout, *, root):
 
 def self_test_main():
     """Offline self-test of the explicit --std probe, launched through main: a real directory exits 0,
-    and a --std that is a symlink, live or dangling, or sits beneath a symlinked ancestor exits 2 naming
-    it. The fixture manifest carries no url, so no vector reaches the network."""
+    and a --std that is a symlink, live or dangling, sits beneath a symlinked ancestor, or is swapped
+    for a symlink after its probe exits 2 naming it. The fixture manifest carries no url, so no
+    vector reaches the network."""
     import io
     import shutil
     import tempfile
@@ -148,7 +150,8 @@ def self_test_main():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: an explicit --std that is a real directory exits 0, and one that is a live or "
-          "dangling symlink or sits beneath a symlinked ancestor exits 2 naming it (offline, no network)")
+          "dangling symlink, sits beneath a symlinked ancestor or is swapped for a symlink after its "
+          "probe exits 2 naming it (offline, no network)")
     return 0
 
 
@@ -194,7 +197,7 @@ def main(argv=None):
         except OSError as exc:
             print("MALFORMED: --std {}: {}".format(std, exc), file=sys.stderr)
             return 2
-    return run(std_dir, timeout, root=root)
+    return run(std_dir, timeout, root=root, search_only=std is not None)
 
 
 if __name__ == "__main__":
