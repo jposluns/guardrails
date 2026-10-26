@@ -2746,14 +2746,14 @@ def boundary_self_test():
         check("adoption-legacy-target-" + home, lambda h=home: adopt.validate_op(
             dict(create, path=h + "/file")).status == store.VALID)
     check("adoption-composed-member", lambda: adopt.validate_op(
-        {"op": "install-pack", "target": ".working", "members": [
+        {"op": "render-views", "store_root": ".working", "members": [
             {"path": "journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
 
     check("adoption-root-pack-preserved", lambda: adopt.validate_op(
-        {"op": "install-pack", "target": ".", "members": [
+        {"op": "render-views", "store_root": ".", "members": [
             {"path": "notes.txt", "digest": "sha256:" + "0" * 64}]}, homes=2).status == store.VALID)
     check("adoption-root-pack-journal-refused", lambda: adopt.validate_op(
-        {"op": "install-pack", "target": ".", "members": [
+        {"op": "init-store", "store_root": ".", "members": [
             {"path": ".working/journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
     def view_plan(model):
         view_manifest = dict(model, views=dict(VERSION=dict(kind="projection", sources=[],
@@ -2869,14 +2869,14 @@ def boundary_self_test():
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
             # Every planned creation needs observed absence, so the root-level ones and the opf/ mirror are
-            # declared targets; the enforcement members are installed by the pack row the frozen plan ties
+            # declared targets; the enforcement members are installed by the plant rows the frozen plan ties
             # them to.
             bindings = adopt.canonical_plan_bindings()
             targets = ["notes.txt", adopt.PACK_MIRROR_ROOT]
             observed = planning.investigate(Path("/store"), sources=[], targets=targets)
             result = planning.plan(
                 Path("/store"), sources=[], targets=targets, product="opf", decisions=[],
-                ops=[op, adopt.enforcement_install_op(bindings["enforcement"])],
+                ops=[op] + adopt.enforcement_install_ops(bindings["enforcement"]),
                 expected_observation_digest=tomllib.loads(observed.observation.decode())["observation_digest"],
                 now=utc, run_nonce="0123456789abcdef", bindings=bindings)
         return result, [c.kwargs.get("homes") for c in frozen.call_args_list]
