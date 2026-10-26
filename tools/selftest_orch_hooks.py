@@ -10740,6 +10740,152 @@ def _leasehb_status_and_parse_cases(tmp):
           ("allow", True, True))
 
 
+# The git executable fixture the differential oracle runs under real bash: it records the argv git actually
+# receives (one JSON array per line) and does nothing else - no network, no repository writes - so a word a
+# builder expands into '-c alias.<name>=...' is observed as the argv git would have run. The shebang is the
+# running interpreter's absolute path so the fixture needs nothing on the env -i PATH but itself.
+_ORACLE_BASH = "/usr/bin/bash"
+_ORACLE_ALIAS = "alias.qx=version"
+
+
+def _oracle_fake_git_source():
+    return ("#!" + os.path.realpath(sys.executable) + "\n"
+            "import json, os, sys\n"
+            "with open(os.environ['AIQT_ORACLE_RECORD'], 'a') as _fh:\n"
+            "    _fh.write(json.dumps(sys.argv[1:]) + chr(10))\n"
+            "sys.exit(0)\n")
+
+
+def _oracle_corpus():
+    """A bounded corpus of shell commands from a small grammar: a git word (option or subcommand region) built
+    by the unquoted, double-quoted list, indirect, list, brace, glob and here-string forms, each with and
+    without a leading here-string separator or quoted git text before it, plus the three past-stop shift
+    families (A GIT REGION THE LEXER DID NOT READ). Each entry is (label, command). The alias builders expand
+    to '-c alias.qx=version'; the control builders build a non-alias word. Size and runtime are reported by the
+    caller; every command runs real bash once (well under 60 seconds total)."""
+    alias = "-c " + _ORACLE_ALIAS
+    # (label, setup, args): command = setup + context + "git " + args; builders that define an alias.
+    builders = (
+        ("literal", "", alias + " qx"),
+        ("unquoted", "C='" + alias + "'; ", "$C qx"),
+        ("list", "A=(" + alias + "); ", '"${A[@]}" qx'),
+        ("positional", "set -- " + alias + "; ", '"$@" qx'),
+        ("brace", "", "{-c," + _ORACLE_ALIAS + "} qx"),
+        ("indirect", "A=(" + alias + "); R='A[@]'; ", '"${!R}" qx'),
+        ("indirect-op", "A=(" + alias + "); R='A[@]'; ", '"${!R:-x}" qx'),
+    )
+    # control builders: a git word built by a glob (no match, literal) or a double-quoted scalar, defining no
+    # alias; the oracle never fails on these (nothing in argv defines one) whatever the verdict.
+    controls = (
+        ("glob-sub", "", "lo* "),
+        ("dq-scalar", "P=less; ", '-c core.pager="$P" qx'),
+    )
+    contexts = (("plain", ""), ("sep", "cat <<<x; "), ("quoted", 'cat <<<x; echo "git log"; '))
+    corpus = []
+    for bl, setup, args in builders + controls:
+        for cl, ctx in contexts:
+            corpus.append(("{}/{}".format(bl, cl), setup + ctx + "git " + args))
+    # the past-stop shift (fix B): a built word after a quoted blank or separator in a region the de-quoted
+    # reading splits, so the subcommand word moves and the plain reading misses the built word.
+    shift = "X='" + alias + "'; "
+    corpus.extend((
+        ("shift-c", shift + 'cat <<<x; echo "git log"; git -c "core.x=a b" $X qx'),
+        ("shift-C", shift + 'cat <<<x; echo "git log"; git -C "a b" $X qx'),
+        ("shift-past", shift + 'cat <<<x; git -C "a b" $X qx'),
+        ("shift-lead", shift + 'cat <<<x; git <<<y -C "a b" $X qx'),
+    ))
+    return corpus
+
+
+def _oracle_run_argv(bindir, workdir, record, command):
+    """Run command under real bash with env -i (only PATH, HOME and the record path set), the git fixture on
+    PATH, in workdir; return the argv lists git received, or None on malformed fixture evidence."""
+    try:
+        os.remove(record)
+    except FileNotFoundError:
+        pass
+    env = {"PATH": bindir, "HOME": str(workdir), "AIQT_ORACLE_RECORD": str(record)}
+    subprocess.run([_ORACLE_BASH, "-c", command], env=env, cwd=str(workdir),
+                   capture_output=True, timeout=30)
+    if not os.path.exists(record):
+        return []
+    calls = []
+    with open(record, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                argv = json.loads(line)
+            except ValueError:
+                return None
+            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+                return None
+            calls.append(argv)
+    return calls
+
+
+def _oracle_defines_alias(calls):
+    """Whether any recorded git argv holds a configuration option that defines an alias, read exactly as the
+    guards read a literal argv (_git_alias_defined_at over the real post-bash words)."""
+    return any(aiqt_hooks._git_alias_defined_at(argv, i)
+               for argv in calls for i in range(len(argv)))
+
+
+def _gitalias_oracle_cases(tmp):
+    """Differential oracle for the git-alias guards: for each corpus command, run real bash with a recording
+    git fixture, then compare whether the argv git received defines an alias against each guard's verdict, and
+    FAIL on any case where a guard permits a command whose argv defines one (a fail-open). The alias builders
+    must each be observed to define an alias at run time; missing, malformed or unexpected fixture evidence
+    fails the test (the test-hermeticity rule)."""
+    root = tmp / "gitalias-oracle"
+    bindir = root / "bin"
+    bindir.mkdir(parents=True)
+    git_fixture = bindir / "git"
+    git_fixture.write_text(_oracle_fake_git_source(), encoding="utf-8")
+    os.chmod(str(git_fixture), 0o755)
+    record = root / "argv.jsonl"
+    repo = root / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True,
+                   capture_output=True, timeout=30)
+    (repo / "f.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "f.txt"], check=True, capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
+                   check=True, capture_output=True, timeout=30)
+    (repo / "f.txt").write_text("dirty\n", encoding="utf-8")
+    guards = (("protected_line", aiqt_hooks.protected_line, str(repo)),
+              ("gate_weakening", aiqt_hooks.gate_weakening, None),
+              ("git_discard", aiqt_hooks.git_discard, str(repo)),
+              ("branch_root", aiqt_hooks.branch_root, str(repo)))
+    corpus = _oracle_corpus()
+    alias_labels = {"literal", "unquoted", "list", "positional", "brace", "indirect", "indirect-op",
+                    "shift-c", "shift-C", "shift-past", "shift-lead"}
+    fail_open = []
+    hermeticity = []
+    for label, command in corpus:
+        calls = _oracle_run_argv(str(bindir), repo, str(record), command)
+        if calls is None:
+            hermeticity.append("{}: malformed fixture evidence".format(label))
+            continue
+        defines = _oracle_defines_alias(calls)
+        builder = label.split("/", 1)[0]
+        if builder in alias_labels and not defines:
+            hermeticity.append("{}: builder recorded no alias-defining argv (calls={!r})".format(label, calls))
+        for gname, handler, cwd in guards:
+            payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": command}}
+            if cwd is not None:
+                payload["cwd"] = cwd
+            verdict = _verdict(handler(payload))
+            if defines and verdict in ("allow", "warn", "explicit-allow"):
+                fail_open.append("{}:{} permitted argv defining an alias ({})".format(label, gname, verdict))
+    check("gitalias-oracle/no-fail-open", sorted(fail_open), [])
+    check("gitalias-oracle/fixture-hermetic", sorted(hermeticity), [])
+    shutil.rmtree(str(root), ignore_errors=True)
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -16746,6 +16892,7 @@ def _main_isolated(report_path=None):
         _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
         _rwh_cases(tmp)
+        _gitalias_oracle_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

@@ -1674,6 +1674,11 @@ expected-check-ids = [
   "rwh/no-marker-directory-inert",
   "rwh/removed-or-expired-marker-allows",
   "rwh/drift-notes-without-denying",
+  # The git-alias differential oracle: real bash expands each corpus command and a recording git fixture
+  # captures the argv git would run; a guard that permits a command whose argv defines an alias is a
+  # fail-open (no-fail-open), and missing or malformed fixture evidence fails the test (fixture-hermetic).
+  "gitalias-oracle/no-fail-open",
+  "gitalias-oracle/fixture-hermetic",
 ]
 
 [[suite]]

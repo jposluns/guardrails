@@ -12548,10 +12548,12 @@ def _main_isolated(monitor):
         _gkl_forms = (
             ("at", 'git "$@" l'), ("at-brace", 'git "${@:1}" l'), ("arr", 'git "${A[@]}" l'),
             ("arr-op", 'git "${A[@]:0}" l'), ("keys", 'git "${!A[@]}" l'), ("names", 'git "${!pre@}" l'),
+            ("ind", 'git "${!R}" l'), ("ind-op", 'git "${!R:-x}" l'), ("ind-value", 'git -C "${!R}" l'),
             ("nested", 'git "${x:-$@}" l'), ("value", 'git -C "${A[@]}" l'))
         _gkl_controls = (
             ("star", 'git "$*" log'), ("arr-star", 'git "${A[*]}" log'), ("length", 'git -C "${#A[@]}" log'),
             ("element", 'git -C "${A[0]}" log'), ("names-star", 'git "${!pre*}" log'),
+            ("ind-star", 'git "${!R*}" log'), ("ind-sub", 'git -C "${!A[0]}" log'),
             ("pattern", 'git -c user.email="${EMAIL%@*}" log'))
         for _gks_handler, _gks_cwd in _gks_guards:
             _gks_name = _gks_handler.__name__
@@ -12570,6 +12572,12 @@ def _main_isolated(monitor):
         for _gkl_label, _gkl_word, _gkl_want, _gkl_locale in (
                 ("gkl-read-at", '"$@"', True, False), ("gkl-read-arr", '"${A[@]}"', True, False),
                 ("gkl-read-names", '"${!p@}"', True, False), ("gkl-read-star", '"$*"', False, False),
+                # An indirect expansion with no subscript of its own expands to a list when its named variable holds
+                # a list reference (bash 5.3: with R set to @ or A[@], "${!R}" and "${!R:-x}" expanded the list), so
+                # its word is marked as one bash may split; the prefix-names-star "${!R*}" stays one word, and a
+                # subscript of its own ("${!A[0]}") keeps the plain reading (outside this round's scope).
+                ("gkl-read-ind", '"${!R}"', True, False), ("gkl-read-ind-op", '"${!R:-x}"', True, False),
+                ("gkl-read-ind-star", '"${!R*}"', False, False), ("gkl-read-ind-sub", '"${!A[0]}"', False, False),
                 ("gkl-read-arr-star", '"${A[*]}"', False, False), ("gkl-read-length", '"${#A[@]}"', False, False),
                 ("gkl-read-scalar", '"$x"', False, False), ("gkl-read-transform", '"${x@Q}"', False, False),
                 # The locale-quote branch records its word as built at run time: with the locale reading on, $"x"
@@ -12591,16 +12599,23 @@ def _main_isolated(monitor):
         # quoted blank or separator shifts, allowed each before. gku2-<form>-<guard>: each guard denies, gate_weakening,
         # git_discard and branch_root naming a word built at run time (protected_line's commit recognizer denies it as
         # an unverifiable commit). open-log is the disclosed over-refusal of an open region with a literal subcommand.
+        # The reading past the stop begins only at a command position the lexer reaches, never inside quoted or
+        # here-document text, and is scoped to a segment that runs git as its own command (_segment_runs_git_command):
+        # past-echo reaches the real git command past a quoted git word that the old reading mis-read as the command.
         # gku2c-<form>-<guard>: a literal region the lexer read in full, or that the reading past the stop reads in
-        # full, keeps its allow.
+        # full, keeps its allow; the nongit-* controls name no git command (git is an operand of grep, echo or a
+        # pull-request body), so the unread-region rule does not reach them and the over-refusal is gone.
         _gku2_forms = (
             ("qblank", 'git <<<x -C "a b" $X l'), ("squote", "git <<<x -C 'a b' $X l"),
             ("qsep", 'git <<<x -C "a;b" $X l'), ("key", 'git <<<x -C "a b" -c "$K"=v l'),
             ("lead", '<<<x git -C "a b" $X l'), ("past", 'cat <<<x; git -C "a b" $X l'),
+            ("past-echo", 'cat <<<x; echo "git log"; git -C "a b" $X l'),
             ("open-log", "git <<<x log"))
         _gku2_controls = (
             ("trail", "git log --oneline <<<x"), ("past-literal", "cat <<<x; git status"),
-            ("past-quoted", 'cat <<<x; git log "$a"'), ("procsub", "diff <(git show HEAD:f) f"))
+            ("past-quoted", 'cat <<<x; git log "$a"'), ("procsub", "diff <(git show HEAD:f) f"),
+            ("nongit-echo", 'cat <<<x; echo "run git"'), ("nongit-grep", 'grep -c git <<<"$s"'),
+            ("nongit-gh", 'gh pr create --body "$(cat <<\'EOF\'\nmentions git here\nEOF\n)"'))
         for _gks_handler, _gks_cwd in _gks_guards:
             _gks_name = _gks_handler.__name__
             for _gku2_label, _gku2_rows, _gku2_want in (("gku2", _gku2_forms, "deny"),

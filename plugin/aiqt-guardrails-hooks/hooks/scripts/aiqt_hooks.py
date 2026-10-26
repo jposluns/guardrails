@@ -497,11 +497,18 @@ _Segment = collections.namedtuple(
 _WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace", "unquoted"))
 # An expansion that bash expands to one word per element even inside double quotes, as bash 5.3 printed for each
 # form: the positional list ("$@", "${@}", "${@:1}", "${@/x/y}"), an array subscripted with @ in any parameter
-# expansion form ("${A[@]}", "${A[@]:0}", "${A[@]#-}", "${A[@]@Q}", "${!A[@]}"), and the names with a prefix
-# ("${!pre@}"), anywhere in a '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts too.
-# A length ('${#A[@]}', '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}") and one element ("${A[0]}")
-# expand to one word, and so match nothing here.
-_DQ_LIST_EXPANSION_RE = re.compile(r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![A-Za-z_][A-Za-z0-9_]*@))")
+# expansion form ("${A[@]}", "${A[@]:0}", "${A[@]#-}", "${A[@]@Q}", "${!A[@]}"), the names with a prefix
+# ("${!pre@}"), and a plain indirect expansion with no subscript of its own ("${!R}"), whose named variable can
+# itself hold a list reference such as @ or an array[@] subscript, so bash splits it into one word per element
+# (bash 5.3: with R set to @ or to A[@], "${!R}" expanded to the positional or array list); anywhere in a
+# '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts too. A length ('${#A[@]}',
+# '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}") and one element ("${A[0]}") expand to one
+# word, and so match nothing here. The indirect form is read whatever operator follows the name ("${!R}",
+# "${!R:-x}", "${!R@Q}" each expand the array when R holds a list reference), except the prefix-names-star
+# "${!pre*}", one word, and a subscript of its own ("${!A[@]}" is read by the array-subscript alternative,
+# "${!A[0]}" is one element), so the name is matched only when a '*' or '[' does not immediately follow it.
+_DQ_LIST_EXPANSION_RE = re.compile(
+    r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_*[])))")
 
 
 class _SpelledWords(list):
@@ -5341,18 +5348,48 @@ _GIT_BUILT_WORD_FIX = (
 
 # A GIT REGION THE LEXER DID NOT READ. On a command the full parse cannot read, the partial lexer stops at the first
 # construct it refuses (a here-string, an unquoted heredoc, a process substitution, a '{fd}' redirect or an unbalanced
-# quote) and reads no word after it. Where it stops before a git command's option region ('git <<<x -C "a b" $X l')
-# or inside it, that region is unread, and the de-quoted reading of _git_alias_spelled cannot stand in for it: a
+# quote) and reads no word after it. The rule is scoped to a segment that runs git AS ITS OWN COMMAND
+# (_segment_runs_git_command: its command word is git or a wrapper the guards resolve), never a git word another
+# command merely carries. Where it stops before such a git command's option region ('git <<<x -C "a b" $X l') or
+# inside it, that region is unread, and the de-quoted reading of _git_alias_spelled cannot stand in for it: a
 # quoted blank or separator moves its subcommand word ('-C "a b" $X' reads there as -C a with the subcommand b, so $X
 # stands past it; with X set to '-c alias.l=log', bash 5.3 passed git -C 'a b' -c alias.l=log l). So an unread region
-# on a git segment counts as a definition, fail closed (_git_alias_unread): a git word among the words of the
-# segment the lexer was still inside whose walk (_git_local_alias) reads no subcommand word among them
-# (_git_region_open), and a git word in the text past where the lexer stopped whose region a quote-aware reading
-# from that word (_git_region_read, the word reader with its spelling record) cannot read to its subcommand word, or
-# reads with a word that defines one under HOW A WORD IS SPELLED. A literal region read in full keeps its decision.
-# Disclosed over-refusal (the safe direction): a word naming git that is the last word read before such a construct
-# ('git <<<x log', 'grep -c git <<<"$s"'), and a word naming git past it inside quoted or here-document text that the
-# reading from that word cannot read ('cat <<<x; echo "run git"'). Read only for a command whose lex failed.
+# on a git segment counts as a definition, fail closed (_git_alias_unread): a git command the lexer was still inside
+# whose walk (_git_region_open) reads no subcommand word among the words read before the stop, and a git command of
+# its own past where the lexer stopped, found at a command position the reader reaches (the text past each construct
+# it can measure, _construct_end, re-lexed quote-aware), whose region runs open or holds a word that defines one
+# under HOW A WORD IS SPELLED (_git_local_alias). Reading begins only at a command position the lexer reaches, never
+# inside quoted or here-document text. A literal region read in full keeps its decision. Disclosed over-refusal (the
+# safe direction): a word naming git that is the last word read before such a construct and is its command word
+# ('git <<<x log') still denies, while a git word only another command carries ('grep -c git <<<"$s"',
+# 'cat <<<x; echo "run git"', a pull-request or issue body naming git) is no longer read as a git command, so it
+# allows. Read only for a command whose lex failed.
+
+
+def _segment_runs_git_command(tokens):
+    """Whether a segment runs git AS ITS OWN COMMAND: its command word, found past any leading reserved words, a
+    function or coprocess name, an env-assignment prefix and the wrapper words the git readers resolve
+    (_CMTIDN_GIT_WRAPPERS), names git as a word (a path to git included, read by its basename), or such a wrapper
+    stands there and a later word names git. A git word that is only an operand of another command ('grep -c git',
+    'echo "git log"', a pull-request body) makes this False. The unread-region rule is scoped by this, so it reads
+    only a git command's own unread region and never denies a command whose command words name no git command."""
+    i = 0
+    n = len(tokens)
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return False
+    word = tokens[i].rsplit("/", 1)[-1]
+    if _GIT_WORD_RE.search(word):
+        return True
+    if word in _CMTIDN_GIT_WRAPPERS:
+        return any(_GIT_WORD_RE.search(tok.rsplit("/", 1)[-1]) for tok in tokens[i + 1:])
+    return False
 
 
 def _git_region_open(tokens):
@@ -5443,28 +5480,100 @@ def _git_region_read(command, at):
     return _SpelledWords(words, spelling), i
 
 
+def _skip_balanced_parens(command, i, n):
+    """The index just past the ')' that closes the '(' at index i, single and double quotes and nested
+    parentheses respected, or None when it is unterminated. Reads past a process substitution's body to the
+    word after it."""
+    depth = 0
+    while i < n:
+        c = command[i]
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return None
+            i = j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and command[i] != '"':
+                i += 2 if command[i] == "\\" and i + 1 < n else 1
+            if i >= n:
+                return None
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _construct_end(command, pos):
+    """The index just past the construct the partial lexer stopped at (position pos), so the text after it lexes
+    as the lexer would read it once the redirect is consumed, or None where this reader cannot measure the
+    construct on the same text (an unquoted heredoc whose body is deferred, a '{fd}' redirect, an unbalanced
+    quote, or a substitution). A here-string ('<<<word') is read past its one target word, and a process
+    substitution ('<(...)'/'>(...)') past its balanced parentheses; only these two carry their whole extent on
+    the text the reader can walk."""
+    n = len(command)
+    if command.startswith("<<<", pos):
+        j = pos + 3
+        while j < n and command[j] in " \t":
+            j += 1
+        if j >= n or command[j] == "\n" or command[j] in _METACHARS or command[j] == "#":
+            return None
+        try:
+            _text, _opaque, started, _digits, _tilde, k = _read_word(command, j, n)
+        except ValueError:
+            return None
+        return k if started else None
+    if command.startswith("<(", pos) or command.startswith(">(", pos):
+        return _skip_balanced_parens(command, pos + 1, n)
+    return None
+
+
 def _git_alias_unread(command, stops):
-    """Whether an unparseable command holds a git command whose option region the lexer did not read (A GIT REGION
-    THE LEXER DID NOT READ, above), given stops, the (start, words) pairs its partial lex recorded (_LexStops): a
-    git word of the words read in a segment the lexer stopped inside whose region runs past them, or a git word in
-    the text from the earliest stop on whose region _git_region_read cannot read, or reads with a word that defines
-    a git alias under HOW A WORD IS SPELLED. Each git word inside a region already read is skipped, so the text is
-    read about once."""
-    if any(words is not None and _git_region_open(words) for _start, words in stops):
-        return True
+    """Whether an unparseable command holds a GIT COMMAND of its own whose option region the lexer did not read (A
+    GIT REGION THE LEXER DID NOT READ, above), given stops, the (start, words) pairs its partial lex recorded
+    (_LexStops). Two readings, each scoped to a segment that runs git as its own command (_segment_runs_git_command),
+    never a git word another command merely carries: a segment the lexer stopped inside whose git command's region
+    runs past the words it read (_git_region_open), and, from the earliest stop, the text past each construct the
+    reader can measure (_construct_end), re-lexed quote-aware (so a quoted blank or separator does not shift the
+    region as the de-quoted reading does), each recovered git command denying where its region runs open or a word
+    in it defines a git alias under HOW A WORD IS SPELLED (_git_local_alias). Reading begins only at a command
+    position the lexer reaches, never inside quoted or here-document text. Where a construct cannot be measured, a
+    git command past it stays unread: it denies when the de-quoted reading of the text from there runs a git command
+    as its own command word (de-quoting never hides a command word) and allows when none does."""
+    for _start, words in stops:
+        if words is not None and _segment_runs_git_command(words) and _git_region_open(words):
+            return True
     if not stops:
         return False
-    end = min(start for start, _words in stops)
-    for match in _GIT_WORD_RE.finditer(command, end):
-        if match.start() < end:
-            continue
-        region = _git_region_read(command, match.start())
-        if region is None:
-            return True
-        words, end = region
-        if _git_local_alias(words):
-            return True
-    return False
+    pos = min(start for start, _words in stops)
+    while True:
+        end = _construct_end(command, pos)
+        if end is None:
+            # The reader cannot measure this construct (or the partial lex recovered no position): read the
+            # text from here with the de-quoted reading, which reaches every command past it but cannot undo a
+            # quoted blank or separator that shifts a region (a disclosed residual, as for _git_alias_spelled),
+            # and deny where a git command of its own runs an open or alias-defining region there.
+            return any(_segment_runs_git_command(seg)
+                       and (_git_region_open(seg) or _git_local_alias(seg))
+                       for seg in _git_alias_spelled_segments(command[pos:]))
+        rest = command[end:]
+        with _WordSpellings(), _LexStops() as rstops:
+            recovered = _lex_command(rest, partial=True, skip_empty=True)[0]
+        for seg in recovered:
+            if _segment_runs_git_command(seg.argv) and (_git_region_open(seg.argv)
+                                                        or _git_local_alias(seg.argv)):
+                return True
+        if not rstops.seen:
+            return False
+        command = rest
+        pos = min(start for start, _words in rstops.seen)
 
 
 # The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
