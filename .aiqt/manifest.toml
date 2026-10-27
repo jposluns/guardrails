@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "62a91881cf5e6c6e5fa29e63db328c310b0518c17492a51f128e1333de029fa3"
+tree-sha256 = "c9b338dc1e6e2de2817f01d4df497293f8b931cea2487938e29c28811926e487"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2536,13 +2536,13 @@ sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
 
 [[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
-bytes = 116006
-sha256 = "4873258d90455500c449324c09287c531ec5fec5e889510fda0c4c0eef858970"
+bytes = 118063
+sha256 = "baae33ba5577c7c3e9673f1b1de1208a7b68e3b5c9989832756bef39f3bee68b"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
 bytes = 1816
-sha256 = "ab1619d41ecd16d75ab8efe89ffa4acc4b7da5fa9b88e4e94cd3430e9d139b91"
+sha256 = "9bb0a5dfe3d4a85f4c5f6964a66ef2d60cd817529b1c51ffb65bd8c2aec605e2"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -3046,8 +3046,8 @@ sha256 = "abb63c72d7f706ebf20ebaa8cd497c81279a28a3a6e8b232d2f2bc9acff96536"
 
 [[sources]]
 path = "opf/tools/check_opf_prompt_pack.py"
-bytes = 29444
-sha256 = "b089b183c86fb696cb9b967efd7409c925204a1b2860c22ad9914e3b1c54db7e"
+bytes = 34740
+sha256 = "7ec849b7a916287e1c22724adb8d263dcd926afdb3fdb7307f04bf86e4c75f1b"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
