@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.13** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.14** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -76,29 +76,37 @@ lane applies the `merge-train` label to the train pull request after each push i
 label the pull request already carries fires no `labeled` event (GitHub's behaviour, not verified live
 here), so to run again on the same head it removes the label and adds it back. A member pull request's
 open, push, reopen, retarget or title/body edit schedules no Quality run, so a member head gets no Quality
-run at all; `msg-leaks.yml` still runs on every pull request into main and every push to main. A member
-head's evidence is the local `tools/run_all_checks.sh` run before its push, a process rule, not enforced
-per head. That run FAILS when gitleaks is not on PATH or reports another version than the
-`Secrets (gitleaks)` step of `quality.yml` pins (`tools/check_gitleaks_pin.py`; its live leg is local-only,
-and CI runs its self-test). Behind the trigger, as a second layer, the heavy jobs (`opf`, `opf-adopt`,
-`opf-init`, `selftest-execution`, the four `git-fixture-env-*` lanes, the five host jobs and
-`byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull request whose
-head is a `merge-train-*` branch of this repository; every other job runs in every run. A label added to
-any other pull request into main starts a run whose heavy jobs are skipped, so its `Quality gates` fails by
-design, and a change merges only by riding a train: a squash merge of an up-to-date, labelled
-`merge-train-*` pull request, whose run is the full suite, and the push to `main` runs it again. A newer
-run of the same pull request cancels its superseded run; a push run has a concurrency group of its own and
-is never cancelled. `tools/check_ci_parity.py` and `tools/check_python_host_pin.py` accept exactly the
-pinned `concurrency` block and `if:` line. `tools/ci-status.sh` requires a completed successful run of
-`.github/workflows/quality.yml` on every read, with or without `--require-base` and `--wait`, so a head
-with none (a member head) reads as missing (exit 1), never as passing. It also refuses a commit with any
-non-success run, a cancelled one included, so a cancelled run on a live head (a label added while its run
-is in progress, the `merge-train` label re-applied included, or a push back to an earlier head) needs a
-new head commit, labelled again.
+run at all; `msg-leaks.yml` still runs on every pull request into main and every push to main. Since the
+maintainer's decision of 2026-10-27, a member head's evidence is its named suites plus every
+generated-file `--check` and the manifest check, run locally before its push, a process rule, not enforced
+per head; the full roster is first proven on the train tree by the train pull request's Quality run.
+Whenever the full `tools/run_all_checks.sh` runs, it FAILS when gitleaks is not on PATH or reports another
+version than the `Secrets (gitleaks)` step of `quality.yml` pins (`tools/check_gitleaks_pin.py`; its live
+leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the heavy jobs
+(`opf`, `opf-adopt`, `opf-init`, `selftest-execution`, the four `git-fixture-env-*` lanes, the five host
+jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
+request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
+label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
+`Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
+up-to-date, labelled `merge-train-*` pull request, whose run is the full suite, and the push to `main`
+runs it again. A newer run of the same pull request cancels its superseded run; a push run has a
+concurrency group of its own and is never cancelled. `tools/check_ci_parity.py` and
+`tools/check_python_host_pin.py` accept exactly the pinned `concurrency` block and `if:` line.
+`tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on every
+read, with or without `--require-base` and `--wait`, so a head with none (a member head) reads as missing
+(exit 1), never as passing. It also refuses a commit with any non-success run, a cancelled one included,
+so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
+re-applied included, or a push back to an earlier head) needs a new head commit, labelled again.
 
 The maintainer authorized on 2026-10-25 what member heads no longer get from CI; each still runs once, on
-the train head: every Quality job. The gates in token parity with `tools/run_all_checks.sh` (gitleaks
-included) and the host-patch suites rest on the local run alone. The CI-only pull-request legs
+the train head: every Quality job. Since the maintainer's decision of 2026-10-27, the train pull
+request's Quality run on the identical tree, not the local mirror, is the standing full evidence for the
+gates in token parity with `tools/run_all_checks.sh` (gitleaks included) and the host-patch suites;
+neither a member head's local subset nor the train's fast pre-push subset runs the full roster, and
+nothing in this repository enforces either subset. The fast pre-push subset is a check run on the
+maintainer's host before a train is pushed and is defined outside this repository; the train pull
+request's Quality run is the evidence. Whenever the full local runner runs, its local
+gitleaks-pin leg stays its own requirement. The CI-only pull-request legs
 (branch-root and version monotonicity against the base), the hostile `core.autocrlf` byte-canon legs on
 ubuntu and macOS, setup-python's resolution of `3.14` on the runner, evaluation of the merge ref against
 current main in a clean clone, and CI evidence for each intermediate member commit have no member-head

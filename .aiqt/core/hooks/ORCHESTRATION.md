@@ -48,9 +48,25 @@ the doctor and the resume audit report and arm from it):
 - DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
   `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
   scope the truncation guard denies nothing and allows every Bash call that passes those pre-scope
-  checks. It allows silently, except that a readable foreground command that detaches work (a bare
-  `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with a
-  note naming the tracked background mechanism (`run_in_background`, or a foreground wait); its scan
+  checks. It allows silently, except that a readable foreground command that may detach work gets ONE
+  note naming rule trkasy and the tracked background mechanism (`run_in_background`, or a foreground
+  wait), from the first of two readers that flags it. The first is the detector a session with a
+  registry denies on: a command it reads as a bare `&` detach, and one whose quoting or comments it
+  cannot read to the end (where a later `&` can be a hidden detach), get its note, the second saying
+  the guard could not read the command to its end (a later release turns these notes into the deny a
+  session with a registry already gets). That detector reads a here-document body under an unquoted
+  delimiter and arithmetic as code, so a body `&` there and a bitwise `&` in `$(( ))` or `(( ))` get
+  its note too, accepted over-notes in this warn-first release; a safe command it cannot read to the
+  end, such as a quoted here-document whose body holds an unbalanced apostrophe, also gets it.
+  Otherwise the note scan decides: a readable foreground command that detaches work (a bare
+  `&`, or a `setsid` without `-w`, a `nohup` or a `disown` in command position) is allowed with its
+  note; a command whose every bare `&` the detector lifts, because the shared lexer places each in a
+  quoted here-document body whose end the lexer can prove is where bash ends it, a quoted string or
+  a comment, is no detach, as with a registry, and the lift suppresses only the notes its own shapes
+  cause: the note scan runs again reading those vouched here-document shapes as data, so a `setsid`,
+  `nohup` or `disown` in command position anywhere in the command (one past a quoted here-document
+  body included), a line continuation, an unclosed expansion, and every other cause outside those
+  shapes keeps its note, the one note being the true union of both readers; the note scan
   reads a `#` by the in-scope deny's comment rule, so a `#` whose reading depends on context (right
   after a `)`, as in `x=$(true)#`, or at a word start inside an open `${...}` or backquote
   substitution, as in `echo ${x:- #} & job`) draws the note rather than being read as a comment; a
@@ -175,7 +191,8 @@ the doctor and the resume audit report and arm from it):
   a Bash call whose cwd is missing, empty or not a string in every mode, before its scope check. For a
   Bash call from a non-empty string cwd where git resolves nothing, whether the guard's scope check denies it depends only on its own ancestor walk of
   that cwd and the mode, because its git leg resolves nothing either; its other checks still read the
-  call itself (in scope, a foreground bare `&` is denied): with a regular registry on the walk the scope
+  call itself (in scope, a foreground bare `&` is denied; with no registry found and by default, it is
+  allowed with a warning): with a regular registry on the walk the scope
   check does not deny a plain command in either mode, while a walk it cannot carry out denies in both.
   Git can still resolve a root this process cannot enter (through `core.worktree`, from a session cwd
   inside the repository's git directory). Where that root exists but this process cannot search it, or
