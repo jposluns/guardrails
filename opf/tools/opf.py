@@ -8,12 +8,13 @@
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
 self-test wired in; store verbs that have not yet landed are recognized names that report
 NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub can never read as a
-passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
+passing operation. `render` HAS landed: the `opf render` CLI requires exactly one of
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
-(forwarding to the U4 engine) and `--write` (VC-4/PR-C) is the mutating half: it gathers the inert git-derived
-observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
-`validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
-checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
+(forwarding to the views engine, `_opf_views.render`) and `--write` is the mutating half: it gathers the
+inert git-derived observations caller-side (_opf_observe.gather) and hands them to the same engine, which
+composes the EXISTING doctor `validate_store` store-integrity gate and permits writing when source
+integrity holds. Post-write validation checks source integrity and regenerated outputs; other
+deliverable failures can remain. `doctor` HAS landed: `opf doctor
 [--root DIR] [--require-store]` RESOLVES the store, gathers the inert git-derived observations
 (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
 over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
@@ -127,7 +128,7 @@ def _bootstrap():
         import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
-        import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
+        import _opf_observe     # caller-side git-derived observations for the doctor verb (validate_store)
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
@@ -16575,7 +16576,7 @@ def _cmd_render(rest):
 
     The READ-ONLY `--check` half forwards to the U4 engine `_opf_views.render`, whose 0/1/2 contract is
     exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE
-    and exits 0, the pack's own `--root .` case). The mutating `--write` half (VC-4/PR-C) gathers the inert
+    and exits 0, the pack's own `--root .` case). The mutating `--write` half gathers the inert
     git-derived observations caller-side (_opf_observe.gather over the RESOLVED store, exactly as doctor does)
     and hands them to the same engine, which composes the store-integrity gate and permits the write only
     when source integrity is sound, printing the findings/cannot-evaluates and returning 2 (writing nothing)
@@ -19723,7 +19724,7 @@ def _cli_self_test():
         expect(["render", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
 
-        # doctor verb ROUTING (PR-B), judged on exit code only. Bad-flag / usage cases need no store on disk.
+        # doctor verb ROUTING, judged on exit code only. Bad-flag / usage cases need no store on disk.
         expect(["doctor", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
