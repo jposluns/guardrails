@@ -45,7 +45,7 @@ a C1 control other than U+0085, a surrogate, U+FFFE or U+FFFF, because a YAML re
 file there. The local binary is the first
 gitleaks on PATH; its version is the whole output of gitleaks version, read as X.Y.Z with an optional
 leading v. It fails (exit 1) when no gitleaks is on PATH and when the version it reports differs from the
-pin, so a member push cannot rest on a local run that skipped the scan or ran another version. Any other
+pin, so a full local run cannot pass with the scan skipped or run at another version. Any other
 argument is refused (exit 2).
 
 Exit convention (matches the repo's gates):
