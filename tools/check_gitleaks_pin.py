@@ -2,12 +2,13 @@
 """Require the gitleaks version .github/workflows/quality.yml pins on the local PATH. Offline, stdlib only.
 
 Quality runs on a pull request only when a label is added to it, and the merge lane labels only the train
-pull request, so a member head gets no Quality run at all and its evidence is the local
-tools/run_all_checks.sh run before its push, which includes the gitleaks scan only when gitleaks is
-installed. This gate makes the scan required locally: tools/run_all_checks.sh runs it right after its
+pull request, so a member head gets no Quality run at all. Its evidence is its named suites plus every
+generated-file --check and the manifest check, run locally before its push (a process rule, not enforced
+per head), and the train pull request's Quality run on the identical tree is the standing full evidence.
+Whenever the full tools/run_all_checks.sh runs, it includes the gitleaks scan only when gitleaks is
+installed, so this gate makes the scan required there: tools/run_all_checks.sh runs it right after its
 gitleaks block, so the user-local ~/.local/bin fallback that block appends to PATH applies here too, and
-the run FAILS, never ends in a pass with the scan not run. Nothing enforces that the local run happens
-before each member push: that is a process rule, not enforced per head.
+the run FAILS, never ends in a pass with the scan not run.
 
   check_gitleaks_pin.py              check the local gitleaks against the pin
   check_gitleaks_pin.py --self-test  run the deterministic vectors (stub binaries, no real gitleaks)
@@ -44,7 +45,7 @@ a C1 control other than U+0085, a surrogate, U+FFFE or U+FFFF, because a YAML re
 file there. The local binary is the first
 gitleaks on PATH; its version is the whole output of gitleaks version, read as X.Y.Z with an optional
 leading v. It fails (exit 1) when no gitleaks is on PATH and when the version it reports differs from the
-pin, so a member push cannot rest on a local run that skipped the scan or ran another version. Any other
+pin, so a full local run cannot pass with the scan skipped or run at another version. Any other
 argument is refused (exit 2).
 
 Exit convention (matches the repo's gates):

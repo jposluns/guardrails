@@ -8,8 +8,10 @@ on:
     # already carries fires no labeled event (GitHub's behaviour, not verified live here), so to run
     # on the same head again it removes the label and adds it back. An open, a push, a reopen, a
     # retarget and a title/body edit schedule nothing, so a member head gets no Quality run at all:
-    # its evidence is the local tools/run_all_checks.sh run before its push (a process rule, not
-    # enforced per head), and that run fails when gitleaks is not on PATH or reports another version
+    # its evidence is its named suites plus every generated-file --check and the manifest check, run
+    # locally before its push (a process rule, not enforced per head), and the train pull request's
+    # Quality run on the identical tree is the standing full evidence. Whenever the full
+    # tools/run_all_checks.sh runs, it fails when gitleaks is not on PATH or reports another version
     # than the Secrets (gitleaks) step below pins. A label added to any other pull request into main
     # starts a run whose heavy jobs are skipped (the job-level if: below, the second layer), so its
     # Quality gates fails. A head with no run of this workflow reads as missing, never as passing:
