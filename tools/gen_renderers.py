@@ -71,7 +71,7 @@ import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 from gen_rules import SLUG_RE  # noqa: E402  the authoritative renderer-id slug syntax
 import gen_gensrc  # noqa: E402  reuse its validated GENSRC_OUTPUTS loader, never a second parser
 
@@ -723,7 +723,7 @@ def run(root, check):
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
-    if reconcile(root / RENDERERS_REL, text, check):
+    if reconcile(root / RENDERERS_REL, text, check, root):
         print("drift: {} is out of date; run tools/gen_renderers.py".format(RENDERERS_REL),
               file=sys.stderr)
         return 1
@@ -1195,6 +1195,10 @@ def self_test_main():
         if run_quiet(good, check=True) != 0:
             failures.append("conformant: regeneration expected drift-clean exit 0")
         first = (good / RENDERERS_REL).read_bytes()
+        # .aiqt/ above renderers.toml symlinked outside the root fails closed (exit 2) in --check and write mode
+        # with the file there untouched; symlinked inside the root, it is read and the file rewritten there.
+        failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _fixture(base, _ENTRY_GOOD), run, ".aiqt",
+                                            RENDERERS_REL))
 
         def _determinism_failure(generate):
             rc = generate(good, False)

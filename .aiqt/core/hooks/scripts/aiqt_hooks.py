@@ -133,7 +133,7 @@ metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
-entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
+entry (a '!!' line, never printed without --ignored, reads as malformed, never clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
 No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
 'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
@@ -4830,8 +4830,9 @@ def bash_absolute_paths(data):
 #                           form-classifier cannot resolve - ASKS without ever consulting the probe; and a
 #                           pristine lossy form on a not-provably-clean tree (tracked OR untracked change),
 #                           a worktree the guard cannot resolve to the session cwd, a status probe that did
-#                           not complete, or a softer/index-only discard (clean of untracked files, stash
-#                           drop/clear, branch -D, restore --staged, mixed/path reset, rm --cached) also ASKS.
+#                           not complete or answered malformed, or a softer/index-only discard (clean of
+#                           untracked files, stash drop/clear, branch -D, restore --staged, mixed/path reset,
+#                           rm --cached) also ASKS.
 # The gate is PURELY LEXICAL and never parses the bash grammar: the presence of any shell metacharacter in a
 # lossy-verb command is treated as a reason to ASK (a safe over-ask), so ONLY a metacharacter-free
 # 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
@@ -5726,24 +5727,32 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "refs", "repack", "reset", "restore", "revert", "rm",
     "stash", "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53; the long
-# universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
-# by the eb-e57..e147 differential self-test and an out-of-suite real-git differential; a future git
-# option-table change, such as a new write option absent from the table, is a DISCLOSED drift residual
-# caught by re-validating the table on a git upgrade, with a dedicated option-table drift-tripwire gate a
-# tracked follow-up, GD-158-T7). The classifier is FAIL-SAFE by
+# branch/tag classification (flag behaviour pinned to git 2.53, plus the git 2.56 branch options marked in
+# the table; the long universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated
+# against git 2.53 by the classifier's differential self-test vectors and an out-of-suite real-git
+# differential; a future git option-table change, such as a new write option absent from the table, is a
+# DISCLOSED drift residual caught by re-validating the table on a git upgrade and by the option-table
+# drift-tripwire gate, tools/check_git_option_table.py). The classifier is FAIL-SAFE by
 # construction: it DEFAULTS to MUTATING and returns READ only when every token positively resolves to a
 # recognized read-neutral role and no create/rename/delete TARGET is present (before OR after '--'). A
 # missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
-# spelling form; a missed READ is only an over-ASK (safe), so READ recognition may be incomplete. Roles,
+# spelling form; a missed READ only adds a note (safe), so READ recognition may be incomplete. Roles,
 # one char per long option: 'W' write (immediate mutating); 'L' list trigger (no value); 'V' tag verify
-# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'D'
+# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'Q'
+# filter whose value git REQUIRES even when last (sets list mode; a missing value is malformed); 'D'
 # display taking a REQUIRED value but NOT setting list mode (a following name still creates); 'O' optional
-# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). The long
+# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). One value
+# rule covers every role and both spellings ('=' or a separate argument): an EMPTY value never yields a
+# READ (git refuses an empty filter object or branch, an empty sort key, and an empty --color or --abbrev;
+# the empty values git accepts, --format and --column, only add a note), and neither does a filter value
+# that leads with a dash (git 2.53 refuses '-x' there as a malformed object name; any such value git does
+# accept only adds a note). The classifier does not check a value's content beyond that, so a nonempty
+# value git rejects (an unknown ref or sort key) stays a READ; git refuses that command, so no ref
+# changes. The long
 # universe is a conservative SUPERSET of git's real per-subcommand option table (hidden aliases, the
 # deprecated --set-upstream, and generated --no-* forms included): a MISSING entry could let a unique
 # prefix resolve to a read where real git sees a write or an ambiguity (a fail-open), while an EXTRA entry
-# only over-ASKs. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
+# only adds a note. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
 # --no-without, --no-show-current) are roled W: roling --no-list read would fail-open
 # 'git branch --list --no-list NAME' (a real create). Display negatives (--no-color, --no-sort, ...) are R
 # (no value, no mode; a positional beside them still catches the create).
@@ -5760,10 +5769,16 @@ _GIT_REF_SPECS = {
             "--recurse-submodules": "W", "--no-recurse-submodules": "W",
             "--no-list": "W", "--no-show-current": "W",
             "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
-            # L / F: list trigger and filters (set list mode; F takes a value, optional only when last).
+            # git 2.56: --delete-merged deletes merged local branches; --dry-run and --no-dry-run decide
+            # whether it does, so they are W too (a dry run beside the deletion is judged like the deletion).
+            "--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W",
+            # L / F / Q: list trigger and filters (set list mode; F takes a value, optional only when last;
+            # Q takes a value git requires, so 'git branch --points-at' alone is an error, not a listing).
             "--list": "L",
             "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
-            "--points-at": "F", "--with": "F", "--without": "F",
+            "--with": "F", "--without": "F",
+            "--points-at": "Q",
+            "--forked": "Q",  # git 2.56: lists branches whose upstream matches; implies --list
             # D: required value, NO list mode (a following name creates).
             "--format": "D", "--sort": "D",
             # O: optional '='-attached value only (never consumes a following token).
@@ -5887,8 +5902,9 @@ def _resolve_long_role(name, long_roles):
     (ambiguous, exactly what real git rejects) resolve to None, which the caller treats as MUTATING. The
     universe MUST be a superset of git's real option table: a missing entry could let a prefix resolve
     uniquely to a read where git sees a write or an ambiguity (a fail-open); the table is validated against
-    git 2.53 by the eb differential self-test and an out-of-suite real-git differential, with the drift
-    residual disclosed and a dedicated option-table drift-tripwire gate tracked as follow-up GD-158-T7."""
+    git 2.53 by the classifier's differential self-test vectors and an out-of-suite real-git differential,
+    with the drift residual disclosed and checked by the option-table drift-tripwire gate,
+    tools/check_git_option_table.py."""
     if name in long_roles:
         return long_roles[name]
     matches = [k for k in long_roles if k.startswith(name)]
@@ -5926,7 +5942,7 @@ def _short_cluster_verdict(chars, spec):
 
 
 def _git_ref_cmd_mutating(sub, args):
-    """Fail-safe branch/tag mutation classifier (GD-158 rounds 1-6 + tri-family synthesis). DEFAULTS to
+    """Fail-safe branch/tag mutation classifier. DEFAULTS to
     MUTATING (return True); returns READ (return False) ONLY when every option token resolves to a known
     non-W role with a parseable value form, every positional is absent or covered by list/verify mode, and
     the post-'--' region is empty or covered by list/verify mode. Any unknown, ambiguous, or malformed form
@@ -5952,24 +5968,33 @@ def _git_ref_cmd_mutating(sub, args):
                 if sep:
                     return True  # '=' on a no-value option is malformed -> MUTATING
                 list_mode = True
-            elif role == "F":
-                list_mode = True
-                if not sep:
-                    if i < n and not pre[i].startswith("-"):
-                        i += 1       # separate filter value consumed
-                    elif i < n:
-                        return True  # a dash-leading separate value cannot be certified -> MUTATING
-                    # at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
-            elif role == "D":
-                if not sep:
-                    if i < n and not pre[i].startswith("-"):
-                        i += 1       # separate display value consumed
-                    else:
-                        return True  # missing OR dash-leading required value -> MUTATING (closes D-3)
+            elif role in ("F", "Q", "D"):
+                if role != "D":
+                    list_mode = True  # a filter sets list mode; a display value does not
+                if sep:
+                    value = _val
+                elif i < n:
+                    value = pre[i]
+                    i += 1           # separate value consumed
+                elif role == "F":
+                    continue         # F at end: the filter value is optional-when-last (defaults HEAD)
+                else:
+                    return True      # Q or D at end with no value: git refuses a required value -> MUTATING
+                # One value rule for both spellings, so a form cannot pass in one and fail in the other.
+                if not value:
+                    return True      # an empty value is never certified -> MUTATING
+                # A dash-leading value is never certified either: git 2.53 refuses '-x' as a filter object,
+                # and a separate one may be an option git consumes as the value. Only a D value attached
+                # with '=' may lead with a dash (--sort=-committerdate is a valid descending key).
+                if value.startswith("-") and (role != "D" or not sep):
+                    return True      # -> MUTATING
             elif role == "R":
                 if sep:
                     return True  # '=' on a no-value option -> MUTATING
-            # role "O": optional '='-attached value only; consumes NOTHING following, sets no mode
+            elif role == "O":
+                if sep and not _val:
+                    return True  # an empty '=' value is never certified -> MUTATING
+                # otherwise an optional '='-attached value only; consumes NOTHING following, sets no mode
         else:
             verdict = _short_cluster_verdict(tok[1:], spec)
             if verdict == "MUT":
@@ -6495,17 +6520,24 @@ def _tree_is_clean(repo):
     read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
     (any staged or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False
     when it reports either, None when the probe could not run (a subprocess error, a non-zero return, an
-    unreadable repo). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset
-    --hard' can destroy, so an untracked-only-dirty tree is NOT provably clean.
+    unreadable repo) or answered MALFORMED: a zero-exit answer holding a blank line or an ignored '!!' line,
+    and no change line, is not well-formed output for this call (one 'XY PATH' record per line, and porcelain
+    prints '!!' only under --ignored, which this probe never passes), so such an answer (a broken or
+    substituted git) reads as cannot-evaluate, never as clean. A change line still WINS (False): a raw
+    U+2028/U+0085 path, which a repo-local core.quotePath=false leaves unquoted, is cut by str.splitlines()
+    into its record plus a blank fragment, and False is the stricter answer at the clobber gate (DENY, where
+    None snapshots then allows). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset --hard' can
+    destroy, so an untracked-only-dirty tree is NOT provably clean.
 
     The probe FORCES untracked reporting - 'git -c status.showUntrackedFiles=all status --porcelain
     --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
     file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
     override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
-    carrying both keeps the intent legible. An ignored '!!' entry is treated as clean (porcelain does not emit
-    '!!' without --ignored anyway). A forced checkout or 'clean -x' CAN overwrite/remove an ignored file, but
-    probing --ignored would ASK on every repo carrying build artifacts, so ignored-file loss on those forms is
-    a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
+    carrying both keeps the intent legible. The probe never asks for ignored files, so an ignored file is
+    invisible to it, and a '!!' line in its answer is malformed (above), never clean. A forced checkout or
+    'clean -x' CAN overwrite/remove an ignored file, but probing --ignored would ASK on every repo carrying
+    build artifacts, so ignored-file loss on those forms is a DISCLOSED residual the recovery layer backstops
+    (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
@@ -6521,11 +6553,15 @@ def _tree_is_clean(repo):
             capture_output=True, text=True, timeout=5, env=env)
         if result.returncode != 0:
             return None
+        malformed = False
         for line in result.stdout.splitlines():
             if not line or line[:2] == "!!":
-                continue  # only an ignored entry is treated as clean
+                # a blank line is not a porcelain record, and '!!' is never printed without --ignored, which
+                # this probe does not pass: malformed on its own, but a change line still wins
+                malformed = True
+                continue
             return False  # a tracked change (staged or unstaged) OR an untracked file: not provably clean
-        return True
+        return None if malformed else True  # blank or '!!' lines only: cannot evaluate, never clean
     except Exception:
         return None
 
@@ -10040,8 +10076,8 @@ def git_discard(data):
     if clean is None:
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
         return _discard_recovery_result(
-            kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean", snap, note)
+            kind, "targets a repository whose status probe did not complete or answered malformed, so this "
+                  "guard cannot prove the working tree clean", snap, note)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
         return _deny_with_recovery(kind, snap, note)  # a confirmed whole-tree loss, still recoverable if approved

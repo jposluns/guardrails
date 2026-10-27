@@ -65,7 +65,8 @@ import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cu
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
-from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
+from _standards import (dir_chain_or_absent, dir_or_absent, load_manifests, map_keys,  # noqa: E402
+                        validate_mappings, ManifestError)
 
 
 # Status constants for a single check's outcome.
@@ -103,17 +104,24 @@ def _standards_dir(root):
     return root / ".aiqt" / "standards"
 
 
-def _reachable(path):
+def _reachable(path, root, probe=dir_or_absent):
     """Fail-closed replacement for the `if not X.is_dir()` absence guards. Returns (present, error):
     (True/False, None) when the path is reachable (present dir / genuinely absent), or (None, msg) when
     it EXISTS but cannot be read (an unreadable dir or an unreadable .aiqt/.claude/ parent). is_dir()
     swallows EACCES and returns False, so an unreadable input would read as absent -> NOT APPLICABLE (a
-    false-clean); dir_present raises on EACCES so the caller can render it as MALFORMED (exit 2) in its
-    own Result/tuple shape."""
+    false-clean); dir_or_absent raises on EACCES so the caller can render it as MALFORMED (exit 2) in its
+    own Result/tuple shape. Something there that cannot be read as the directory (a regular file, or a
+    symlink that is dangling, whose target is not a directory or resolves outside root) is (None, msg)
+    too, never read as absent; a symlink to a directory inside root is present and is read. probe is
+    dir_chain_or_absent where the generator that writes the path judges every component under the root,
+    so the reading check refuses the same layouts that writer does."""
     try:
-        return (dir_present(path), None)
+        present, problem = probe(path, root)
     except OSError as exc:
         return (None, "cannot read {}: {}".format(path, exc))
+    if problem is not None:
+        return (None, "{} {} (cannot evaluate)".format(path, problem))
+    return (present, None)
 
 
 def _rebind_map_keys(root):
@@ -136,7 +144,7 @@ def check_c1(root, cache):
     for C2 and C4. Absent core -> NOT APPLICABLE (a read-tree-only install has no core to load); a
     present-but-empty core (a dir with no rule sources) is also NOT APPLICABLE, never a hollow pass."""
     src = _corpus_src(root)
-    present, err = _reachable(src)
+    present, err = _reachable(src, root)
     if err:
         cache["corpus_error"] = True
         return Result("C1", "corpus-loads", MALFORMED, err)
@@ -161,11 +169,17 @@ def _claude_drift(root, corpus):
     Returns (status, detail). Absent .claude/rules/ surface -> NOT APPLICABLE (the adopter did not
     install the Claude surface). Present-but-different or orphaned generated files -> FAIL."""
     claude_dir = root / ".claude" / "rules"
-    present, err = _reachable(claude_dir)
+    # dir_chain_or_absent, as gen_rules probes the same paths: .claude/rules and, before the first read, each
+    # family directory, at every component under the root (.claude/ too).
+    present, err = _reachable(claude_dir, root, dir_chain_or_absent)
     if err:
         return (MALFORMED, err)
     if not present:
         return (NA, "no .claude/rules/ surface installed")
+    for family in ("aiqt", "security"):
+        _present, err = _reachable(claude_dir / family, root, dir_chain_or_absent)
+        if err:
+            return (MALFORMED, err)
     desired = {}
     try:
         for src, _fm, rel in corpus:
@@ -181,7 +195,12 @@ def _claude_drift(root, corpus):
                 drift.append(rel)
         for family in ("aiqt", "security"):
             fam_dir = claude_dir / family
-            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed (MALFORMED), not skip the orphan scan
+            # not is_dir or dir_present: an unreadable .claude parent, or a family path that is there but is
+            # not a directory, must fail closed (MALFORMED), not skip the orphan scan.
+            present, err = _reachable(fam_dir, root, dir_chain_or_absent)
+            if err:
+                return (MALFORMED, err)
+            if present:
                 # os.walk(onerror=raise), not rglob: rglob silently skips an unreadable dir at ANY depth
                 # (concealing an orphan); os.walk surfaces the read error, caught below as MALFORMED.
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_walk_raise):
@@ -229,6 +248,12 @@ def _adapter_drift(root, corpus, adapter):
     out = root.joinpath(*adapter["parts"])
     label = adapter["label"]
     parts = "/".join(adapter["parts"])
+    # dir_chain_or_absent on the directory holding the surface (.github/ for the nested copilot surface), before
+    # the read: the composer refuses to write through a symlink there, so one that resolves outside the root (or
+    # is dangling, or is not a directory) is MALFORMED, never read through and passed.
+    _present, err = _reachable(out.parent, root, dir_chain_or_absent)
+    if err:
+        return (label, MALFORMED, err)
     # Probe by READING, not Path.exists(): on Python 3.12 exists() returns False on EACCES (an unreadable
     # .github/ parent for the nested copilot surface) rather than raising, which would mask a present-but-
     # unreadable surface as a false NOT APPLICABLE. read_bytes distinguishes FileNotFoundError (the adopter
@@ -260,7 +285,9 @@ def _cursor_drift(root, corpus):
     scanned; an adopter's own rules beside it are never read. Absent subtree -> NOT APPLICABLE (the
     adopter did not install the Cursor surface)."""
     cursor_dir = root.joinpath(*gen_cursor.OUT_PARTS)
-    present, err = _reachable(cursor_dir)
+    # dir_chain_or_absent, as gen_cursor probes the same paths: the subtree and, before the first read, the
+    # directory holding each generated .mdc, at every component under the root.
+    present, err = _reachable(cursor_dir, root, dir_chain_or_absent)
     if err:
         return (MALFORMED, err)
     if not present:
@@ -271,6 +298,10 @@ def _cursor_drift(root, corpus):
             desired[gen_cursor.cursor_rel(rel)] = gen_cursor.render_rule(src)
     except (ValueError, OSError) as exc:
         return (MALFORMED, "cannot render a Cursor rule: {}".format(exc))
+    for parent in sorted({(cursor_dir / rel).parent for rel in desired}):
+        _present, err = _reachable(parent, root, dir_chain_or_absent)
+        if err:
+            return (MALFORMED, err)
     drift = []
     try:
         for rel, content in sorted(desired.items()):
@@ -300,7 +331,10 @@ def _skill_drift(root, corpus):
     source, or an unknown cited corpus-id, is a broken install -> MALFORMED (fail closed), so the same
     anti-fabrication gate that guards the generator also guards an installed skill."""
     reserved_dir = root.joinpath(*gen_skill.RESERVED_PARTS)
-    present, err = _reachable(reserved_dir)
+    # dir_chain_or_absent: the reserved subtree at every component under the root (site/ and site/downloads/,
+    # which hold the standalone and zip outputs, too). gen_skill refuses a symlink at any of them, so one that
+    # resolves outside the root (or is dangling, or is not a directory) is MALFORMED, never read through.
+    present, err = _reachable(reserved_dir, root, dir_chain_or_absent)
     if err:
         return (MALFORMED, err)
     if not present:
@@ -352,7 +386,7 @@ def check_c2(root, cache):
     # reconcile against the empty corpus so orphaned .claude/rules files and a stale AGENTS.md are caught
     # (an empty desired set makes every generated file an orphan), exactly as gen_rules.main() does. A
     # bare `not corpus` guard would mask that empty-core case as NOT APPLICABLE.
-    present, err = _reachable(_corpus_src(root))
+    present, err = _reachable(_corpus_src(root), root)
     if err:
         return Result("C2", "no-drift", MALFORMED, err)
     if not present:
@@ -384,11 +418,17 @@ def check_c3(root):
     orchestrator keeps control of reporting. Runs unconditionally: it needs only .claude/rules/, which
     every adopter has. An absent tree trivially conforms."""
     rules = root / ".claude" / "rules"
-    present, err = _reachable(rules)
+    # dir_chain_or_absent, as gen_rules probes the same paths: the tree and each family directory it generates,
+    # at every component under the root (.claude/ too), before the first read.
+    present, err = _reachable(rules, root, dir_chain_or_absent)
     if err:
         return Result("C3", "placement", MALFORMED, err)
     if not present:
         return Result("C3", "placement", NA, "no .claude/rules/ tree installed to validate")
+    for family in ("aiqt", "security"):
+        _present, err = _reachable(rules / family, root, dir_chain_or_absent)
+        if err:
+            return Result("C3", "placement", MALFORMED, err)
     findings = []
     evaluated = 0  # rule files / vendored sources actually checked; 0 means nothing was validated
 
@@ -454,7 +494,7 @@ def check_c4(root, cache):
         return Result("C4", "mappings", SKIPPED, "corpus did not load (see C1)")
     src = _corpus_src(root)
     std = _standards_dir(root)
-    present, err = _reachable(std)
+    present, err = _reachable(std, root)
     if err:
         return Result("C4", "mappings", MALFORMED, err)
     if not present:
@@ -466,7 +506,7 @@ def check_c4(root, cache):
         manifests = load_manifests(std)
     except (ManifestError, OSError) as exc:
         return Result("C4", "mappings", MALFORMED, str(exc))
-    present, err = _reachable(src)
+    present, err = _reachable(src, root)
     if err:
         return Result("C4", "mappings", MALFORMED, err)
     if not present:
@@ -512,10 +552,12 @@ def check_c5(root, cache):
         return Result("C5", "hooks-no-drift", SKIPPED, "corpus did not load (see C1)")
     src_dir = root / ".aiqt" / "core" / "hooks"
     plugin_root = root.joinpath(*gen_hooks.PLUGIN_ROOT_PARTS)
-    src_present, src_err = _reachable(src_dir)
+    src_present, src_err = _reachable(src_dir, root)
     if src_err:
         return Result("C5", "hooks-no-drift", MALFORMED, src_err)
-    surf_present, surf_err = _reachable(plugin_root)
+    # dir_chain_or_absent, as gen_hooks probes the same paths: the plugin root and, before the first read, hooks/
+    # and the directory holding each generated file, at every component under the root.
+    surf_present, surf_err = _reachable(plugin_root, root, dir_chain_or_absent)
     if surf_err:
         return Result("C5", "hooks-no-drift", MALFORMED, surf_err)
     if not surf_present:
@@ -531,6 +573,12 @@ def check_c5(root, cache):
         desired = gen_hooks.build_desired(root, src_dir)
     except (ValueError, OSError) as exc:
         return Result("C5", "hooks-no-drift", MALFORMED, str(exc))
+    hooks_dir = root.joinpath(*gen_hooks.HOOKS_SUBTREE_PARTS)
+    probed = {}
+    for path in (hooks_dir, *sorted({(root / rel).parent for rel in desired})):
+        probed[path], err = _reachable(path, root, dir_chain_or_absent)
+        if err:
+            return Result("C5", "hooks-no-drift", MALFORMED, err)
     drift = []
     try:
         for rel, content in sorted(desired.items()):
@@ -544,11 +592,7 @@ def check_c5(root, cache):
                 drift.append(rel)
         # Orphan scan the RESERVED plugin hooks/ subtree only (100% generated); the plugin.json is in
         # desired and compared above, and .claude-plugin/ is not otherwise walked.
-        hooks_dir = root.joinpath(*gen_hooks.HOOKS_SUBTREE_PARTS)
-        present, err = _reachable(hooks_dir)
-        if err:
-            return Result("C5", "hooks-no-drift", MALFORMED, err)
-        if present:
+        if probed[hooks_dir]:
             for dirpath, _dirs, filenames in os.walk(hooks_dir, onerror=_walk_raise):
                 for fn in sorted(filenames):
                     f = Path(dirpath) / fn
@@ -1352,7 +1396,7 @@ def self_test_main():
         os.chmod(gen_fam, 0o755)  # restore so cleanup can remove it
 
         # 12. An unreadable .aiqt/ PARENT (not the standards/core dirs themselves) must fail closed:
-        #     dir_present() stats THROUGH it and raises EACCES, so the run fails as exit 2 rather than
+        #     dir_or_absent() stats THROUGH it and raises EACCES, so the run fails as exit 2 rather than
         #     reading the children as absent -> NOT APPLICABLE (the F-35 fail-open, where is_dir()
         #     swallows EACCES). Here map_keys()'s rebind trips first. Same root-vs-nonroot guard.
         badparent = tmp / "badparent"
@@ -1482,6 +1526,144 @@ def self_test_main():
                 failures.append("unreadable plugin hooks/ expected C5 MALFORMED:\n{}".format(out))
         os.chmod(hooks_surface, 0o755)  # restore so cleanup can remove it
 
+        # 17. An input that is there but is not a directory fails closed (exit 2, MALFORMED), never read
+        #     as absent -> NOT APPLICABLE: (a) a regular file at .aiqt/core/rules (C1), (b) at .claude/rules
+        #     (C3), (c) at a generated family .claude/rules/security, which the C2 orphan scan would skip.
+        for label, rel, cid in (("17a core rules", (".aiqt", "core", "rules"), "C1"),
+                                ("17b .claude/rules", (".claude", "rules"), "C3"),
+                                ("17c generated family", (".claude", "rules", "security"), "C2")):
+            nondir = tmp / ("nondir-" + label.split()[0])
+            nondir.mkdir()
+            _build_conformant(nondir)
+            shutil.rmtree(nondir.joinpath(*rel))
+            nondir.joinpath(*rel).write_text("not a directory\n", encoding="utf-8")
+            code, out = run_capture(nondir)
+            if code != 2 or status_of(out, cid) != MALFORMED:
+                failures.append("{} that is a regular file expected exit 2 + {} MALFORMED, got {}:\n{}".format(
+                    label, cid, code, out))
+
+        # 18. The same three inputs as symlinks: one to the directory moved elsewhere inside the root is read
+        #     (exit 0, PASS); one that is dangling, one to a regular file inside the root, and one to the
+        #     directory moved outside the root (a conformant tree, so following it would pass) fail closed
+        #     (exit 2, MALFORMED), never read as absent or followed.
+        for label, rel, cid in (("18a core rules", (".aiqt", "core", "rules"), "C1"),
+                                ("18b .claude/rules", (".claude", "rules"), "C3"),
+                                ("18c generated family", (".claude", "rules", "security"), "C2")):
+            for shape, want_code, want_status in (("in-root", 0, PASS), ("dangling", 2, MALFORMED),
+                                                  ("to-file", 2, MALFORMED), ("outside", 2, MALFORMED)):
+                linked = tmp / "linked-{}-{}".format(label.split()[0], shape)
+                linked.mkdir()
+                _build_conformant(linked)
+                link = linked.joinpath(*rel)
+                if shape == "in-root":
+                    target = linked / "shared" / rel[-1]
+                elif shape == "outside":
+                    target = tmp / "outside-{}".format(label.split()[0])
+                elif shape == "to-file":
+                    target = linked / "target.txt"
+                else:
+                    target = linked / "absent"
+                if shape in ("in-root", "outside"):
+                    target.parent.mkdir(exist_ok=True)
+                    shutil.move(str(link), str(target))
+                else:
+                    shutil.rmtree(link)
+                if shape == "to-file":
+                    target.write_text("not a directory\n", encoding="utf-8")
+                link.symlink_to(target if shape == "outside" else os.path.relpath(target, link.parent))
+                code, out = run_capture(linked)
+                if code != want_code or status_of(out, cid) != want_status:
+                    failures.append("{} as a symlink {} expected exit {} + {} {}, got {}:\n{}".format(
+                        label, shape, want_code, cid, want_status, code, out))
+
+        # 19. A directory at any depth above a generated Cursor, hooks plugin, Claude rule, chat-skill or copilot
+        #     file, judged as its writer judges it before writing there: .cursor/ above the reserved subtree and
+        #     the aiqt family inside it (C2), plugin/ above the plugin root, hooks/scripts/ and .claude-plugin/
+        #     (C5), .claude/ above the read tree (C2 and C3, as gen_rules) and .github/ above the copilot surface
+        #     (C2). A symlink to the directory moved elsewhere inside the root is read (exit 0, PASS); one to it
+        #     moved outside the root (a conformant surface, so following it would pass) fails closed (exit 2,
+        #     MALFORMED).
+        for label, rel, cids in (("19a .cursor", (".cursor",), ("C2",)),
+                                 ("19b cursor family", gen_cursor.OUT_PARTS + ("aiqt",), ("C2",)),
+                                 ("19c plugin", ("plugin",), ("C5",)),
+                                 ("19d hooks/scripts", gen_hooks.HOOKS_SUBTREE_PARTS + ("scripts",), ("C5",)),
+                                 ("19e .claude-plugin", gen_hooks.PLUGIN_ROOT_PARTS + (".claude-plugin",), ("C5",)),
+                                 ("19i .claude", (".claude",), ("C2", "C3")),
+                                 ("19k .github", (".github",), ("C2",))):
+            for shape, want_code, want_status in (("in-root", 0, PASS), ("outside", 2, MALFORMED)):
+                linked = tmp / "deep-{}-{}".format(label.split()[0], shape)
+                linked.mkdir()
+                _build_conformant(linked)
+                _build_hooks(linked)
+                link = linked.joinpath(*rel)
+                if shape == "in-root":
+                    target = linked / "shared" / rel[-1]
+                else:
+                    target = tmp / "outside-{}".format(label.split()[0])
+                target.parent.mkdir(exist_ok=True)
+                shutil.move(str(link), str(target))
+                link.symlink_to(target if shape == "outside" else os.path.relpath(target, link.parent))
+                code, out = run_capture(linked)
+                if code != want_code or any(status_of(out, cid) != want_status for cid in cids):
+                    failures.append("{} as a symlink {} expected exit {} + {} {}, got {}:\n{}".format(
+                        label, shape, want_code, "/".join(cids), want_status, code, out))
+
+        # 19j. site/ above a valid chat-skill surface (its reserved subtree, standalone text and zips), judged as
+        #      gen_skill judges it before writing there: a symlink to it moved elsewhere inside the root is read
+        #      (the skill surface PASS); one to it moved outside the root fails closed (exit 2, the skill surface
+        #      MALFORMED). The fixture's added skill rules drift the other surfaces, so only the skill is judged.
+        for shape, want_code, want_skill in (("in-root", None, "skill: PASS"), ("outside", 2, "skill: MALFORMED")):
+            linked = tmp / "deep-19j-{}".format(shape)
+            linked.mkdir()
+            _build_conformant(linked)
+            _add_skill_surface(linked)
+            link = linked / "site"
+            target = linked / "shared" / "site" if shape == "in-root" else tmp / "outside-19j"
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(link), str(target))
+            link.symlink_to(target if shape == "outside" else os.path.relpath(target, link.parent))
+            code, out = run_capture(linked)
+            if want_skill not in out or want_code not in (None, code):
+                failures.append("19j site as a symlink {} expected {}{}, got exit {}:\n{}".format(
+                    shape, want_skill, "" if want_code is None else " and exit {}".format(want_code), code, out))
+
+        # 19f. .cursor/ or plugin/ that is a symlink to an empty directory, which holds no surface below it: inside
+        #      the root, the surface is absent (C2 cursor or C5 NOT APPLICABLE, exit 0); outside the root, it fails
+        #      closed (exit 2, MALFORMED), never read as an absent surface, as gen_cursor and gen_hooks refuse to
+        #      create one there.
+        for label, rel, cid, want_in_root in (("19f .cursor", (".cursor",), "C2", PASS),
+                                              ("19g plugin", ("plugin",), "C5", NA)):
+            for shape, want_code, want_status in (("in-root", 0, want_in_root), ("outside", 2, MALFORMED)):
+                linked = tmp / "empty-{}-{}".format(label.split()[0], shape)
+                linked.mkdir()
+                _build_conformant(linked)
+                _build_hooks(linked)
+                link = linked.joinpath(*rel)
+                shutil.rmtree(link)
+                if shape == "in-root":
+                    target = linked / "shared" / rel[-1]
+                else:
+                    target = tmp / "empty-outside-{}".format(label.split()[0])
+                target.mkdir(parents=True)
+                link.symlink_to(target if shape == "outside" else os.path.relpath(target, link.parent))
+                code, out = run_capture(linked)
+                if code != want_code or status_of(out, cid) != want_status:
+                    failures.append("{} as a symlink {} to an empty directory expected exit {} + {} {}, got {}:\n{}"
+                                    .format(label, shape, want_code, cid, want_status, code, out))
+
+        # 19h. dir_chain_or_absent judges only a path under the root: one elsewhere, or one holding a ..
+        #      component (which would climb out between the components it judges), is refused with a reason,
+        #      never judged as present or absent.
+        (tmp / "chain" / "a").mkdir(parents=True)
+        for label, path in (("elsewhere", tmp / "good"),
+                            ("holding a .. component", tmp / "chain" / "a" / ".." / "..")):
+            try:
+                got = dir_chain_or_absent(path, tmp / "chain")
+            except (OSError, ValueError) as exc:
+                got = "raised {}".format(type(exc).__name__)
+            if not (isinstance(got, tuple) and got[0] is False and got[1]):
+                failures.append("dir_chain_or_absent on a path {} expected a refusal, got {!r}".format(label, got))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1513,7 +1695,13 @@ def self_test_main():
           "orphan, or an orphaned surface with no source; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
-          "hooks subtree), and a bad --root fail closed" + skip_note)
+          "hooks subtree), a regular file or a symlink that is dangling, to a regular file or to a directory "
+          "outside the root at the core rules, .claude/rules or a generated family, a symlink to a directory "
+          "outside the root at .cursor/, a Cursor family, plugin/, hooks/scripts/, .claude-plugin/, .claude/, "
+          "site/ or .github/ (an empty "
+          "one at .cursor/ or plugin/ included), and a bad --root fail closed; a symlink there to a directory "
+          "inside the root is read and passes; the every-component probe refuses a path outside the root or "
+          "holding a .. component" + skip_note)
     return 0
 
 

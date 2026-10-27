@@ -186,8 +186,9 @@ python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); impor
 findings. In the observation TOML, read:
 
 - `observation_digest`: the planning worksheet must quote it exactly.
-- `ancestry.adoption`: `first-adoption` or `re-adoption`. A pointer, a resolved store manifest,
-  or content at a reserved `.working` name makes it re-adoption.
+- `ancestry.adoption`: `first-adoption` or `re-adoption`. A pointer or a resolved store
+  manifest makes it re-adoption; a tree with neither is a first adoption, manifestless
+  content at a reserved `.working` name included.
 - `resolution.status`: whether a store already resolves. A store that does not resolve needs an
   `init-store` operation in the plan; a store that resolves must not have one.
 - `candidates`: every path that needs a disposition. These are the confirmed sources, foreign

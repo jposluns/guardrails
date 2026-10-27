@@ -400,9 +400,9 @@ _RESIDUALS = (
 # Disclosed only on a homes-2 report, so a legacy report's residuals are unchanged.
 _HOMES2_RESIDUALS = (
     "Journal contents are not inspected by doctor, except that it lists the id reservation home of each "
-    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read awaits "
-    "the homes-2 revision of spec section 4.2, which still says doctor excludes journals (a release "
-    "dependency). A staged plan does not prove recoverability. "
+    "journal kind and reads each reservation file's bytes, for the reserved numbers alone; that read is the "
+    "one exception spec section 4.2 makes to doctor excluding journals, read-only and for the section 8.2 "
+    "counter checks alone. A staged plan does not prove recoverability. "
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
     "A reserved number that no present record carries is treated as issued only where the prior committed "
@@ -799,7 +799,7 @@ def _close_fd_quietly(fd):
     """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
     (EINTR / EIO / EBADF) during teardown cannot crash the validator. The store verdict is already computed
     (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
-    never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
+    never itself the store's verdict (fail-closed teardown).
 
     Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
     counts as released and is never touched again: no fstat or fcntl probe, no second close. close(2) on
@@ -843,8 +843,8 @@ def _list_contained(root_fd, reldir):
                 entries = sorted(os.listdir(dfd))
             except OSError as exc:
                 # An I/O error listing the opened directory (EIO, ENOMEM, EBADF from an exotic fd) is a
-                # fail-closed StoreError naming the directory, never a raw OSError escaping the barrier
-                # (S1-F1); it routes through _list_dir to a named CANNOT-EVALUATE like the os.stat case.
+                # fail-closed StoreError naming the directory, never a raw OSError escaping the
+                # barrier; it routes through _list_dir to a named CANNOT-EVALUATE like the os.stat case.
                 raise StoreError("cannot list {} no-follow ({})".format(reldir, exc))
             for entry in entries:
                 try:
@@ -2475,13 +2475,13 @@ def _reserved_numbers(root_fd, rep):
     """Homes 2: the numbers the id reservations hold, per series key as {series key: set of numbers}, and
     whether every reservation evaluated. C-NO-DELETION and C-CONTIGUITY skip such a number only where no
     present record carries it and the prior committed snapshot held no record with that id
-    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2
-    defines the reservation and the next-ID derivation, not this grading, and the grading does not reach
-    the release: no span can cover a reserved worklog number that no entry carries (spec 6.1), so the
-    release cut refuses a tail with one below its highest entry however doctor grades it. Reading the
-    journals at all is the one exception to the spec 4.2 sentence that doctor excludes journals, and it
-    awaits the homes-2 revision of that section (a release dependency). The homes are the allocations/
-    home under journals/ of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
+    (_split_reserved), so this reads each reservation read-only and for that purpose alone. Spec 8.2 at
+    2.0.0 defines the reservation, the next-ID derivation and this grading (the doctor treats a reserved
+    number as issued), and spec 4.2 names this read-only reservation read as the one exception to its
+    rule that doctor excludes journals. The grading does not reach the release: no span can cover a
+    reserved worklog number that no entry carries (spec 6.1), so the release cut refuses a tail with one
+    below its highest entry however doctor grades it. The homes are the allocations/ home under journals/
+    of every kind in _opf_store.JOURNAL_KINDS (read at call time), each derived through
     _opf_store.allocation_record, listed and read through the contained no-follow readers; no journal
     frame, projection or run directory is opened. A reservation is judged as the record writer judges
     one: its file name binds a run id of its own kind, and its bytes equal the exact canonical payload
@@ -2990,7 +2990,8 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
     closed); each of these causes is a CANNOT-EVALUATE naming it:
       - `unevaluated` names the clean-record readers (C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM)
         that did not evaluate; the records they could not seat are not graded, and the rules still run
-        over the records in `recs` unless the next cause stops one;
+        over the records in `recs` unless the next cause stops one. That one message covers both
+        provenance-keyed arms, so they are handed no `unevaluated` of their own here;
       - `unread` names the record types the collectors could not read in full, including where a reader
         reports only a finding (a record left unseated, a moved row its destination does not confirm),
         and _make_rec's `unparsed` names the records whose status, links, scopes or actor kind could not
@@ -3067,7 +3068,7 @@ def _firewall_partial(recs, rep, cid, unread, types, rule):
     return True
 
 
-def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
+def _check_importer_receipts(recs, rep, cid, unread=frozenset(), unevaluated=()):
     """The section 8.6 receipt firewall over the clean record set `recs`, keyed on provenance and reported
     under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-RECEIPTS otherwise): "a clean
     backlog item reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor". A
@@ -3083,9 +3084,15 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
     (_FIREWALL_RESIDUALS discloses both). The arm reads the backlog_item, done and maintainer_decision
     records, so when one of those types is in `unread` or a record of one has a status, links or actor
     kind that could not be interpreted, it is CANNOT-EVALUATE naming the cause and is not run
-    (_firewall_partial): a receipt or remedy whose author is unknown neither confers nor withholds. An
-    imported-series row is skipped, as in the receipt join: it is no receipt and no remedy, and owes no
-    receipt (the driver never passes one; the skip is the backstop for a direct caller)."""
+    (_firewall_partial): a receipt or remedy whose author is unknown neither confers nor withholds.
+    `unevaluated` names the clean-record checks that did not evaluate: when one of those types is also in
+    `unread`, the arm is CANNOT-EVALUATE naming them too, never a pass, and is not run; with only other
+    types unread they do not stop the arm. An imported-series row is skipped, as in the
+    receipt join: it is no receipt and no remedy, and owes no receipt (the driver never passes one; the
+    skip is the backstop for a direct caller)."""
+    if unevaluated and unread & {"backlog_item", "done", "maintainer_decision"}:
+        rep.cant("{}: {} did not evaluate, so the receipt firewall (spec 8.6) is not evaluated over the "
+                 "clean records it could not seat".format(cid, ", ".join(unevaluated)))
     if _firewall_partial(recs, rep, cid, unread, {"backlog_item", "done", "maintainer_decision"},
                          "receipt firewall"):
         return
@@ -3115,7 +3122,7 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
                         "(spec 8.6)".format(cid, r.id, ", ".join(sorted(_safe_display(d.id) for d in mine))))
 
 
-def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset()):
+def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset(), unevaluated=()):
     """The section 8.6 decision-chain arm over the clean record set `recs`, keyed on provenance and
     reported under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-DECISION-CHAINS
     otherwise): "An importer-authored decision MUST NOT be treated as the current effective resolution of a
@@ -3129,7 +3136,12 @@ def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset()):
     clean decision. A resolution by any other actor is not graded here. When the pending_decision records
     are in `unread`, or one has a status, links or actor kind that could not be interpreted, the arm is
     CANNOT-EVALUATE naming the cause and is not run (_firewall_partial): a member not read, or one whose
-    author is unknown, could be the importer-authored resolution or hide it."""
+    author is unknown, could be the importer-authored resolution or hide it. `unevaluated` is read as in
+    _check_importer_receipts: when the pending_decision records are also in `unread`, the arm is
+    CANNOT-EVALUATE naming the checks that did not evaluate too, never a pass, and is not run."""
+    if unevaluated and "pending_decision" in unread:
+        rep.cant("{}: {} did not evaluate, so the decision-chain firewall (spec 8.6) is not evaluated "
+                 "over the clean records it could not seat".format(cid, ", ".join(unevaluated)))
     if _firewall_partial(recs, rep, cid, unread, {"pending_decision"}, "decision-chain firewall"):
         return
     for _members, current in decision_chains(recs, by_id, firewall=False):
@@ -4300,7 +4312,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
                  "({})".format(type(exc).__name__, exc))
     finally:
         # The store verdict is already computed by the barrier above; a descriptor close that raises
-        # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (S4-F3, outside B6).
+        # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (outside B6).
         # Any other exception a close raises never abandons the other close, and goes through the one
         # first-interrupt selection, so an interrupt in flight here keeps propagating as itself.
         inflight, raised = _journal._in_flight_in(sys._getframe()), []
@@ -4555,19 +4567,23 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # and decision-chain arms below; otherwise that check is off the roster (spec 4.2), so the two arms
     # report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard, with the same `unread` set, so
     # each arm is CANNOT-EVALUATE over a partial set on either path. A store holding an importer-authored
-    # clean record discloses the firewall residuals either way.
+    # clean record discloses the firewall residuals either way. Either way the two arms also fail closed on
+    # a clean-record reader that did not evaluate (spec 8.3/8.6): `unseated` names those readers, and here
+    # an arm whose own record types are unread is then CANNOT-EVALUATE naming them, never a pass.
+    unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
+                if rep.checks.get(cid) == "CANNOT-EVALUATE"]
     if any(r.actor_kind == "importer" for r in recs):
         rep.disclose_firewall()
     rep.ran("C-RECEIPTS")
     _check_receipts(recs, by_id, rep, unread)
     if not imported:
-        _check_importer_receipts(recs, rep, "C-RECEIPTS", unread)
+        _check_importer_receipts(recs, rep, "C-RECEIPTS", unread, unseated)
     rep.ran("C-HANDOFF")
     _check_handoff(recs, rep, unread)
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep, unread)
     if not imported:
-        _check_importer_chains(recs, by_id, rep, "C-DECISION-CHAINS", unread)
+        _check_importer_chains(recs, by_id, rep, "C-DECISION-CHAINS", unread, unseated)
     rep.ran("C-LINKS")
     # C-LINKS reads the rows C-IMPORTED-SCHEMA read, and resolves a target only among those the per-series
     # id grading above reads as series members, keyed by (series key, id) so a same-id row in another leaf
@@ -4585,8 +4601,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # `unparsed` as the joins do (spec 8.3/8.6); its provenance-keyed arms run on an inactive store too
     # (above) ------
     if imported:
-        unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
-                    if rep.checks.get(cid) == "CANNOT-EVALUATE"]
         rep.ran("C-IMPORTED-SEGREGATION")
         _check_imported_segregation(recs, by_id, unseated, rep, unread)
 
@@ -7769,13 +7783,15 @@ def self_test():
                   _i3_off(_i3_flip("_check_imported_segregation", _i3_link(*_i3_refused[0])),
                           "C-IMPORTED-SEGREGATION"))
             # Fail-closed: a clean index nothing could read leaves its records unseated, so the firewall
-            # is CANNOT-EVALUATE naming the reader that did not evaluate, never a pass over them.
+            # is CANNOT-EVALUATE naming the reader that did not evaluate, never a pass over them, in one
+            # message for all its arms (red when the check also hands its arms the unseated list).
             _i3_sgu = _i3_machine()
             _i3_sgu["done.index.toml"] = "record = [ not toml"
             _i3_sgur = _i3_run(_i3_sgu)
             check("imported-segregation-unread-clean-records-cannot-evaluate",
                   _i3_sgur is not None and _i3_sgur.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
-                  and any("C-RECORDS did not evaluate" in m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION")))
+                  and any("C-RECORDS did not evaluate" in m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION"))
+                  and len([m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION") if "did not evaluate" in m]) == 1)
             # The other two fail-closed arms, each on its own store: an archive bucket whose
             # archive.toml cannot be read makes C-ARCHIVE-ENUM CANNOT-EVALUATE, and a per-record
             # registry row that is not a table makes C-PERRECORD-RECONCILE CANNOT-EVALUATE; the
@@ -9421,6 +9437,48 @@ def self_test():
         _fw_hist = _fw_run(f, _fw_dig)
         check("firewall-inactive-legacy-history-valid",
               _fw_hist is not None and _fw_hist.status == VALID and _fw_disclosed(_fw_hist))
+        # The firewall fails closed on this inactive store as on an active one: a clean-record reader that
+        # did not evaluate leaves its records unseated, so each arm whose own record types are unread is
+        # CANNOT-EVALUATE naming that reader in one message, never a pass over them (red when the driver
+        # hands an arm no unseated list, or the reader leaves that list), and is not run, so it grades none
+        # of the records it did seat (red when either arm runs past its cant). An unread pending_decision
+        # index or registry leaves only the decision-chain arm's type unread, so only that arm is checked
+        # there. The first store is the importer-current-resolution store above with its index unreadable;
+        # the last joins the importer-only receipt and importer-current-resolution stores above beside an
+        # unreadable archive, so each arm has a seated finding it does not raise.
+        def _fw_unseated(r, reader, arms=("C-RECEIPTS", "C-DECISION-CHAINS")):
+            def cants(cid):
+                return [m for m in r.by_check.get(cid, []) if "did not evaluate" in m]
+            return (r is not None and r.status == CANNOT_EVALUATE and r.checks.get(reader) == "CANNOT-EVALUATE"
+                    and all(r.checks.get(cid) == "CANNOT-EVALUATE" and len(cants(cid)) == 1
+                            and cants(cid)[0].startswith("{}: {} did not evaluate".format(cid, reader))
+                            for cid in arms))
+
+        _fw_chain = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        f = clean_machine()
+        f["pending_decision.index.toml"] = _opf_emit.emit(_fw_chain) + "\n[[[ broken\n"
+        f["counters.toml"] = counters(PD=2)
+        check("firewall-inactive-unread-records-cannot-evaluate",
+              _fw_unseated(run(f), "C-RECORDS", ("C-DECISION-CHAINS",)))
+        f = clean_machine()
+        f["archive/2026/archive.toml"] = "moved = [ not toml"
+        check("firewall-inactive-unread-archive-cannot-evaluate", _fw_unseated(run(f), "C-ARCHIVE-ENUM"))
+        f = copy.deepcopy(pr_machine)
+        f["pending_decision.index.toml"] = "schema = 1\nrecord = [ 7 ]\n"
+        check("firewall-inactive-unread-perrecord-cannot-evaluate",
+              _fw_unseated(run(f, product=pr_product, obs=pr_obs), "C-PERRECORD-RECONCILE",
+                           ("C-DECISION-CHAINS",)))
+        f = _fw_receipt()
+        f["pending_decision.index.toml"] = copy.deepcopy(_fw_chain)
+        f["counters.toml"] = counters(PD=2)
+        f["archive/2026/archive.toml"] = "moved = [ not toml"
+        _fw_sd = _fw_run(f, _fw_dig)
+        check("firewall-inactive-unseated-still-grades-seated",
+              _fw_unseated(_fw_sd, "C-ARCHIVE-ENUM")
+              and not any("'BI-1' is authored by a non-importer actor" in m
+                          for m in _fw_sd.by_check.get("C-RECEIPTS", []))
+              and not any("'PD-2' is the current effective resolution" in m
+                          for m in _fw_sd.by_check.get("C-DECISION-CHAINS", [])))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
@@ -9586,7 +9644,7 @@ def self_test():
 
         # --- range-bounding: a huge declared high-water and span must NOT expand (F15). The engine must
         # terminate promptly (the overhang finding carries a COUNT, not a list), so the two vectors run
-        # behind a bounded child (S7-F1): a range-expansion REGRESSION would otherwise hang or OOM the
+        # behind a bounded child: a range-expansion REGRESSION would otherwise hang or OOM the
         # suite in-process; here it trips a deterministic TIMEOUT/OOM sentinel the status assertions
         # catch. Requires os.fork; a fork-less host fails the setup check closed. ------------------------
         if not hasattr(os, "fork"):
@@ -9941,7 +9999,7 @@ def self_test():
               b5r is not None and b5r.status in (INVALID, CANNOT_EVALUATE))
 
         # --- B4: a FIFO planted as a declared read target fails closed to CANNOT-EVALUATE, never an
-        # unbounded BLOCK on the reader. The validate_store call runs behind a bounded child (S7-F2): a
+        # unbounded BLOCK on the reader. The validate_store call runs behind a bounded child: a
         # regression that opened the FIFO for a blocking read would HANG the suite in-process; here it trips
         # a TIMEOUT sentinel the assertion rejects. The setup needs os.mkfifo AND os.fork, so a host missing
         # either fails the setup check closed rather than silently skipping the no-hang guarantee. ---------
@@ -9961,7 +10019,7 @@ def self_test():
 
             check("b4-fifo-target-cannot-eval-not-hang", run_bounded(_fifo_probe) == "CANT-REGFILE")
 
-        # --- S1-F1: an OSError from os.listdir inside _list_contained maps to a fail-closed StoreError
+        # --- Listing leg: an OSError from os.listdir inside _list_contained maps to a fail-closed StoreError
         # (routed by _list_dir to a named CANNOT-EVALUATE), never a raw OSError escaping the walk; pre-fix
         # only the os.stat leg was wrapped. Exercised by forcing os.listdir to raise over a real dir fd. ---
         _s1_dir = base / "s1-listdir"
@@ -9986,7 +10044,7 @@ def self_test():
             _close_fd_quietly(_s1_fd)
         check("s1-listdir-oserror-is-storeerror", _s1_outcome == "storeerror")
 
-        # --- S1-F1 (close leg): the _list_contained `finally` closes are guarded, so a teardown close that
+        # --- Close leg: the _list_contained `finally` closes are guarded, so a teardown close that
         # raises does not escape as a raw OSError; pre-fix the raw os.close there propagated (reaching a
         # CANNOT-EVALUATE only via the far B6 barrier, spuriously downgrading a VALID store). Patch os.close
         # to really-close-then-raise over a real dir walk and confirm _list_contained still returns its
@@ -10129,7 +10187,7 @@ def self_test():
             check("p1-close-fd-quietly-probe-flip-red-by-probe-alone-" + _q_tag,
                   _q_vector(_q_probe, _q_err) == ["probe"])
 
-        # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
+        # --- Teardown closes: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
         # swallowed rather than crash the validator after the verdict is already computed. Exercised by
         # patching os.close to really close then raise for the whole call: post-fix the guarded finally
