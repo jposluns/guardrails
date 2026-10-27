@@ -2,6 +2,7 @@
 """opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
+  opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; the CI shards)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
@@ -47,9 +48,12 @@ nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readines
 the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
 `opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
 and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed. `complete`
-and `reconcile` are recognized and refuse (exit 2) until the completion and recovery stages land in a later
-PR.
+refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed.
+`opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
+alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
+own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
+safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -933,6 +937,57 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
+def _self_test_group_probe(registry):
+    """Flip the group partition and the selector. Each synthetic grouping of the live registry must yield its
+    fault; over a synthetic registry of recording callables, a group runs exactly its own labels in registry
+    order and forwards the worst outcome, a broken partition and an unknown name return 2 having run nothing,
+    and main() hands `--self-test-group NAME` to the selector. Returns a list of the discrepancies."""
+    from unittest.mock import patch
+    misses = []
+    groups = SELF_TEST_GROUPS
+    first, last = groups[0], groups[-1]
+    cases = (
+        ("a leg left out", registry, groups[:-1] + ((last[0], last[1][1:]),),
+         last[1][0] + " is in no group (left out)"),
+        ("a leg doubled", registry, ((first[0], first[1] + last[1][:1]),) + groups[1:],
+         last[1][0] + " is grouped 2 times (doubled)"),
+        ("an unregistered label", registry, ((first[0], first[1] + ("synthetic-stale",)),) + groups[1:],
+         "synthetic-stale is grouped, but no registry entry has that label"),
+        ("an empty group", registry, groups + (("synthetic-empty", ()),), "group synthetic-empty is empty"),
+        ("a group named twice", registry, groups + ((first[0], ()),), "group {} is named 2 times".format(first[0])),
+        ("a label registered twice", registry + registry[:1], groups,
+         "{} is registered 2 times".format(registry[0][0])),
+    )
+    for label, table, grouping, want in cases:
+        if want not in _self_test_group_faults(table, grouping):
+            misses.append("group case {!r} not named".format(label))
+    ran = []
+
+    def leg(label, code):
+        def run():
+            ran.append(label)
+            return code
+        return run
+
+    table = (("one", leg("one", 0)), ("two", leg("two", 1)), ("three", leg("three", 0)))
+    split = (("odd", ("three", "one")), ("even", ("two",)))
+    for name, grouping, want in (("odd", split, (0, ["one", "three"])), ("even", split, (1, ["two"])),
+                                 ("synthetic-unknown", split, (2, [])),
+                                 ("odd", (("odd", ("one", "three")),), (2, [])),
+                                 ("odd", split + (("again", ("one",)),), (2, []))):
+        del ran[:]
+        got = (run_self_test_group(name, grouping, table), list(ran))
+        if got != want:
+            misses.append("group selector over {!r} with {!r}: got {!r}, expected {!r}".format(
+                name, grouping, got, want))
+    handed = []
+    with patch.object(sys.modules[__name__], "run_self_test_group", lambda name: handed.append(name) or 0):
+        got = (main(["--self-test-group", "synthetic-name"]), handed)
+    if got != (EXIT_OK, ["synthetic-name"]):
+        misses.append("main() does not hand --self-test-group NAME to the selector: got {!r}".format(got))
+    return misses
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
@@ -943,7 +998,9 @@ def _aggregator_self_test():
     module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
     (_self_test_floor) requires every module whose self_test is registered below and fails on an empty
     registry, an empty scan, or a registered callable that is not its module's self_test and not exempt; and
-    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is."""
+    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is. It
+    holds SELF_TEST_GROUPS to a partition of the registry (_self_test_group_faults) and flips the partition, the
+    group selector and its main() wiring (_self_test_group_probe)."""
     import tempfile
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
@@ -951,13 +1008,16 @@ def _aggregator_self_test():
     registry = _self_tests()
     required, faults = _self_test_floor(registry, here, _ENTRY_FLOOR_EXEMPT)
     gaps, exposers = _self_test_entry_gaps(here, required)
+    group_faults = _self_test_group_faults(registry, SELF_TEST_GROUPS)
     with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
-        missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
-    if gaps or faults or missed:
+        missed = (_self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+                  + _self_test_group_probe(registry))
+    if gaps or faults or missed or group_faults:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
-              "registry floor faults: {}; synthetic probe discrepancies: {})".format(
+              "registry floor faults: {}; self-test group faults: {}; synthetic probe discrepancies: {})".format(
                   "; ".join("{} ({})".format(k, v) for k, v in sorted(gaps.items())) or "none",
-                  "; ".join(faults) or "none", "; ".join(missed) or "none"), file=sys.stderr)
+                  "; ".join(faults) or "none", "; ".join(group_faults) or "none", "; ".join(missed) or "none"),
+              file=sys.stderr)
         return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
@@ -977,8 +1037,9 @@ def _aggregator_self_test():
               file=sys.stderr)
         return EXIT_FINDING
     print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
-          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
-              len(exposers), len(required)))
+          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry; the {} "
+          "named groups hold the {} registered self-tests exactly once)".format(
+              len(exposers), len(required), len(SELF_TEST_GROUPS), len(registry)))
     return EXIT_OK
 
 
@@ -5452,7 +5513,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert not kill.called
     elif mode == "overdue-success":
         import time
-        # QA16 F1: an exit first observed after the deadline is TIMEOUT, whatever
+        # An exit first observed after the deadline is TIMEOUT, whatever
         # order the guardian and the collector were scheduled in. The guardian
         # stops itself before supervision; the collector is gated before its
         # first poll; the subject finishes only after the recorded deadline has
@@ -5548,7 +5609,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "an overdue completion was accepted as success: " + repr(outcome))
     elif mode == "launch-ownership":
         import time
-        # QA16 F2 / QA17 F3: fork-to-ownership is uninterruptible by interpreter
+        # Fork-to-ownership is uninterruptible by interpreter
         # construction -- the fork runs on a private launcher thread, where CPython
         # never raises asynchronous signal exceptions -- so a cancellation delivered
         # at ANY caller-side bytecode still reaps the guardian to ECHILD. The old
@@ -5756,7 +5817,7 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "fd-hygiene-total":
         import errno
         import time
-        # QA16 MINOR-1 + QA17 F4/MINOR-2: EVERY undeclared caller descriptor is
+        # EVERY undeclared caller descriptor is
         # closed before a subject can run -- a bare pipe, a plain open file, an
         # UNSTARTED sibling call's endpoints (the construction window: there is no
         # publication step left to race), and a started sibling's -- while this
@@ -5815,7 +5876,7 @@ def _watchdog_completion_case(mode, tree=None):
                 os.close(fd)
     elif mode == "nested-keep":
         import time
-        # QA17 F2, migrated to the explicit-contract refusal: a caller descriptor a
+        # Migrated to the explicit-contract refusal: a caller descriptor a
         # NESTED run_bounded thunk relies on is a deterministic ERROR:OSError unless
         # declared through keep_fds, in which case it works -- never a
         # sometimes-working reuse of a stale registry entry.
@@ -5915,12 +5976,12 @@ def _watchdog_completion_case(mode, tree=None):
             assert emit.run_bounded(probe, timeout_s=10) == "GC-OFF"
     elif mode == "guardian-preload":
         import time
-        # QA18 codex F5: the guardian forks from the launcher thread, so a cold
+        # The guardian forks from the launcher thread, so a cold
         # guardian-side import could block on an import or module lock some other
         # caller thread held at fork time. Construction preloads the whole guardian
         # dependency set, making every guardian-side import a lock-free
         # sys.modules hit; the documented restriction that remains is thunk-side.
-        # QA19 F4: socket.send_fds/recv_fds cold-import array inside their own
+        # Likewise socket.send_fds/recv_fds cold-import array inside their own
         # bodies (importing socket alone does not load it), so the receipt path
         # needs array preloaded too.
         def pop_cold():
@@ -7020,7 +7081,7 @@ def _watchdog_completion_case(mode, tree=None):
                 raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
     elif mode == "escalation-subject":
         import time
-        # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
+        # Cancelling a wedged guardian is bounded AND kills
         # and observes the receipt-identified subject tree -- freeze the guardian,
         # then the subject's group and pidfd, then the guardian -- never a stranded
         # sleeper the test has to clean up. The same-group descendant must die with
@@ -7280,7 +7341,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "poll-collected":
         import time
-        # QA19 F1: a guardian failure FIRST collected by poll() -- the layer's
+        # A guardian failure FIRST collected by poll() -- the layer's
         # primary collection path (run_bounded and _run_fixture_process poll on
         # every loop iteration) -- must still get close()'s receipt kill,
         # disappearance proof and loud refusal: poll() records the failure and
@@ -7430,8 +7491,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "close-cancel":
         import time
-        # QA19 F2 + QA20 codex F2 / gemini / claude F2 + QA21 claude
-        # F1/F3/F4 (masked design, fix 2w/2x): a real SIGINT landing anywhere
+        # Masked design: a real SIGINT landing anywhere
         # inside close()'s ownership decision, transfer, collection or
         # cleanup stays PENDING (SIGINT and SIGTERM are blocked as the FIRST
         # statement of close()'s restoring try, and the launcher thread is
@@ -7854,7 +7914,7 @@ def _watchdog_completion_case(mode, tree=None):
         import time
         from contextlib import ExitStack
         caller = os.getpid()
-        # QA19 F3: with no pidfd available the escalation can neither freeze the
+        # With no pidfd available the escalation can neither freeze the
         # guardian nor address the pid-only receipt's subject, so the refusal
         # must say guardian-only/unverified -- never claim a frozen guardian or
         # a killed subject tree it could not address.
@@ -11369,13 +11429,19 @@ def _watchdog_completion_case(mode, tree=None):
                             "a pending cancellation (fix 7, QA28 codex "
                             "BLOCKER 1)", key, ast.dump(call.func))
 
-        # Leg 11 NEGATIVE VECTORS (fix 10, QA31; fix 11, QA32): each
-        # reproduces an in-memory QA mutation and must be REJECTED by
+        # Leg 11 NEGATIVE VECTORS: each reproduces an in-memory
+        # mutation and must be REJECTED by
         # the structural machinery above -- by its named check, never
-        # accepted and never a crash. Every QA31 vector was verified
-        # ACCEPTED (red) by the fix-9 machinery at 7df50fda; every
-        # QA32 vector was verified ACCEPTED (red) by the fix-10
-        # machinery at 7182a86e.
+        # accepted and never a crash. The swapped boundary argument,
+        # AnnAssign rebinding, hidden finalbody, shadowed import and
+        # module-poisoning vectors below were verified ACCEPTED (red)
+        # by the machinery at 7df50fda; the capturing-try finally,
+        # nested default, two capture-alias forms, nonlocal
+        # reach-back, inverted and swapped-guard conditional, and
+        # yield and await vectors were verified ACCEPTED (red) by the
+        # machinery at 7182a86e. The class-width walrus companion and
+        # every acceptance or over-rejection pin are outside both
+        # claims.
         def leg11_vector(source):
             function = _optlevel.parse(textwrap.dedent(source)).body[0]
             capturing = next(node for node in function.body
@@ -11388,10 +11454,10 @@ def _watchdog_completion_case(mode, tree=None):
             except AssertionError:
                 return
             raise AssertionError((
-                "a QA31/QA32 mutation vector was ACCEPTED by leg 11 "
-                "(fix 10/11)", label))
+                "a mutation vector that leg 11 must reject was ACCEPTED "
+                "(the pending-cancellation tripwire went quiet)", label))
 
-        # QA31 codex BLOCKER 1, mutation 1: the abandonment boundary's
+        # Swapped boundary argument: the abandonment boundary's
         # pending argument swapped off the captured name -- while the
         # capture may be pending, a boundary call that passes ANY
         # other name must be rejected.
@@ -11412,16 +11478,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex mutation 1: boundary pending argument swapped to "
+            "boundary vector: pending argument swapped to "
             "another name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex-1"),
-                    "interrupted", "vector:codex-1"))
+                                     "vector:swapped-boundary"),
+                    "interrupted", "vector:swapped-boundary"))
 
-        # QA31 codex BLOCKER 1, mutation 2: an AnnAssign rebinds the
+        # AnnAssign rebinding: an AnnAssign rebinds the
         # captured name after the capture -- every assignment form
         # that can touch the captured name is a FAILURE.
         function, capturing = leg11_vector("""
@@ -11435,15 +11501,15 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex mutation 2: AnnAssign rebinds the captured name",
+            "AnnAssign vector: AnnAssign rebinds the captured name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex-2"),
-                    "interrupted", "vector:codex-2"))
+                                     "vector:annassign-rebind"),
+                    "interrupted", "vector:annassign-rebind"))
 
-        # Class-width companion (fix 10): a walrus hidden inside the
+        # Class-width companion: a walrus hidden inside the
         # boundary call's own arguments rebinds the captured name with
         # zero calls for the old scan to see.
         function, capturing = leg11_vector("""
@@ -11467,7 +11533,7 @@ def _watchdog_completion_case(mode, tree=None):
                                      "vector:walrus"),
                     "interrupted", "vector:walrus"))
 
-        # QA31 gemini BLOCKER b: a zero-call finally after the capture
+        # Hidden finalbody: a zero-call finally after the capture
         # rebinds the captured name and raises a bare exception class
         # over the in-flight re-raise.
         function, capturing = leg11_vector("""
@@ -11483,21 +11549,21 @@ def _watchdog_completion_case(mode, tree=None):
                     raise Exception
             """)
         leg11_vector_rejected(
-            "gemini finally mutation: rebinding and foreign raise "
+            "finalbody vector: rebinding and foreign raise "
             "hidden in a finalbody",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:gemini-b"),
-                    "captured", "vector:gemini-b"))
+                                     "vector:finalbody-rebind"),
+                    "captured", "vector:finalbody-rebind"))
 
-        # QA31 codex BLOCKER 2: a local rebinding shadows an imported
+        # Shadowed import: a local rebinding shadows an imported
         # module name -- the receiver is NOT the module, and the
         # origin proof must FAIL it, never clear it as external.
         shadowing = _optlevel.parse(textwrap.dedent("""
             def mutant(self):
-                os = _qa31_object
+                os = _shadowing_object
                 os.poll()
             """)).body[0]
         vector_kinds, vector_value_kind = local_value_kinds(shadowing)
@@ -11506,17 +11572,17 @@ def _watchdog_completion_case(mode, tree=None):
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute))
         leg11_vector_rejected(
-            "codex receiver mutation: shadowed import cleared as "
+            "receiver vector: shadowed import cleared as "
             "external",
             lambda call=shadowed_call, kinds=vector_kinds,
                    value_kind=vector_value_kind:
-                resolve_call(call.func, "vector:codex-receiver",
+                resolve_call(call.func, "vector:shadowed-receiver",
                              set(), kinds, value_kind))
         assert vector_value_kind(shadowed_call) is None, (
             "value_kind cleared a call through a shadowed import as "
-            "external (fix 10, QA31 codex BLOCKER 2)")
+            "external")
 
-        # QA31 gemini BLOCKER c: an attribute assignment (and a
+        # Module poisoning: an attribute assignment (and a
         # setattr) on an imported module poisons the NAME module-wide
         # -- module-owned cleanup monkey-patched onto os must never
         # clear as external.
@@ -11535,19 +11601,19 @@ def _watchdog_completion_case(mode, tree=None):
         assert "os" not in external_import_names(poisoned_tree), (
             "an attribute assignment on an imported module did not "
             "poison the imported name: module-owned cleanup can hide "
-            "on the module object (fix 10, QA31 gemini BLOCKER c)")
+            "on the module object")
         setattr_tree = _optlevel.parse(textwrap.dedent("""
             import os
             setattr(os, "sneak_cleanup", _fixture_signal)
             """))
         assert "os" not in external_import_names(setattr_tree), (
             "a setattr on an imported module did not poison the "
-            "imported name (fix 10, QA31 gemini BLOCKER c)")
+            "imported name")
         assert "os" in imported_modules, (
             "the emit module itself poisons os: the disclosed os-level "
-            "primitives would fail closed, not clear (fix 10)")
+            "primitives would fail closed, not clear")
 
-        # QA32 codex BLOCKER 1: the capturing try's OWN finally is a
+        # Capturing-try finally: the capturing try's OWN finally is a
         # successor -- a boundary call there with a swapped pending
         # argument must be rejected while the capture may be pending.
         function, capturing = leg11_vector("""
@@ -11564,16 +11630,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 finally vector: swapped pending argument in "
+            "finally vector: swapped pending argument in "
             "the capturing try's own finalbody",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex32-1"),
-                    "interrupted", "vector:codex32-1"))
+                                     "vector:finally-swap"),
+                    "interrupted", "vector:finally-swap"))
 
-        # QA32 codex BLOCKER 2: a nested def's parameter DEFAULT
+        # Nested default: a nested def's parameter DEFAULT
         # executes at the definition, right after the capture.
         function, capturing = leg11_vector("""
             def mutant(self):
@@ -11587,16 +11653,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 default vector: unprotected cleanup in a "
+            "default vector: unprotected cleanup in a "
             "nested def's default after a capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex32-2"),
-                    "interrupted", "vector:codex32-2"))
+                                     "vector:nested-default"),
+                    "interrupted", "vector:nested-default"))
 
-        # QA32 codex BLOCKER 3, form 1: the capture target collides
+        # Capture alias, form 1: the capture target collides
         # with the handler's own `as` name -- Python deletes that
         # binding at handler exit, so the later re-raise reads an
         # unbound name and the cancellation is lost.
@@ -11611,12 +11677,12 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 as-name vector: capture reuses the handler's "
+            "as-name vector: capture reuses the handler's "
             "bound name",
             lambda handler=capturing.handlers[0]:
                 capture_shape(handler.body, handler.name))
 
-        # QA32 codex BLOCKER 3, form 2: an overwrite between the
+        # Capture alias, form 2: an overwrite between the
         # capture alias and the final raise -- ends_in_raise must
         # discard the overwritten alias, never keep trusting it.
         function, capturing = leg11_vector("""
@@ -11631,9 +11697,9 @@ def _watchdog_completion_case(mode, tree=None):
         overwriting = capturing.handlers[0]
         assert not ends_in_raise(overwriting.body, overwriting.name), (
             "a handler that overwrites its capture alias before the "
-            "final raise was accepted (fix 11, QA32 codex BLOCKER 3)")
+            "final raise was accepted")
 
-        # QA32 claude BLOCKER 1: a pre-capture nested def -- usable as
+        # Nonlocal reach-back: a pre-capture nested def -- usable as
         # a boundary step -- reaches the captured name back through
         # nonlocal and rebinds it with zero post-capture binding
         # leaves and zero calls for the old scans to see.
@@ -11654,16 +11720,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 nonlocal vector: a nested def rebinds the "
+            "nonlocal vector: a nested def rebinds the "
             "captured name through nonlocal",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-1"),
-                    "interrupted", "vector:claude32-1"))
+                                     "vector:nonlocal"),
+                    "interrupted", "vector:nonlocal"))
 
-        # QA32 claude BLOCKER 2: the pending argument at ANY boundary
+        # Boundary pending shapes: the pending argument at ANY boundary
         # call must be a recognized shape. The two real shapes stay
         # accepted; the inverted conditional and a conditional
         # guarding a DIFFERENT name are rejected.
@@ -11675,33 +11741,33 @@ def _watchdog_completion_case(mode, tree=None):
             _cleanup_boundary(
                 exc if isinstance(exc, _PENDING_CANCELLATIONS)
                 else None, release_launcher, "parked launcher release")
-            """), "vector:claude32-2-accept")
+            """), "vector:accepted-shape")
         boundary_pending_shape(vector_pending_arg("""
             _cleanup_boundary(
                 tail_exc if isinstance(tail_exc,
                                        _PENDING_CANCELLATIONS)
                 else pending, close_report, "report channel close")
-            """), "vector:claude32-2-accept")
+            """), "vector:accepted-shape")
         leg11_vector_rejected(
-            "claude QA32 inversion vector: inverted conditional "
+            "inversion vector: inverted conditional "
             "pending argument",
             lambda arg=vector_pending_arg("""
                 _cleanup_boundary(
                     None if isinstance(exc, _PENDING_CANCELLATIONS)
                     else exc, release_launcher,
                     "parked launcher release")
-                """): boundary_pending_shape(arg, "vector:claude32-2a"))
+                """): boundary_pending_shape(arg, "vector:inverted-guard"))
         leg11_vector_rejected(
-            "claude QA32 swapped-guard vector: the conditional guards "
+            "swapped-guard vector: the conditional guards "
             "a different name than it passes",
             lambda arg=vector_pending_arg("""
                 _cleanup_boundary(
                     pending if isinstance(exc, _PENDING_CANCELLATIONS)
                     else None, release_launcher,
                     "parked launcher release")
-                """): boundary_pending_shape(arg, "vector:claude32-2b"))
+                """): boundary_pending_shape(arg, "vector:swapped-guard"))
 
-        # QA32 claude MINOR 2: a call-free suspension point after a
+        # Suspension pair: a call-free suspension point after a
         # capture parks the function while the capture is pending -- a
         # dropped generator or coroutine would swallow the
         # cancellation without any call for the walk to see.
@@ -11716,14 +11782,14 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 yield vector: call-free suspension after a "
+            "yield vector: call-free suspension after a "
             "capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-3"),
-                    "interrupted", "vector:claude32-3"))
+                                     "vector:yield"),
+                    "interrupted", "vector:yield"))
         function, capturing = leg11_vector("""
             async def mutant(self):
                 try:
@@ -11735,16 +11801,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 await vector: call-free suspension after a "
+            "await vector: call-free suspension after a "
             "capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-4"),
-                    "interrupted", "vector:claude32-4"))
+                                     "vector:await"),
+                    "interrupted", "vector:await"))
 
-        # QA32 codex MINOR (over-rejection pin): a bare annotation
+        # Over-rejection pin: a bare annotation
         # with no value binds nothing at runtime -- it must be
         # ACCEPTED, with the guarded re-raise still discharging the
         # capture.
@@ -11761,10 +11827,10 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex32-minor"),
-            "interrupted", "vector:codex32-minor")
+                             "vector:bare-annotation"),
+            "interrupted", "vector:bare-annotation")
 
-        # QA33 codex MAJOR (fix 12): applying a BARE decorator right
+        # Bare decorator: applying a BARE decorator right
         # after the capture calls it with the function -- with no
         # ast.Call node anywhere in the tree -- so the
         # definition-time work check must model the application
@@ -11782,16 +11848,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA33 decorator vector: a bare decorator applied "
+            "decorator vector: a bare decorator applied "
             "after a capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex33-major"),
-                    "interrupted", "vector:codex33-major"))
+                                     "vector:bare-decorator"),
+                    "interrupted", "vector:bare-decorator"))
 
-        # QA33 codex MINOR (fix 12, over-rejection pins): a LOCAL
+        # Over-rejection pins: a LOCAL
         # annotation never evaluates its annotation expression, so a
         # call spelled inside a bare AnnAssign's annotation runs
         # nothing and must be ACCEPTED; a yield inside a NESTED def
@@ -11811,8 +11877,8 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex33-minor-annotation"),
-            "interrupted", "vector:codex33-minor-annotation")
+                             "vector:local-annotation-call"),
+            "interrupted", "vector:local-annotation-call")
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
@@ -11827,11 +11893,14 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex33-minor-yield"),
-            "interrupted", "vector:codex33-minor-yield")
+                             "vector:nested-generator"),
+            "interrupted", "vector:nested-generator")
 
-        # QA34 codex/claude MAJOR (fix 13, a fix-12 regression): a
-        # nested def's or lambda's parameter DEFAULT is
+        # Definition-time defaults (a regression the exemption of a
+        # whole nested def or lambda at f4200b43 introduced, which
+        # b84a21fa narrowed to the nested body): a nested def's or
+        # lambda's
+        # parameter DEFAULT is
         # definition-time work -- it evaluates in the ENCLOSING
         # function, and a yield spelled there generator-converts
         # THAT function, so its body (every boundary and re-raise
@@ -11875,7 +11944,7 @@ def _watchdog_completion_case(mode, tree=None):
         ):
             function, capturing = leg11_vector(source)
             leg11_vector_rejected(
-                "codex/claude QA34 " + label + " vector: a yield in "
+                label + " vector: a yield in "
                 "a nested definition-time default suspends the "
                 "enclosing function",
                 lambda function=function, capturing=capturing,
@@ -11884,15 +11953,15 @@ def _watchdog_completion_case(mode, tree=None):
                         function,
                         successors_after(
                             function, capturing,
-                            "vector:codex34-major-" + label),
+                            "vector:definition-time-" + label),
                         "interrupted",
-                        "vector:codex34-major-" + label))
+                        "vector:definition-time-" + label))
 
-        # Companion rejection pin (fix 13): a walrus in that same
+        # Companion rejection pin: a walrus in that same
         # definition-time default binds in the ENCLOSING scope, so
         # the nested-body walrus exemption must not cover it either
         # (already rejected at f4200b43; this pins the seam between
-        # the two fix-13 exemptions).
+        # the two exemptions added at b84a21fa).
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
@@ -11905,17 +11974,17 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "fix 13 companion: a walrus in a nested definition-time "
+            "companion vector: a walrus in a nested definition-time "
             "default rebinds the captured name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(
                         function, capturing,
-                        "vector:codex34-walrus-default"),
-                    "interrupted", "vector:codex34-walrus-default"))
+                        "vector:walrus-default"),
+                    "interrupted", "vector:walrus-default"))
 
-        # QA34 codex MINOR (fix 13, over-rejection pin): a walrus in
+        # Over-rejection pin: a walrus in
         # a nested def's own BODY binds that function's local -- it
         # cannot rebind the enclosing captured name without a
         # nonlocal/global reach-back, which stays rejected
@@ -11935,10 +12004,10 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex34-minor-walrus-local"),
-            "interrupted", "vector:codex34-minor-walrus-local")
+                             "vector:walrus-nested-body"),
+            "interrupted", "vector:walrus-nested-body")
 
-        # QA34 codex MINOR (fix 13, over-rejection pin): a LOCAL
+        # Over-rejection pin: a LOCAL
         # annotation expression never executes, so a walrus spelled
         # inside it -- reachable only through a nested lambda's body
         # on this Python -- binds nothing and must be ACCEPTED.
@@ -11956,10 +12025,10 @@ def _watchdog_completion_case(mode, tree=None):
             function,
             successors_after(
                 function, capturing,
-                "vector:codex34-minor-walrus-annotation"),
-            "interrupted", "vector:codex34-minor-walrus-annotation")
+                "vector:walrus-local-annotation"),
+            "interrupted", "vector:walrus-local-annotation")
 
-        # QA34 gemini a (fix 13, acceptance pin): a bare local
+        # Acceptance pin: a bare local
         # annotation nested inside the guard body after the capture
         # is dispatched by walk_block's own AnnAssign arm -- never a
         # whole-block call scan -- and stays ACCEPTED.
@@ -11976,14 +12045,14 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:gemini34-annotation-in-if"),
-            "interrupted", "vector:gemini34-annotation-in-if")
+                             "vector:annotation-in-guard"),
+            "interrupted", "vector:annotation-in-guard")
 
-        # QA35 codex/claude MINOR (fix 14, acceptance pin): under
+        # Acceptance pin: under
         # PEP 649 a nested def's parameter and return annotations
         # are deferred -- nothing spelled inside one runs at
         # definition time -- so an otherwise-harmless annotated def
-        # after the capture must be ACCEPTED (the fix-13 scanner
+        # after the capture must be ACCEPTED (the earlier scanner
         # modeled the annotations as immediate calls and rejected
         # it naming `type`).
         function, capturing = leg11_vector("""
@@ -12000,24 +12069,24 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex35-annotated-def"),
-            "interrupted", "vector:codex35-annotated-def")
+                             "vector:annotated-def"),
+            "interrupted", "vector:annotated-def")
 
-        # QA35 gemini (fix 14, rejection pin): the interpreter pin
+        # Rejection pin: the interpreter pin
         # is a named FAILURE, never a silent model mismatch -- a
         # pre-3.14 version tuple must be refused.
         leg11_vector_rejected(
-            "gemini QA35 interpreter vector: leg 11 ran on a "
+            "interpreter vector: leg 11 ran on a "
             "pre-PEP-649 interpreter without failing closed",
             lambda: leg11_interpreter_pinned((3, 13, 0)))
 
-        # QA36 codex MAJOR (fix 15): the PEP 649 deferral has an
+        # Annotation read: the PEP 649 deferral has an
         # execution point -- READING the annotated def's
         # __annotations__ invokes its generated __annotate__ and
         # runs the module-owned cleanup spelled in the annotation,
         # with no ast.Call anywhere at the read site. The read after
         # the capture must be rejected while the UNREAD annotated
-        # def (the fix-14 acceptance pin above) stays accepted.
+        # def (the annotated-def acceptance pin above) stays accepted.
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
@@ -12031,17 +12100,17 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA36 annotation-read vector: reading a nested "
+            "annotation-read vector: reading a nested "
             "def's __annotations__ after a capture evaluates its "
             "deferred annotation",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex36-annotation-read"),
-                    "interrupted", "vector:codex36-annotation-read"))
+                                     "vector:annotation-read"),
+                    "interrupted", "vector:annotation-read"))
 
-        # QA37 codex MINOR (fix 16, over-rejection pin): a LOCAL
+        # Over-rejection pin: a LOCAL
         # AnnAssign's annotation expression never evaluates on the
         # pinned interpreter, so a deferred-read spelling inside it
         # runs nothing and must be ACCEPTED -- while the same
@@ -12053,7 +12122,7 @@ def _watchdog_completion_case(mode, tree=None):
             """)).body[0]
         assert not list(annotation_reads(unevaluated.body)), (
             "an unevaluated local annotation was scanned as a "
-            "deferred-annotation READ (fix 16, QA37 codex MINOR)")
+            "deferred-annotation READ")
         evaluated = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = step.__annotations__
@@ -12062,9 +12131,9 @@ def _watchdog_completion_case(mode, tree=None):
                 in annotation_reads(evaluated.body)] \
             == ["__annotations__"], (
             "an annotation READ in an AnnAssign VALUE executes at "
-            "the statement and must stay rejected (fix 15/16)")
+            "the statement and must stay rejected")
 
-        # QA38 codex/claude MINOR (fix 17, over-rejection pin): the
+        # Over-rejection pin: the
         # CALL scan holds the same region -- direct_calls used to
         # walk the AnnAssign annotation annotation_reads skips, so a
         # call spelled in an unevaluated local annotation
@@ -12078,8 +12147,7 @@ def _watchdog_completion_case(mode, tree=None):
             """)).body[0]
         assert not list(direct_calls(unevaluated_call.body)), (
             "a call inside an unevaluated local annotation was "
-            "scanned as an executing call (fix 17, QA38 "
-            "codex/claude MINOR)")
+            "scanned as an executing call")
         evaluated_call = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = getattr(step, "__annotations__")
@@ -12088,14 +12156,14 @@ def _watchdog_completion_case(mode, tree=None):
                 in direct_calls(evaluated_call.body)] \
             == [("name", "getattr")], (
             "a call in an AnnAssign VALUE executes at the statement "
-            "and must stay seen (fix 17)")
+            "and must stay seen")
 
-        # QA37 codex/claude MAJOR (fix 16): DISCLOSED-RESIDUAL pins.
-        # Under PD-335-TAIL option 2 and the fix-16 scope decision,
-        # leg 11 is a tripwire over an OPEN grammar and the two
-        # QA37 classes are disclosed, not enforced (scanner
-        # hardening for them is recorded follow-up work in the
-        # maintainer backlog, not a fix-16 change). Each pin
+        # DISCLOSED-RESIDUAL pins. Under the maintainer's recorded
+        # scope decisions, leg 11 is a tripwire over an OPEN grammar
+        # and the two classes pinned here are disclosed, not enforced
+        # (scanner hardening for them is recorded follow-up work in
+        # the maintainer backlog, not part of the change that added
+        # these pins). Each pin
         # therefore proves BOTH halves of the disclosure: the
         # mutation shape is ACCEPTED by this leg's machinery (the
         # tripwire does not see it), and executing that shape with
@@ -12134,22 +12202,21 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """
 
-        # ACCEPTED by leg 11 (claude QA37): the PEP 695 lazy read is
+        # ACCEPTED by leg 11: the PEP 695 lazy read is
         # attribute-shaped but spells neither recognized name, and
         # the type parameter's bound is walked by no call scan, so
         # the successor walk accepts the whole shape.
         function, capturing = leg11_vector(pep695_read_source)
         assert not list(annotation_reads(function.body)), (
             "the PEP 695 lazy read is expected to evade "
-            "annotation_reads -- it is DISCLOSED, not enforced "
-            "(fix 16, QA37 claude MAJOR)")
+            "annotation_reads -- it is DISCLOSED, not enforced")
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:claude37-pep695-read"),
-            "interrupted", "vector:claude37-pep695-read")
+                             "vector:pep695-read"),
+            "interrupted", "vector:pep695-read")
 
-        # ACCEPTED by leg 11 (codex QA37): the handler is the
+        # ACCEPTED by leg 11: the handler is the
         # RECOGNIZED capture shape -- exactly that recognition
         # exempts its boundary-call arguments from the handler-body
         # call scan, so the indirect reader spelled there is never
@@ -12160,18 +12227,18 @@ def _watchdog_completion_case(mode, tree=None):
             "the indirect reader in the boundary-call arguments is "
             "expected to evade annotation_reads -- it is a call, "
             "not a recognized attribute read; DISCLOSED, not "
-            "enforced (fix 16, QA37 codex MAJOR)")
+            "enforced")
         assert capture_shape(handler.body, handler.name) \
             == "interrupted", (
             "the mutated handler must still be the RECOGNIZED "
             "capture shape: that recognition is what exempts its "
             "boundary-call arguments from the handler-body call "
-            "scan (fix 16, QA37 codex MAJOR)")
+            "scan")
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex37-handler-args"),
-            "interrupted", "vector:codex37-handler-args")
+                             "vector:handler-args"),
+            "interrupted", "vector:handler-args")
 
         # CAUGHT by leg 19: run each accepted shape for real, the
         # way the behavioural matrix drives a site -- a cancellation
@@ -12195,24 +12262,23 @@ def _watchdog_completion_case(mode, tree=None):
                 "release_launcher": lambda: None,
             }
             exec(compile(textwrap.dedent(source),
-                         "<leg 11 QA37 vector>", "exec"), namespace)
+                         "<leg 11 disclosed vector>", "exec"), namespace)
             try:
                 namespace["mutant"](None)
             except BaseException as exc:
                 return exc
             raise AssertionError(
-                "the disclosed QA37 mutation shape completed "
-                "without raising (fix 16)")
+                "the disclosed mutation shape completed "
+                "without raising")
 
         for label, source in (
-                ("claude37-pep695-read", pep695_read_source),
-                ("codex37-handler-args", handler_argument_source)):
+                ("pep695-read", pep695_read_source),
+                ("handler-args", handler_argument_source)):
             outward = displaced_outward(source)
             assert (type(outward) is RuntimeError
                     and str(outward) == "injected cleanup fault"), (
-                "a disclosed QA37 residual shape did not reproduce "
-                "the displacement leg 19 catches (fix 16, QA37 "
-                "codex/claude MAJOR)", label, repr(outward))
+                "a disclosed residual shape did not reproduce "
+                "the displacement leg 19 catches", label, repr(outward))
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
@@ -19140,10 +19206,11 @@ def _adopt_read_inputs(path):
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
     vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
-    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, and `complete` and `reconcile`
-    refuse fail-closed (exit 2) until the completion and recovery stages land, so a stub can never read as
-    a passing operation. plan, approve and apply each refuse over a non-clean adoption journal (an open
-    transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything else is read.
+    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, `reconcile` runs the journal-only
+    recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
+    never read as a passing operation. plan, approve and apply each refuse over a non-clean adoption
+    journal (an open transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything
+    else is read; `reconcile` is how that journal is made clean again.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19177,6 +19244,38 @@ def _cmd_adopt(rest):
           stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
           written, which in this build is every plan. Exit 0: applied
           (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
+      reconcile [--root DIR] : the EXPLICIT recovery of an interrupted adoption transaction
+          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE: the store is never
+          resolved (spec 14.2), and no reconcile-first gate runs (this IS the reconcile). Each open
+          transaction rolls FORWARD when every poststate already verifies, else BACK from its durable
+          preimages, under the journal lock, and a confirmed-dead run's journal lock is broken only
+          through the journal's stale-lock arbitration. The interrupted run is never resumed. Exit 0:
+          each recovered transaction printed with its outcome (rolled-back or rolled-forward) and a
+          released dead-run lock named; or "nothing to reconcile": with no journal, or no open transaction
+          and no lock, NOTHING is written; when the journal lock was taken and every transaction was
+          already terminal (a concurrent reconcile recovered it first), it says so, and that no recovery
+          write was made. Beside an open transaction other than an init-store one, reconcile takes the
+          adoption journal lock, then the single-writer store lease of every machine subdirectory under
+          `.working/` (the apply's order: init-store takes the journal lock, then its substrate's lease),
+          before any recovery write, and releases only those leases, after the journal lock. Exit 2 is
+          printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
+          product files and every transaction as found, and releases any lock or lease it took; its message
+          names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
+          creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
+          seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
+          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
+          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
+          claimed by another writer, in a machine subdirectory, beside an open transaction other than
+          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
+          did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
+          began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
+          recovery-failed (files already restored or frames already published stay, the transaction stays
+          open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
+          never reported recovered), or store-lease-release-failed (the recovery finished,
+          but a store lease this run took could not be released and stays, named). Also exit 2: a
+          cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
+          lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
+          not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -19196,7 +19295,7 @@ def _cmd_adopt(rest):
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("complete", "reconcile")
+    deferred = ("complete",)
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -19204,8 +19303,8 @@ def _cmd_adopt(rest):
     if sub in deferred:
         # Refused BEFORE any parse or filesystem read, so a deferred subcommand can never write; the
         # message names no command that does not exist (the K9b engine lands these).
-        print("opf adopt {}: not yet available in this build (fail-closed); the completion and recovery "
-              "stages land in a later PR".format(sub), file=sys.stderr)
+        print("opf adopt {}: not yet available in this build (fail-closed); the completion stage lands "
+              "in a later PR".format(sub), file=sys.stderr)
         return EXIT_MALFORMED
     if sub not in subcommands:
         print("opf adopt: unknown subcommand {!r}; subcommands: {}".format(
@@ -19213,9 +19312,9 @@ def _cmd_adopt(rest):
         return EXIT_MALFORMED
 
     root = None
-    # The value flags each subcommand takes, each required exactly once (status takes none).
+    # The value flags each subcommand takes, each required exactly once (status and reconcile take none).
     takes = dict(plan=("--inputs",), approve=("--inputs", "--plan", "--actor"),
-                 apply=("--inputs", "--plan", "--approval"), status=())[sub]
+                 apply=("--inputs", "--plan", "--approval"), reconcile=(), status=())[sub]
     given = dict()
 
     def _need_value(flag, idx):
@@ -19312,6 +19411,41 @@ def _cmd_adopt(rest):
         print("opf adopt {}: cannot evaluate: cannot resolve the product root ({})".format(sub, exc),
               file=sys.stderr)
         return EXIT_MALFORMED
+
+    if sub == "reconcile":
+        # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
+        # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
+        try:
+            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs)
+        except _opf_adopt_apply.ReconcileRefusal as exc:
+            print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except _opf_adopt_apply.AdoptApplyError as exc:
+            print("opf adopt reconcile: cannot evaluate: {}".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0 or uncaught exit-1
+            print("opf adopt reconcile: cannot evaluate: unexpected error ({!r}); failing closed to exit "
+                  "2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        recovered = [(txn, outcome) for txn, outcome in outcomes
+                     if outcome in ("rolled-back", "rolled-forward")]
+        for txn, outcome in recovered:
+            print("opf adopt reconcile: transaction {}: {}".format(txn, outcome))
+        if stale_released:
+            print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
+                  "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
+        if not (recovered or stale_released) and lock_taken:
+            print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
+                  "when this run took the journal lock (another reconcile may have recovered it first); no "
+                  "recovery write was made, and the journal lock and any store lease this run took are "
+                  "released")
+        elif not (recovered or stale_released):
+            print("opf adopt reconcile: nothing to reconcile (no interrupted adoption transaction and no "
+                  "leftover journal lock); nothing was written")
+        else:
+            print("opf adopt reconcile: the interrupted run is not resumed: inspect the reconciled tree; a "
+                  "rolled-back run takes a fresh plan with its own run id (spec 14.1)")
+        return EXIT_OK
 
     if sub == "plan":
         import datetime
@@ -19429,10 +19563,12 @@ def _cmd_adopt(rest):
         journal_rel = adopt.JOURNAL_REL
         if owner is not None:
             findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
-                            "(reconcile once no adoption run is live)".format(journal_rel, owner.get("pid")))
+                            "(run `opf adopt reconcile` once no adoption run is live)".format(
+                                journal_rel, owner.get("pid")))
         if opened:
             findings.append("the adoption journal at {} holds interrupted transaction(s) {} -- an "
-                            "adoption transaction did not complete".format(journal_rel, ", ".join(opened)))
+                            "adoption transaction did not complete (run `opf adopt reconcile`)".format(
+                                journal_rel, ", ".join(opened)))
         for run_id in runs:
             print("opf adopt status: adoption run {}: evidence bundle at {}/{}".format(
                 run_id, evidence_rel, run_id))
@@ -19676,11 +19812,31 @@ def _cli_self_test():
         expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
                 "--actor", "a"], EXIT_MALFORMED)                                     # --actor is approve's
         expect(["adopt", "plan", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)      # --plan
-        # The two deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
-        # store resolution or write, each with its own located not-yet-available message (never the
-        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the
-        # completion and recovery stages land them.
-        for deferred_sub in ("complete", "reconcile"):
+        # The deferred subcommand is RECOGNIZED and refuses fail-closed (exit 2) BEFORE any parse, store
+        # resolution or write, with its own located not-yet-available message (never the unknown-verb or
+        # unknown-subcommand message, and naming no command that does not exist); the completion stage
+        # lands it. `reconcile` is wired: its grammar refuses like status's (it takes only --root), and an
+        # unrecognized argument is named by the PARSER, which the deferred head never reached (it printed
+        # not-yet-available instead), the routing discriminator; the recovery itself rides
+        # _adopt_reconcile_leg below.
+        # Each malformed vector asserts the PARSER's own diagnostic, so it is red when the routing reverts to
+        # the deferred head (exit 2 there too, but with not-yet-available and no parser message).
+        for argv, diagnostic in (
+                (["adopt", "reconcile", "--root"], "opf adopt reconcile: --root requires an argument"),
+                (["adopt", "reconcile", "--root", ".", "--root", "."],
+                 "opf adopt reconcile: --root given more than once"),
+                (["adopt", "reconcile", "--inputs", "w.toml"],
+                 "opf adopt reconcile: unrecognized argument {!r}".format("--inputs")),
+                (["adopt", "reconcile", "--bogus"],
+                 "opf adopt reconcile: unrecognized argument {!r}".format("--bogus"))):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = main(argv)
+            if rc != EXIT_MALFORMED or diagnostic not in buf.getvalue() or "not yet available" in buf.getvalue():
+                failures.append("{}: rc={!r} (expected 2 + the parser diagnostic {!r}, never "
+                                "not-yet-available; {})".format(" ".join(argv), rc, diagnostic,
+                                                                buf.getvalue().strip()))
+        for deferred_sub in ("complete",):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 rc = main(["adopt", deferred_sub])
@@ -20964,10 +21120,11 @@ def _cli_self_test():
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
                 # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming the unlanded ops (the fixture plan's init-store, install-pack, register-unmanaged
-                # and retire-file ops, and the driver's receipt stage, are not landed in this build),
-                # writing nothing, no journal and no bundle (the wiring discriminator: an unwired apply
-                # refuses with the not-yet-available message instead). Flips: an approval for a fresh plan
+                # naming what is unlanded (every plan op of the fixture, its plant-governance enforcement
+                # rows among them, has landed; the driver's mandatory receipt stage has not, so apply names
+                # that stage and no plan op), writing nothing, no journal and no bundle (the wiring
+                # discriminator: an unwired apply refuses with the not-yet-available message instead).
+                # Flips: an approval for a fresh plan
                 # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
                 # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
                 # (the planner itself never reads that journal, so without the gate it reports the
@@ -20992,8 +21149,9 @@ def _cli_self_test():
                 bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
                 manifest = _opf_init.build_manifest()
                 views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
-                # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
-                # point) lies outside every walked root, so its absence is a declared target.
+                # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with
+                # its entry point, and the deny hook) lies outside every walked root, so its absence is a
+                # declared target.
                 sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
                              targets=[_opf_adopt.PACK_MIRROR_ROOT],
                              decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
@@ -21001,8 +21159,8 @@ def _cli_self_test():
                              ops=[dict(op="init-store", store_root=".", members=[dict(
                                       path=".working/toml/manifest.toml", digest=sha(manifest.encode("utf-8")))]),
                                   dict(op="render-views", store_root=".",
-                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views]),
-                                  _opf_adopt.enforcement_install_op(bindings["enforcement"])],
+                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views])]
+                             + _opf_adopt.enforcement_install_ops(bindings["enforcement"]),
                              bindings=bindings)
                 sheet_path, plan_path, plan2_path, approval_path = (
                     os.path.join(abase, name) for name in ("adopt-sheet.toml", "adopt-plan.toml",
@@ -21055,6 +21213,12 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "not yet executable" not in err:
                         failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
                                         "refusal; {})".format(rc, err.strip()))
+                    # the plan's plant-governance rows dispatch to their landed handler, so the refusal names
+                    # the receipt stage alone and no plan op
+                    if (rc != EXIT_MALFORMED or "receipt stage" not in err or "plan op(s)" in err
+                            or "plant-governance" not in [row["op"] for row in plan_doc["ops"]]):
+                        failures.append("adopt apply over the routed enforcement rows: rc={!r} (expected 2 + "
+                                        "the receipt-stage refusal naming no plan op; {})".format(rc, err.strip()))
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
                                                "--approval", approval_path, "--root", adoptee])
                     if rc != EXIT_MALFORMED or "does not bind" not in err:
@@ -21088,6 +21252,305 @@ def _cli_self_test():
                 shutil.rmtree(abase, ignore_errors=True)
             return None
 
+        def _adopt_reconcile_leg():
+            """`opf adopt reconcile` end to end over product-root fixtures, judged on exit codes, the printed
+            outcome or named finding, and file snapshots. Every vector is red on the deferred head, which
+            refused each `adopt reconcile` with exit 2 and not-yet-available before any read. Recovery of
+            each interrupted state the journal leaves: a transaction interrupted before every op landed
+            (rolled back to the byte-identical prestate, with the store resolver and discovery patched to
+            raise, so a store resolution turns it red), one interrupted after every op landed but before
+            its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
+            (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
+            transaction that never published its INTENT (each lock released and named). The no-op: no
+            journal, a completed transaction, a store lease with nothing open, and a second reconcile after
+            a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
+            its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
+            malformed lock, a transaction with an invalid frame sequence and a stray journal entry beside no
+            transaction (journal-unclassifiable; red against a listing that skips the stray, which reads
+            nothing to reconcile), a store lease beside an open transaction (store-lease-held), and an
+            init-store reversal whose live creations are not the operation's own
+            (init-store-reversal-unproven). A fault after recovery began exits 2 as recovery-failed with
+            the partial state the journal records (the transaction open, no lock and no lease left), and a
+            second reconcile resumes it to the prestate. A product root that does not exist exits 2 as
+            cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
+            the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
+            reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
+            and 8e). Returns None on success or EXIT_MALFORMED on a harness error."""
+            from unittest import mock
+            adopt = _opf_adopt_apply
+            journal = adopt._journal
+            j_rel = adopt.JOURNAL_REL
+            rid = "adopt-20260101T000000Z-0123456789abcdef"
+            files = {".working/TODO.md": b"hand-kept todo\n", "legacy/RULES.md": b"old rules\n"}
+            body = dict(format="opf.adoption.plan/v2", run_id=rid)
+            digest = "sha256:" + adopt._sha256(adopt.emit_checked(body).encode("utf-8"))
+            plan = adopt.emit_checked(dict(body, plan_digest=digest)).encode("utf-8")
+            lease_rel = "{}/{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR,
+                                          "lease.toml")
+
+            class _Interrupt(Exception):
+                pass
+
+            def compose(ops):
+                ops.create(adopt.plan_rel(rid), plan)
+                ops.archive_occupying(".working/TODO.md", "sha256:" + adopt._sha256(files[".working/TODO.md"]))
+                ops.preserve("legacy/RULES.md", "sha256:" + adopt._sha256(files["legacy/RULES.md"]))
+
+            def snap(root):
+                got = dict()
+                for dirpath, _dirs, names in os.walk(root):
+                    for name in names:
+                        p = os.path.join(dirpath, name)
+                        with open(p, "rb") as fh:
+                            got[os.path.relpath(p, root)] = fh.read()
+                return got
+
+            def product(root):
+                return {rel: data for rel, data in snap(root).items() if not rel.startswith(".aiqt" + os.sep)}
+
+            def journal_clean(root):
+                try:
+                    adopt.require_clean_journal(root)
+                    return True
+                except adopt.AdoptApplyError:
+                    return False
+
+            def fixture(name):
+                root = os.path.join(rbase, name)
+                for rel, payload in files.items():
+                    os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                    with open(os.path.join(root, rel), "wb") as fh:
+                        fh.write(payload)
+                return root
+
+            def interrupted(name, when):
+                root = fixture(name)
+
+                def kill(point):
+                    if point.startswith("after-apply-") and when(root):
+                        raise _Interrupt(point)
+                with mock.patch.object(journal, "_kill_point", kill):
+                    try:
+                        adopt.run_adopt_transaction(root, rid, compose, plan_digest=digest)
+                    except (_Interrupt, adopt.AdoptApplyError):
+                        pass
+                return root
+
+            def mid_archive(root):
+                return (os.path.exists(os.path.join(root, adopt.archive_rel(rid, ".working/TODO.md")))
+                        and os.path.exists(os.path.join(root, ".working/TODO.md")))
+
+            def all_landed(root):
+                return os.path.exists(os.path.join(root, adopt.inventory_rel(rid)))
+
+            def lock_bytes(pid):
+                owner = dict(uid=os.getuid(), pid=pid, session="opf-cli-selftest", utc="2026-01-01T00:00:00Z")
+                owner["pid-start"] = ""
+                return json.dumps(owner).encode("utf-8")
+
+            def dead_pid():
+                # a pid with POSITIVE evidence of death (ProcessLookupError on signal 0); nothing is signalled
+                pid = (1 << 22) - 1
+                for _ in range(4096):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        return pid
+                    except OSError:
+                        pass
+                    pid -= 1
+                return None
+
+            def put(root, rel, data):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "wb") as fh:
+                    fh.write(data)
+
+            def run(root):
+                out, err = io.StringIO(), io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        return main(["adopt", "reconcile", "--root", root]), out.getvalue() + err.getvalue()
+                except BaseException as exc:            # a dispatcher crash is itself a failure
+                    return "raised {!r}".format(exc), out.getvalue() + err.getvalue()
+
+            try:
+                rbase = tempfile.mkdtemp(prefix="opf-cli-reconcile-")
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the reconcile fixture tempdir "
+                      "({})".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            try:
+                try:
+                    dead = dead_pid()
+                    before = product(fixture("prestate"))
+                    back = interrupted("back", mid_archive)
+                    forward = interrupted("forward", all_landed)
+                    rip = interrupted("rip", mid_archive)
+                    rip_fired = []
+
+                    def kill_restore(point):
+                        if point.startswith("after-restore-") and not rip_fired:
+                            rip_fired.append(point)
+                            raise _Interrupt(point)
+                    with mock.patch.object(journal, "_kill_point", kill_restore):
+                        try:
+                            adopt.reconcile_report(rip)
+                        except (_Interrupt, adopt.AdoptApplyError):
+                            pass
+                    stale_open = interrupted("staleopen", mid_archive)
+                    put(stale_open, j_rel + "/lock", lock_bytes(dead or 1))
+                    stale_unopened = fixture("staleunopened")
+                    os.makedirs(os.path.join(stale_unopened, j_rel, rid))
+                    put(stale_unopened, j_rel + "/lock", lock_bytes(dead or 1))
+                    empty = fixture("nojournal")
+                    done = fixture("completed")
+                    adopt.run_adopt_transaction(done, rid, compose, plan_digest=digest)
+                    lease_only = fixture("leaseonly")
+                    put(lease_only, lease_rel, b"held\n")
+                    live = interrupted("livelock", mid_archive)
+                    put(live, j_rel + "/lock", lock_bytes(os.getpid()))
+                    badlock = interrupted("badlock", mid_archive)
+                    put(badlock, j_rel + "/lock", b"not a lock record\n")
+                    badseq = fixture("badsequence")
+                    adopt.run_adopt_transaction(badseq, rid, compose, plan_digest=digest)
+                    # the committed frame log written twice over: two INTENTs, never an accepted sequence
+                    frames = os.path.join(badseq, j_rel, rid, "frames.log")
+                    with open(frames, "rb") as fh:
+                        logged = fh.read()
+                    with open(frames, "wb") as fh:
+                        fh.write(logged * 2)
+                    # a stray file in the journal beside no transaction and no lock
+                    strayonly = fixture("strayonly")
+                    put(strayonly, j_rel + "/stray", b"")
+                    leased = interrupted("leased", mid_archive)
+                    put(leased, lease_rel, b"held\n")
+                    # an open transaction the reversal treats as init-store's (its name) whose live creations
+                    # are not that operation's own publication: the reversal preverify refuses it
+                    unproven = interrupted("unproven", mid_archive)
+                    os.rename(os.path.join(unproven, j_rel, rid),
+                              os.path.join(unproven, j_rel, rid + "." + adopt.INIT_STORE_PHASE))
+                    failing = interrupted("recoveryfailed", mid_archive)
+                    failing_before = product(fixture("recoveryfailedprestate"))
+                except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
+                    print("opf cli self-test: harness error: could not build the reconcile fixtures "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+
+                # the fixtures reached the states they name, so no vector below passes vacuously
+                for label, root, want_clean in (("interrupted before every op landed", back, False),
+                                                ("interrupted after every op landed", forward, False),
+                                                ("interrupted mid-rollback", rip, False),
+                                                ("completed", done, True)):
+                    if journal_clean(root) != want_clean:
+                        failures.append("reconcile fixture {}: journal clean={!r} (expected {!r})".format(
+                            label, not want_clean, want_clean))
+                if not rip_fired or dead is None:
+                    failures.append("reconcile fixtures: rollback interrupt fired={!r}, dead pid={!r} (both "
+                                    "needed)".format(bool(rip_fired), dead))
+
+                # recovery, each red on the deferred head; the rollback runs with the store resolver and
+                # discovery raising (spec 14.2: recovery never requires the tree to resolve as a store).
+                no_store = AssertionError("reconcile resolved the store")
+                with mock.patch.object(_opf_store, "resolve_store", side_effect=no_store), \
+                        mock.patch.object(_opf_store, "discover_machine_store", side_effect=no_store):
+                    rc, out = run(back)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and product(back) == before and journal_clean(back)):
+                    failures.append("adopt reconcile over a transaction interrupted before every op landed: "
+                                    "rc={!r} (expected 0 + rolled-back, the byte-identical prestate, no store "
+                                    "resolution; {})".format(rc, out.strip()))
+                rc, out = run(forward)
+                if not (rc == EXIT_OK and "transaction {}: rolled-forward".format(rid) in out
+                        and journal_clean(forward)
+                        and adopt.verify_bundle(forward, rid).status == _opf_store.VALID
+                        and not os.path.exists(os.path.join(forward, ".working/TODO.md"))):
+                    failures.append("adopt reconcile over a transaction interrupted after every op landed: "
+                                    "rc={!r} (expected 0 + rolled-forward, its bundle VALID; {})".format(
+                                        rc, out.strip()))
+                rc, out = run(rip)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and product(rip) == before and journal_clean(rip)):
+                    failures.append("adopt reconcile over an interrupted rollback: rc={!r} (expected 0 + "
+                                    "rolled-back, the byte-identical prestate; {})".format(rc, out.strip()))
+                for label, root, needle in (
+                        ("a dead run's lock beside an open transaction", stale_open,
+                         "transaction {}: rolled-back".format(rid)),
+                        ("a dead run's lock beside a transaction that never published its INTENT",
+                         stale_unopened, "is not resumed")):
+                    rc, out = run(root)
+                    if not (rc == EXIT_OK and needle in out and "released the adoption journal lock" in out
+                            and product(root) == before and journal_clean(root)):
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + {!r} + the released "
+                                        "lock named, the prestate, a clean journal; {})".format(
+                                            label, rc, needle, out.strip()))
+
+                # nothing to recover: exit 0 and every file, the journal included, byte-identical; a
+                # second reconcile after a recovery is the same no-op.
+                for label, root in (("no journal", empty), ("a completed transaction", done),
+                                    ("a store lease with nothing open", lease_only),
+                                    ("an already reconciled journal", back)):
+                    was = snap(root)
+                    rc, out = run(root)
+                    if rc != EXIT_OK or "nothing to reconcile" not in out or snap(root) != was:
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + nothing to reconcile, "
+                                        "byte-identical; {})".format(label, rc, out.strip()))
+
+                # each refusal: exit 2, its named finding, every file byte-identical.
+                for label, root, finding in (
+                        ("a live journal lock", live, adopt.RECONCILE_LOCK_HELD),
+                        ("a malformed journal lock", badlock, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("an invalid frame sequence", badseq, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("a stray journal entry beside no transaction", strayonly, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("a store lease beside an open transaction", leased, adopt.RECONCILE_STORE_LEASE_HELD),
+                        ("an init-store reversal whose live creations are not its own", unproven,
+                         adopt.RECONCILE_REVERSAL_UNPROVEN)):
+                    was = snap(root)
+                    rc, out = run(root)
+                    if rc != EXIT_MALFORMED or "REFUSED ({})".format(finding) not in out or snap(root) != was:
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 2 + REFUSED ({}), "
+                                        "byte-identical; {})".format(label, rc, finding, out.strip()))
+
+                # a product root that does not exist: cannot evaluate (exit 2), never a REFUSED finding, and
+                # nothing created there (a contract pin, green on the build before it too).
+                missing = os.path.join(rbase, "missing")
+                rc, out = run(missing)
+                if (rc != EXIT_MALFORMED or "cannot evaluate" not in out or "cannot open product root" not in out
+                        or "REFUSED" in out or os.path.lexists(missing)):
+                    failures.append("adopt reconcile over a product root that does not exist: rc={!r} (expected "
+                                    "2 + cannot evaluate, no REFUSED finding, nothing created; {})".format(
+                                        rc, out.strip()))
+
+                # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
+                # archive copy is discarded) exits 2 named, and the state is the journal's record of a
+                # PARTIAL recovery: the transaction still open, the archive copy gone, no journal lock and no
+                # store lease left; a second reconcile resumes it to the byte-identical prestate.
+                copy = os.path.join(failing, adopt.archive_rel(rid, ".working/TODO.md"))
+                fired = []
+
+                def restore_fault(point):
+                    if point.startswith("after-restore-") and not os.path.exists(copy) and not fired:
+                        fired.append(point)
+                        raise OSError(5, "injected EIO at " + point)
+                with mock.patch.object(journal, "_kill_point", restore_fault):
+                    rc, out = run(failing)
+                partial = (fired != [] and rc == EXIT_MALFORMED
+                           and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out and "PARTIAL" in out
+                           and not journal_clean(failing) and not os.path.exists(copy)
+                           and not os.path.exists(os.path.join(failing, j_rel, "lock"))
+                           and not any(rel.endswith("lease.toml") for rel in snap(failing))
+                           and product(failing) != failing_before)
+                rc2, out2 = run(failing)
+                if not (partial and rc2 == EXIT_OK and "transaction {}: rolled-back".format(rid) in out2
+                        and product(failing) == failing_before and journal_clean(failing)):
+                    failures.append("adopt reconcile over a recovery that faults after it began: rc={!r} then "
+                                    "{!r} (expected 2 + REFUSED (recovery-failed), the partial state the "
+                                    "journal records, then 0 + rolled-back to the prestate; {} / {})".format(
+                                        rc, rc2, out.strip(), out2.strip()))
+            finally:
+                shutil.rmtree(rbase, ignore_errors=True)
+            return None
+
         harness_rc = _fixture_leg()
         if harness_rc is not None:
             return harness_rc
@@ -21097,6 +21560,9 @@ def _cli_self_test():
         adopt_rc = _adopt_leg()
         if adopt_rc is not None:
             return adopt_rc
+        reconcile_rc = _adopt_reconcile_leg()
+        if reconcile_rc is not None:
+            return reconcile_rc
         upgrade_rc = _upgrade_self_test()
         if upgrade_rc == EXIT_MALFORMED:
             return upgrade_rc
@@ -21167,8 +21633,14 @@ def _cli_self_test():
               "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
-              "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
-              "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
+              "adoption planner -- bare/malformed usage and the deferred complete fail closed to exit 2; "
+              "reconcile -> 0 recovering an interrupted transaction from the journal alone (rolled back "
+              "with no store resolution, rolled forward, an interrupted rollback finished, a dead run's "
+              "lock released) or a byte-identical no-op with nothing to recover / 2 with a named finding "
+              "and nothing written on a live or malformed lock, an invalid frame sequence, a store "
+              "lease beside an open transaction or an unproven init-store reversal, and 2 recovery-failed "
+              "with the journal's partial state that a second reconcile resumes, malformed arguments named "
+              "by the parser; status -> 0 no-run or verified run / 1 open-transaction or invalid-"
               "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
               "another phase or plan digest than its own sealed plan's, or has no plan, "
               "plan -> 2 missing, FIFO, oversized "
@@ -22596,6 +23068,65 @@ def _self_tests():
     ("opf-cli", _cli_self_test),
 )
 
+
+# The named groups of the registry above, each run alone by `opf.py --self-test-group NAME`, so CI can run the
+# self-test as parallel shards. Every registered label sits in exactly one group, and a group runs its labels in
+# registry order. _self_test_group_faults names a label left out, doubled or unknown, and the selector runs
+# nothing while it names one, so a shard can never silently drop a leg. The selector is its own flag, not an
+# argument after --self-test: a command carrying --self-test is a registered self-test that the git-fixture-env
+# config lanes rerun, and the whole run stays registered (the host-patch CI job and opf/tools/run_all_checks.sh
+# still run it), so those lanes run each leg once and no group command a second time.
+SELF_TEST_GROUPS = (
+    ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
+              "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
+              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+    ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
+    ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
+)
+
+
+def _self_test_group_faults(registry, groups):
+    """Return the faults of `groups` as a partition of the labels of `registry`, (label, callable) pairs: a
+    group name given twice, an empty group, a label registered twice, a registered label in no group (left
+    out), a label named more than once across the groups (doubled), and a grouped label with no registry
+    entry. No fault means every registered self-test is in exactly one group."""
+    labels = [label for label, _fn in registry]
+    names = [name for name, _members in groups]
+    grouped = [label for _name, members in groups for label in members]
+    faults = ["group {} is named {} times".format(name, names.count(name))
+              for name in sorted(set(names)) if names.count(name) > 1]
+    faults += ["group {} is empty".format(name) for name, members in groups if not members]
+    faults += ["{} is registered {} times".format(label, labels.count(label))
+               for label in sorted(set(labels)) if labels.count(label) > 1]
+    for label in sorted(set(labels)):
+        if not grouped.count(label):
+            faults.append("{} is in no group (left out)".format(label))
+        elif grouped.count(label) > 1:
+            faults.append("{} is grouped {} times (doubled)".format(label, grouped.count(label)))
+    faults += ["{} is grouped, but no registry entry has that label".format(label)
+               for label in sorted(set(grouped) - set(labels))]
+    return faults
+
+
+def run_self_test_group(name, groups=None, tests=None):
+    """Run the one group of SELF_TEST_GROUPS named `name` through run_self_tests: its registered self-tests, in
+    registry order, with the aggregate's worst-outcome exit. Returns 2 (cannot evaluate) and runs nothing when the
+    groups are not a partition of the registry (_self_test_group_faults) or no group has that name."""
+    groups = SELF_TEST_GROUPS if groups is None else groups
+    tests = _self_tests() if tests is None else tests
+    faults = _self_test_group_faults(tests, groups)
+    if faults:
+        print("opf self-test group: the groups do not hold every registered self-test exactly once, so no group "
+              "runs (cannot evaluate): {}".format("; ".join(faults)), file=sys.stderr)
+        return EXIT_MALFORMED
+    members = dict(groups).get(name)
+    if members is None:
+        print("opf self-test group: no group is named {}; the groups are {} (cannot evaluate)".format(
+            _init_inert(name), ", ".join(group for group, _members in groups)), file=sys.stderr)
+        return EXIT_MALFORMED
+    return run_self_tests(tuple((label, fn) for label, fn in tests if label in members))
+
+
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb",
                "record")
@@ -22679,6 +23210,8 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
+    if len(args) == 2 and args[0] == "--self-test-group":
+        return run_self_test_group(args[1])
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED

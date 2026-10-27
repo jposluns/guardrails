@@ -186,8 +186,54 @@ def vectors(f):
     add("compat/bad-provenance",
         lambda m: m.validate_compatibility(manifest, provenance=b"not toml"),
         "REFUSED", "COMPATIBILITY")
-    add("compat/older-version-refused", lambda m: m.validate_compatibility(old[p0.MANIFEST_PATH]),
-        "REFUSED", "VERSION")
+    def older_version_refused(m):
+        # The refusal names the manifest path and the declared spec_version, states that no store
+        # upgrade reaches spec_version 2.0.0, and states the hand step (spec 9.2), pinned whole:
+        # rewording it, dropping any of them, or offering an upgrade again, is red.
+        got = m.validate_compatibility(old[p0.MANIFEST_PATH])
+        check([f[2] for f in got.findings] == [
+            "{0} declares spec_version '1.1.0'; this bootstrap requires 1.2.0: no store upgrade "
+            "reaches spec_version 2.0.0, and this bootstrap does not operate on a store at another "
+            "version; to adopt its tree instead, "
+            "first move {0} aside by hand: its files are then ordinary foreign content for a first "
+            "adoption".format(p0.MANIFEST_PATH)],
+            "compat/older-version-refused/message")
+        return got
+    add("compat/older-version-refused", older_version_refused, "REFUSED", "VERSION")
+
+    def version_refusal(name, variant, message):
+        # Pinned whole, like compat/older-version-refused: collapsing these refusals back into one
+        # shared hand-step message is red.
+        def case(m, variant=variant, message=message):
+            got = m.validate_compatibility(variant)
+            check([f[2] for f in got.findings] == [message], "compat/" + name + "/message")
+            return got
+        add("compat/" + name, case, "REFUSED", "VERSION")
+
+    # Each non-1.2.0 declaration gets its own pinned refusal: only a declaration below 2.0.0 is an
+    # older store and gets the hand step (spec 9.2); a newer, malformed or missing declaration is
+    # never offered it.
+    check(manifest.count(b'spec_version = "1.2.0"\n') == 1, "fixture/manifest-version-line")
+    version_refusal("newer-no-hand-step", manifest.replace(b'"1.2.0"', b'"2.0.0"'),
+                    "{} declares spec_version '2.0.0'; this bootstrap requires 1.2.0: a store "
+                    "declaring 2.0.0 or above is a store at a later version, never foreign "
+                    "content; use the tooling that implements it (fail-closed)".format(
+                        p0.MANIFEST_PATH))
+    version_refusal("between-gets-hand-step", manifest.replace(b'"1.2.0"', b'"1.3.0"'),
+                    "{0} declares spec_version '1.3.0'; this bootstrap requires 1.2.0: no store "
+                    "upgrade reaches spec_version 2.0.0, and this bootstrap does not operate on a "
+                    "store at another version; to "
+                    "adopt its tree instead, first move {0} aside by hand: its files are then "
+                    "ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH))
+    version_refusal("malformed-version", manifest.replace(b'"1.2.0"', b'"x.y"'),
+                    "{} declares spec_version 'x.y', which is not a bare SemVer; this bootstrap "
+                    "requires 1.2.0 (fail-closed)".format(p0.MANIFEST_PATH))
+    version_refusal("missing-version", manifest.replace(b'spec_version = "1.2.0"\n', b''),
+                    "{} declares no spec_version; this bootstrap requires 1.2.0 "
+                    "(fail-closed)".format(p0.MANIFEST_PATH))
+    version_refusal("missing-opf-table", manifest.replace(b'[opf]\n', b'[other]\n'),
+                    "{} has no [opf] table; this bootstrap requires spec_version 1.2.0 "
+                    "(fail-closed)".format(p0.MANIFEST_PATH))
     def homes(m):
         # Verify the generation fence even if a later resolver activates generation 2.
         from unittest.mock import patch

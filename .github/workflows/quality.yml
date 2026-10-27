@@ -3,24 +3,49 @@ name: Quality
 on:
   pull_request:
     branches: [main]
+    # Only the labeled type schedules a pull request run. The merge lane applies the merge-train label
+    # to the train pull request after each push it makes there; adding a label the pull request
+    # already carries fires no labeled event (GitHub's behaviour, not verified live here), so to run
+    # on the same head again it removes the label and adds it back. An open, a push, a reopen, a
+    # retarget and a title/body edit schedule nothing, so a member head gets no Quality run at all:
+    # its evidence is the local tools/run_all_checks.sh run before its push (a process rule, not
+    # enforced per head), and that run fails when gitleaks is not on PATH or reports another version
+    # than the Secrets (gitleaks) step below pins. A label added to any other pull request into main
+    # starts a run whose heavy jobs are skipped (the job-level if: below, the second layer), so its
+    # Quality gates fails. A head with no run of this workflow reads as missing, never as passing:
+    # ci-status.sh requires a completed successful run of this workflow FILE on every read.
+    # tools/check_ci_parity.py holds these types to exactly [labeled].
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
-    # (check_msg_leaks), which runs in msg-leaks.yml, triggered on `edited`. A retarget alone
-    # therefore schedules no fresh Quality run; ci-status.sh --require-base closes that gap. That
-    # invocation is the merge lane's own tooling: no production caller in this repository passes
-    # the option (its behaviour self-test exercises it). It refuses a run whose recorded
+    # (check_msg_leaks), which runs in msg-leaks.yml on every pull request into main, triggered on
+    # `edited` too. A retarget alone therefore schedules no fresh Quality run; ci-status.sh
+    # --require-base closes that gap. That invocation is the merge lane's own tooling: no
+    # production caller in this repository passes the option (its behaviour self-test exercises
+    # it). It refuses a run whose recorded
     # pull_request base is not the merge target AND requires a conforming run of this workflow
     # FILE (matched by the run's recorded path, never its display name), so a pre-retarget run is
     # never trusted and a lone msg-leaks run cannot stand in. Recovery: only a RETAINED
-    # pre-retarget run forces a refresh push (a NEW head SHA); a merely missing Quality run is
-    # satisfied by a qualifying run on this same head, which a reopen schedules, and under --wait
-    # the check keeps polling for one within its settle window before refusing.
-    types: [opened, synchronize, reopened]
+    # pre-retarget run forces a refresh push (a NEW head SHA), labelled again after it; a merely
+    # missing Quality run is satisfied by a qualifying run on this same head, which removing and
+    # re-adding the merge-train label schedules, and under --wait the check keeps polling for one
+    # within its settle window before refusing.
+    types: [labeled]
   push:
     branches: [main]
 
 permissions:
   contents: read
+
+# A newer run of the same pull request cancels its superseded run, which then reads red (Quality gates
+# fails on a cancelled job), never green. A push run gets a group of its own (its run id), so a
+# push-to-main run is never cancelled and never queued behind another run. A cancelled run stays on its
+# commit and tools/ci-status.sh refuses a commit with any non-success run, so a cancelled run on a live
+# head (a label added while its run is in progress, the merge-train label re-applied included, or a
+# push back to an earlier head) needs a new head commit, labelled again. tools/check_ci_parity.py and
+# tools/check_python_host_pin.py accept exactly this block.
+concurrency:
+  group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # The gates run as parallel jobs, so the run takes about as long as its longest single step
@@ -40,6 +65,14 @@ jobs:
   # the local runner runs check_ci_parity.
   # Within a job the steps keep their original relative order. The Quality gates job at the end
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
+  # The heavy jobs (the three OPF tooling shards opf, opf-adopt and opf-init, selftest-execution, the four
+  # git-fixture-env lanes, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
+  # so they run only on a push and on a pull request whose head is a merge-train-* branch of this
+  # repository; every other job runs in every run. That if: is the second layer behind the labeled
+  # trigger above, which already keeps a member head from running at all. In any other pull request
+  # run (a label added to a pull request that is not a train) the heavy jobs are skipped
+  # and Quality gates fails by design (skipped is not success): such a change merges only by riding a
+  # train. tools/check_ci_parity.py accepts that if: line exactly, and only on those jobs.
   secrets:
     name: Secrets and leaks
     runs-on: ubuntu-latest
@@ -78,6 +111,14 @@ jobs:
           echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks dir . --no-banner --redact --exit-code 1
+
+      # The local runner requires this same gitleaks version on PATH (its live leg is local-only: the
+      # step above downloads and verifies the pinned binary here); CI runs the gate's vectors. The gate
+      # reads the pin only from the env: of the step above and refuses GITLEAKS_VERSION named anywhere
+      # else in this file, outside a comment and that step's expansions of it.
+      - name: Gitleaks pin self-test
+        shell: bash
+        run: python3 -I -B tools/check_gitleaks_pin.py --self-test
 
       - name: Leak denylist self-test
         shell: bash
@@ -206,8 +247,15 @@ jobs:
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py
 
+  # The OPF tooling steps run as three parallel shards (opf, opf-adopt and opf-init), each with one
+  # opf.py --self-test-group step: SELF_TEST_GROUPS in opf/tools/opf.py names the groups, and the selector
+  # runs nothing unless they hold every registered self-test exactly once. Every other step runs in exactly
+  # one shard, keeping its original relative order there. tools/check_ci_parity.py holds the group steps
+  # to the heavy jobs and, in its self-test, each group to exactly one step here and one line of
+  # tools/run_all_checks.sh. The opf-host-patch job below runs the whole self-test, every group once.
   opf:
-    name: OPF tooling
+    name: OPF tooling (core, records and upgrade)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -227,9 +275,9 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_homes.py
 
-      - name: OPF tooling self-test
+      - name: OPF tooling self-test (core group)
         shell: bash
-        run: python3 -I -B opf/tools/opf.py --self-test
+        run: python3 -I -B opf/tools/opf.py --self-test-group core
 
       - name: OPF journal direct self-test
         shell: bash
@@ -255,29 +303,43 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_doctor.py
 
-      - name: OPF source-only init gate self-test
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init.py --self-test
-
-      - name: OPF source-only init gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init.py
-
-      - name: OPF init Keep-contract validator self-test
-        shell: bash
-        run: python3 -I -B opf/tools/_opf_init_contract.py --self-test
-
-      - name: OPF init contract consistency gate self-test
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
-
-      - name: OPF init contract consistency gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init_contract.py
-
       - name: OPF record-authoring gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
+
+      - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+
+      - name: OPF prompt-pack manifest drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
+
+      - name: OPF enforcement-pack platform coverage gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test
+
+      - name: OPF enforcement-pack platform coverage gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_platforms.py
+
+  opf-adopt:
+    name: OPF tooling (adoption)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: OPF tooling self-test (adopt group)
+        shell: bash
+        run: python3 -I -B opf/tools/opf.py --self-test-group adopt
 
       - name: OPF adoption schema and read-only planning self-test
         shell: bash
@@ -303,6 +365,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_batch.py --self-test
 
+      - name: OPF import completion per-source evaluator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
+
       - name: OPF pack manifest parser self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
@@ -315,21 +381,43 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
 
-      - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+  opf-init:
+    name: OPF tooling (init and watchdog)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-      - name: OPF prompt-pack manifest drift gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
-      - name: OPF enforcement-pack platform coverage gate self-test
+      - name: OPF tooling self-test (watchdog group)
         shell: bash
-        run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test
+        run: python3 -I -B opf/tools/opf.py --self-test-group watchdog
 
-      - name: OPF enforcement-pack platform coverage gate
+      - name: OPF source-only init gate self-test
         shell: bash
-        run: python3 -I -B tools/check_opf_enforce_platforms.py
+        run: python3 -I -B opf/tools/check_opf_init.py --self-test
+
+      - name: OPF source-only init gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init.py
+
+      - name: OPF init Keep-contract validator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_init_contract.py --self-test
+
+      - name: OPF init contract consistency gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
+
+      - name: OPF init contract consistency gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_contract.py
 
       - name: OPF operation-lock self-test
         shell: bash
@@ -566,6 +654,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_must_deliver.py
 
+      - name: Mappings page self-test
+        shell: bash
+        run: python3 -I -B tools/gen_mappings.py --self-test
       - name: Mappings page drift
         shell: bash
         run: python3 -I -B tools/gen_mappings.py --check
@@ -634,6 +725,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_notice.py --check
 
+      - name: CLAUDE.md self-test
+        shell: bash
+        run: python3 -I -B tools/gen_claude.py --self-test
       - name: CLAUDE.md drift
         shell: bash
         run: python3 -I -B tools/gen_claude.py --check
@@ -658,6 +752,10 @@ jobs:
       - name: Hooks generator self-test
         shell: bash
         run: python3 -I -B tools/gen_hooks.py --self-test
+
+      - name: Secret-patterns generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_secret_patterns.py --self-test
 
       # gen_secret_patterns.py --check runs BEFORE the byte-copy drift gate below: a drifted generated
       # secret-pattern region in the source aiqt_hooks.py is caught here, before gen_hooks.py copies that
@@ -694,6 +792,7 @@ jobs:
 
   selftest-execution:
     name: Execution-reconciled self-tests
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -738,6 +837,7 @@ jobs:
 
   git-fixture-env-core:
     name: Git-fixture-env core self-test
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -755,6 +855,7 @@ jobs:
 
   git-fixture-env-config-combined:
     name: Git-fixture-env combined config lane
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -772,6 +873,7 @@ jobs:
 
   git-fixture-env-config-malformed:
     name: Git-fixture-env malformed config lane
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -789,6 +891,7 @@ jobs:
 
   git-fixture-env-config-system:
     name: Git-fixture-env system config lane
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -806,22 +909,28 @@ jobs:
 
   # The host-patch legs. Every other job of this workflow that sets up Python pins '3.14' (Quality gates
   # sets up none); with check-latest off, the Python setup action may resolve that pin to a 3.14 already on
-  # the runner rather than the newest patch release. Those jobs stay required. These two run the suites a
+  # the runner rather than the newest patch release. Those jobs stay required. These five run the suites a
   # newer patch release most often breaks on the exact patch release the maintainer host runs, which
   # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
   # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
-  # innocent. tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
-  # jobs) and each job whole: runs-on ubuntu-24.04 (on 2026-10-12 the Python versions manifest listed Linux
-  # x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would fail these jobs on an image
-  # without one), this checkout step as written, no env: on the job or any step, one Python setup step
-  # pinning that release, the gate itself as the next step (it fails when the job does not run that
-  # release) and the job's suites in order, each held step with exactly name, run and shell: bash; its
-  # jobs leg also runs outside these jobs, in the registry job (--jobs-only), so an edit here cannot
-  # silence every CI run of it. Both are required through Quality gates. They run the OPF tooling
-  # self-test and the four git-fixture-env suites a second time in every run; an edit to a pull request's
-  # title or body starts no Quality run.
+  # innocent. opf-host-patch runs the OPF tooling self-test, and each git-fixture-env-*-host-patch job runs
+  # the one git-fixture-env suite of its '3.14' lane, so the four suites run as parallel jobs, as they do on
+  # '3.14', and the host leg takes about as long as its longest suite rather than the sum of the four.
+  # tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
+  # jobs, and concurrency only as the pinned block) and each job whole: no job key but name, runs-on,
+  # steps and the pinned heavy-job if: line, runs-on ubuntu-24.04 (on 2026-10-12 the Python versions
+  # manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so ubuntu-latest would
+  # fail these jobs on an image without one), this checkout step as written, no env: on the job or any
+  # step, one Python setup step pinning that release, the gate itself as the next step (it fails when the
+  # job does not run that release) and the job's one suite, each held step with exactly name, run
+  # and shell: bash; its jobs leg also runs outside these jobs, in the registry job (--jobs-only), which
+  # carries no if:, so an edit here cannot silence every CI run of it. All five are required through Quality
+  # gates. They are heavy jobs, so they run the OPF tooling self-test and the four git-fixture-env suites
+  # a second time in every run on a push or on a merge-train-* pull request of this repository, and in no
+  # other pull request run; an edit to a pull request's title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -845,8 +954,9 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/opf.py --self-test
 
-  git-fixture-env-host-patch:
-    name: Git-fixture-env self-test (host patch)
+  git-fixture-env-core-host-patch:
+    name: Git-fixture-env core self-test (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -866,13 +976,67 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 
+  git-fixture-env-config-combined-host-patch:
+    name: Git-fixture-env combined config lane (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
       - name: Git-fixture-env combined config-injection lane (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
 
+  git-fixture-env-config-malformed-host-patch:
+    name: Git-fixture-env malformed config lane (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
       - name: Git-fixture-env malformed-config lane (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+
+  git-fixture-env-config-system-host-patch:
+    name: Git-fixture-env system config lane (host patch)
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
 
       - name: Git-fixture-env system-config lane (execution-reconciled, host patch)
         shell: bash
@@ -968,7 +1132,7 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_python_floor.py
 
-      # The host-pin jobs leg, run OUTSIDE the two host-patch jobs it judges, so an edit to those
+      # The host-pin jobs leg, run OUTSIDE the five host-patch jobs it judges, so an edit to those
       # jobs (a job-level env: or defaults: that silences their own steps among them) cannot silence
       # every CI run of this gate; this job pins '3.14', not the host patch, so only the source and
       # jobs legs run (--jobs-only), never the interpreter leg.
@@ -1119,6 +1283,7 @@ jobs:
   # would surface as a carriage-return finding, failing the job.
   byte-canon-matrix:
     name: Byte canon vectors (${{ matrix.os }})
+    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -1153,6 +1318,8 @@ jobs:
       - secrets
       - site
       - opf
+      - opf-adopt
+      - opf-init
       - opf-closure
       - release
       - generated
@@ -1162,7 +1329,10 @@ jobs:
       - git-fixture-env-config-malformed
       - git-fixture-env-config-system
       - opf-host-patch
-      - git-fixture-env-host-patch
+      - git-fixture-env-core-host-patch
+      - git-fixture-env-config-combined-host-patch
+      - git-fixture-env-config-malformed-host-patch
+      - git-fixture-env-config-system-host-patch
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest

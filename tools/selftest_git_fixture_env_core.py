@@ -179,7 +179,7 @@ def _roster_checks():
             ("roster/prefixed-invalid-suite-refused", local,
              add_local('\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-core --extra\n'),
              "unparseable suite invocation:"),
-            # codex qa10 MAJOR-1: Path.read_text() translated a planted
+            # Byte-level reader: Path.read_text() translated a planted
             # carriage return into a newline BEFORE any screen ran, so a
             # \r-hidden gate line in a REAL runner file on disk read as a
             # clean extra gate and the roster stayed green. Every fixture

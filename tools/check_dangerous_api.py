@@ -461,11 +461,18 @@ ALLOWLIST = (
     ("opf/tools/_opf_adopt_observe.py", "self_test.deny_effects", "shell", 1,
      "self-test deny patch: mock.patch.object(os, name) over a fixed literal tuple of spawn and"
      " exec names, each replaced with a refusal; never called"),
-    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 1,
-     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run)"),
+    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 2,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run, once by"
+     " the rec-nolazyfetch env capture and once by the blank-probe status-answer injection, each"
+     " restored in a finally)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated._recheck_under", "shell", 1,
      "self-test fault injector: picks the hook module's own os (or os.path) to patch one"
      " function its caller names from a fixed fault table; never runs a shell"),
+    ("tools/selftest_orch_hooks.py", "_rwh_cases", "shell", 2,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run, saved"
+     " once for the probe-error stubs and once around the locale-pin recorder; the identity-probe"
+     " stubs raise for the one probe argv they intercept and delegate every other call unchanged,"
+     " and the locale recorder answers the probe reply shape without running anything)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated", "shell", 1,
      "self-test fault injector: setattr on the hook module's own os with a function name from"
      " its fixed fault table; never runs a shell"),
