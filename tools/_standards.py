@@ -8,6 +8,7 @@ them. An id that is not in its manifest cannot ship, so a fabricated mapping is 
 
 Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml.
 """
+import errno
 import os
 import re
 import stat
@@ -164,20 +165,280 @@ class Manifest:
         self.id_set = set(self.ids)
 
 
-def dir_present(path):
-    """Fail-closed directory-absence probe. Return True if path is a directory, False if it does not
-    exist. RAISE OSError if it exists but cannot be reached (an unreadable path, or an unreadable
-    ancestor such as a `chmod 0` .aiqt/ parent): the caller must fail closed rather than mistake
-    'cannot tell' for 'absent'. Path.is_dir()/exists() SWALLOW EACCES and return False, so an
-    unreadable input dir would read as an absent (transition-safe) input and pass clean; os.stat raises
-    on EACCES, so we use it. A non-directory returns False (callers treat it as absent, as is_dir did).
-    Pairs with ensure_listable: dir_present catches an unreachable dir, ensure_listable catches a
-    reachable-but-unlistable one."""
+# The probe primitive, named so a self-test can refuse it without filesystem permissions (a
+# chmod-based unreadable-parent fixture is invisible to root); the check_rule_placement.py self-test
+# patches it.
+_lstat = os.lstat
+
+# The link resolution primitives the walk uses on a symlink it meets, bound at import as _lstat is, so a
+# self-test that stands in for the os module inside a probe module still sees every call the walk makes.
+_realpath = os.path.realpath
+_commonpath = os.path.commonpath
+
+# The dir_fd capability, bound at import so it reflects the platform, not a later rebinding of an os
+# attribute (a self-test may wrap os.open); _adapter_compose binds its _DIR_FD_REQUIRES the same way.
+_DIR_FD_OK = os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
+
+# The search-only open flag for a search_only walk, bound at import for the same reason: O_PATH where
+# the platform has it (a directory opened for search needs no read permission), else 0, so the walk
+# opens for reading as the default probe does.
+_SEARCH = getattr(os, "O_PATH", 0)
+
+
+def dir_present(path, *, root, search_only=False):
+    """Fail-closed three-way directory probe. Return True only when every inspected component is a
+    real directory by lstat, or a symlink that resolves to a real directory inside root (read as that
+    directory, as dir_or_absent reads it). Return False only on GENUINE absence: no directory entry
+    at an inspected component (FileNotFoundError; a dangling symlink is a present entry, so it never
+    reads as absent). Anything else RAISES, so a caller can never read 'cannot tell' or 'wrong type'
+    as absent. An unreachable path raises OSError (an unreadable ancestor such as a `chmod 0` .aiqt/
+    parent: Path.is_dir()/exists() SWALLOW EACCES and return False, so an unreadable input dir would
+    read as an absent, transition-safe input and pass clean; the probe raises on EACCES, from lstat
+    or from opening a directory it must walk through). An inspected entry that EXISTS but cannot be
+    read as a directory raises NotADirectoryError (an OSError, so the callers' existing fail-closed
+    handlers refuse it): a regular file, a FIFO, a device, or a symlink that is dangling, whose
+    target is not a directory, or whose target resolves outside root. A symlink is resolved once
+    (os.path.realpath, strict) and tested against the resolved root; the directory it resolves to is
+    then walked to from the resolved root, every component of that walk judged as below and none of
+    them followed, so a symlink met there (swapped in after the resolution) is refused.
+
+    root is required and keyword-only: the directory the caller already trusts (its resolved
+    repository or --root directory, or a directory it just created), which path must lie beneath.
+    root itself is opened as the caller named it; EVERY component of path below root is inspected,
+    each bound beneath the previous component's directory descriptor (lstat with dir_fd, then
+    os.open with O_DIRECTORY|O_NOFOLLOW), so a wrong-type entry, or a symlink that is dangling or
+    resolves to a non-directory or outside root, at ANY ancestor (a symlinked .claude or .aiqt
+    included) is refused, never followed and never read as absent, and a real directory swapped for
+    a symlink between its lstat and its open is refused by the open, while a genuinely absent
+    ancestor still reads as absence. A component whose lstat found it but which is gone by its open
+    (removed or renamed in between) raises OSError naming it: the tree changed under the probe,
+    which is never absence. Every component the walk opens must also be the directory its lstat
+    judged, its descriptor's st_dev and st_ino equal to that lstat's, so one replaced by another
+    real directory in between (which O_NOFOLLOW admits) raises OSError naming it too, never walked
+    into: its contents, or its lack of the next component read as absence, never stand in for the
+    tree judged. There is no form without a root: a probe that judged only the final component
+    would trust, and so follow, every ancestor, and read a dangling one as absence.
+    A path that is not beneath root (or that climbs with '..') raises OSError (EINVAL), so the
+    callers' handlers refuse it too. The probe judges the tree only while it runs: a later read of
+    the same path by name is not bound to it (open_dir returns a descriptor to read through
+    instead). Pairs with ensure_listable: dir_present catches an unreachable or wrong-type entry,
+    ensure_listable catches a reachable-but-unlistable directory.
+
+    search_only opens root and every directory the walk passes through for search only (O_PATH where
+    the platform has it), so a traversable but unreadable directory on the way does not raise; the
+    default opens them for reading, so such a directory raises EACCES. Every judgement is the same
+    either way: each component is judged by lstat, and O_PATH with O_DIRECTORY|O_NOFOLLOW refuses a
+    symlink as O_RDONLY does."""
+    return _walk(path, root, _SEARCH if search_only else 0, False) is not None
+
+
+def open_dir(path, *, root, search_only=False):
+    """Probe path as dir_present does and return a descriptor for it, opened for reading, which the
+    caller owns and closes; return None on genuine absence. Every refusal dir_present makes, this
+    makes, and path must lie strictly beneath root (root itself raises EINVAL). The final component
+    is judged by lstat like every other, then opened beneath its parent's descriptor with
+    O_DIRECTORY|O_NOFOLLOW, and the opened directory's st_dev and st_ino must equal that lstat's,
+    as every directory the walk opens below root must: a symlink swapped in between the judgement
+    and the open is refused by the open, another directory swapped in, at path or at any ancestor
+    below root, raises OSError naming it, and so does a final directory removed in between, so the
+    descriptor is always the directory the probe judged, reached through the ancestors it judged,
+    and its absence is never read from a changed tree. A caller that lists and reads through it
+    (os.scandir on the descriptor, os.open with dir_fd) is then bound to that directory whatever
+    later happens to its name. search_only opens root and the directories the walk passes through
+    as dir_present's does; the final directory is opened for reading either way, since its caller
+    lists it."""
+    return _walk(path, root, _SEARCH if search_only else 0, True)
+
+
+def _linked_dir(link, root):
+    """(target, resolved root) when the symlink at link resolves (os.path.realpath, strict) to an
+    existing directory inside root, root resolved too; None when it is dangling, resolves outside
+    root, or names something that is not a directory, which the walk then refuses. A link that
+    cannot be resolved other than by absence (a loop, an unreadable component) raises OSError."""
     try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        return False
-    return stat.S_ISDIR(st.st_mode)
+        real = _realpath(link, strict=True)
+        real_root = _realpath(root)
+        if _commonpath([real, real_root]) != real_root or not stat.S_ISDIR(_lstat(real).st_mode):
+            return None
+    except (FileNotFoundError, ValueError):
+        return None
+    return Path(real), Path(real_root)
+
+
+def _walk(path, root, search, hold, follow=True):
+    """The walk dir_present and open_dir share. Return None on genuine absence; otherwise True, or
+    with hold the final directory's descriptor, the only one it leaves open, opened for reading
+    whatever search is. Every directory it opens below root is checked by st_dev and st_ino against
+    the lstat that judged it; root itself is opened as named. With follow, a symlink at a component
+    that resolves to a directory inside root (_linked_dir) is read as that directory: it is walked
+    to from the resolved root without follow, held when a later component is judged beneath it or
+    when it is the held final component; any other symlink is refused."""
+    path = Path(path)
+    base = Path(root)
+    try:
+        parts = path.relative_to(base).parts
+    except ValueError:
+        parts = None
+    if parts is None or ".." in parts or (hold and not parts and follow):
+        raise OSError(errno.EINVAL, "not a path beneath the probe root {}".format(base), str(path))
+    if not _DIR_FD_OK:
+        raise OSError(
+            errno.ENOSYS, "directory probing bound beneath a descriptor (os.open and os.lstat "
+            "with dir_fd) is unavailable on this platform", str(path))
+    walked = base
+    fds = []
+    try:
+        try:
+            fds.append(os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | search))
+            for i, name in enumerate(parts):
+                walked = walked / name
+                st = _lstat(name, dir_fd=fds[-1])
+                if follow and stat.S_ISLNK(st.st_mode):
+                    linked = _linked_dir(walked, base)
+                    if linked is not None:
+                        reached = _walk(linked[0], linked[1], search, hold or i + 1 < len(parts), False)
+                        if reached is None:
+                            # The resolution found the directory, so it is gone only because the
+                            # tree changed in between: never absence.
+                            raise OSError(errno.ESTALE, "the directory the symlink resolved to is gone "
+                                          "(removed or renamed in between)", str(walked))
+                        if reached is not True:
+                            fds.append(reached)
+                        continue
+                if not stat.S_ISDIR(st.st_mode):
+                    kind = "a symlink" if stat.S_ISLNK(st.st_mode) else "a non-directory entry"
+                    raise NotADirectoryError(
+                        errno.ENOTDIR, "{} where a directory is required".format(kind), str(walked))
+                if hold or i + 1 < len(parts):
+                    # The next component is judged beneath THIS component's descriptor; O_NOFOLLOW
+                    # refuses even a symlink swapped in between the lstat above and this open. The
+                    # final component is opened only when it is held (for reading, as its caller
+                    # lists it): otherwise its lstat is the whole judgement.
+                    try:
+                        fds.append(os.open(name,
+                                           os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                                           | (search if i + 1 < len(parts) else 0), dir_fd=fds[-1]))
+                    except FileNotFoundError:
+                        # The lstat above found this entry, so it is gone only because the tree
+                        # changed in between: that is never absence. Not ENOENT, which the handler
+                        # below would read as absence.
+                        raise OSError(errno.ESTALE, "the entry the probe judged is gone (removed or "
+                                      "renamed in between)", str(walked))
+                    # O_NOFOLLOW admits another real directory swapped in between the lstat above
+                    # and this open, so every directory opened, an ancestor as well as the held final
+                    # component, must be the one judged: otherwise the walk would go on inside the
+                    # replacement, reading its tree, or its missing child as absence.
+                    opened = os.fstat(fds[-1])
+                    if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+                        raise OSError(errno.ESTALE, "the directory opened is not the one the probe "
+                                      "judged (it was replaced in between)", str(walked))
+        except FileNotFoundError:
+            return None
+        return fds.pop() if hold else True
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def std_root(std):
+    """Return (root, std_dir) for an explicit --std DIR, after probing DIR beneath root: root is the
+    parent of the directory above DIR (an explicit DIR has no known repository root, so that
+    directory stands for it, as load_manifests' callers judge <root>/.aiqt/standards) and std_dir is
+    DIR, which the caller passes to load_manifests with search_only=True, so the loader walks DIR
+    beneath the same root again and reads only through the descriptor it holds. DIR is first walked
+    here by dir_present, and a DIR that is itself a symlink, or that has one at a component below
+    root, is read as the directory it names when that is a real directory inside root; one that is
+    dangling, or whose target is not a directory or resolves outside root (a live link to a
+    standards directory elsewhere included), or a non-directory at ANY component below root, raises
+    NotADirectoryError naming that component, never followed; the loader's own walk refuses such a
+    component swapped in after this one the same way. An absent DIR reads as absent here, and the
+    loader then finds no manifests, which its callers refuse. A relative DIR is taken beneath
+    os.getcwd(), and a DIR that climbs with '..' raises OSError (EINVAL), as dir_present refuses any
+    '..'. Both walks are search_only, so a real DIR beneath a traversable but unreadable directory
+    still works where the platform has O_PATH, and raises EACCES (fail-closed) where it does not."""
+    std = Path(std)
+    named = std if std.is_absolute() else Path(os.getcwd()) / std
+    if ".." in named.parts:
+        raise OSError(errno.EINVAL, "not a path beneath the probe root", str(named))
+    root = named.parent.parent
+    dir_present(named, root=root, search_only=True)
+    return root, named
+
+
+def _std_root_vectors(launch, base, today, failures):
+    """Self-test vectors for a tool's explicit --std, shared by check_standards_currency.py and
+    check_standards_urls_live.py so both hold the same contract. launch(argv) runs the tool's main
+    and returns (exit code, stderr text); base is a fresh writable directory; today dates the fixture
+    manifest (a current, url-free manifest, so no vector reaches the network). A real --std exits 0,
+    also beneath a traversable but unreadable directory where the platform has O_PATH; a --std that
+    is a live symlink to a directory inside its root (std_root's), sits beneath such a symlinked
+    ancestor, or holds no manifest and is swapped for such a symlink to the real tree right after
+    std_root's probe judged it (a hook on the probe primitive), is read and exits 0; a --std that is
+    a dangling symlink, or a live symlink to a directory outside its root, exits 2 naming the
+    symlink. Each failure is appended to failures as one line."""
+    global _lstat
+    base = Path(base).resolve()   # the fixture's own ancestors must hold no symlink
+    body = ('map-key = "map-cur"\nname = "Self-test cur"\npublisher = "AIQT self-test"\n'
+            'edition = "2026"\nkind = "control"\nstatus = "stable"\ncitation-unit = "control"\n'
+            'id-pattern = "ST[0-9]{{2}}"\nsource-artefact = "self-test fixture"\nretrieved = "{}"\n'
+            'catalogue = "full"\n[[id]]\ncode = "ST01"\ntitle = "one"\n').format(today.isoformat())
+    real = base / "std-real"
+    opaque = base / "std-opaque"
+    swapped = base / "std-swapped"
+    swapped.mkdir()
+    for directory in (real, opaque / "standards", base / "std-ancestor-real" / "standards"):
+        directory.mkdir(parents=True)
+        (directory / "cur.toml").write_text(body, encoding="utf-8")
+    # A --std two levels below base, so its root (std_root's) is base / "nest" and real lies outside it.
+    out_link = base / "nest" / "inner" / "std-out-link"
+    out_link.parent.mkdir(parents=True)
+    try:
+        (base / "std-link").symlink_to(real)
+        (base / "std-dangling").symlink_to(base / "no-such-target")
+        (base / "std-ancestor-link").symlink_to(base / "std-ancestor-real")
+        out_link.symlink_to(real)
+    except OSError as exc:
+        failures.append("NOT RUN: the --std symlink vectors: cannot create a symlink ({})".format(exc))
+        return
+    real_lstat = _lstat
+    moved = []
+
+    def _swapping_lstat(name, dir_fd=None):
+        # Judge swapped as it is, then, once, move it aside and link its name to the real tree.
+        st = real_lstat(name, dir_fd=dir_fd)
+        if name == swapped.name and not moved:
+            moved.append(swapped.rename(swapped.with_name(swapped.name + "-judged")))
+            swapped.symlink_to(real)
+        return st
+
+    opaque.chmod(0o711)
+    try:
+        # (vector, --std, expected exit, the path the refusal must name, the probe primitive)
+        for vector, std, want, named, probe in (
+                ("real --std directory", real, 0, None, real_lstat),
+                ("real --std beneath a traversable but unreadable directory", opaque / "standards",
+                 0 if _SEARCH else 2, None, real_lstat),
+                ("--std that is a live symlink to a directory inside its root", base / "std-link", 0, None,
+                 real_lstat),
+                ("--std that is a live symlink to a directory outside its root", out_link, 2, out_link,
+                 real_lstat),
+                ("--std that is a dangling symlink", base / "std-dangling", 2, base / "std-dangling",
+                 real_lstat),
+                ("--std beneath a symlinked ancestor inside its root", base / "std-ancestor-link" / "standards",
+                 0, None, real_lstat),
+                ("--std swapped for a symlink inside its root after its probe", swapped, 0, None,
+                 _swapping_lstat)):
+            _lstat = probe
+            try:
+                code, err = launch(["--std", str(std)])
+            finally:
+                _lstat = real_lstat
+            if code != want or (named is not None and "a symlink where a directory is required: "
+                                "'{}'".format(named) not in err):
+                failures.append("{}: expected exit {}{}, got exit {} ({!r})".format(
+                    vector, want, "" if named is None else " naming " + str(named), code, err))
+    finally:
+        opaque.chmod(0o755)
 
 
 # The reasons dir_or_absent gives for something there that cannot be read as the directory.
@@ -200,12 +461,13 @@ def dir_or_absent(path, root):
     root `root`. Return (True, None) for a directory, (False, None) when nothing is there, and (False, reason)
     when something is there that cannot be read as that directory: a regular file or other non-directory, or
     a symbolic link that is dangling, whose target is not a directory, or whose target resolves outside root.
-    A symbolic link whose target is an existing directory inside root is a directory, as dir_present reads
-    it: the link is resolved once (os.path.realpath, strict), and that one resolved path is the path tested
-    against the resolved root and, with os.lstat, as a directory. RAISE OSError when the path cannot be
+    A symbolic link whose target is an existing directory inside root is a directory, as dir_present also
+    reads it: the link is resolved once (os.path.realpath, strict), and that one resolved path is the path
+    tested against the resolved root and, with os.lstat, as a directory. RAISE OSError when the path cannot be
     examined other than by absence (an unreadable ancestor, an ancestor that is not a directory, or a
-    symbolic link loop), as dir_present does. dir_present reads every non-directory as absent; a caller that
-    must not pass over an input it never read refuses the reason as cannot-evaluate instead. Only the last
+    symbolic link loop), as dir_present does. dir_present raises NotADirectoryError on each such reason
+    instead of giving it; a caller that must name why it cannot evaluate an input refuses the reason given
+    here as cannot-evaluate. Only the last
     component is judged: an ancestor symlink is followed (dir_chain_or_absent judges every component). The
     caller reads the tree through path, so a link retargeted between this probe and that read (by another
     writer at the same moment) is not detected."""
@@ -279,6 +541,34 @@ def _check_stem(path):
             "{}: manifest stem may not end in -tight/-broad (reserved fit suffix)".format(path.name))
 
 
+def _manifest_names(dir_fd):
+    """The *.toml entry names of the standards directory held at dir_fd, sorted, listed through the
+    descriptor (a listing error raises OSError, never an empty set)."""
+    with os.scandir(dir_fd) as entries:
+        return sorted(entry.name for entry in entries if entry.name.endswith(".toml"))
+
+
+# A manifest is opened beneath the held standards directory without following a link; O_NONBLOCK
+# keeps a FIFO at a manifest's name from blocking the open (the fstat check then refuses it).
+_MANIFEST_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _read_manifest(dir_fd, path):
+    """The bytes of the manifest path, read beneath dir_fd only when fstat on the opened descriptor
+    finds a regular file; anything else, a symlink included, raises OSError naming path."""
+    try:
+        manifest_fd = os.open(path.name, _MANIFEST_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        raise OSError(exc.errno, exc.strerror, str(path)) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(manifest_fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file where a manifest is required", str(path))
+        with open(manifest_fd, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(manifest_fd)
+
+
 def _standards_present(std_dir, root):
     """dir_or_absent for the standards dir under root, raising (OSError) where something is there that
     cannot be read as the directory, so it is never read as no manifests; every caller already renders an
@@ -289,39 +579,48 @@ def _standards_present(std_dir, root):
     return present
 
 
-def load_manifests(std_dir, root=None):
+def load_manifests(std_dir, *, root, search_only=False):
     """Return {map_key: Manifest} for every *.toml under std_dir, fully validated. Raise ManifestError
     on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe); an
     existing dir that cannot be listed, or a std_dir that is there but cannot be read as a directory
     (dir_or_absent: a regular file, or a symlink that is dangling, whose target is not a directory or
-    resolves outside root), raises OSError (fail-closed), never a false-clean empty. root is the
-    repository root; by default the directory two levels up, whose .aiqt/standards std_dir is. That default
-    is the real root for every caller that passes <root>/.aiqt/standards. A std_dir named explicitly (the
-    --std DIR of check_standards_currency and check_standards_urls_live) has no known repository root, so
-    the default is a guess there: a DIR that is itself a symbolic link is judged against DIR's grandparent,
-    and one whose target lies outside that directory is refused (exit 2, the message naming it as outside
-    the repository) even when the target is a valid standards directory; name the target directory itself
-    to audit it. A DIR that is not a symbolic link is read as it is, wherever it lies."""
+    resolves outside root), raises OSError (fail-closed), never a false-clean empty; that refusal names
+    the reason. std_dir must lie strictly beneath root (required: the repository root for every caller
+    that passes <root>/.aiqt/standards; for the --std DIR of check_standards_currency and
+    check_standards_urls_live, std_root's root, the parent of the directory above DIR) and is then held
+    by open_dir beneath it (search_only as there; std_root's callers pass True), so a .aiqt (or
+    standards) that is dangling, or a symlink whose target is not a directory or resolves outside root,
+    raises rather than being followed or reading as an absent, empty manifest set, while one that is a
+    symlink to a directory inside root is read as that directory. The listing and every manifest are
+    then read only through the descriptor open_dir returns, each manifest opened beneath it with
+    O_NOFOLLOW, so a component swapped for a symlink or another directory between open_dir's judgement
+    of it and its open is refused (OSError naming it), never followed, and a manifest that is a
+    symlink or not a regular file raises OSError naming it."""
     std_dir = Path(std_dir)
     out = {}
-    if not _standards_present(std_dir, std_dir.parent.parent if root is None else root):
+    _standards_present(std_dir, root)
+    std_fd = open_dir(std_dir, root=root, search_only=search_only)
+    if std_fd is None:
         return out
-    ensure_listable(std_dir)
-    for path in sorted(std_dir.glob("*.toml")):
-        _check_stem(path)
-        with open(path, "rb") as handle:
+    try:
+        for name in _manifest_names(std_fd):
+            path = std_dir / name
+            _check_stem(path)
             try:
-                data = tomllib.load(handle)
+                data = tomllib.loads(_read_manifest(std_fd, path).decode("utf-8"))
             # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
             # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-            # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+            # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS). Content that is not
+            # UTF-8 raises a ValueError too.
             except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
                 raise ManifestError("{}: invalid TOML: {}".format(path.name, exc))
-        manifest = Manifest(path, data)
-        if manifest.map_key in out:
-            raise ManifestError("{}: map-key '{}' already defined by {}".format(
-                path.name, manifest.map_key, out[manifest.map_key].path.name))
-        out[manifest.map_key] = manifest
+            manifest = Manifest(path, data)
+            if manifest.map_key in out:
+                raise ManifestError("{}: map-key '{}' already defined by {}".format(
+                    path.name, manifest.map_key, out[manifest.map_key].path.name))
+            out[manifest.map_key] = manifest
+    finally:
+        os.close(std_fd)
     return out
 
 
@@ -331,14 +630,24 @@ def map_keys(root):
     else. A bare `map-<stem>` (no fit) or a bad suffix (`map-<stem>-medium`) is therefore not a legal
     frontmatter key, rejected fail-closed by gen_rules._check_keys with no extra gate code. Cheap (no
     parse) so gen_rules can build MAP_KEYS at import; check_mappings does the full parse/validation via
-    load_manifests. A .aiqt/standards that is there but cannot be read as a directory raises, as
-    load_manifests does."""
-    std_dir = Path(root) / ".aiqt" / "standards"
-    if not _standards_present(std_dir, root):
+    load_manifests. .aiqt and standards are both probed beneath root, so a .aiqt (or standards) that
+    is dangling, or a symlink whose target is not a directory or resolves outside root, raises rather
+    than reading as an absent, transition-safe key set (a .aiqt/standards that is there but cannot be
+    read as a directory raises naming the reason, as load_manifests does), and the names are listed
+    through the descriptor open_dir returns, as load_manifests lists them."""
+    root = Path(root)
+    std_dir = root / ".aiqt" / "standards"
+    _standards_present(std_dir, root)
+    std_fd = open_dir(std_dir, root=root)
+    if std_fd is None:
         return set()
-    ensure_listable(std_dir)
+    try:
+        names = _manifest_names(std_fd)
+    finally:
+        os.close(std_fd)
     keys = set()
-    for path in std_dir.glob("*.toml"):
+    for name in names:
+        path = std_dir / name
         _check_stem(path)
         keys.add("map-" + path.stem + "-tight")
         keys.add("map-" + path.stem + "-broad")

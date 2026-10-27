@@ -189,7 +189,7 @@ def run(root, check):
     for rel in (README_REL, LANDING_REL):
         target_dir_present(root / rel, root)
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         roster_text = build(root, manifests)
         landing_text = build_landing(root, manifests)
     except (ManifestError, OSError, ValueError, KeyError) as exc:

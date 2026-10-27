@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_chain_or_absent, dir_or_absent, map_keys  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, dir_present, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -125,27 +125,31 @@ def _value(v):
 
 
 def parse_source(path):
-    text = path.read_text(encoding="utf-8")
+    return parse_source_text(path.read_text(encoding="utf-8"), path.name)
+
+
+def parse_source_text(text, name):
+    """The frontmatter of a rule source's text, already read; name labels every error."""
     if not text.startswith("---\n"):
-        raise ValueError("{}: no frontmatter".format(path.name))
+        raise ValueError("{}: no frontmatter".format(name))
     end = text.find("\n---\n", 4)
     if end == -1:
-        raise ValueError("{}: unterminated frontmatter".format(path.name))
+        raise ValueError("{}: unterminated frontmatter".format(name))
     fm = {}
     for line in text[4:end].splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
+            raise ValueError("{}: bad frontmatter line {!r}".format(name, line))
         key, val = line.split(":", 1)
         key = key.strip()
         if key in fm:
-            raise ValueError("{}: duplicate key {}".format(path.name, key))
+            raise ValueError("{}: duplicate key {}".format(name, key))
         try:
             fm[key] = _value(val.strip())
         except ValueError as exc:
-            raise ValueError("{}: {}".format(path.name, exc))
+            raise ValueError("{}: {}".format(name, exc))
     return fm
 
 
@@ -253,11 +257,14 @@ def run(root, check):
         # there but cannot be read as a directory, must fail closed as exit 2, not read as an absent corpus
         # (which would delete every generated file as an orphan below). A symlink to a directory inside the
         # root is read.
-        present, problem = dir_or_absent(src_dir, root)
+        # Then dir_present, bound beneath root, judges every component above it the same way, so a
+        # .aiqt that is dangling, not a directory or a symlink resolving outside the root fails closed
+        # too, never read as an absent corpus.
+        _present, problem = dir_or_absent(src_dir, root)
         if problem is not None:
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
-        if present:
+        if dir_present(src_dir, root=root):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
