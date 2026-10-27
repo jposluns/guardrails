@@ -177,6 +177,24 @@ VALID verdict on such a store says nothing about conformance to the specificatio
 and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
 refuses every invocation with exit 2, reading and writing nothing.
 
+The reference tooling's declaration (OPF-SPEC section 16.1) ships as one file, the declaration file
+`opf/tools/opf-declaration.toml`. The shipped-file digest is carried in
+`opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. This release declares:
+
+```toml opf-declaration
+release = "1.0.5"
+spec_version = "1.2.0"
+homes = 1
+worklog = 1
+```
+
+Before `opf render`, `opf doctor`, `opf init`, `opf absorb`, `opf record`, or `opf adopt` resolves a
+store, the tooling checks the installed copy of that file against that digest and against its own
+build. A copy that is absent, unreadable, altered, malformed, or contradictory refuses the command
+with exit 2 before any store is resolved. `python3 -I -B opf/tools/opf.py --declaration` runs that
+check alone and prints the report: the declaration as shipped, both digests, and the runtime result.
+`opf doctor` appends the same report.
+
 The reference tooling requires Python 3.14 or newer.
 
 ---
