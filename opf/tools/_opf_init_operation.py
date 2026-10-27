@@ -47,8 +47,8 @@ The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), 
   5. Plan and provenance. The provenance source_digest is sha256 over the canonical JSON of the
      sorted (path, content-digest) roster EXCLUDING init.toml; init.toml is TOML through
      _opf_emit.emit_checked; the plan_digest is sha256 over the canonical JSON of the plan WITHOUT
-     its plan_digest member. The base spec_version bump, init.toml's C-CONTAINMENT membership, and the
-     `opf upgrade` route live in _opf_store, _opf_check, and opf.py. A completed adoption is
+     its plan_digest member. The base spec_version bump and init.toml's C-CONTAINMENT membership live
+     in _opf_store and _opf_check; this tooling defines no store upgrade. A completed adoption is
      re-validated for HEALTH (it may carry legitimate later edits); a partial operation is held to
      BYTE-EXACT dedupe against its immutable plan.
   6. Newest ancestral counters. The reader consumes ONE pinned evidence commit, which must lie on
