@@ -108,7 +108,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
-from _standards import dir_or_absent  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_hooks import (load_manifest, ID_RE, CID_RE, KNOWN_EVENTS,  # noqa: E402  reuse the hooks loader and shapes
                        WARN_EVENTS, NONBLOCK_EVENTS)
@@ -592,14 +592,15 @@ def build_ledger(root):
     trailing newline for a deterministic byte-identity target. Raises ValueError/OSError on a malformed
     or unreadable input; the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
-    # dir_or_absent (not is_dir or dir_present): an unreadable .aiqt/ parent must fail closed as exit 2, not
+    # dir_or_absent (not is_dir): an unreadable .aiqt/ parent must fail closed as exit 2, not
     # read as an absent corpus (which would emit an empty ledger, a false clean), and a corpus that is there
     # but cannot be read as a directory (a regular file, or a symlink that is dangling, whose target is not a
     # directory or resolves outside the root) is never read; a symlink to a directory inside the root is read.
-    present, problem = dir_or_absent(rules_dir, root)
+    # dir_present, bound beneath root, then judges every component above it the same way.
+    _present, problem = dir_or_absent(rules_dir, root)
     if problem is not None:
         raise ValueError("cannot build the ledger: {} {} (cannot evaluate)".format(rules_dir, problem))
-    if not present:
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot build the ledger: no {} to load".format(rules_dir))
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}
