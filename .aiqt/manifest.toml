@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0913e646d21e3245efe0baab2395ef9d505c8e5d1e7914cc96d723544f9d651e"
+tree-sha256 = "f8455a1e069cc9aeaf9c0cb95cd925e90aa5b1a0e5be6ad868580212828eeb5c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3351,8 +3351,8 @@ sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 358652
-sha256 = "bc7153dd68a51848c685a60ea79e5647ee912170739b64600d031e8daf9ffcfa"
+bytes = 371641
+sha256 = "ffb2d4fa7f91521d46a4893786a99afbc42deede0cf515cf0b359252c95de323"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3501,8 +3501,8 @@ sha256 = "eac06e9e10fb9351ad7c060a0a29b0baf703d7a87a71b9c26a4ea70d4f1e5d0c"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 262548
-sha256 = "0235e8338248147692fa5f00e2e6556552aa2d889391625316c9ecc350e39857"
+bytes = 262975
+sha256 = "fc428b0f01bcd33550a5a0d447adec5d0cc8e8f52190960e3ef9b6b12b76590c"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"

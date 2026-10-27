@@ -8,10 +8,11 @@ Quality gates job, which aggregates the others, sets up none). With check-latest
 setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release,
 while the maintainers' host runs one fixed distribution patch release, so a change can pass every local
 suite and fail only in CI on a patch-release difference. The host-patch jobs (HOST_JOBS) run the suites a
-newer patch release most often breaks on the host's own patch release, beside the '3.14' jobs of
-quality.yml, which stay required and unchanged. A passing local suite on the host patch then predicts a
-required CI leg, and a failure only on a '3.14' leg is diagnostic evidence of a patch-release difference,
-not proof that the change is innocent. This gate keeps the workflow's top level and each host-patch job
+newer patch release most often breaks on the host's own patch release; they are the only CI run of the
+OPF tooling self-test and of the combined, malformed and system git-fixture-env suites, and only the
+git-fixture-env-core suite also runs on '3.14', in its canary job. A passing local suite on the host
+patch then predicts a required CI leg, and a failure only on the '3.14' canary is diagnostic evidence of a
+patch-release difference, not proof that the change is innocent. This gate keeps the workflow's top level and each host-patch job
 whole and the statements of that patch release in agreement.
 
 Legs, in order:
@@ -68,9 +69,8 @@ Legs, in order:
                                 (opf-host-patch: the OPF tooling self-test; each of
                                 git-fixture-env-core-host-patch, git-fixture-env-config-combined-host-patch,
                                 git-fixture-env-config-malformed-host-patch and
-                                git-fixture-env-config-system-host-patch: the one git-fixture-env suite its
-                                '3.14' lane job runs, so the four run as parallel jobs, as the '3.14'
-                                lanes do);
+                                git-fixture-env-config-system-host-patch: one git-fixture-env suite each,
+                                so the four run as parallel jobs);
                  outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
                                 jobs runs this gate with --jobs-only (JOBS_ONLY_RUN) as its own run:
                                 command, judged by command tokens, never by exact text. EVERY job
@@ -380,9 +380,10 @@ others) can differ between the host and the runner, and this gate does not compa
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
 source and every host-patch pin in one reviewed change, and until then every local run fails on the
 interpreter leg. CI cost: the five jobs carry the pinned heavy-job if:, so they run the OPF tooling self-test
-and the four git-fixture-env suites a second time in every run on a push or on a merge-train-* pull request of
-this repository and in no other pull request run, the four suites as four parallel jobs (so the host leg's
-wall time is its longest job, not the sum of the four), and an edit to a pull request's title or body starts
+and the four git-fixture-env suites in every run on a push or on a merge-train-* pull request of this
+repository and in no other pull request run, the only CI run of each but the git-fixture-env-core suite, whose
+'3.14' canary job runs it too, the four suites as four parallel jobs (so the host leg's wall time is its
+longest job, not the sum of the four), and an edit to a pull request's title or body starts
 no Quality run (the workflow does not run on edited). This gate compares the concurrency: block and the if: line
 as text; whether GitHub evaluates them as their text says is not observed here.
 
@@ -417,9 +418,9 @@ SOURCE_REL = ".aiqt/python-host.toml"
 SOURCE_KEYS = {"format-version", "python-host-patch"}
 WORKFLOW_REL = ".github/workflows/quality.yml"
 # The host-patch jobs of WORKFLOW_REL, each with the ordered tuple of suites it exists to run (the run: text
-# of one executable step each, in this order): each git-fixture-env-*-host-patch job runs the one
-# git-fixture-env suite its '3.14' lane job runs, so the four run as parallel jobs, as the '3.14' lanes do,
-# and listed here in the lanes' order. tools/check_python_floor.py accepts a host-patch pin only inside
+# of one executable step each, in this order): each git-fixture-env-*-host-patch job runs one
+# git-fixture-env suite, so the four run as parallel jobs, listed here core first, then combined,
+# malformed and system. tools/check_python_floor.py accepts a host-patch pin only inside
 # these jobs; its HOST_JOBS names the same jobs, which the self-test holds.
 HOST_SUITES = {
     "opf-host-patch": ("python3 -I -B opf/tools/opf.py --self-test",),
@@ -1685,8 +1686,8 @@ REVERT_CALLS = (("jobs", "job_findings(root, patch)"),
                 ("interpreter", "interpreter_findings(patch, version)"))
 HOST = (3, 14, 4, "final")
 SOURCE_TEXT = "format-version = 1\npython-host-patch = \"3.14.4\"\n"
-# The OPF host-patch job, then the four git-fixture-env host-patch jobs in their lanes' order (GFE, the
-# core lane's job, stands for any one of them), and the four lanes' suite runs in that order.
+# The OPF host-patch job, then the four git-fixture-env host-patch jobs in HOST_SUITES order (GFE, the
+# core suite's job, stands for any one of them), and their four suite runs in that order.
 OPF, GFE_JOBS = HOST_JOBS[0], HOST_JOBS[1:]
 GFE = GFE_JOBS[0]
 GFE_RUNS = tuple(run for job in GFE_JOBS for run in HOST_SUITES[job])
@@ -3609,12 +3610,15 @@ def _self_test_cases(base):
     if real is not None:
         code, lines = serial_mutant.evaluate(ROOT, real)
         check("real/tree-serial-host-job-mutant-red", (code, _has(lines, "carries no job " + serial)), (1, True))
-    # The git-fixture-env host-patch suites are the '3.14' lanes of the committed workflow, in its order
-    # (_workflow_lanes): each lane's command, its shlex tokens joined by single spaces, and the pin lines
-    # of the job that carries it. A run: line or value the reader cannot read is cannot-evaluate (exit 2).
+    # The committed workflow runs one git-fixture-env suite on '3.14', the core suite, in its
+    # git-fixture-env-core canary job; the combined, malformed and system suites run in CI only in their
+    # host-patch jobs (_workflow_lanes: each lane's command, its shlex tokens joined by single spaces, and
+    # the pin lines of the job that carries it). A '3.14' copy of another suite put back, or the canary
+    # removed, is red here; a run: line or value the reader cannot read is cannot-evaluate (exit 2). The
+    # lanes/ vectors below read their own four-lane fixture, not the committed workflow.
     lanes = (GFE_RUNS, (("python-version: '3.14'",),) * len(GFE_RUNS))
     check("real/git-fixture-env-host-suites-are-the-lanes", _workflow_lanes(_read_text(ROOT / WORKFLOW_REL)),
-          lanes)
+          (GFE_RUNS[:1], (("python-version: '3.14'",),)))
     # Each lanes/ vector adds one job beside the four literal lanes and pairs the intact reader with a copy
     # of this gate (_mutant) whose reader drops one rule: "refusal" leaves a candidate line that is not an
     # exact form unread; "literal" selects run: lines by literal text again (--suite and git-fixture-env
