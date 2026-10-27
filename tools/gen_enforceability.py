@@ -107,8 +107,8 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
+from _standards import dir_or_absent  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_hooks import (load_manifest, ID_RE, CID_RE, KNOWN_EVENTS,  # noqa: E402  reuse the hooks loader and shapes
                        WARN_EVENTS, NONBLOCK_EVENTS)
@@ -592,9 +592,14 @@ def build_ledger(root):
     trailing newline for a deterministic byte-identity target. Raises ValueError/OSError on a malformed
     or unreadable input; the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
-    # dir_present (not is_dir): an unreadable .aiqt/ parent must fail closed as exit 2, not read as an
-    # absent corpus (which would emit an empty ledger, a false clean).
-    if not dir_present(rules_dir):
+    # dir_or_absent (not is_dir or dir_present): an unreadable .aiqt/ parent must fail closed as exit 2, not
+    # read as an absent corpus (which would emit an empty ledger, a false clean), and a corpus that is there
+    # but cannot be read as a directory (a regular file, or a symlink that is dangling, whose target is not a
+    # directory or resolves outside the root) is never read; a symlink to a directory inside the root is read.
+    present, problem = dir_or_absent(rules_dir, root)
+    if problem is not None:
+        raise ValueError("cannot build the ledger: {} {} (cannot evaluate)".format(rules_dir, problem))
+    if not present:
         raise ValueError("cannot build the ledger: no {} to load".format(rules_dir))
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}
@@ -638,7 +643,7 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(LEDGER_REL, exc), file=sys.stderr)
         return 2
-    drifted = reconcile(root / LEDGER_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+    drifted = reconcile(root / LEDGER_REL, text, check, root)  # shared reconcile fail-closes (exit 2) on an
                                                          # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_enforceability.py".format(LEDGER_REL),
@@ -705,7 +710,9 @@ def main():
 #       naming defined exactly as in (y);
 #   (ab) the preview-channel [[hook]] rows (the inline cases (ab) to (ab3)), and
 #   (ac) one preview manifest holding both kinds generates (exit 0), each kind in its own ledger field,
-#       while a published hook with an entry of each kind fails closed (exit 2).
+#       while a published hook with an entry of each kind fails closed (exit 2);
+#   (ad) a corpus symlinked to a directory inside the root is read, while one symlinked outside the root
+#       fails closed (exit 2) with no ledger written.
 # These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
 # hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
 # read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
@@ -1367,6 +1374,24 @@ def self_test_main():
             if "cannot block at the platform" in str(exc) or "own choice" not in str(exc):
                 failures.append("preview: the PreCompact refusal must state the pack's own choice, not a "
                                 "platform limit")
+        # (ad) A .aiqt/core/rules that is a symlink to the corpus moved elsewhere inside the root is read (exit 0,
+        #      the ledger written); one to the corpus moved outside the root (so following it would build a
+        #      clean ledger) fails closed (exit 2) with no ledger written, never followed out of the repository.
+        for where, want in (("in-root", 0), ("outside", 2)):
+            t = _build(tmp / ("corpus-" + where))
+            corpus = t / RULES_DIR_REL
+            target = t / "shared" / "rules" if where == "in-root" else tmp / "outside-corpus"
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(corpus), str(target))
+            corpus.symlink_to(target if where == "outside" else os.path.relpath(target, corpus.parent))
+            got = run_caught(t, check=False)
+            if got != want or (t / LEDGER_REL).is_file() != (want == 0):
+                failures.append("a corpus that is a symlink {} expected exit {} with the ledger {}, got {}".format(
+                    where, want, "written" if want == 0 else "not written", got))
+
+        # .aiqt/ above the ledger symlinked outside the root fails closed (exit 2) in --check and write mode with
+        # the ledger there untouched; symlinked inside the root, it is read and the ledger rewritten there.
+        failures.extend(linked_dir_failures(tmp, "aiqt", _build, run, ".aiqt", LEDGER_REL))
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -1405,7 +1430,8 @@ def self_test_main():
           "or a warn default on PreToolUse fails closed (exit 2); an absent preview manifest is an empty "
           "channel, and one that is a dangling symlink, a symlink, or a directory fails closed (exit 2); one "
           "manifest holding both kinds generates, and a published hook with an entry of each kind fails "
-          "closed (exit 2)" + note)
+          "closed (exit 2); a corpus symlinked inside the root is read, and one symlinked outside the root "
+          "fails closed (exit 2) with no ledger written" + note)
     return 0
 
 

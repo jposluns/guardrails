@@ -210,8 +210,9 @@ closed pop-before-close, so no number is ever closed twice, but no signal mask i
 asynchronous interrupt (SIGINT or SIGTERM, delivered through any thread), or any other exception raised
 at the same point (an injected one included), can leave a descriptor open in the process until it
 exits: one landing between a C call's return and the binding of the descriptor it returned; between a
-helper's return and the handoff of the descriptors it returned to the owning list (journal_state's
-transaction directory descriptors, bound to txns before held.extend has taken them all); between a
+helper's return and the handoff of the descriptors it returned to the owning list (journal_state's and
+reconcile's transaction directory descriptors, bound to txns before held.extend or held_fds.extend has
+taken them all); between a
 descriptor's pop and its close inside a close-out (every close-out loop in this module runs through
 _close_held_into, which still closes the rest of its list and records every exception it meets;
 _close_held re-raises the first, each later one noted on it, and the transaction's final close-out runs
@@ -1601,16 +1602,20 @@ def reconcile(product_root):
     on the stale-lock path each outcome names what the break's own recovery DID (rolled-forward or
     rolled-back), never 'terminal' for work this call performed. The interrupted run itself stays
     refused, so the operator inspects the reconciled tree first. This is reconcile_report without its
-    stale-lock flag; every refusal is a ReconcileRefusal naming its finding."""
+    stale-lock flag; every refusal is a ReconcileRefusal naming its finding, except a product root that
+    cannot be opened, which raises AdoptApplyError before anything is read (`opf adopt reconcile` prints
+    it as cannot evaluate)."""
     return reconcile_report(product_root)[0]
 
 
-def _reconcile_intent(jr_fd, txn_dir):
+def _reconcile_intent(jr_fd, txn_dir, txn_fd=None):
     """(init_store, paths) from an open transaction's durable INTENT. init_store is True only when the
     transaction's NAME carries the init-store phase AND its INTENT header says so (kind, phase and op), so a
     directory merely named `*.initstore` never skips the store lease; paths is the set of op paths the
-    INTENT names. A JournalError or OSError reading the frames propagates (the caller's classification)."""
-    frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
+    INTENT names. A JournalError or OSError reading the frames propagates (the caller's classification).
+    txn_fd, when given, is the transaction directory descriptor the caller HELD from its listing, and the
+    frames are read through it, never by reopening the name."""
+    frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
     intent = _journal._first(frames, _journal.F_INTENT)
     intent = intent if isinstance(intent, dict) else {}
     header = intent.get("header") if isinstance(intent.get("header"), dict) else {}
@@ -1678,6 +1683,10 @@ def _reconcile_lease_targets(root_fd, shell, touched):
 
 
 RECONCILE_LEASE_VERB = "adopt reconcile"    # the operation this run stamps on the store leases it takes
+
+# The held classification each recover() outcome leaves (_reconcile_run's agreement check).
+_RECOVERY_LEAVES = {"nothing-opened": ("nothing-opened",), "terminal": ("complete", "rolled-back"),
+                    "rolled-forward": ("complete",), "rolled-back": ("rolled-back",)}
 
 
 def _take_reconcile_leases(root_fd, targets, taken):
@@ -1749,10 +1758,12 @@ def reconcile_report(product_root):
     resolved that half-scaffolded store is not excluded during the reversal; a machine subdirectory that
     first appears after the targets are listed, and one an open transaction itself names, is not leased.
 
-    Every refusal is a ReconcileRefusal naming its finding. BEFORE ANY RECOVERY WRITE, leaving the
-    product files and every transaction as found: RECONCILE_UNCLASSIFIABLE (a journal, lock, entry or
-    transaction that cannot be read or classified), RECONCILE_LOCK_HELD (a possibly-live owner holds the
-    lock, or a run took it meanwhile; never seized), RECONCILE_STORE_LEASE_HELD (a pointer or a present
+    Every refusal is a ReconcileRefusal naming its finding, except an unopenable product root (below).
+    BEFORE ANY RECOVERY WRITE, leaving the product files and every transaction as found:
+    RECONCILE_UNCLASSIFIABLE (a journal, lock, entry or transaction that cannot be read or classified, a
+    stray or wrong-type journal entry, or a transaction renamed or replaced after the listing),
+    RECONCILE_LOCK_HELD (a possibly-live owner holds the lock, or a run took it meanwhile; never seized),
+    RECONCILE_STORE_LEASE_HELD (a pointer or a present
     lease observed before the lock, or a lease another writer claimed, or that cannot be claimed, under
     it), RECONCILE_REVERSAL_UNPROVEN (an init-store reversal not proven to remove only the operation's own
     publication) and RECONCILE_PRELOCK_FAULT (any other fault before this call held the journal lock and
@@ -1760,11 +1771,25 @@ def reconcile_report(product_root):
     the stale-lock arbitration's own refusals, an acquire_lock OSError). A lock or lease this call took is
     released, and the message names what stays: a lock acquire_lock created that could not be released
     (_failed_lock_state), the stale-lock arbitration file lock.break this call created, a lease the claim
-    left. RECONCILE_FAILED: the recovery faulted AFTER it began, so it may be PARTIAL: what it already
-    restored or published stays as the journal records it, the transaction stays open, and a later
-    reconcile resumes it. RECONCILE_LEASE_RELEASE_FAILED: a store lease this call took could not be
-    released; it stays, named beside what the recovery did. A stray non-directory journal entry is
-    skipped here, as before, never read as a transaction."""
+    left. RECONCILE_FAILED: the recovery faulted AFTER it began, or a transaction directory was replaced
+    during it, so it may be PARTIAL: what it already restored or published stays as the journal records
+    it, the transaction stays open, and a later reconcile resumes it. RECONCILE_LEASE_RELEASE_FAILED: a
+    store lease this call took could not be released; it stays, named beside what the recovery did.
+
+    The journal is listed strictly and HELD (the journal_state posture): a stray or wrong-type entry (a
+    file, FIFO or socket, a symlinked entry, a non-regular or multiply-linked lock or lock.break) refuses
+    as RECONCILE_UNCLASSIFIABLE, never skipped, and every transaction directory is opened at the listing
+    and classified, its INTENT and its init-store preverify read, through that held descriptor, never by
+    reopening its name. Before the journal lock, each listed name must still name the directory this call
+    holds: a transaction renamed or replaced after the listing refuses as RECONCILE_UNCLASSIFIABLE, nothing
+    written. After each recovery, the held directory's classification must agree with what recover()
+    reported (_RECOVERY_LEAVES): a transaction directory replaced during the recovery refuses as
+    RECONCILE_FAILED, never reported recovered or clean. RESIDUAL (disclosed): recover() itself reopens
+    each transaction by name, so a directory swapped onto the name after the identity check can receive
+    that recovery's writes (frames appended, preimages restored from it); the agreement check then
+    refuses, so it is never reported recovered. A product root that cannot be opened raises
+    AdoptApplyError before anything is read, never a ReconcileRefusal (`opf adopt reconcile` prints it as
+    cannot evaluate)."""
     root_fd = _open_product_root(product_root)
     taken = []      # (machine_rel, payload) of every store lease THIS call took: only these are released
     broke = []      # non-empty once THIS call's stale-lock break claimed its leases; its recovery follows
@@ -1826,17 +1851,28 @@ def _reconcile_run(product_root, root_fd, taken, broke):
         if not stat.S_ISDIR(st.st_mode):
             raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption journal {} is not a "
                                    "directory; nothing was written (fail-closed)".format(JOURNAL_REL))
-        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        held_fds = []   # jr_fd, then every held transaction directory descriptor: ONE list, ONE close-out
         try:
+            held_fds.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
+            jr_fd = held_fds[0]
             # beneath the HELD jr_fd (round 3, the journal_state posture): the journal path is
             # never re-resolved after the contained open, so a concurrently swapped journal
             # cannot hide the held lock or substitute a decoy's.
             owner = _journal.read_lock_owner_at(jr_fd)
-            txns = _journal._journal_txn_dirs(jr_fd, journal_root)
-            opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
+            # strict=True, hold=True (the journal_state posture): a stray or wrong-type journal entry
+            # refuses here, never skipped, and every transaction directory is opened AT the listing and
+            # read through that held descriptor below, so one renamed aside and replaced by an empty decoy
+            # after the listing is never reopened by name and read as nothing to reconcile.
+            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
+            # the handoff: an exception landing here, before extend has taken every descriptor in txns
+            # (an interrupt at the generator's start or a resume), leaves the ones not yet taken open
+            # until the process exits (the disclosed residual, module docstring)
+            held_fds.extend(tfd for _t, tfd in txns)
+            opened = sorted(t.name for t, tfd in txns
+                            if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
             if owner is None and not opened:
                 return outcomes, False
-            intents = {t.name: _reconcile_intent(jr_fd, t) for t in txns if t.name in opened}
+            intents = {t.name: _reconcile_intent(jr_fd, t, txn_fd=tfd) for t, tfd in txns if t.name in opened}
             stage[0] = "prelock"
             if owner is not None and not _journal.owner_confirmed_dead(owner):
                 raise ReconcileRefusal(RECONCILE_LOCK_HELD, "the adoption journal lock is held by a "
@@ -1852,12 +1888,28 @@ def _reconcile_run(product_root, root_fd, taken, broke):
             # only the operation's own publication: a foreign file at a member path is
             # preserved and the whole reconciliation refuses fail-closed
             # (_init_store_reversal_preverify). Named by its INTENT or by its name, either.
-            for t in txns:
+            for t, tfd in txns:
                 if t.name in opened and (intents[t.name][0] or t.name.endswith("." + INIT_STORE_PHASE)):
                     try:
-                        _init_store_reversal_preverify(root_fd, product_root, jr_fd, t)
+                        _init_store_reversal_preverify(root_fd, product_root, jr_fd, t, txn_fd=tfd)
                     except AdoptApplyError as exc:
                         raise ReconcileRefusal(RECONCILE_REVERSAL_UNPROVEN, str(exc)) from exc
+            # The identity gate, the last read before the journal lock: recover() reopens each
+            # transaction by NAME, so every listed name must still name the directory this run holds and
+            # classified. One renamed aside or replaced after the listing refuses here, nothing written.
+            for t, tfd in txns:
+                try:
+                    now = os.lstat(t.name, dir_fd=jr_fd)
+                except FileNotFoundError:
+                    now = None
+                was = os.fstat(tfd)
+                if now is None or (now.st_dev, now.st_ino) != (was.st_dev, was.st_ino):
+                    raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption transaction {!r} was renamed "
+                                           "or replaced after this run listed it ({}), so a recovery by its "
+                                           "name would not reach the directory this run classified; nothing "
+                                           "was written (fail-closed)".format(
+                                               t.name, "its name is now absent" if now is None
+                                               else "its name now names another entry"))
 
             def lock_fault(exc):
                 """An acquire_lock OSError: what it left, read and released by _failed_lock_state (only a
@@ -1879,7 +1931,7 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                 # The stale-lock break reconciles every transaction ITSELF (under its arbitration
                 # lock), so the idempotent recover() re-run below would read each one 'terminal'.
                 # Record the pre-break states so the reported outcome names what that recovery DID.
-                stale = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
+                stale = {t.name: _journal.classify_state(jr_fd, t, txn_fd=tfd) for t, tfd in txns}
 
                 def claim():
                     _take_reconcile_leases(root_fd, targets, taken)
@@ -1911,17 +1963,31 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                 if not broke:
                     _take_reconcile_leases(root_fd, targets, taken)
                 stage[0] = "recovering"
-                for txn in txns:
+                for txn, tfd in txns:
                     outcome = _journal.recover(jr_fd, txn, root_fd)
+                    # The agreement check: recover() reopened the transaction by name, so what it reports
+                    # stands only when the directory this run HOLDS now classifies as that outcome leaves
+                    # it; one replaced during the recovery is never reported recovered or clean.
+                    state = _journal.classify_state(jr_fd, txn, txn_fd=tfd)
+                    if state not in _RECOVERY_LEAVES.get(outcome, ()):
+                        raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery of "
+                                               "transaction {!r} reported {!r}, but the directory this run "
+                                               "listed under that name classifies {!r}: the name was renamed "
+                                               "or replaced during the recovery, so it is never reported "
+                                               "recovered. What the recovery wrote stays as the journal "
+                                               "records it{}; the journal lock this run took is released, and "
+                                               "a later `opf adopt reconcile` reconciles what the journal then "
+                                               "holds (fail-closed)".format(
+                                                   JOURNAL_REL, txn.name, outcome, state,
+                                                   "" if not outcomes else " (recovered before it: {})".format(
+                                                       ", ".join("{} {}".format(t, o) for t, o in outcomes))))
                     if broke and stale.get(txn.name) == "open" and outcome == "terminal":
-                        outcome = ("rolled-forward"
-                                   if _journal.classify_state(jr_fd, txn) == "complete"
-                                   else "rolled-back")
+                        outcome = "rolled-forward" if state == "complete" else "rolled-back"
                     outcomes.append((txn.name, outcome))
             finally:
                 _journal.release_lock(journal_root)
         finally:
-            _journal._close_fd_quietly(jr_fd)
+            _close_held(held_fds)   # the held transaction directories (deepest appended last), then jr_fd
     except ReconcileRefusal as exc:
         said = arbitration_said()
         if said and said not in str(exc):
@@ -2441,8 +2507,8 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine, lock_gone=False):
                        "which this run never creates there".format(seen[0]), False
     if (rel.startswith(journal) and "/" not in rel[len(journal):] and seen[0] != "directory"
             and rel != journal + "lock.break"):
-        return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() does not "
-                        "touch it, so no sanctioned path clears it and it stays"), False
+        return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() refuses on "
+                        "it too (journal-unclassifiable), so no sanctioned path clears it and it stays"), False
     return named, False
 
 
@@ -4240,7 +4306,7 @@ def _init_store_recorded_plan(product_root, op_id):
                 _journal._close_fd_quietly(fd)
 
 
-def _init_store_reversal_preverify(root_fd, product_root, jr_fd, txn_dir):
+def _init_store_reversal_preverify(root_fd, product_root, jr_fd, txn_dir, txn_fd=None):
     """The reversal removes EXACTLY what the operation created and nothing else (spec 14.2):
     every recorded creation still PRESENT live must be proven the operation's own publication by
     ATTRIBUTABLE SUBSTRATE EVIDENCE -- the digest the operation's own recorded plan binds to the
@@ -4256,9 +4322,11 @@ def _init_store_reversal_preverify(root_fd, product_root, jr_fd, txn_dir):
     the foreign content aside, then reconcile()). RESIDUAL (disclosed): the verification and
     the rollback's unlink are two observations, so a same-user adversarial swap between them
     stays outside the journal's quiescence guarantee, and a foreign file whose bytes EQUAL the
-    substrate's own published payload is indistinguishable from it and is removed."""
+    substrate's own published payload is indistinguishable from it and is removed. txn_fd, when given,
+    is the transaction directory descriptor reconcile HELD from its listing, and the INTENT is read
+    through it, never by reopening the name."""
     try:
-        frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
+        frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
         intent = _journal._first(frames, _journal.F_INTENT)
     except (_journal.JournalError, OSError) as exc:
         raise AdoptApplyError("cannot read the init-store intent before its reversal ({}); "
@@ -6357,10 +6425,11 @@ def _self_test_checks():
     failures = []
     failure_details = {}
     checked = [0]
-    skipped = []    # (check, why): a check this platform cannot evaluate, named, never silently dropped
+    skipped = []    # (check, why): a check this platform cannot evaluate, named (exit 2, never a pass)
     bound_expired = []  # each child bound that expired, named: its checks did not run (exit 2, never a pass)
     # The descriptor census the inode-reuse, handoff and NFS vectors use is /proc/self/fd; a platform
-    # without it (macOS) skips exactly those vectors, each named with this note, never a partial run.
+    # without it (macOS) skips exactly those vectors, each named with this note, and the run then reports
+    # cannot evaluate (exit 2, _self_test_outcome), never a pass over the checks it did not run.
     census = Path("/proc/self/fd").is_dir()
     no_census = _NO_CENSUS
 
@@ -11377,18 +11446,26 @@ def _self_test_checks():
         check("reconcile-pre-lock-faults-named-no-lock-left",
               no_create == RECONCILE_PRELOCK_FAULT and created == RECONCILE_PRELOCK_FAULT and lock_free(root)
               and txn_state(root, rid) == "open" and tree_state(root) == was, (no_create, created))
+    # the stale-lock arbitration's own refusal: the second name for lock.break lands after reconcile's
+    # strict listing accepted it (singly linked then), so the arbitration itself refuses it (a second name
+    # present at the listing refuses there as unclassifiable, section 8e).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, _before = interrupted_mid(temp)
         dead, stale = stale_lock_bytes()
         (_journal_root(root) / "lock").write_bytes(stale)
         arb = _journal_root(root) / "lock.break"
         arb.write_bytes(b"")
-        os.link(arb, root / "arbitration-second-name")
-        was = tree_state(root)
-        got = finding_of(reconcile, root)
+        planted = []
+
+        def second_name_before_break(*args, **kwargs):
+            os.link(arb, root / "arbitration-second-name")
+            planted.append(tree_state(root))
+            return real_claim_stale(*args, **kwargs)
+        with mock.patch.object(_journal, "reconcile_and_claim_stale", second_name_before_break):
+            got = finding_of(reconcile, root)
         check("reconcile-stale-arbitration-refusal-named-pre-lock",
-              dead is not None and got == RECONCILE_PRELOCK_FAULT and tree_state(root) == was
-              and txn_state(root, rid) == "open", got)
+              dead is not None and planted != [] and got == RECONCILE_PRELOCK_FAULT
+              and tree_state(root) == planted[0] and txn_state(root, rid) == "open", got)
 
     # a lost race is reported as what it was: a second reconcile that takes the lock after the first
     # recovered reports every transaction terminal with the lock taken, and a stale lock a peer broke first
@@ -11460,6 +11537,194 @@ def _self_test_checks():
         check("reconcile-releases-only-its-own-lease",
               peer != [] and got == RECONCILE_LEASE_RELEASE_FAILED and (root / lease_rel).read_bytes() == peer[0]
               and lock_free(root), got)
+
+    # 8e: reconcile lists the journal strictly and HELD (the journal_state posture), so it never reads as
+    # nothing to reconcile a journal that journal_state refuses or reports open. A stray or wrong-type
+    # journal entry refuses as unclassifiable with nothing written (red against the skipping listing: the
+    # open transaction is rolled back, and a committed one reads as nothing to reconcile); every pre-lock
+    # read of a transaction goes through the descriptor the listing held; a transaction renamed aside and
+    # replaced by an empty decoy after the listing refuses before the lock (red against a by-name
+    # classification, which reads nothing to reconcile); one replaced during its recovery is never reported
+    # recovered (red against reporting what recover() returned for the decoy); and every descriptor the
+    # listing held is closed.
+    def refusal_of(fn, *args):
+        """(finding, message) of a reconcile refusal, the finding as finding_of names it; (None, None) when
+        fn did not refuse."""
+        try:
+            fn(*args)
+        except ReconcileRefusal as exc:
+            return exc.finding, str(exc)
+        except AdoptApplyError as exc:
+            return "unnamed", str(exc)
+        return None, None
+
+    def state_at(path):
+        """The C2 classification of the transaction directory at `path`, read through a descriptor of it (a
+        directory moved out of the journal root has no journal-relative name)."""
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            return _journal.classify_state(fd, path, txn_fd=fd)
+        finally:
+            os.close(fd)
+
+    def swap_aside(root):
+        """Rename the transaction directory aside (beside the journal root, outside it) and put an empty decoy
+        directory at its name; returns where it went."""
+        aside = _journal_root(root).parent / "aside"
+        os.rename(_journal_root(root) / rid, aside)
+        os.mkdir(_journal_root(root) / rid)
+        return aside
+
+    real_txn_dirs = _journal._journal_txn_dirs
+    real_recover = _journal.recover
+    real_open_jr = _journal.open_journal_root_fd
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        (_journal_root(root) / "stray").write_bytes(b"")
+        was = tree_state(root)
+        got, why = refusal_of(reconcile, root)
+        check("reconcile-strict-stray-entry-refused-named",
+              got == RECONCILE_UNCLASSIFIABLE and "'stray'" in (why or "")
+              and "neither a transaction directory" in (why or "") and tree_state(root) == was
+              and txn_state(root, rid) == "open" and lock_free(root) and not (root / lease_rel).exists(), why)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        (_journal_root(root) / "stray").write_bytes(b"")
+        was = tree_state(root)
+        got, why = refusal_of(reconcile_report, root)
+        check("reconcile-strict-stray-entry-never-reads-nothing-to-reconcile",
+              txn == rid and got == RECONCILE_UNCLASSIFIABLE and tree_state(root) == was, why)
+
+    # a second name for lock.break present at the listing refuses there, before the stale-lock arbitration
+    # (red against the skipping listing: the arbitration's own refusal, a pre-lock fault, section 8d).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        arb = _journal_root(root) / "lock.break"
+        arb.write_bytes(b"")
+        os.link(arb, root / "arbitration-second-name")
+        was = tree_state(root)
+        got, why = refusal_of(reconcile, root)
+        check("reconcile-strict-hardlinked-arbitration-refused-at-listing",
+              dead is not None and got == RECONCILE_UNCLASSIFIABLE
+              and "'lock.break' has 2 hard links" in (why or "") and tree_state(root) == was
+              and txn_state(root, rid) == "open", why)
+
+    # the interrupted transaction renamed aside and an empty decoy put at its name right after the listing
+    # (the deterministic stand-in for a concurrent writer): refused before the lock, nothing written, the
+    # transaction aside still open (red against a by-name classification: nothing to reconcile; red against
+    # no identity gate: recovery-failed after the lock and the lease were taken).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        was = snapshot(root)
+        swapped = []
+
+        def swap_after_listing(*args, **kwargs):
+            out = real_txn_dirs(*args, **kwargs)
+            if not swapped:
+                swapped.append(swap_aside(root))
+            return out
+        with mock.patch.object(_journal, "_journal_txn_dirs", swap_after_listing):
+            got, why = refusal_of(reconcile, root)
+        check("reconcile-swap-after-listing-refused-named",
+              swapped != [] and got == RECONCILE_UNCLASSIFIABLE and repr(rid) in (why or "")
+              and "renamed or replaced after this run listed it" in (why or "") and snapshot(root) == was
+              and lock_free(root) and not (root / lease_rel).exists() and state_at(swapped[0]) == "open", why)
+
+    # the same swap inside the recovery, after the identity gate: recover() reads the decoy by name and
+    # reports nothing-opened, which the held directory (still open) disagrees with, so the run refuses and
+    # never reports it recovered (red against reporting recover()'s outcome: nothing to reconcile).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        swapped = []
+
+        def swap_then_recover(jr_fd, txn_dir, root_fd):
+            if not swapped:
+                swapped.append(swap_aside(root))
+            return real_recover(jr_fd, txn_dir, root_fd)
+        with mock.patch.object(_journal, "recover", swap_then_recover):
+            got, why = refusal_of(reconcile_report, root)
+        check("reconcile-swap-during-recovery-never-reported-recovered",
+              swapped != [] and got == RECONCILE_FAILED and repr(rid) in (why or "")
+              and "never reported recovered" in (why or "") and state_at(swapped[0]) == "open"
+              and lock_free(root) and not (root / lease_rel).exists(), why)
+
+    # every read of the transaction before the journal lock (its classification, its INTENT and the
+    # init-store preverify its name triggers) goes through the descriptor the listing held (red against any
+    # one of them reopening the name).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        named = rid + "." + INIT_STORE_PHASE
+        os.rename(_journal_root(root) / rid, _journal_root(root) / named)
+        real_read_frames = _journal.read_frames
+        locked, reads = [], []
+
+        def lock_seen(journal_root, session_id):
+            locked.append(True)
+            return real_acquire_lock(journal_root, session_id)
+
+        def read_seen(jr_fd, txn_dir, txn_fd=None):
+            if Path(txn_dir).name == named:
+                reads.append((locked != [], txn_fd is not None))
+            return real_read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
+        with mock.patch.object(_journal, "acquire_lock", lock_seen), \
+                mock.patch.object(_journal, "read_frames", read_seen):
+            got = finding_of(reconcile, root)
+        prelock = [through_held for after_lock, through_held in reads if not after_lock]
+        check("reconcile-prelock-reads-through-held-descriptors",
+              len(prelock) >= 3 and all(prelock), (got, reads))
+
+    # every descriptor the run held (the journal root's and each listed transaction directory's) is closed
+    # after a recovery and after a refusal (red against a close-out of the journal root's alone).
+    def held_after(root, swap):
+        """(finding, recorded, still open, swapped) of one reconcile over `root` that records the journal-root
+        descriptor and every transaction directory descriptor its listing held, each with its identity
+        while open; swap renames the transaction aside right after the listing, as above."""
+        rec, swapped = [], []
+
+        def open_jr_recorded(*args, **kwargs):
+            fd = real_open_jr(*args, **kwargs)
+            rec.append((fd, _fd_ident(fd)))
+            return fd
+
+        def txn_dirs_recorded(*args, **kwargs):
+            out = real_txn_dirs(*args, **kwargs)
+            if kwargs.get("hold"):
+                rec.extend((tfd, _fd_ident(tfd)) for _t, tfd in out)
+            if swap and not swapped:
+                swapped.append(swap_aside(root))
+            return out
+        with mock.patch.object(_journal, "open_journal_root_fd", open_jr_recorded), \
+                mock.patch.object(_journal, "_journal_txn_dirs", txn_dirs_recorded):
+            got, _why = refusal_of(reconcile, root)
+        return got, rec, [fd for fd, _ident in _held_open(rec)], swapped
+
+    closed = []
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        got, rec, rolled_left, _swapped = held_after(root, False)
+        # a copy: _close_held empties the list it closes
+        closed.append((got is None and txn_state(root, rid) == "rolled-back" and len(rec) >= 2,
+                       list(rolled_left)))
+        _close_held(rolled_left)    # a run that leaks them fails below; close them so the suite stays clean
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        got, rec, refused_left, swapped = held_after(root, True)
+        closed.append((swapped != [] and got == RECONCILE_UNCLASSIFIABLE and len(rec) >= 2, list(refused_left)))
+        _close_held(refused_left)
+    check("reconcile-held-descriptors-closed", closed == [(True, []), (True, [])], closed)
+
+    # GREEN-ON-REVERT GUARD (a contract pin; the fix states it in the docstrings only): a product root that
+    # cannot be opened raises the plain AdoptApplyError before anything is read, never a named finding, which
+    # `opf adopt reconcile` prints as cannot evaluate; red against a refusal that names a finding for it.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        missing = Path(temp).resolve() / "missing"
+        got, why = refusal_of(reconcile, missing)
+        check("reconcile-unopenable-root-cannot-evaluate-not-a-finding",
+              got == "unnamed" and "cannot open product root" in (why or "") and not missing.exists(), why)
 
     # 9: live re-observation over a throwaway fixture.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -14449,7 +14714,7 @@ def _self_test_checks():
         skipped.append(("self-test-leaves-no-descriptor-open", no_census))
     for name, why in skipped:
         print("  SKIPPED: {} ({})".format(name, why))
-    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)
+    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)
 
 
 def _st_fixture_plan(run_id_):
@@ -14688,11 +14953,12 @@ def _class_sweep_record(check, bound_expired, run=None):
             check(name, rows[index][1], observed=rows[index][2])
 
 
-def _self_test_outcome(failures, failure_details, checked, bound_expired):
+def _self_test_outcome(failures, failure_details, checked, bound_expired, skipped=()):
     """Print the run's verdict and return its exit code: 1 when a check failed (each bound that expired is
-    named beside the failures), 2 when the only problem is a bound that expired (cannot evaluate: the
-    checks behind it did not run, because either the host was too slow or the code under test hangs, and
-    the expiry does not tell which), else 0."""
+    named beside the failures), 2 when the only problems are a bound that expired or a required check
+    this platform could not run (cannot evaluate: the checks behind an expired bound did not run, because
+    either the host was too slow or the code under test hangs, and the expiry does not tell which; each
+    skipped (check, why) entry was never evaluated, so the run is not a pass), else 0."""
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
         for f in failures:
@@ -14702,12 +14968,18 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired):
         for entry in bound_expired:
             print("  BOUND EXPIRED: {}".format(entry))
         return 1
-    if bound_expired:
+    if bound_expired or skipped:
         for entry in bound_expired:
             print("  BOUND EXPIRED: {}".format(entry))
-        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({} bound(s) expired: the checks behind each "
-              "did not run, because either the host was too slow or the code under test hangs; the other "
-              "{} checks passed)".format(len(bound_expired), checked))
+        reasons = []
+        if bound_expired:
+            reasons.append("{} bound(s) expired: the checks behind each did not run, because either the host "
+                           "was too slow or the code under test hangs".format(len(bound_expired)))
+        if skipped:
+            reasons.append("{} required check(s) skipped, never evaluated on this platform: {}".format(
+                len(skipped), ", ".join(name for name, _why in skipped)))
+        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({}; the other {} checks passed)".format(
+            "; ".join(reasons), checked))
         return 2
     print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
           "init-store, the registration ops, enable-hook and the finish ops)".format(checked))
@@ -14850,10 +15122,11 @@ def _skip_list_write_sites(tree):
     capture, a mapping-pattern rest, an import alias, an except-as target, a global or nonlocal
     declaration's name list) and the string wherever else it occurs (a keyword argument name, an
     attribute name, a string constant equal to `skipped`). Sanctioned, and so not foreign: the one
-    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, and `skipped` as
-    a for statement's iterable (the skip report's read). The skip report is honest only while nothing
-    erases, rebinds or hands off the list between a skip's recording and the report, and the executed
-    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
+    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, `skipped` as a for
+    statement's iterable (the skip report's read), and `skipped` as the fifth and last positional argument
+    of a keyword-free _self_test_outcome call (the verdict's read). The skip report is honest only while
+    nothing erases, rebinds or hands off the list between a skip's recording and the report, and the
+    executed reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
     unsanctioned field carrying the string is refused HERE. Residual: an erasure that reaches the list
     object without the string `skipped` in any field (through another name already bound to the same
     object, or an indirect read of the frame's locals) is outside this reader's scope."""
@@ -14876,6 +15149,10 @@ def _skip_list_write_sites(tree):
                 elif (isinstance(sub, ast.For) and isinstance(sub.iter, ast.Name)
                         and sub.iter.id == "skipped"):
                     sanctioned.add(id(sub.iter))
+                elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "_self_test_outcome" and len(sub.args) == 5 and not sub.keywords
+                        and isinstance(sub.args[4], ast.Name) and sub.args[4].id == "skipped"):
+                    sanctioned.add(id(sub.args[4]))
             foreign = sorted(
                 "line {}: {}.{}".format(getattr(sub, "lineno", 0), type(sub).__name__, field)
                 for sub in ast.walk(node) if id(sub) not in sanctioned
@@ -15110,6 +15387,33 @@ def _class_sweep_bound_self_test(check):
           and said["clean"][0] == 0 and "SELF-TEST: PASS (41 " in said["clean"][1]
           and "BOUND EXPIRED" not in said["clean"][1],
           observed=repr(said))
+    # A required check this platform could not run is cannot-evaluate too: one skipped check alone is exit 2,
+    # naming it and never PASS; a failure beside it is still 1; a skip beside an expired bound is 2 naming
+    # both; an empty skip list is the clean 0. Red against a verdict that ignores the skip list (the
+    # descriptor-census skips printed as SKIPPED while the run exits 0).
+    skip_one = [("self-test-leaves-no-descriptor-open", _NO_CENSUS)]
+    skip_said = {}
+    for label, args in (("one", ([], {}, 41, [], skip_one)),
+                        ("two", ([], {}, 41, [], skip_one + [("x-census-check", _NO_CENSUS)])),
+                        ("fail", (["x"], {}, 41, [], skip_one)),
+                        ("bound", ([], {}, 40, ["class sweep child killed at its 3000s bound"], skip_one)),
+                        ("none", ([], {}, 41, [], []))):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = _self_test_outcome(*args)
+        skip_said[label] = (code, out.getvalue())
+    check("self-test-exit-skipped-check-cannot-evaluate",
+          skip_said["one"][0] == 2 and "CANNOT EVALUATE (1 required check(s) skipped" in skip_said["one"][1]
+          and "self-test-leaves-no-descriptor-open" in skip_said["one"][1]
+          and "PASS" not in skip_said["one"][1] and "FAIL" not in skip_said["one"][1]
+          and skip_said["two"][0] == 2 and "2 required check(s) skipped" in skip_said["two"][1]
+          and "self-test-leaves-no-descriptor-open, x-census-check" in skip_said["two"][1]
+          and skip_said["fail"][0] == 1 and "FAILED: x" in skip_said["fail"][1]
+          and skip_said["bound"][0] == 2 and bound_line in skip_said["bound"][1]
+          and "1 bound(s) expired" in skip_said["bound"][1]
+          and "1 required check(s) skipped" in skip_said["bound"][1]
+          and skip_said["none"][0] == 0 and "SELF-TEST: PASS (41 " in skip_said["none"][1],
+          observed=repr(skip_said))
     # The no-census skip roster: every census-only sweep check is named, each with the given reason, in
     # _CLASS_SWEEP_CHECKS order, then the parent comparison and the expiry probe, and nothing else.
     entries = _class_sweep_skip_entries("probe reason")
@@ -15157,14 +15461,14 @@ def _class_sweep_bound_self_test(check):
             "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
             "    else:\n"
             "        _class_sweep_record(check, bound_expired)\n"
-            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)\n")
+            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)\n")
     wiring_probes = {}
     for label, text in (("good", good),
                         ("fresh-list", good.replace("_class_sweep_record(check, bound_expired)",
                                                     "_class_sweep_record(check, [])")),
                         ("other-list", good.replace(
-                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired)",
-                            "_self_test_outcome(failures, failure_details, checked[0], [])")),
+                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)",
+                            "_self_test_outcome(failures, failure_details, checked[0], [], skipped)")),
                         ("no-skips", good.replace(
                             "        skipped.extend(_class_sweep_skip_entries(no_census))",
                             "        pass"))):
@@ -15179,8 +15483,8 @@ def _class_sweep_bound_self_test(check):
     # The reporting, proved by RUNNING the real statements: the sweep-reporting slice of this module's
     # own _self_test_checks (_sweep_report_source) is executed with the sweep child controlled, asserting
     # the final exit code and the emitted entries. A controlled no-census run must put every sweep check
-    # into the skip report and still exit 0; a controlled expiry must exit 2 with the bound entry emitted
-    # and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
+    # into the skip report and exit 2, cannot evaluate, naming them; a controlled expiry must exit 2 with
+    # the bound entry emitted and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
 
     def _slice_outcomes(module_text):
         slice_source = _sweep_report_source(ast.parse(module_text))
@@ -15207,9 +15511,16 @@ def _class_sweep_bound_self_test(check):
                 outcomes[label] = (code, list(skipped_list), recorded_calls, out.getvalue())
         return outcomes
     live_report = _slice_outcomes(source_text)
+    # The no-census verdict line itself names every skipped sweep check (not only the SKIPPED lines).
+    no_census_verdict = [] if live_report is None else [
+        line for line in live_report["no-census"][3].splitlines()
+        if line.startswith("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (")]
     check("class-sweep-reporting-slice-reports-skips-and-expiry",
           live_report is not None
-          and live_report["no-census"][0] == 0
+          and live_report["no-census"][0] == 2
+          and "PASS" not in live_report["no-census"][3]
+          and len(no_census_verdict) == 1
+          and all(name in no_census_verdict[0] for name in names)
           and [entry[0] for entry in live_report["no-census"][1]] == names
           + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
              "class-sweep-bound-expiry-attributed-to-the-bound"]
@@ -15228,14 +15539,21 @@ def _class_sweep_bound_self_test(check):
     # Negative controls: each reporting mutation, applied to this module's source, must change what the
     # executed slice reports. A bare call that drops the skip entries, an extend into a throwaway list,
     # and a rebinding of the expiry list to empty just before the verdict each keep the name-reading
-    # wiring check above green; the executed slice refuses all three.
+    # wiring check above green; the executed slice refuses all three. A verdict that no longer reads the
+    # skip list ("verdict-blind") keeps the skip report but lets a no-census run exit 0; the executed
+    # slice refuses it too.
     extend_stmt = "        skipped.extend(_class_sweep_skip_entries(no_census))"
-    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)"
+    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)"
+    # The verdict statement on a line of its own, so a mutation lands on the live statement and never inside
+    # a probe string above that quotes it; a live verdict without that exact form leaves the source
+    # unchanged, which the check below refuses.
+    verdict_line = "\n" + verdict_stmt + "\n"
     mutated = {
         "discard": source_text.replace(extend_stmt, "        _class_sweep_skip_entries(no_census)", 1),
         "throwaway": source_text.replace(
             extend_stmt, "        [].extend(_class_sweep_skip_entries(no_census))", 1),
-        "rebind": source_text.replace(verdict_stmt, "    bound_expired = []\n" + verdict_stmt, 1),
+        "rebind": source_text.replace(verdict_line, "\n    bound_expired = []" + verdict_line, 1),
+        "verdict-blind": source_text.replace(verdict_line, verdict_line.replace(", skipped)", ")"), 1),
     }
     mutant_reports = {label: _slice_outcomes(text) for label, text in mutated.items()}
     check("class-sweep-reporting-slice-refuses-dropped-skips-and-rebound-expiry",
@@ -15246,7 +15564,10 @@ def _class_sweep_bound_self_test(check):
           and "SKIPPED" not in mutant_reports["throwaway"]["no-census"][3]
           and mutant_reports["rebind"]["expiry"][0] == 0
           and "BOUND EXPIRED" not in mutant_reports["rebind"]["expiry"][3]
-          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3],
+          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3]
+          and mutant_reports["verdict-blind"]["no-census"][0] == 0
+          and "  SKIPPED: " in mutant_reports["verdict-blind"]["no-census"][3]
+          and "CANNOT EVALUATE" not in mutant_reports["verdict-blind"]["no-census"][3],
           observed=repr({label: None if report is None else
                          (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
                          for label, report in mutant_reports.items()}))
@@ -15266,7 +15587,8 @@ def _class_sweep_bound_self_test(check):
                   "        skipped.append((name, no_census))\n"
                   "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
                   "    for name, why in skipped:\n"
-                  "        print(name, why)\n")
+                  "        print(name, why)\n"
+                  "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)\n")
     report_loop = "    for name, why in skipped:"
     shape_probes = {}
     for label, inserted in (("good", None),
@@ -15287,7 +15609,11 @@ def _class_sweep_bound_self_test(check):
                              "    try:\n        pass\n"
                              "    except Exception as skipped:\n        pass\n"),
                             ("global-declared", "    global skipped\n"),
-                            ("keyword-named", "    _some_helper(skipped=[])\n")):
+                            ("keyword-named", "    _some_helper(skipped=[])\n"),
+                            ("verdict-keyword", "    _self_test_outcome(failures, failure_details, checked[0], "
+                             "bound_expired, skipped=skipped)\n"),
+                            ("verdict-other-slot", "    _self_test_outcome(skipped, failure_details, checked[0], "
+                             "bound_expired, [])\n")):
         text = shape_good if inserted is None else shape_good.replace(
             report_loop, inserted + report_loop, 1)
         shape_probes[label] = _skip_list_write_sites(ast.parse(text))
@@ -15302,7 +15628,8 @@ def _class_sweep_bound_self_test(check):
           and all(shape_probes[label][0] == 1 and shape_probes[label][1] != []
                   for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped",
                                 "match-captured", "star-captured", "mapping-rest", "import-aliased",
-                                "except-bound", "global-declared", "keyword-named"))
+                                "except-bound", "global-declared", "keyword-named", "verdict-keyword",
+                                "verdict-other-slot"))
           and cleared_live is not None and cleared_live[0] == 1 and cleared_live[1] != []
           and captured_live is not None and captured_live[0] == 1 and captured_live[1] != []
           and _skip_list_write_sites(ast.parse("def other():\n    skipped = []\n")) is None,

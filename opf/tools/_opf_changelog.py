@@ -519,7 +519,8 @@ def _load_inputs(resolution, product_root):
     # its [vendors]: an invalid manifest is a fail-closed cannot-evaluate, never a silent partial pass.
     # validate_manifest returns CANNOT-EVALUATE for a non-table / non-opf manifest and INVALID for a
     # schema violation; either is fail-closed here.
-    mv = _opf_store.validate_manifest(manifest_data)
+    mv = _opf_store.validate_manifest(
+        manifest_data, manifest_rel=resolution.machine_rel + "/" + _opf_store.MANIFEST_NAME)
     if mv.status != VALID:
         return None, None, None, frozenset(), ("manifest.toml does not validate against the manifest "
                                                 "schema: {} (fail-closed, spec 4.5/9)".format(
@@ -1133,6 +1134,25 @@ def self_test():
         check("f5-manifest-missing-types-cannot-eval",
               evaluate(build_store(version_text, worklog_text, cl_disk, manifest_no_types)).status
               == CANNOT_EVALUATE)
+
+        # The below-supported spec_version refusal read through this gate names the resolved
+        # manifest's own path (_load_inputs's own validate_manifest call); falling back to the
+        # unnamed "the store manifest" wording is red. On the live path the worklog loader
+        # validates the manifest first and names the path itself, so it is bypassed here to
+        # reach exactly this module's call.
+        manifest_old = manifest.replace(
+            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+        _orig_load_worklog_at = _opf_worklog.load_worklog_at
+        _opf_worklog.load_worklog_at = (
+            lambda fd, machine_rel, required=False: {"schema": 1, "entry": []})
+        try:
+            r_old = evaluate(build_store(version_text, worklog_text, cl_disk, manifest_old))
+        finally:
+            _opf_worklog.load_worklog_at = _orig_load_worklog_at
+        check("older-manifest-refusal-names-path",
+              r_old.status == CANNOT_EVALUATE
+              and any("'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in f
+                      for f in r_old.findings))
 
         # M3 end-to-end: a store whose MANIFEST registers x-acme and whose worklog USES x-acme resolves
         # and PASSES only because _load_inputs reads the manifest and threads [vendors].registered through
