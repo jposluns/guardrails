@@ -94,7 +94,7 @@ from _opf_schema import (  # noqa: E402
 from _opf_release import (  # noqa: E402
     validate_version, validate_worklog, _entries_by_id,
     check_frozen_coverage, check_ids_partition, check_rotation_only_released, _verify_append_only, _wl_num,
-    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS,
+    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS, RELEASE_OPTIONAL_KEYS, _imported_row_findings,
 )
 
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
@@ -4083,15 +4083,16 @@ def _check_lease(root_fd, machine_rel, rep):
 
 def _wellformed_release_row(row):
     """True when `row` is a structurally well-formed release row: the per-row shape validate_version
-    enforces (keys EXACTLY RELEASE_KEYS, a valid SemVer version, an RFC 3339 date, a well-formed
-    worklog_span, and a sha256 coverage_digest). Cross-row tiling, uniqueness, and monotonicity are NOT
+    enforces (keys EXACTLY RELEASE_KEYS plus any RELEASE_OPTIONAL_KEYS, a valid SemVer version, an RFC
+    3339 date, a well-formed worklog_span, a sha256 coverage_digest, and the optional imported flag under
+    the shared _imported_row_findings rule). Cross-row tiling, uniqueness, and monotonicity are NOT
     applied: this decides only whether an INJECTED prior row can serve as the append-only immutability
     baseline, so a well-formed row that merely DIFFERS from the current ledger still reaches the graded
     rewrite check (a real history rewrite), while a dict of garbage keys is a malformed observation routed
     to CANNOT-EVALUATE rather than a false rewrite finding (F5; guard-input-soundness)."""
     if not isinstance(row, dict):
         return False
-    if set(row) != RELEASE_KEYS:
+    if set(row) - RELEASE_OPTIONAL_KEYS != RELEASE_KEYS:
         return False
     if parse_semver(row.get("version")) is None:
         return False
@@ -4101,6 +4102,8 @@ def _wellformed_release_row(row):
     if _parse_span(row.get("worklog_span"), scratch, "prior release row") is False or scratch:
         return False
     if not _valid_digest(row.get("coverage_digest")):
+        return False
+    if _imported_row_findings(row, "prior release row"):
         return False
     return True
 
@@ -10090,6 +10093,82 @@ def self_test():
         rp["prior"]["releases"][0]["coverage_digest"] = "sha256:" + "c" * 64
         rpr = run(clean_machine(), obs=rp)
         check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
+
+        # --- the optional imported release-row flag (spec 6.1, 14.3): C-VERSION-LEDGER and the prior-row
+        # check admit it as exactly true on an empty span, and the composed ledger readers (the changelog
+        # gates and the view planner) apply the same rule; the whole-store vector below grades a store
+        # with an imported row VALID end to end.
+        imp_empty = compute_span_digest(full_wl, None)
+
+        def imp_row(version, imported=True):
+            r = {"version": version, "date": "2025-01-01T00:00:00Z", "worklog_span": [],
+                 "coverage_digest": imp_empty}
+            if imported is not None:
+                r["imported"] = imported
+            return r
+
+        def imp_run(rows, prior_rows):
+            m = clean_machine()
+            m["version.toml"]["release"] = rows + m["version.toml"]["release"]
+            o = copy.deepcopy(clean_prior())
+            o["prior"]["releases"] = prior_rows + o["prior"]["releases"]
+            return run(m, obs=o)
+
+        def verdicts(r, *cids):
+            return None if r is None else tuple(r.checks.get(c) for c in cids)
+
+        hist = ("C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION")
+        _imp = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")])
+        check("rel-imported-doctor-accepted", verdicts(_imp, "C-VERSION-LEDGER") == ("PASS",))
+        check("prior-imported-row-wellformed", verdicts(_imp, *hist) == ("PASS",) * 3)
+        # A flag outside the value rule is a C-VERSION-LEDGER finding naming the rule, and the same row in
+        # the prior is a malformed observation, so the history checks cannot evaluate.
+        _impv = imp_run([imp_row("0.9.0", 1)], [imp_row("0.9.0", 1)])
+        check("rel-imported-doctor-int1-refused",
+              verdicts(_impv, "C-VERSION-LEDGER") == ("FINDING",)
+              and any("exactly true" in f for f in _impv.findings)
+              and verdicts(_impv, *hist) == (CANNOT_EVALUATE,) * 3
+              and any("malformed" in m for m in _impv.cannot_evaluate))
+        # The prior-row check applies the value and span rules of validate_version at their boundaries.
+        check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0")))
+        check("prior-row-imported-false-refused", not _wellformed_release_row(imp_row("0.9.0", False)))
+        check("prior-row-imported-int1-refused", not _wellformed_release_row(imp_row("0.9.0", 1)))
+        check("prior-row-imported-nonempty-span-refused", not _wellformed_release_row(
+            dict(imp_row("0.9.0"), worklog_span=["WL-1", "WL-1"],
+                 coverage_digest=compute_span_digest(full_wl, (1, 1)))))
+        check("prior-row-plain-still-wellformed", _wellformed_release_row(imp_row("0.9.0", None)))
+        # The flag MUST NOT be added to or removed from an existing row (spec 6.1): with both ledgers
+        # admitted, C-HISTORY-APPEND-ONLY reads either change as a rewrite.
+        for _imp_label, _imp_cur, _imp_prior in (("added-to", True, None), ("removed-from", None, True)):
+            _impr = imp_run([imp_row("0.9.0", _imp_cur)], [imp_row("0.9.0", _imp_prior)])
+            check("history-flag-{}-existing-row-finding".format(_imp_label),
+                  verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
+                  and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
+        # WHOLE STORE, end to end: a store with a declared VERSION view whose ledger and prior carry an
+        # imported row, with the changelog tiling all three releases, grades VALID with no finding and no
+        # cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the changelog gates, the
+        # view planner behind C-VIEW-DRIFT, and the history checks, so the vector is red when ANY of them
+        # refuses the flag.
+        _e2e_cl = make_changelog(["1.1.0", "1.0.0", "0.9.0"])
+        _e2e_dig = freeze_digests(_e2e_cl, ["1.1.0", "1.0.0", "0.9.0"])
+        _e2e = clean_machine()
+        _e2e["manifest.toml"] = base_manifest(views={"VERSION": {
+            "kind": "deterministic", "sources": ["version"], "target": "VERSION"}})
+        _e2e["version.toml"]["release"] = [imp_row("0.9.0")] + _e2e["version.toml"]["release"]
+        _e2e["version.toml"]["summary"] = [
+            {"covers": "0.9.0", "status": "published", "digest": _e2e_dig["0.9.0"]},
+            {"covers": "1.0.0", "status": "published", "digest": _e2e_dig["1.0.0"]},
+            {"covers": "1.1.0", "status": "published", "digest": _e2e_dig["1.1.0"]},
+            {"covers": "unreleased", "status": "working"}]
+        _e2e_obs = copy.deepcopy(clean_prior())
+        _e2e_obs["prior"]["releases"] = [imp_row("0.9.0")] + _e2e_obs["prior"]["releases"]
+        _e2e_run = run(_e2e, product={"VERSION": "1.1.0\n", "CHANGELOG.md": _e2e_cl}, obs=_e2e_obs)
+        check("rel-imported-doctor-whole-store-valid",
+              _e2e_run is not None and _e2e_run.status == VALID
+              and not _e2e_run.findings and not _e2e_run.cannot_evaluate
+              and _e2e_run.checks.get("C-CHANGELOG-GATES") == "PASS"
+              and _e2e_run.checks.get("C-VIEW-DRIFT") == "PASS"
+              and _e2e_run.checks.get("C-VERSION-LEDGER") == "PASS")
 
         # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
         b5 = clean_machine()

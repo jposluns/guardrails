@@ -772,7 +772,8 @@ def self_test():
     malformed-heading findings propagated fail-closed in BOTH the range rollup and the freeze digest; the CLI
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
-    fail-closed on a broken ledger and on an unledgered covers token, exit-map)."""
+    fail-closed on a broken ledger and on an unledgered covers token, exit-map). The imported
+    release-row flag (spec 6.1, 14.3): the drafter drafts over an imported historical row."""
     import tempfile
     import shutil
 
@@ -969,6 +970,17 @@ def self_test():
     cl_edit = cl.replace("- first release (WL-1)\n", "- first release, reworded (WL-1)\n")
     check("published-edit-freeze-finding",
           _opf_changelog.run_gates(vbase, worklog, cl_edit).status == "FINDING")
+
+    # 8b: the imported release-row flag (spec 6.1, 14.3). The drafter validates the ledger by
+    # validate_version's own rule, so a ledger with an imported historical row drafts the unreleased entry.
+    v_imp = {"schema": 1,
+             "release": [{"version": "0.9.0", "date": "2026-05-01T00:00:00Z", "worklog_span": [],
+                          "coverage_digest": _opf_release.compute_span_digest(by_id, None),
+                          "imported": True}] + vbase["release"],
+             "summary": vbase["summary"]}
+    st_impa, text_impa, _n, _f = draft_entry(v_imp, worklog, None, cl, "unreleased")
+    check("imported-row-draft-ok",
+          st_impa == OK and text_impa == "## unreleased\n\n### Added\n- a feature (WL-4)\n")
 
     # 9: the freeze-digest assist equals U5's freeze_digest of the parsed entry.
     check("freeze-digest-assist",
