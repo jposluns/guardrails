@@ -15875,6 +15875,10 @@ def _main_isolated(monitor):
                 ("gw-rt-pe-note", "$G commit -nv <<<x; pytest || true", "is built at run time")):
             gdeny_names("({}) on the parse-error path the fallback's deny comes first, the run-time one next"
                         .format(_gw_lbl), _gw_cmd, _gw_needle)
+        # On the parsed path the run-time rule runs after every other deny, so a command the closed literal grammar
+        # denies too keeps the grammar's reason; read first, the run-time rule would name '$G' instead.
+        gdeny_names("(gw-rt-order-parsed) on the parsed path the closed literal grammar's deny comes first",
+                    "git commit $O; $G commit -nv", "the raw command text names a git command")
         # Behind a '#' the shared lexer could not judge, such a character before a roster verb counts as git does.
         gdeny_names("(gw-rt-doubt) behind an unjudged '#', a word built at run time before commit -nv denies",
                     "(true #'\n)\n$G commit -nv", "a word built at run time that may be git")
@@ -15922,6 +15926,17 @@ def _main_isolated(monitor):
                 "shopt -s expand_aliases\nalias G=git\nG commit -nv", "allow")
         gexpect("(gw-rt-residual-stage) words fed to $G from another stage allow (disclosed residual)",
                 "echo commit -nv | xargs $G", "allow")
+        # A git builtin run by its dashed name (each git-<verb> in git's exec path links to the git binary, which
+        # runs that builtin) and a git alias defined on the command line name no roster verb any reading sees.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-residual-dashed", "/usr/lib/git-core/git-commit -nv"),
+                ("gw-rt-residual-dashed-push", "/usr/lib/git-core/git-push --no-verify"),
+                ("gw-rt-residual-dashed-exec-path", "$(git --exec-path)/git-commit -nv"),
+                ("gw-rt-residual-dashed-var", "$P/git-commit --no-verify"),
+                ("gw-rt-residual-git-alias", "git -c alias.ci=commit ci -nv"),
+                ("gw-rt-residual-git-alias-var", "$G -c alias.ci=commit ci -nv")):
+            gexpect("({}) a dashed git builtin or an inline git alias allows (disclosed residual)".format(_gw_lbl),
+                    _gw_cmd, "allow")
         # The disclosed safe-direction over-denies: any word built at run time counts, an operand or quoted text
         # included, so does a safe value built at run time after the verb, the whole text holding an extglob
         # opener is read across its separators, and behind an unjudged '#' any roster verb after such a character
@@ -15979,6 +15994,45 @@ def _main_isolated(monitor):
                 ("gw-rt-hd-subst-close", "$G $(cat <<'EOF' >notes.txt\n)\nEOF\n) commit -nv")):
             gdeny_names("({}) a here-document body does not re-pair the split before a hook skip".format(_gw_lbl),
                         _gw_cmd, "is built at run time")
+        # A body quote that re-pairs the first split can carry an ANSI-C escaped quote across that split's pieces, so
+        # no piece of it holds both the quote's "$'" and its "\'"; the split-doubt test reads the pieces of the
+        # inert-body split too (_gate_split_spans). With G=git and O=-nv bash runs each as a hook-skipping git commit
+        # (git -c "x.y=a;';b" commit -nv); each allowed before.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-hd-ansi-gopt-unq", "cat <<EOF >notes.txt\nDon't\nEOF\n$G -c $'x.y=a;\\';b' commit -nv"),
+                ("gw-rt-hd-ansi-gopt-q", "cat <<'EOF' >notes.txt\nDon't\nEOF\n$G -c $'x.y=a;\\';b' commit -nv"),
+                ("gw-rt-hd-ansi-gopt-pipe", "cat <<\"EOF\" >notes.txt\nDon't\nEOF\n$G -c $'x.y=a|\\'|b' commit -nv"),
+                ("gw-rt-hd-ansi-gopt-amp", "cat <<-EOF >notes.txt\n\tDon't\n\tEOF\n$G -c $'x.y=a&\\'&b' commit -nv"),
+                ("gw-rt-hd-ansi-gopt-later", "cat <<'EOF' >notes.txt\nDon't\nEOF\n$G -c $'x.y=a;\\';b' commit $O"),
+                ("gw-rt-hd-ansi-gopt-sudo", "cat <<'EOF' >notes.txt\nDon't\nEOF\nsudo $G -c $'x.y=a;\\';b' commit -nv"),
+                ("gw-rt-hd-ansi-gopt-cont", "cat <<'EOF' >notes.txt\nDon't\nEOF\n$G -c $\\\n'x.y=a;\\';b' commit -nv")):
+            gdeny_names("({}) a body quote does not carry an ANSI-C escaped quote past the split-doubt test"
+                        .format(_gw_lbl), _gw_cmd, "is built at run time")
+        gdeny_names("(gw-rt-hd-ansi-lit) the carry before a quote-assembled git with a git operand denies too",
+                    "cat <<'EOF' >notes.txt\nDon't\nEOF\ng'i't -c $'x.y=a;\\';b' commit $O git",
+                    "a de-quoted reading of the command names git ('git'), and a later ")
+        gexpect("(gw-rt-hd-ansi-ctl) an ANSI-C escaped quote after a here-document before an ordinary command allows",
+                "cat <<'EOF' >notes.md\nDon't push it.\nEOF\nprintf $'it\\'s\\n'; git log -n 3", "allow")
+        # The here-document shapes the inert-body split misreads, pinned as behaviour (disclosed residual): a stray
+        # '<<' inside quotes, in a comment or as an arithmetic shift, on the real operator's line or a line before
+        # it, opens a body that never ends, and a delimiter with a line continuation inside it, an ANSI-C or locale
+        # quote, an escaped blank or a blank inside quotes never matches the line that ends its body, so the body
+        # line Don't still re-pairs the split and neither split puts -nv in one piece with $G. With G=git bash runs
+        # each as git commit -m 'a;b' -nv. A change that closes one fails here.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-hd-res-stray-sq", "echo '<<X' && cat <<EOF\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-comment", "cat <<EOF # <<X\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-sq-after", "cat <<EOF '<<X'\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-line", "echo '<<X'\ncat <<EOF >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-arith", "cat <<EOF >notes.txt; (( 1<<2 ))\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-arith-subst", "cat <<EOF; echo $((1<<2))\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-delim-cont", "cat <<E\\\nOF >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-delim-ansi", "cat <<$'EOF' >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-delim-locale", "cat <<$\"EOF\" >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-delim-esc-blank", "cat <<E\\ F >notes.txt\nDon't\nE F\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-delim-sq-blank", "cat <<'E F' >notes.txt\nDon't\nE F\n$G commit -m 'a;b' -nv")):
+            gexpect("({}) a here-document shape the inert-body split misreads allows (disclosed residual)"
+                    .format(_gw_lbl), _gw_cmd, "allow")
         # The parse-error path's unread-text reading splits as the run-time rule does: after an unquoted
         # here-document the lexer stops at, a quote-assembled git with a separator in its quoted message (bash runs
         # git commit -m 'a;b' -nv) allowed before.
@@ -16028,6 +16082,36 @@ def _main_isolated(monitor):
                 ("gw-rt-lit-pe", "g'i't commit $O <<<x")):
             gdeny_names("({}) a quote-assembled git before a roster verb and a run-time word denies".format(_gw_lbl),
                         _gw_cmd, "a de-quoted reading of the command names git ('git'), and a later ")
+        # A git written as such elsewhere in the piece (an operand, a message, an option value, in either case) hides
+        # no quote-assembled git: that walk reads the piece with every git the closed literal grammar reads masked
+        # out (_gate_runtime_masked_git), since the grammar judges each, and each assembled git starts a walk, one
+        # after a git whose subcommand is off the roster included. With O=-nv, L=--no-verify and HOME=-nv bash runs
+        # each as a hook-skipping git commit, am or push (g'i't commit ~ -m git runs git commit -nv -m git). Each
+        # allowed before.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-lit-git-tail", "g'i't commit $O git"),
+                ("gw-rt-lit-git-tail-tilde", "HOME=-nv; g'i't commit ~ git"),
+                ("gw-rt-lit-git-author", "g'i't commit $O --author=git"),
+                ("gw-rt-lit-git-sudo-msg", "sudo g'i't commit ~ -m git"),
+                ("gw-rt-lit-git-bs-msg", "g\\it commit $O -m git"),
+                ("gw-rt-lit-git-upper", "g\"i\"t commit $O GIT"),
+                ("gw-rt-lit-git-path", "/usr/bin/g'i't commit $O git"),
+                ("gw-rt-lit-git-mbox", "g'i't am $O git.mbox"),
+                ("gw-rt-lit-git-push", "g'i't push $L -- git"),
+                ("gw-rt-lit-git-heredoc", "bash <<'EOF'\ng'i't commit $O git\nEOF"),
+                ("gw-rt-lit-second-sh-c", "sh -c \"g'i't log; g'i't commit \\$O\""),
+                ("gw-rt-lit-second-eval", "eval \"g'i't status && g'i't commit ~\""),
+                ("gw-rt-lit-second-push", "bash -c 'g\"i\"t log; g\"i\"t push $L'")):
+            gdeny_names("({}) a git written as such in the piece hides no quote-assembled git".format(_gw_lbl),
+                        _gw_cmd, "a de-quoted reading of the command names git (")
+        # Controls: a git written as such keeps the closed literal grammar's reading, so its here-document message
+        # form, a word built at run time after commit, allows with git and a roster verb named in the body too, and
+        # a quote-assembled git whose subcommand is off the roster allows with a git operand after it.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-lit-ctl-hd-body", "git commit -m \"$(cat <<'EOF'\nfix: git commit the change\nEOF\n)\""),
+                ("gw-rt-lit-ctl-log-git", "g'i't log --grep commit $N git")):
+            gexpect("({}) a git written as such keeps the closed literal grammar's reading".format(_gw_lbl), _gw_cmd,
+                    "allow")
         # With extglob already on before the call, one extglob command word builds git with no shopt in the text.
         gdeny_names("(gw-rt-extglob-onepiece) an extglob command word denies with no shopt in the text",
                     "/usr/bin/+(gi)t commit -nv", "is built at run time")
@@ -16090,8 +16174,9 @@ def _main_isolated(monitor):
                     "allow")
         # The disclosed over-denies of these reads: a tilde word counts whatever it expands to (~root, and a
         # tilde-prefix bash leaves unexpanded because a quote stands in it) and, after the first word, however it is
-        # quoted; a quote-assembled git with a safe value built at run time after its verb; and the read from an
-        # ANSI-C escaped quote or a case word to the end of the text spans separators.
+        # quoted; a quote-assembled git with a safe value built at run time after its verb, every such git starting a
+        # walk, an operand included, and so a git an option's attached value names (read as env -Sgit runs git); and
+        # the read from an ANSI-C escaped quote or a case word to the end of the text spans separators.
         for _gw_lbl, _gw_cmd in (
                 ("gw-rt-overdeny-tilde-name", "~root commit -nv"),
                 ("gw-rt-overdeny-tilde-quoted-prefix", "~\"\" commit -nv"),
@@ -16099,6 +16184,8 @@ def _main_isolated(monitor):
                 ("gw-rt-overdeny-tilde-quoted-later", "$G commit -m 'see ~'"),
                 ("gw-rt-overdeny-lit-msg", "g'i't commit -m \"$msg\""),
                 ("gw-rt-overdeny-ansi-rest", "ls $D $'a\\';b'; echo commit -n"),
+                ("gw-rt-overdeny-lit-operand", "g'i't log -- g'i't commit $O"),
+                ("gw-rt-overdeny-lit-attached", "git log -Sgit commit $x"),
                 ("gw-rt-overdeny-case-rest", "case $x in a) ls;; esac; echo commit -n")):
             gexpect("({}) a read the new forms need denies more than bash runs (disclosed over-deny)".format(_gw_lbl),
                     _gw_cmd, "deny")
@@ -16140,7 +16227,8 @@ def _main_isolated(monitor):
         # piece of the split a here-document body changes only where it holds such a character, and for the text
         # from a piece holding an ANSI-C escaped quote or a case word, before the last piece, to the end: a reading
         # only removes characters or decodes an ANSI-C escape, which needs a '$', so a piece with none has no
-        # run-time word to start at.
+        # run-time word to start at. The readings of a piece with every git written as such masked out are built
+        # only where masking changed it and it still holds a quote, a backslash or a 'git' a reading can join.
         _gw_built = []
         _gw_real_readings = aiqt_hooks._gate_bash_readings
         aiqt_hooks._gate_bash_readings = lambda text: _gw_built.append(text) or _gw_real_readings(text)
@@ -16151,7 +16239,10 @@ def _main_isolated(monitor):
                                        ("ls @(a)", ["ls @(a)"]), ("ls ~; log", ["ls ~"]),
                                        ("printf $'a\\'; log", ["printf $'a\\'", "printf $'a\\'; log"]),
                                        ("printf $'a\\'", ["printf $'a\\'"]),
-                                       ("cat <<E\n'\nE\n$x", ["'\nE\n$x", "$x"])):
+                                       ("cat <<E\n'\nE\n$x", ["'\nE\n$x", "$x"]),
+                                       ("git log $x", ["git log $x"]), ("g'i't log $x", ["g'i't log $x"]),
+                                       ("git log \"$x\"", ["git log \"$x\"", "xxx log \"$x\""]),
+                                       ("git log -Sgit $x", ["git log -Sgit $x", "xxx log -Sgit $x"])):
                 del _gw_built[:]
                 if _gw_rtb is not None:
                     _gw_rtb(_gw_text)
@@ -16197,6 +16288,38 @@ def _main_isolated(monitor):
                 ("case", "$G $(case a in a) ", True), ("case-inside", "lowercase x", False),
                 ("plain", "$G commit -m x", False)):
             rdexpect("(gw-rt-split-doubt-{}) the split-doubt test".format(_gw_lbl), _gw_sd, _gw_text, _gw_want)
+        # The read to the end of the text from a doubt piece of either split: the inert-body split's piece holding
+        # the whole ANSI-C quote (the first split, re-paired by the body's apostrophe, cuts between its "$'" and its
+        # "\'"), and the first split's own doubt piece where no here-document changes the text.
+        _gw_ss = getattr(aiqt_hooks, "_gate_split_spans", None)
+        for _gw_lbl, _gw_text in (("masked", "cat <<'EOF' >f\nDon't\nEOF\n$G -c $'x.y=a;\\';b' commit -nv"),
+                                  ("first", "$G -c $'x.y=a;\\';b' commit -nv")):
+            rdexpect("(gw-rt-split-spans-{}) a doubt piece of either split is read to the end".format(_gw_lbl),
+                     (lambda text: (text.index("$G"), len(text)) in _gw_ss(text)[1]) if _gw_ss is not None else None,
+                     _gw_text, True)
+        # The mask of every git the closed literal grammar reads ('git' at a word boundary in either case, a path's
+        # last part and a '.git' ending included, never one glued to a letter), and the walk from each git a reading
+        # of the masked piece names: its subcommand found as _git_sub_and_args finds it (an option value skipped, a
+        # leading assignment that names git read as an assignment), a later git read after an off-roster one, and a
+        # roster verb with no word built at run time after it giving none.
+        rdexpect("(gw-rt-masked-git) every git the closed literal grammar reads is masked, one for one",
+                 getattr(aiqt_hooks, "_gate_runtime_masked_git", None),
+                 "g'i't commit $O git GIT /usr/bin/git x.git -Sgit gitx",
+                 "g'i't commit $O xxx xxx /usr/bin/xxx x.xxx -Sgit gitx")
+        _gw_ar = getattr(aiqt_hooks, "_gate_assembled_reading", None)
+        for _gw_lbl, _gw_words, _gw_want in (
+                ("first", ["git", "commit", "$O"], ("git", "commit", "the word '$O', built at run time, which may "
+                                                    "expand to a hook-skip spelling for it")),
+                ("second", ["git", "log", "git", "commit", "~"], ("git", "commit", "the word '~', built at run time, "
+                                                                  "which may expand to a hook-skip spelling for it")),
+                ("gopt", ["git", "-C", "git", "-c", "a=b", "push", "x", "$L"],
+                 ("git", "push", "the word '$L', built at run time, which may expand to a hook-skip spelling for it")),
+                ("off", ["git", "-C", "git", "log", "commit", "$O"], None),
+                ("assign", ["X=/a/git", "commit", "$O"], None),
+                ("no-runtime", ["git", "commit", "-m", "x"], None),
+                ("none", ["xxx", "commit", "$O"], None)):
+            rdexpect("(gw-rt-assembled-{}) the walk from each assembled git".format(_gw_lbl), _gw_ar, _gw_words,
+                     _gw_want)
         # The here-document mask: every masked character in a body, an unquoted and a quoted delimiter, the
         # delimiter line exactly (a trailing blank, a longer word and, without '<<-', a leading tab do not end the
         # body; with '<<-' leading tabs are stripped), two operators on one line, a here-string, a body that never
@@ -16286,12 +16409,23 @@ def _main_isolated(monitor):
                 ("gw-res-runtime-doubt", "or make commit -j4 after a backquote that holds such a #"),
                 ("gw-res-runtime-tilde", "or a tilde word (~, ~+, ~-, ~N, ~+N, ~-N or ~name with no / after it"),
                 ("gw-res-runtime-heredoc", "split again with every here-document body made inert"),
-                ("gw-res-runtime-split-doubt", "read from a piece holding an ANSI-C dollar-quoted span with an "
-                 "escaped quote (backslash, quote) or a case word to the end of the text"),
-                ("gw-res-runtime-literal", "and a git that a de-quoted reading assembles and the closed literal "
+                ("gw-res-runtime-split-doubt", "read from a piece of either split holding an ANSI-C dollar-quoted "
+                 "span with an escaped quote (backslash, quote) or a case word to the end of the text"),
+                ("gw-res-runtime-split-doubt-carry", "a body quote that re-pairs the first split can carry such a span "
+                 "across its pieces"),
+                ("gw-res-runtime-literal", "and each git that a de-quoted reading assembles and the closed literal "
                  "grammar does not read as written"),
+                ("gw-res-runtime-literal-masked", "read with every git written as such masked out of the piece"),
+                ("gw-res-runtime-literal-overdeny", "any quote-assembled git starts a walk, an operand included"),
+                ("gw-res-runtime-attached-overdeny", "git log -Sgit commit $x denies"),
                 ("gw-res-runtime-tilde-overdeny", "a tilde word counts whatever it expands to"),
-                ("gw-res-runtime-residual-heredoc", "a here-document whose delimiter is quoted around a blank"),
+                ("gw-res-runtime-residual-heredoc", "a delimiter with a line continuation inside it, an ANSI-C or "
+                 "locale quote, an escaped blank or a blank inside quotes"),
+                ("gw-res-runtime-residual-stray", "a stray << inside quotes, in a comment or as an arithmetic shift, "
+                 "on the real operator line or a line before it"),
+                ("gw-res-runtime-residual-repair", "after each a body quote can still re-pair the split"),
+                ("gw-res-runtime-residual-dashed", "a git builtin run by its dashed name"),
+                ("gw-res-runtime-residual-git-alias", "a git alias defined on the command line"),
                 ("gw-res-unread-split", "the unread text split also as the run-time rule below splits it"),
                 ("gw-res-runtime-doubt-tilde", "{, a tilde or the @, + or ! of an extglob opener before such a "
                  "subcommand"),
@@ -16467,6 +16601,10 @@ def _main_isolated(monitor):
         #   here-document mask and the second split it gives: each body's quote pairs with the next one for the
         #   first split, so the pieces of the two splits differ throughout. gw-lin-runtime-case (`case;` + ` $x log
         #   -m y;`*n) times the read from a case word's piece to the end of the text, over many raw pieces.
+        #   gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x`) times the walk from each quote-assembled git
+        #   (_gate_assembled_reading) over one piece in which every git's -C takes the next git as its value, so
+        #   each git's subcommand is the one log at the end: the tables built from the end find each in one step,
+        #   where a subcommand search restarted at every git reads every later word again, quadratic.
         # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
         # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
@@ -16492,6 +16630,7 @@ def _main_isolated(monitor):
             ("gw-lin-runtime-tilde", "~ log -m y ", "", "commit -m y", _gw_runtime_scan, None),
             ("gw-lin-runtime-heredoc", "cat <<E\n'$x log\nE\n", "", "commit -m y", _gw_runtime_scan, None),
             ("gw-lin-runtime-case", " $x log -m y;", "case;", "", _gw_runtime_scan, None),
+            ("gw-lin-runtime-assembled", " g'i't -C", "", " x log $x", _gw_runtime_scan, None),
         )
         failures.extend(_gw_lin_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
