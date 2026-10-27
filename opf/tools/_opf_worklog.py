@@ -94,7 +94,8 @@ class ManifestModel:
 
     def __init__(self, root_fd, machine_rel, data, supported_profiles=None):
         self.root_fd, self.machine_rel, self.data = root_fd, machine_rel, data
-        self.validation = _opf_store.validate_manifest(data, supported_profiles)
+        self.validation = _opf_store.validate_manifest(
+            data, supported_profiles, manifest_rel=machine_rel + "/" + _opf_store.MANIFEST_NAME)
         profiles = data.get("profiles") if isinstance(data, dict) else None
         declared = {k for k in profiles if isinstance(k, str)} if isinstance(profiles, dict) else set()
         self.unevaluated_profiles = tuple(self.validation.unevaluated_profiles)
