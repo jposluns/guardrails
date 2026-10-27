@@ -398,7 +398,9 @@ def _manifest_intake_regressions(check):
             data = (_opf_store.tomllib.loads(value.decode()) if phase == "read" else
                     value[0] if phase == "validation" else value)
             control = value[1] if phase == "validation" else None
-            expected = _manifest_diagnostics(data, _opf_store.validate_manifest(data, control))
+            # Every intake names the manifest it read (p) in the older-spec_version refusal.
+            expected = _manifest_diagnostics(
+                data, _opf_store.validate_manifest(data, control, manifest_rel=p))
         elif message == exotic:
             expected["views"] = (p + " is present but is not a regular file "
                                  "(a FIFO, device, socket, or directory; fail-closed, never opened)")
@@ -416,7 +418,7 @@ def _manifest_intake_regressions(check):
         control = value[1] if phase == "validation" else None
         if control is not None:
             # Only doctor accepts supported_profiles. Never change base-only intake.
-            validation = _opf_store.validate_manifest(data, control)
+            validation = _opf_store.validate_manifest(data, control, manifest_rel=p)
             expected = {"doctor": (
                 ["m/manifest.toml: " + message]
                 if validation.status == _opf_store.CANNOT_EVALUATE else
@@ -597,6 +599,8 @@ def _entry_point_regressions(check):
 
     p = M + "/manifest.toml"
     for name, data, validation, control in manifest_cases(check):
+        # Every intake names the manifest it read (p) in the older-spec_version refusal.
+        validation = _opf_store.validate_manifest(data, control, manifest_rel=p)
         with _Fixture() as fx:
             readers = _manifest_readers(fx, control)
             readers.update({key: (lambda run=run: run()[1])
