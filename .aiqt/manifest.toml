@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "cae21b1cab6b72d7886dc68dbcf2e97bfdb75016645e36765c09cde6ca5e27a3"
+tree-sha256 = "283fb35f65fdb328dc5fa80fa72f2f0e29fa27c03296b1fc06555cac4cff8e18"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3401,8 +3401,8 @@ sha256 = "8452eefa4ea89f00c6cac593951443ba4e6113cd804655fb040eb3e29d85b833"
 
 [[sources]]
 path = "tools/check_gitleaks_pin.py"
-bytes = 53124
-sha256 = "144be7d52aa0e46cb51fb2ec2edfc4d63d1379068c95285d74c9fe0bea6727e9"
+bytes = 53234
+sha256 = "fe29090bf558ec6beaf0bf914022bf910516342a9040ad660680c41f5135142d"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -3786,8 +3786,8 @@ sha256 = "437cee6111bc3f7bb14b283b3e5764b29a5b3b703a923e714b131e38187838d0"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 24820
-sha256 = "ea08aaff201eb6548fd26043e0fe5996aaa9605c0000b5bfdd2d563e5861843a"
+bytes = 25006
+sha256 = "d2b2eddfd3eb783193459df5cad8670448127298fa88cc4130c0cbabdc179ce6"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

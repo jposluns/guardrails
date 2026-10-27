@@ -38,9 +38,11 @@ run_gate() {
 run_gate "secrets"   python3 -I -B tools/check_secrets.py
 run_gate "secrets-selftest" python3 -I -B tools/check_secrets.py --self-test
 
-# gitleaks is a second, independent secret gate, and it is required here: a member head gets no
-# Quality run, so this run is its evidence. If gitleaks is not installed locally its scan cannot
-# run, and the gitleaks-pin gate below fails the run rather than letting it pass without the scan.
+# gitleaks is a second, independent secret gate, and it is required whenever this full runner runs.
+# A member head gets no Quality run: its evidence is its named suites plus every generated-file
+# --check and the manifest check, and the train pull request's Quality run on the identical tree is
+# the standing full evidence. If gitleaks is not installed locally its scan cannot run, and the
+# gitleaks-pin gate below fails the run rather than letting it pass without the scan.
 # A no-root user install (the recommended non-root path) lands in ~/.local/bin, which a
 # non-login shell may not carry on PATH; fall back to it ONLY when the normal lookup fails,
 # and append rather than prepend, so an on-PATH gitleaks keeps precedence and a user-local

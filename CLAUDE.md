@@ -103,7 +103,9 @@ the train head: every Quality job. Since the maintainer's decision of 2026-10-27
 request's Quality run on the identical tree, not the local mirror, is the standing full evidence for the
 gates in token parity with `tools/run_all_checks.sh` (gitleaks included) and the host-patch suites;
 neither a member head's local subset nor the train's fast pre-push subset runs the full roster, and
-nothing in this repository enforces either subset. Whenever the full local runner runs, its local
+nothing in this repository enforces either subset. The fast pre-push subset is a check run on the
+maintainer's host before a train is pushed and is defined outside this repository; the train pull
+request's Quality run is the evidence. Whenever the full local runner runs, its local
 gitleaks-pin leg stays its own requirement. The CI-only pull-request legs
 (branch-root and version monotonicity against the base), the hostile `core.autocrlf` byte-canon legs on
 ubuntu and macOS, setup-python's resolution of `3.14` on the runner, evaluation of the merge ref against
