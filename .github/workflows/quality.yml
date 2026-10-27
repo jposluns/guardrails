@@ -662,6 +662,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_must_deliver.py
 
+      - name: Mappings page self-test
+        shell: bash
+        run: python3 -I -B tools/gen_mappings.py --self-test
       - name: Mappings page drift
         shell: bash
         run: python3 -I -B tools/gen_mappings.py --check
@@ -730,6 +733,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_notice.py --check
 
+      - name: CLAUDE.md self-test
+        shell: bash
+        run: python3 -I -B tools/gen_claude.py --self-test
       - name: CLAUDE.md drift
         shell: bash
         run: python3 -I -B tools/gen_claude.py --check
@@ -754,6 +760,10 @@ jobs:
       - name: Hooks generator self-test
         shell: bash
         run: python3 -I -B tools/gen_hooks.py --self-test
+
+      - name: Secret-patterns generator self-test
+        shell: bash
+        run: python3 -I -B tools/gen_secret_patterns.py --self-test
 
       # gen_secret_patterns.py --check runs BEFORE the byte-copy drift gate below: a drifted generated
       # secret-pattern region in the source aiqt_hooks.py is caught here, before gen_hooks.py copies that

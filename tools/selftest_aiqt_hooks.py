@@ -2256,6 +2256,20 @@ def _make_badname_fixture(badname, failures):
         return False
 
 
+def _make_linesep_fixture(path, failures):
+    """Create the untracked U+2028-named fixture file of the blank-probe-linesep case and return True. A
+    filesystem that refuses the name cannot evaluate that case: record the NAMED failure and return False, so
+    the precedence assertion is never silently omitted from a passing run."""
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("junk\n")
+        return True
+    except OSError as exc:
+        failures.append("(blank-probe-linesep-cannot-evaluate) the U+2028 fixture filename could not be "
+                        "created ({}), so the blank-fragment precedence case was not evaluated".format(exc))
+        return False
+
+
 def _make_stash_fixture(repo, failures):
     """Create the one stash entry the cf4 stash-recovery case preserves and return True; on a setup fault
     record the NAMED cannot-evaluate failure and return False."""
@@ -2292,6 +2306,8 @@ def _test_cannot_evaluate_paths(failures, tmp):
              lambda probe: _make_badname_fixture(os.fsencode(str(missing / "bad")), probe)),
             ("cf4-stash-cannot-evaluate", lambda probe: _make_stash_fixture(missing, probe)),
             ("ws-cs-symlink-cannot-evaluate", lambda probe: _symlink_probe(tmp, missing / "link", probe)),
+            ("blank-probe-linesep-cannot-evaluate",
+             lambda probe: _make_linesep_fixture(missing / "\u2028", probe)),
     ):
         probe = []
         made = inject(probe)
@@ -8348,6 +8364,72 @@ def _main_isolated(monitor):
             failures.append("(rec-attrsource) with an ambient GIT_ATTR_SOURCE set to an unresolvable ref, "
                             "the allowlist scrub must drop it so the probe reads the REAL dirty repo (False), "
                             "got {}".format(probe_as))
+
+        # (blank-probe) a zero-exit status answer holding only blank lines is MALFORMED (porcelain prints one
+        # 'XY PATH' record per line), and so is one holding '!!' lines (porcelain prints '!!' only under
+        # --ignored, which the probe never passes), so _tree_is_clean reads either as None (cannot evaluate),
+        # never clean; a change line still wins (False). Only the non -z porcelain call (the clean probe) is
+        # injected; every other git call, the snapshot's own -z probe included, runs for real.
+        rec_bp = _init_repo(tmp / "rec-blank-probe")
+        _orig_run_bp = aiqt_hooks.subprocess.run
+        _bp_reads = []
+
+        def _bp_run(stdout):
+            def _run(cmd, *a, **kw):
+                if isinstance(cmd, list) and "--porcelain" in cmd and "-z" not in cmd:
+                    _bp_reads.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+                return _orig_run_bp(cmd, *a, **kw)
+            return _run
+
+        for _case, _stdout, _want in (("one-blank", "\n", None), ("many-blank", "\n\n\n", None),
+                                      ("crlf-blank", "\r\n", None), ("ignored-blank", "!! build/\n\n", None),
+                                      ("blank-then-change", "\n M file.txt\n", False),
+                                      ("change-then-blank", " M file.txt\n\n", False),
+                                      ("ignored-only", "!! build/\n", None),
+                                      ("ignored-bare", "!!\n!!x\n", None),
+                                      ("change-then-ignored", " M file.txt\n!! build/\n", False),
+                                      ("ignored-then-change", "!! build/\n?? new.txt\n", False),
+                                      ("empty", "", True)):
+            _bp_reads.clear()
+            aiqt_hooks.subprocess.run = _bp_run(_stdout)
+            try:
+                _got = aiqt_hooks._tree_is_clean(str(rec_bp))
+            finally:
+                aiqt_hooks.subprocess.run = _orig_run_bp
+            if _got is not _want or len(_bp_reads) != 1:
+                failures.append("(blank-probe-{}) a zero-exit status answer {!r} must read as {}, got {} "
+                                "(injection reached {} time(s))".format(_case, _stdout, _want, _got,
+                                                                         len(_bp_reads)))
+        for _verb, _bp_tag, _bp_out in (("reset --hard", "reset", "\n"),
+                                        ("checkout -- file.txt", "checkout", "\n"),
+                                        ("clean -fd", "clean", "\n"),
+                                        ("reset --hard", "ignored-reset", "!! build/\n")):
+            _bp_repo = _init_repo(tmp / "rec-blank-probe-{}".format(_bp_tag))
+            _bp_reads.clear()
+            aiqt_hooks.subprocess.run = _bp_run(_bp_out)
+            try:
+                expect("(blank-probe-handler-{}) a malformed status answer {!r} on a clean tree snapshots then "
+                       "allows git {}, never a silent allow".format(_bp_tag, _bp_out, _verb), "git " + _verb,
+                       "allow-note", cwd=str(_bp_repo))
+            finally:
+                aiqt_hooks.subprocess.run = _orig_run_bp
+            _bp_refs = len(_recovery_refs(_bp_repo))
+            if not _bp_reads or _bp_refs != 1:
+                failures.append("(blank-probe-handler-{}-snap) expected the injected probe reached and one "
+                                "recovery ref, got {} read(s) and {} ref(s)".format(_bp_tag, len(_bp_reads),
+                                                                                 _bp_refs))
+        # (blank-probe-linesep) the blank fragment is reachable from REAL porcelain: with core.quotePath=false
+        # an untracked U+2028 name prints raw and str.splitlines() cuts its record into '?? ' plus ''. The
+        # change line must win, so the probe stays False and the whole-tree clobber still DENIES; a pre-scan
+        # reading any blank line as None turns this deny into a snapshot-then-allow.
+        rec_ls = _init_repo(tmp / "rec-blank-probe-linesep")
+        _git(rec_ls, "config", "core.quotePath", "false")
+        if _make_linesep_fixture(rec_ls / "\u2028", failures):
+            if aiqt_hooks._tree_is_clean(str(rec_ls)) is not False:
+                failures.append("(blank-probe-linesep) a raw U+2028 untracked name must keep the probe False")
+            expect("(blank-probe-linesep-clobber) git reset --hard on that dirty tree denies",
+                   "git reset --hard", "deny", cwd=str(rec_ls))
 
         # (rec-ledger-nonfatal) Fix B: the best-effort ledger must NEVER flip a SUCCESSFUL snapshot to a
         # failure. Monkeypatch _write_recovery_ledger to raise a non-OSError (a ValueError) AFTER the
@@ -21350,16 +21432,16 @@ def _main_isolated(monitor):
         # with a note. Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
         ebexpect("(eb-e57) relocated breadth stage with an explicit -C target and no publish allows with a note",
                  "cd /abs/repo && git -C /abs/repo add -A", "allow-note")
-        # GD-158 round-6 + tri-family synthesis: the branch/tag classifier is now FAIL-SAFE (defaults
-        # MUTATING; returns read only when every token resolves to a recognized read-neutral role and no
-        # create/rename/delete target is present). This table exercises _git_is_mutating directly against
-        # the git 2.53 ground truth: the plan's matrix classes, the six historical fail-open forms as
-        # regression teeth, and fail-safe probes asserting the default on unknown/ambiguous/malformed
-        # input. want=True is MUTATING (-> expbnd ASK); over-ASK is safe, a fail-open (want-True read as
-        # False) is the forbidden regression. This table is validated against git 2.53 by the in-suite eb
+        # The branch/tag classifier is FAIL-SAFE (defaults MUTATING; returns read only when every token
+        # resolves to a recognized read-neutral role and no create/rename/delete target is present). This
+        # table exercises _git_is_mutating directly against the git 2.53 ground truth: the matrix classes,
+        # the six historical fail-open forms as regression teeth, and fail-safe probes asserting the default
+        # on unknown/ambiguous/malformed input. want=True is MUTATING (-> under a directory change, an expbnd
+        # allow with a note, never an ask); an over-note is safe, a fail-open (want-True read as False) is
+        # the forbidden regression. This table is validated against git 2.53 by the in-suite eb
         # differential above and an out-of-suite real-git differential; a future git option-table change is
-        # a disclosed drift residual, and a dedicated option-table drift-tripwire gate is a tracked
-        # follow-up (GD-158-T7), not a gate that exists yet.
+        # a disclosed drift residual that the option-table drift-tripwire gate,
+        # tools/check_git_option_table.py, checks on the installed git.
         _M, _R = True, False
         for _rc_label, _rc_sub, _rc_args, _rc_want in (
             # -- branch: writes (short, long, attached-short, abbreviated-long) --
@@ -21474,6 +21556,121 @@ def _main_isolated(monitor):
             if _rc_got is not _rc_want:
                 failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
                                 .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
+        # A W entry and the unknown-option default give the same MUTATING verdict, so the git 2.56
+        # spellings are also pinned by role: each resolves to its own entry, and a prefix git 2.56
+        # rejects as ambiguous (--d, --del, --fo) resolves to None. --forked and --points-at take a value
+        # git requires even when last, so they are Q, not the optional-when-last F.
+        _rr_long = aiqt_hooks._GIT_REF_SPECS["branch"]["long"]
+        for _rr_name, _rr_want in (
+                ("--delete-merged", "W"), ("--delete-m", "W"),
+                ("--dry-run", "W"), ("--dr", "W"), ("--no-dry-run", "W"),
+                ("--forked", "Q"), ("--fork", "Q"), ("--points-at", "Q"), ("--contains", "F"),
+                ("--del", None), ("--d", None), ("--fo", None)):
+            _rr_got = aiqt_hooks._resolve_long_role(_rr_name, _rr_long)
+            if _rr_got != _rr_want:
+                failures.append("branch {} resolves to role {!r}, expected {!r}"
+                                .format(_rr_name, _rr_got, _rr_want))
+        for _rq_sub, _rq_args, _rq_want in (
+                # -- git 2.56 options. --delete-merged deletes; --dry-run and --no-dry-run decide whether
+                # it does and are W, so a dry run beside the deletion is judged like the deletion --
+                ("branch", ["--delete-merged", "main"], _M),
+                ("branch", ["--delete-merged=main"], _M),
+                ("branch", ["--delete-m", "main"], _M),           # git 2.56 resolves this prefix
+                ("branch", ["--dry-run", "--delete-merged", "main"], _M),
+                ("branch", ["--delete-merged", "main", "--dry-run"], _M),
+                ("branch", ["--dry-run"], _M),                    # git refuses it alone (a note, never an ask)
+                ("branch", ["--no-dry-run"], _M),                 # git lists (an over-note, never an ask)
+                ("branch", ["--no-dry-run", "NAME"], _M),         # git creates NAME
+                # -- git 2.56 --forked is a filter that implies --list (a name is a pattern) --
+                ("branch", ["--forked", "main"], _R),
+                ("branch", ["--forked=main"], _R),
+                ("branch", ["--fork", "main"], _R),               # git 2.56 resolves this prefix
+                ("branch", ["--forked", "main", "NAME"], _R),     # git creates nothing
+                ("branch", ["--forked", "main", "-d", "NAME"], _M),  # list mode never masks a write
+                # -- A required filter value that is missing (last, or before '--') or empty is a command
+                # git refuses; the classifier must not call it a read. An optional-when-last filter alone
+                # stays a read --
+                ("branch", ["--forked"], _M),
+                ("branch", ["--forked="], _M),
+                ("branch", ["--fork"], _M),
+                ("branch", ["--list", "--forked"], _M),
+                ("branch", ["--forked", "--", "NAME"], _M),
+                ("branch", ["--forked", "main", "--forked"], _M),
+                ("branch", ["--forked", "main", "--forked", "origin/*"], _R),
+                ("branch", ["--points-at"], _M),
+                ("branch", ["--points-at="], _M),
+                ("branch", ["--points-at", "HEAD", "-v"], _R),
+                ("branch", ["--points-at=HEAD"], _R),
+                ("branch", ["--contains="], _M),
+                ("branch", ["--merged"], _R),
+                ("tag", ["--points-at"], _R),
+                ("tag", ["--points-at="], _M),
+                # -- An empty value given as a separate argument is the same malformed form as an empty
+                # '=' value: git 2.53 refuses every one below and git 2.56 refuses --forked '' --
+                ("branch", ["--forked", ""], _M),
+                ("branch", ["--forked", "", "NAME"], _M),
+                ("branch", ["--points-at", ""], _M),
+                ("branch", ["--contains", ""], _M),
+                ("branch", ["--merged", ""], _M),
+                ("tag", ["--points-at", ""], _M),
+                ("tag", ["--contains", ""], _M),
+                ("branch", ["--sort", ""], _M),
+                ("branch", ["--sort="], _M),
+                ("tag", ["--sort="], _M),
+                ("branch", ["--color="], _M),
+                ("branch", ["--abbrev="], _M),
+                ("branch", ["--format="], _M),                    # git lists (an over-note, never an ask)
+                ("branch", ["--abbrev=7"], _R),
+                # -- A filter value that leads with a dash is not a read in either spelling (git 2.53
+                # refuses '-x' as a malformed object name); a display value attached with '=' may lead
+                # with a dash --
+                ("branch", ["--contains=-x"], _M),
+                ("branch", ["--forked=-x"], _M),
+                ("tag", ["--points-at=-x"], _M),
+                ("branch", ["--sort=-committerdate"], _R),
+                ("branch", ["--sort", "-committerdate"], _M),     # a separate dash-leading value
+        ):
+            _rq_got = aiqt_hooks._git_is_mutating(_rq_sub, _rq_args)
+            if _rq_got is not _rq_want:
+                failures.append("_git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_rq_sub, _rq_args, _rq_want, _rq_got))
+        # The value rule, swept over every non-W long option of both tables so that no option or spelling
+        # is left out: an empty '=' value never yields a read, nor does an empty separate value or a
+        # dash-leading separate value for a value-taking role (F, Q, D), nor a dash-leading '=' value for a
+        # filter (F, Q). The boundary cases, a one-character value ('@', HEAD) and a dash after the first
+        # character ('v-1'), stay reads. The sweep pins the classifier's syntax; whether git accepts a given
+        # nonempty value is outside it.
+        _vs_roles = set()
+        for _vs_sub in ("branch", "tag"):
+            for _vs_opt, _vs_role in sorted(aiqt_hooks._GIT_REF_SPECS[_vs_sub]["long"].items()):
+                if _vs_role == "W":
+                    continue
+                _vs_roles.add(_vs_role)
+                _vs_cases = [([_vs_opt + "="], _M)]
+                if _vs_role in ("F", "Q", "D"):
+                    _vs_cases += [([_vs_opt, ""], _M), ([_vs_opt, "-"], _M), ([_vs_opt, "-v1"], _M),
+                                  ([_vs_opt, "@"], _R), ([_vs_opt, "v-1"], _R),
+                                  ([_vs_opt + "=@"], _R), ([_vs_opt + "=v-1"], _R)]
+                if _vs_role in ("F", "Q"):
+                    _vs_cases += [([_vs_opt + "=-"], _M), ([_vs_opt + "=-v1"], _M)]
+                for _vs_args, _vs_want in _vs_cases:
+                    _vs_got = aiqt_hooks._git_is_mutating(_vs_sub, _vs_args)
+                    if _vs_got is not _vs_want:
+                        failures.append("value rule: _git_is_mutating({!r}, {!r}) ({} role): expected {}, "
+                                        "got {}".format(_vs_sub, _vs_args, _vs_role, _vs_want, _vs_got))
+        if not {"F", "Q", "D", "O"} <= _vs_roles:
+            failures.append("value rule: the sweep covered roles {}, not every value-taking role F, Q, D "
+                            "and O".format(sorted(_vs_roles)))
+        ebexpect("branch --delete-merged under cd allows with a note (a deletion)",
+                 "cd /x && git branch --delete-merged main", "allow-note")
+        ebexpect("branch --forked listing under cd is read-only",
+                 "cd /x && git branch --forked main", "allow")
+        ebexpect("branch --forked with no value under cd is not a read (a note, never an ask)",
+                 "cd /x && git branch --forked", "allow-note")
+        ebexpect("branch --forked with an empty separate value under cd is not a read (a note, never an ask)",
+                 'cd /x && git branch --forked ""', "allow-note")
+        ebexpect("a dry run beside --delete-merged is judged like the deletion under cd",
+                 "cd /x && git branch --dry-run --delete-merged main", "allow-note")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),

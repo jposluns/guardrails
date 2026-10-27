@@ -235,7 +235,7 @@ def main():
     except (ManifestError, OSError, ValueError, KeyError) as exc:
         print("error: cannot build NOTICE ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
-    if reconcile(root / "NOTICE", text, check):
+    if reconcile(root / "NOTICE", text, check, root):
         print("drift: NOTICE is out of date; run tools/gen_notice.py", file=sys.stderr)
         return 1
     if not check:

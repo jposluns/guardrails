@@ -40,7 +40,13 @@ gen_changelog.render_md and check_versions, both of which read neither). Behavio
     T4 the maximum recorded tag version is not above the head latest version.
 
 Layers C and D (release-order and id-history append-only) are full-row prefix checks over
-.aiqt/core/releases.toml and .aiqt/core/id-history.toml (see layer_c and layer_d). Layer D carries ONE
+.aiqt/core/releases.toml and .aiqt/core/id-history.toml (see layer_c and layer_d). Both records are
+REQUIRED inputs at HEAD: an absent record there is fail-closed (exit 2), never NOT APPLICABLE, and so is
+a releases.toml whose top-level keys or format-version are invalid, or an id-history.toml with a
+top-level key outside its born, tombstone and successor sections or with a section that is not an
+array of tables, on either side; the two layers report NOT APPLICABLE only when HEAD has no baseline or
+the record is absent at base (introduced since base), and they check the HEAD record before deciding
+either. Layer D carries ONE
 disclosed, self-expiring exception: before the first recorded release (the release-order record present
 with ZERO rows at base AND head), and only against a base changelog that already records a tagged
 release (so the changelog stays append-only in every later gated transition and the relabel cannot
@@ -522,6 +528,19 @@ def _rows_of(data, key, where):
     return rows
 
 
+def _validated_register_rows(data, where):
+    """The rows of each REGISTER_SECTIONS section of a parsed id-history.toml, keyed by section, after
+    its TOP-LEVEL keys and section shapes are validated. A top-level key outside REGISTER_SECTIONS, or a
+    section that is not an array of tables (_rows_of), is malformed input (GateError, fail-closed): a
+    misspelled section beside valid ones must never pass unread, and a malformed section must never
+    read as an absent one."""
+    unknown = set(data) - set(REGISTER_SECTIONS)
+    if unknown:
+        raise GateError("{} has unknown top-level key(s): {}; expected a subset of {}".format(
+            where, ", ".join(sorted(unknown)), ", ".join("'{}'".format(s) for s in REGISTER_SECTIONS)))
+    return {section: _rows_of(data, section, where) for section in REGISTER_SECTIONS}
+
+
 def _resolve_base_commit(root, base):
     """Resolve the baseline commit for the append-only prefix layers, mirroring layer_a's precedence:
     None means 'no baseline to compare' (a genuine root-commit HEAD with no explicit --base), for which
@@ -536,15 +555,17 @@ def _resolve_base_commit(root, base):
 
 def layer_c(root, base_commit, head_data):
     """Release-order append-only (2.4): base releases.toml rows are an exact full-row prefix of head
-    rows. NOT APPLICABLE while HEAD has no baseline, the record is absent at HEAD, or the file is absent
-    at base (introduced since base); zero rows is a valid empty prefix. head_data is the parsed HEAD
-    releases.toml, or None when absent at HEAD. The absent-at-HEAD case is a sound delegation, not a
-    fail-open: releases.toml is a manifest-covered SOURCES member, so DELETING it makes check_manifest
-    fail closed (exit 2) on the missing SOURCES member and on read_genesis (VC-4 QA #10, verified); this
-    prefix layer therefore need only apply when the record exists."""
+    rows. NOT APPLICABLE only while HEAD has no baseline or the file is absent at base (introduced since
+    base); zero rows is a valid empty prefix. head_data is the parsed HEAD releases.toml, or None when
+    absent at HEAD. The record is a REQUIRED input: absent at HEAD it is fail-closed (GateError, exit 2),
+    and on each side its top-level keys and format-version are validated (_validated_ledger_rows), so a
+    misspelled section key or an unsupported format-version never reads as a zero-row ledger. The HEAD
+    record is checked FIRST, so a root-commit HEAD with no baseline still refuses an absent or invalid
+    record."""
     if head_data is None:
-        print("release-order-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(RELEASES_REL))
-        return []
+        raise GateError("cannot read {} at HEAD: it is absent (the release-order record is a required "
+                        "input; an absent record never reads as NOT APPLICABLE)".format(RELEASES_REL))
+    head_rows = _validated_ledger_rows(head_data, RELEASES_REL)
     if base_commit is None:
         print("release-order-append-only: NOT APPLICABLE (no baseline to compare)")
         return []
@@ -558,8 +579,7 @@ def layer_c(root, base_commit, head_data):
     # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
-    base_rows = _rows_of(base_data, "release", "baseline " + RELEASES_REL)
-    head_rows = _rows_of(head_data, "release", RELEASES_REL)
+    base_rows = _validated_ledger_rows(base_data, "baseline " + RELEASES_REL)
     findings = _prefix_findings(base_rows, head_rows, "releases.toml [[release]]")
     if not findings:
         print("release-order-append-only: PASS ({} base row(s) prefix-preserved into {} head "
@@ -724,11 +744,14 @@ def _relabel_window_reason(root, base_commit, head_releases, old_version, new_ve
 
 def layer_d(root, base_commit, head_data, head_releases, head):
     """Id-history append-only (7.3): per section (born, tombstone, successor), base register rows are an
-    exact full-row prefix of head register rows. NOT APPLICABLE while HEAD has no baseline, the register
-    is absent at HEAD, or the file is absent at base. head_data is the parsed HEAD id-history.toml, or
-    None when absent at HEAD. As with layer_c, the absent-at-HEAD case is a sound delegation, not a
-    fail-open: id-history.toml is a manifest-covered SOURCES member, so DELETING it makes check_manifest
-    fail closed (exit 2) on the missing SOURCES member (VC-4 QA #10, verified).
+    exact full-row prefix of head register rows. NOT APPLICABLE only while HEAD has no baseline or the
+    file is absent at base. head_data is the parsed HEAD id-history.toml, or None when absent at HEAD.
+    As with layer_c, the register is a REQUIRED input: absent at HEAD it is fail-closed (GateError,
+    exit 2), and on each side its top-level keys and section shapes are validated
+    (_validated_register_rows), so a misspelled section never passes unread and a section that is not
+    an array of tables never reads as absent. The HEAD register is checked FIRST, so a root-commit
+    HEAD with no baseline, or a HEAD whose register is absent at base, still refuses an absent or
+    invalid register.
     ONE-TIME RELABEL EXCEPTION (self-expiring). Before the first recorded release ONLY, the [[born]]
     rows may change their born-release once, so identifiers drafted under a version that will never
     ship can be relabelled to the version actually being cut. Granted only when EVERY condition holds,
@@ -756,8 +779,9 @@ def layer_d(root, base_commit, head_data, head_releases, head):
     under layer_c; a recorded changelog tag does not CLOSE the window (only a ledger row does), it is
     one of the window's preconditions."""
     if head_data is None:
-        print("id-history-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(IDHISTORY_REL))
-        return []
+        raise GateError("cannot read {} at HEAD: it is absent (the id-history register is a required "
+                        "input; an absent register never reads as NOT APPLICABLE)".format(IDHISTORY_REL))
+    head_sections = _validated_register_rows(head_data, IDHISTORY_REL)
     if base_commit is None:
         print("id-history-append-only: NOT APPLICABLE (no baseline to compare)")
         return []
@@ -771,11 +795,11 @@ def layer_d(root, base_commit, head_data, head_releases, head):
     # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("baseline {} does not parse: {}".format(IDHISTORY_REL, exc))
+    base_sections = _validated_register_rows(base_data, "baseline " + IDHISTORY_REL)
     findings = []
     for section in REGISTER_SECTIONS:
-        base_rows = _rows_of(base_data, section, "baseline " + IDHISTORY_REL)
-        head_rows = _rows_of(head_data, section, IDHISTORY_REL)
-        findings += _prefix_findings(base_rows, head_rows, "id-history [[{}]]".format(section))
+        findings += _prefix_findings(base_sections[section], head_sections[section],
+                                     "id-history [[{}]]".format(section))
     if findings:
         relabel = _born_relabel_shape(base_data, head_data)
         if relabel is not None:
@@ -794,10 +818,10 @@ def layer_d(root, base_commit, head_data, head_releases, head):
 
 def _load_head_toml(head, rel):
     """Parse a HEAD record for the prefix layers from the run's _HeadInputs. Returns None when the
-    file is absent at HEAD (the prefix layer then reports NOT APPLICABLE; the file's REQUIRED presence
-    is owned by check_manifest, which fails closed exit 2 on a deleted manifest-covered register, VC-4
-    QA #10 verified). A present file the no-follow reader refuses, an unreadable one, or an
-    unparseable one is fail-closed here too (GateError, exit 2)."""
+    file is absent at HEAD; the prefix layer then fails closed (GateError, exit 2), because both
+    records are required inputs and absence is never NOT APPLICABLE. A present file the no-follow
+    reader refuses, an unreadable one, or an unparseable one is fail-closed here too (GateError,
+    exit 2)."""
     return head.toml(rel)
 
 
@@ -2562,6 +2586,30 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     if _prefix_findings([r1, r2], [r1, r2], "x"):
         failures.append("_prefix_findings: an identical row list expected no finding")
 
+    # Required HEAD records (layer_c / layer_d), called directly with NO baseline: the HEAD record is
+    # checked before the no-baseline NOT APPLICABLE, so an absent record, a HEAD releases.toml with an
+    # unsupported format-version, and a HEAD id-history.toml with a section that is not an array of
+    # tables or an unknown top-level key, each fail closed (GateError naming the record) without git. A
+    # check reverted to return [] or moved below the no-baseline branch returns [] here instead.
+    for label, call, named in (
+            ("layer_c with releases.toml absent at HEAD and no baseline",
+             lambda: layer_c(Path("."), None, None), RELEASES_REL),
+            ("layer_c with a format-version = 2 releases.toml at HEAD and no baseline",
+             lambda: layer_c(Path("."), None, {"format-version": 2}), RELEASES_REL),
+            ("layer_d with id-history.toml absent at HEAD and no baseline",
+             lambda: layer_d(Path("."), None, None, [], None), IDHISTORY_REL),
+            ("layer_d with a non-table 'born' section at HEAD and no baseline",
+             lambda: layer_d(Path("."), None, {"born": 5}, [], None), IDHISTORY_REL),
+            ("layer_d with an unknown top-level key beside a valid section at HEAD and no baseline",
+             lambda: layer_d(Path("."), None, {"born": [], "borne": [{}]}, [], None), IDHISTORY_REL)):
+        try:
+            with redirect_stdout(io.StringIO()):
+                got = call()
+            failures.append("{} must fail closed (GateError), not return {!r}".format(label, got))
+        except GateError as exc:
+            if named not in str(exc):
+                failures.append("{} was refused without naming {} ({})".format(label, named, exc))
+
     # Genesis predicate (_genesis_from_signals): file-level, binary, read at BASE only. (tags, present,
     # rows, expect). An absent ledger is NOT genesis; a tag or a ledger row means shipped.
     genesis_cases = [
@@ -2642,12 +2690,27 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             core.mkdir(parents=True, exist_ok=True)
             (core / "releases.toml").write_text("format-version = 1\n" + body, encoding="utf-8")
 
+        def _write_id_history(path):
+            # A one-row .aiqt/core/id-history.toml. Both prefix-layer records are REQUIRED at HEAD (an
+            # absent one is fail-closed, exit 2), so every fixture that runs the whole gate and is not
+            # about a record's absence carries an id-history register (this one or its own) beside its
+            # release-order record. R14 and R19 write the release-order record alone: they only call
+            # the relabel helper directly, and it never reads the register.
+            core = path / ".aiqt" / "core"
+            core.mkdir(parents=True, exist_ok=True)
+            (core / "id-history.toml").write_text('[[born]]\nid = "c0"\nborn-release = "1.0.0"\n',
+                                                  encoding="utf-8")
+
         try:
             # (1) append-in-working-tree passes; (2) a tail rewrite fails; (4) a garbage base is exit 2.
             r1 = base_tmp / "append"
             _init(r1)
             _root(r1)
+            # A one-row (shipped) ledger keeps this base non-genesis, so the append-only checks of
+            # layer_a stay in force here (a header-only ledger beside an untagged base is genesis).
             _write(r1, _changelog_text(["1.0.0"]))
+            _write_ledger(r1, '\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n')
+            _write_id_history(r1)
             _commit(r1, "seed 1.0.0")
             _write(r1, _changelog_text(["1.0.0", "1.1.0"]))
             if _run_quiet(r1, "HEAD") != 0:
@@ -2660,13 +2723,41 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
 
             # (3) a base commit lacking changelog.toml yields the printed NOT APPLICABLE (exit 0). The
             # root commit here has no changelog; changelog arrives at HEAD, so --base HEAD~1 is "absent".
+            # Both registers arrive with it, so layer_c and layer_d take their absent-at-base NOT
+            # APPLICABLE too (introduced since base), which stays exit 0.
             r2 = base_tmp / "introduced"
             _init(r2)
             _root(r2)
             _write(r2, _changelog_text(["1.0.0"]))
+            _write_ledger(r2)
+            _write_id_history(r2)
             _commit(r2, "introduce changelog")
             if _run_quiet(r2, "HEAD~1") != 0:
                 failures.append("git case: changelog absent at base expected NOT APPLICABLE exit 0")
+            # (3a) the same absent-at-base comparison with the HEAD id-history register broken in the
+            # working tree: a born section that is not an array of tables (a), and an unknown [[borne]]
+            # table beside a valid [[born]] row (b). layer_d validates the HEAD register before its
+            # absent-at-base NOT APPLICABLE, so each is fail-closed (exit 2) naming the register and the
+            # key; every other layer takes its own absent-at-base NOT APPLICABLE, so layer_d alone
+            # refuses. The register is restored after each variant, and the restored tree must pass
+            # again (the control after the loop).
+            idh2 = r2 / ".aiqt" / "core" / "id-history.toml"
+            original3a = idh2.read_bytes()
+            for label3a, broken3a, named3a in (
+                    ("a", "born = 5\n",
+                     "{}: the 'born' section is not an array of tables".format(IDHISTORY_REL)),
+                    ("b", '[[born]]\nid = "c0"\nborn-release = "1.0.0"\n\n[[borne]]\nid = "c1"\n',
+                     "{} has unknown top-level key(s): borne".format(IDHISTORY_REL))):
+                idh2.write_text(broken3a, encoding="utf-8")
+                rc3a, _out3a, err3a = _run_streams(r2, "HEAD~1")
+                idh2.write_bytes(original3a)
+                if rc3a != 2 or named3a not in err3a:
+                    failures.append("git case 3a{}: an id-history register absent at base and malformed at "
+                                    "HEAD expected fail-closed exit 2 with {!r} (got exit {}, stderr "
+                                    "{!r})".format(label3a, named3a, rc3a, err3a))
+            if _run_quiet(r2, "HEAD~1") != 0:
+                failures.append("git case 3a control: the restored register absent at base expected NOT "
+                                "APPLICABLE exit 0")
 
             # (3b) a true root-commit HEAD with NO base yields the printed NOT APPLICABLE (exit 0); the
             # same root HEAD with an explicit but unresolvable --base fails closed (exit 2), because an
@@ -2674,17 +2765,55 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             r2b = base_tmp / "rootcommit"
             _init(r2b)
             _write(r2b, _changelog_text(["1.0.0"]))
+            _write_ledger(r2b)
+            _write_id_history(r2b)
             _commit(r2b, "sole commit")
             if _run_quiet(r2b, None) != 0:
                 failures.append("git case: a root-commit HEAD with no base expected NOT APPLICABLE exit 0")
             if _run_quiet(r2b, "no-such-ref-xyz") != 2:
                 failures.append("git case: a root-commit HEAD with an unresolvable --base expected exit 2")
+            # (3c) the same root-commit HEAD with no base, each HEAD record broken in turn in the working
+            # tree: the release-order record absent (a), a release-order record with an unsupported
+            # format-version (b), the id-history register absent (c), an id-history register whose born
+            # section is not an array of tables (d), and one with an unknown [[borne]] table beside a
+            # valid [[born]] row (e). The HEAD record is checked before the no-baseline NOT APPLICABLE,
+            # so each is fail-closed (exit 2) naming its record; the other record stays valid, so one
+            # layer alone refuses. The record is restored after each variant, and the restored tree must
+            # pass again (the control after the loop).
+            core2b = r2b / ".aiqt" / "core"
+            for label3c, rel3c, broken3c, named3c in (
+                    ("a", "releases.toml", None, "cannot read {} at HEAD: it is absent".format(RELEASES_REL)),
+                    ("b", "releases.toml", "format-version = 2\n", "unsupported format-version"),
+                    ("c", "id-history.toml", None,
+                     "cannot read {} at HEAD: it is absent".format(IDHISTORY_REL)),
+                    ("d", "id-history.toml", "born = 5\n",
+                     "{}: the 'born' section is not an array of tables".format(IDHISTORY_REL)),
+                    ("e", "id-history.toml",
+                     '[[born]]\nid = "c0"\nborn-release = "1.0.0"\n\n[[borne]]\nid = "c1"\n',
+                     "{} has unknown top-level key(s): borne".format(IDHISTORY_REL))):
+                original3c = (core2b / rel3c).read_bytes()
+                if broken3c is None:
+                    (core2b / rel3c).unlink()
+                else:
+                    (core2b / rel3c).write_text(broken3c, encoding="utf-8")
+                rc3c, _out3c, err3c = _run_streams(r2b, None)
+                (core2b / rel3c).write_bytes(original3c)
+                if rc3c != 2 or named3c not in err3c:
+                    failures.append("git case 3c{}: a root-commit HEAD with no base and a broken HEAD {} "
+                                    "expected fail-closed exit 2 with {!r} (got exit {}, stderr "
+                                    "{!r})".format(label3c, rel3c, named3c, rc3c, err3c))
+            if _run_quiet(r2b, None) != 0:
+                failures.append("git case 3c control: the restored root-commit HEAD with no base expected "
+                                "NOT APPLICABLE exit 0")
 
             # (5) a recorded tag with no tag object is exit 2; (6) creating the tag makes it pass.
             r3 = base_tmp / "tagged"
             _init(r3)
             _root(r3)
+            # A one-row (shipped) ledger keeps this base non-genesis, as in (1).
             _write(r3, _changelog_text(["1.0.0"]))
+            _write_ledger(r3, '\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n')
+            _write_id_history(r3)
             _commit(r3, "seed 1.0.0 untagged")
             _write(r3, _changelog_text(["1.0.0"], tag_on={"1.0.0": "v1.0.0"}))
             if _run_quiet(r3, "HEAD") != 2:
@@ -2697,9 +2826,12 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             # (7) a broken-parent history: HEAD names a parent whose object is absent (as a shallow clone
             # leaves it). The old check read any failing HEAD^ as a root and passed NOT APPLICABLE; the fix
             # reads HEAD's own object, sees the parent, and fails closed (exit 2) when it cannot resolve.
+            # Both registers are present, so an absent HEAD record cannot supply that exit 2 instead.
             r4 = base_tmp / "brokenparent"
             _init(r4)
             _write(r4, _changelog_text(["1.0.0"]))
+            _write_ledger(r4)
+            _write_id_history(r4)
             _commit(r4, "seed 1.0.0")
             _write(r4, _changelog_text(["1.0.0", "1.1.0"]))
             _commit(r4, "append 1.1.0")
@@ -2713,7 +2845,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             # (8) layer_c / layer_d append-only over the release-order and id-history registers. The base
             # commit carries a one-row releases.toml and a one-row id-history.toml; the working tree
             # appends a row to each (exit 0), then edits a prior releases row field (exit 1), then deletes
-            # the releases record (NOT APPLICABLE, so exit 0 again).
+            # each record in turn (each a REQUIRED input at HEAD: exit 2 naming it, never NOT APPLICABLE).
             r5 = base_tmp / "registers"
             _init(r5)
             _root(r5)
@@ -2739,13 +2871,60 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             (core / "id-history.toml").write_text(reg_base, encoding="utf-8")
             if _run_quiet(r5, "HEAD") != 1:
                 failures.append("git case: editing a prior release row field expected exit 1")
-            # (8c) delete the releases record at HEAD -> layer_c NOT APPLICABLE; with id-history restored
-            # and changelog intact the run is otherwise clean, exit 0.
+            # (8c) delete the releases record at HEAD -> layer_c fails closed, exit 2 naming it; with
+            # id-history restored and changelog intact, nothing else in the run refuses.
             (core / "releases.toml").unlink()
             (core / "id-history.toml").write_text(reg_base, encoding="utf-8")
-            if _run_quiet(r5, "HEAD") != 0:
-                failures.append("git case: a releases record absent at HEAD expected NOT APPLICABLE "
-                                "(exit 0)")
+            rc8c, _out8c, err8c = _run_streams(r5, "HEAD")
+            if rc8c != 2 or "cannot read {} at HEAD: it is absent".format(RELEASES_REL) not in err8c:
+                failures.append("git case 8c: a releases record absent at HEAD expected fail-closed exit 2 "
+                                "naming it (got exit {}, stderr {!r})".format(rc8c, err8c))
+            # (8d) restore the releases record and delete the id-history register at HEAD -> layer_d
+            # fails closed, exit 2 naming it; layer_c passes first, so layer_d alone refuses.
+            (core / "releases.toml").write_text(rel_base, encoding="utf-8")
+            (core / "id-history.toml").unlink()
+            rc8d, _out8d, err8d = _run_streams(r5, "HEAD")
+            if rc8d != 2 or "cannot read {} at HEAD: it is absent".format(IDHISTORY_REL) not in err8d:
+                failures.append("git case 8d: an id-history register absent at HEAD expected fail-closed "
+                                "exit 2 naming it (got exit {}, stderr {!r})".format(rc8d, err8d))
+            # (8e) restore the register with an appended [[born]] row (a valid prefix extension) and add
+            # an unknown [[borne]] table beside it -> layer_d refuses the unknown top-level key (exit 2
+            # naming the register and the key) rather than comparing only the known sections; the same
+            # register without the [[borne]] table (the control) is exit 0, so the table alone refuses.
+            reg_head8e = reg_base + '\n[[born]]\nid = "cbeta1"\nborn-release = "1.1.0"\n'
+            for label8e, text8e, want8e, named8e in (
+                    ("", reg_head8e + '\n[[borne]]\nid = "cbeta2"\nborn-release = "1.1.0"\n', 2,
+                     "{} has unknown top-level key(s): borne".format(IDHISTORY_REL)),
+                    (" control", reg_head8e, 0, "")):
+                (core / "id-history.toml").write_text(text8e, encoding="utf-8")
+                rc8e, _out8e, err8e = _run_streams(r5, "HEAD")
+                if rc8e != want8e or named8e not in err8e:
+                    failures.append("git case 8e{}: a HEAD id-history register of {!r} expected exit "
+                                    "{}{} (got exit {}, stderr {!r})".format(
+                                        label8e, text8e, want8e,
+                                        " naming {!r}".format(named8e) if named8e else "", rc8e, err8e))
+            # (8f) the BASE register is validated the same way where layer_d reads it: the base commit
+            # carries a valid [[born]] row beside an unknown [[borne]] table, and the working tree drops
+            # that table, so the HEAD register is valid and its [[born]] rows equal the base's. A read of
+            # the known sections alone passes here; the base's unknown key is fail-closed (exit 2)
+            # naming the baseline register and the key.
+            r5f = base_tmp / "registers-base-unknown-key"
+            _init(r5f)
+            _root(r5f)
+            _write(r5f, _changelog_text(["1.0.0", "1.1.0"]))
+            core5f = r5f / ".aiqt" / "core"
+            core5f.mkdir(parents=True, exist_ok=True)
+            (core5f / "releases.toml").write_text(rel_base, encoding="utf-8")
+            (core5f / "id-history.toml").write_text(reg_base + '\n[[borne]]\nid = "cbeta2"\n',
+                                                    encoding="utf-8")
+            _commit(r5f, "base register with an unknown top-level key")
+            (core5f / "id-history.toml").write_text(reg_base, encoding="utf-8")
+            rc8f, _out8f, err8f = _run_streams(r5f, "HEAD")
+            named8f = "baseline {} has unknown top-level key(s): borne".format(IDHISTORY_REL)
+            if rc8f != 2 or named8f not in err8f:
+                failures.append("git case 8f: a base id-history register with an unknown top-level key "
+                                "expected fail-closed exit 2 with {!r} (got exit {}, stderr {!r})".format(
+                                    named8f, rc8f, err8f))
 
             # G1 genesis relabel passes: base changelog [1.0.0] untagged + header-only ledger; the
             # working tree relabels it to [1.0.5]. Without the genesis exemption check_prefix -> exit 1.
@@ -2754,6 +2933,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _root(g1)
             _write(g1, _changelog_text(["1.0.0"]))
             _write_ledger(g1)
+            _write_id_history(g1)
             _commit(g1, "genesis: 1.0.0 draft, header-only ledger")
             _write(g1, _changelog_text(["1.0.5"]))
             if _run_quiet(g1, "HEAD") != 0:
@@ -2766,6 +2946,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _root(g2)
             _write(g2, _changelog_text(["1.0.0", "1.1.0"]))
             _write_ledger(g2)
+            _write_id_history(g2)
             _commit(g2, "genesis: two drafts, header-only ledger")
             _write(g2, _changelog_text(["1.0.5"]))
             if _run_quiet(g2, "HEAD") != 0:
@@ -2778,6 +2959,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _root(g3)
             _write(g3, _changelog_text(["1.0.0"]))
             _write_ledger(g3, '\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n')
+            _write_id_history(g3)
             _commit(g3, "shipped: one ledger row")
             _write(g3, _changelog_text(["1.0.5"]))
             if _run_quiet(g3, "HEAD") != 1:
@@ -2790,6 +2972,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _root(g4)
             _write(g4, _changelog_text(["1.0.0"], tag_on={"1.0.0": "v1.0.0"}))
             _write_ledger(g4)
+            _write_id_history(g4)
             _commit(g4, "shipped: tagged 1.0.0")
             subprocess.run(["git", "-C", str(g4), "tag", "v1.0.0", "HEAD"],
                            check=True, capture_output=True, text=True)
@@ -2806,6 +2989,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _root(g5b)
             _write(g5b, _changelog_text(["1.0.0"]))
             _write_ledger(g5b)
+            _write_id_history(g5b)
             _commit(g5b, "P: genesis 1.0.0 draft")
             p_sha = subprocess.run(["git", "-C", str(g5b), "rev-parse", "HEAD"],
                                    check=True, capture_output=True, text=True).stdout.strip()
@@ -2825,23 +3009,28 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                 failures.append("git case G6: relabel 1.0.5 -> 1.0.6 from a shipped base expected exit 1")
 
             # G7 ISOLATES the base-ledger fail-closed read: the base commit carries changelog [1.0.0]
-            # untagged plus a MALFORMED (unparseable) releases.toml; the working tree DELETES releases.toml
-            # (so layer_c is NOT APPLICABLE at head) and relabels the changelog to [1.0.5]. The base-read
-            # GateError in _base_is_genesis is then the ONLY source of exit 2, so G7 detects a fail-open
-            # regression of that read rather than an exit 2 that any head parse could also produce.
+            # untagged plus a MALFORMED (unparseable) releases.toml; the working tree carries a valid
+            # header-only releases.toml (the record is required at HEAD) and relabels the changelog to
+            # [1.0.5]. layer_c reads the same base ledger later and fails closed on it too, so exit 2
+            # alone cannot isolate the read in _base_is_genesis: G7 also requires an EMPTY stdout, which
+            # holds only when layer_a itself refused (a fail-open regression of that read lets layer_a
+            # finish and layer_b print its status line before layer_c refuses).
             g7 = base_tmp / "malformed-ledger"
             _init(g7)
             _root(g7)
             _write(g7, _changelog_text(["1.0.0"]))
+            _write_id_history(g7)
             core7 = g7 / ".aiqt" / "core"
             core7.mkdir(parents=True, exist_ok=True)
             (core7 / "releases.toml").write_text("format-version = 1\n[[release]\nbroken\n", encoding="utf-8")
             _commit(g7, "base with unparseable ledger")
-            (core7 / "releases.toml").unlink()
+            _write_ledger(g7)
             _write(g7, _changelog_text(["1.0.5"]))
-            if _run_quiet(g7, "HEAD") != 2:
+            rc7, out7, _err7 = _run_streams(g7, "HEAD")
+            if rc7 != 2 or out7:
                 failures.append("git case G7: a malformed base ledger (base read isolated) expected "
-                                "fail-closed exit 2")
+                                "fail-closed exit 2 from layer_a's own base read, before any layer printed "
+                                "a status line (got exit {}, stdout {!r})".format(rc7, out7))
 
             # G8 tag-preservation isolates the new check: base changelog [1.0.0] tag="v1.0.0" + header-only
             # ledger + a real git tag; head keeps version 1.0.0 but DROPS the tag key -> exit 1 from
@@ -2851,6 +3040,7 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _root(g8)
             _write(g8, _changelog_text(["1.0.0"], tag_on={"1.0.0": "v1.0.0"}))
             _write_ledger(g8)
+            _write_id_history(g8)
             _commit(g8, "shipped: tagged 1.0.0, header-only ledger")
             subprocess.run(["git", "-C", str(g8), "tag", "v1.0.0", "HEAD"],
                            check=True, capture_output=True, text=True)
@@ -2858,15 +3048,17 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             if _run_quiet(g8, "HEAD") != 1:
                 failures.append("git case G8: dropping a shipped release's tag key expected exit 1")
 
-            # G9 (FIX 1) a base ledger that is valid TOML but records its rows under a MISSPELLED top-level
-            # key ([[releases]] not [[release]]) fails closed (exit 2): the base-read schema check rejects
-            # the unknown key rather than reading zero [[release]] rows and passing. Base changelog [1.0.0]
-            # untagged; the working tree carries a valid header-only ledger and relabels to [1.0.5], so the
-            # base read is the only source of exit 2. Without FIX 1 this read zero rows and exited 0.
+            # G9 a base ledger that is valid TOML but records its rows under a MISSPELLED top-level key
+            # ([[releases]] not [[release]]) fails closed (exit 2): the base-read schema check in
+            # _base_is_genesis rejects the unknown key rather than reading zero [[release]] rows and
+            # passing. Base changelog [1.0.0] untagged; the working tree carries a valid header-only
+            # ledger and relabels to [1.0.5]. layer_c validates the same base ledger later, so, as in G7,
+            # an EMPTY stdout is what shows that layer_a's own base read refused it.
             g9 = base_tmp / "misspelled-ledger-key"
             _init(g9)
             _root(g9)
             _write(g9, _changelog_text(["1.0.0"]))
+            _write_id_history(g9)
             core9 = g9 / ".aiqt" / "core"
             core9.mkdir(parents=True, exist_ok=True)
             (core9 / "releases.toml").write_text(
@@ -2875,27 +3067,92 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _commit(g9, "base ledger with a misspelled top-level key")
             _write_ledger(g9)
             _write(g9, _changelog_text(["1.0.5"]))
-            if _run_quiet(g9, "HEAD") != 2:
+            rc9, out9, _err9 = _run_streams(g9, "HEAD")
+            if rc9 != 2 or out9:
                 failures.append("git case G9: a base ledger with a misspelled top-level key expected "
-                                "fail-closed exit 2 (FIX 1)")
+                                "fail-closed exit 2 from layer_a's own base read, before any layer printed "
+                                "a status line (got exit {}, stdout {!r})".format(rc9, out9))
 
-            # G10 (FIX 1) a base ledger with an unsupported format-version fails closed (exit 2): the
-            # base-read schema check rejects format-version = 999. Base changelog [1.0.0] untagged; the
-            # working tree carries a valid header-only ledger and relabels to [1.0.5], so the base read is
-            # the only source of exit 2. Without FIX 1 this read zero rows and exited 0.
+            # G10 a base ledger with an unsupported format-version fails closed (exit 2): the base-read
+            # schema check in _base_is_genesis rejects format-version = 999. Base changelog [1.0.0]
+            # untagged; the working tree carries a valid header-only ledger and relabels to [1.0.5].
+            # layer_c validates the same base ledger later, so, as in G7, an EMPTY stdout is what shows
+            # that layer_a's own base read refused it.
             g10 = base_tmp / "bad-format-version"
             _init(g10)
             _root(g10)
             _write(g10, _changelog_text(["1.0.0"]))
+            _write_id_history(g10)
             core10 = g10 / ".aiqt" / "core"
             core10.mkdir(parents=True, exist_ok=True)
             (core10 / "releases.toml").write_text("format-version = 999\n", encoding="utf-8")
             _commit(g10, "base ledger with an unsupported format-version")
             _write_ledger(g10)
             _write(g10, _changelog_text(["1.0.5"]))
-            if _run_quiet(g10, "HEAD") != 2:
+            rc10, out10, _err10 = _run_streams(g10, "HEAD")
+            if rc10 != 2 or out10:
                 failures.append("git case G10: a base ledger with format-version = 999 expected "
-                                "fail-closed exit 2 (FIX 1)")
+                                "fail-closed exit 2 from layer_a's own base read, before any layer printed "
+                                "a status line (got exit {}, stdout {!r})".format(rc10, out10))
+
+            # L1 the HEAD release-order record's top-level keys and format-version are validated by
+            # layer_c itself, so a malformed HEAD ledger never reads as zero rows against a zero-row
+            # base. Base: changelog [1.0.0] untagged, a header-only ledger and the id-history register
+            # (a genesis base, so layer_a is NOT APPLICABLE and nothing else reads the HEAD ledger). The
+            # working tree replaces the HEAD ledger in turn: format-version 0 (a) and 2 (b), each just
+            # outside the only accepted value 1, and a misspelled [[releases]] table beside a valid
+            # format-version (c) are each exit 2 naming the problem; format-version exactly 1 (the
+            # control) is exit 0.
+            l1 = base_tmp / "head-ledger-schema"
+            _init(l1)
+            _root(l1)
+            _write(l1, _changelog_text(["1.0.0"]))
+            _write_ledger(l1)
+            _write_id_history(l1)
+            _commit(l1, "genesis base: header-only ledger and register")
+            for label_l1, text_l1, want_l1, named_l1 in (
+                    ("a", "format-version = 0\n", 2, "unsupported format-version"),
+                    ("b", "format-version = 2\n", 2, "unsupported format-version"),
+                    ("c", 'format-version = 1\n\n[[releases]]\nversion = "1.0.0"\n', 2,
+                     "unknown top-level key"),
+                    ("control", "format-version = 1\n", 0, "")):
+                (l1 / ".aiqt" / "core" / "releases.toml").write_text(text_l1, encoding="utf-8")
+                rc_l1, _out_l1, err_l1 = _run_streams(l1, "HEAD")
+                if rc_l1 != want_l1 or named_l1 not in err_l1:
+                    failures.append("git case L1{}: a HEAD releases.toml of {!r} expected exit {}{} (got "
+                                    "exit {}, stderr {!r})".format(
+                                        label_l1, text_l1, want_l1,
+                                        " naming {!r}".format(named_l1) if named_l1 else "",
+                                        rc_l1, err_l1))
+
+            # L2 the BASE release-order record is validated by layer_c too, not only by _base_is_genesis:
+            # with changelog.toml absent at base, layer_a returns NOT APPLICABLE before it ever reads the
+            # base ledger, so layer_c's read is the first and only one. Each base carries the register
+            # and a ledger with an unsupported format-version (a) or a misspelled [[releases]] table (b),
+            # and no changelog; the working tree adds the changelog and a valid header-only ledger. Each
+            # is exit 2 naming the baseline ledger; a valid base ledger (the control) is exit 0.
+            for label_l2, text_l2, want_l2, named_l2 in (
+                    ("a", "format-version = 999\n", 2, "unsupported format-version"),
+                    ("b", 'format-version = 1\n\n[[releases]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n', 2,
+                     "unknown top-level key"),
+                    ("control", "format-version = 1\n", 0, "")):
+                l2 = base_tmp / ("base-ledger-schema-" + label_l2)
+                _init(l2)
+                _root(l2)
+                _write_id_history(l2)
+                (l2 / ".aiqt" / "core" / "releases.toml").write_text(text_l2, encoding="utf-8")
+                _commit(l2, "base: ledger and register, no changelog")
+                _write(l2, _changelog_text(["1.0.0"]))
+                _write_ledger(l2)
+                rc_l2, _out_l2, err_l2 = _run_streams(l2, "HEAD")
+                if rc_l2 != want_l2 or (named_l2 and ("baseline " + RELEASES_REL not in err_l2
+                                                      or named_l2 not in err_l2)):
+                    failures.append("git case L2{}: a base releases.toml of {!r} behind layer_a's "
+                                    "absent-changelog NOT APPLICABLE expected exit {}{} (got exit {}, "
+                                    "stderr {!r})".format(
+                                        label_l2, text_l2, want_l2,
+                                        " naming the baseline ledger and {!r}".format(named_l2)
+                                        if named_l2 else "", rc_l2, err_l2))
 
             # R cases: the ONE-TIME pre-release born-release relabel exception (layer_d). Shared
             # shape: the base commit carries changelog [1.0.5] with a recorded and real tag v1.0.5
@@ -3387,20 +3644,35 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                 failures.append("git case R26: relabel with the base release-order record absent "
                                 "expected exit 1")
 
-            # R27 the release-order record ABSENT at head refuses the relabel the same way (an open
-            # window is never inferred from a missing record).
+            # R27 the release-order record ABSENT at head: layer_c refuses the absent record itself
+            # (exit 2, naming it) before layer_d runs, so an open window is never inferred from a
+            # missing record. The relabel helper keeps its own refusal for that input (a reason, so the
+            # plain findings stay in force) for direct callers; run() no longer reaches it, so the
+            # unit-level call pins its reason.
             rr27 = _relabel_repo("relabel-head-ledger-absent")
+            rr27_sha = subprocess.run(["git", "-C", str(rr27), "rev-parse", "HEAD"],
+                                      check=True, capture_output=True, text=True).stdout.strip()
             _write(rr27, head_log)
             (rr27 / ".aiqt" / "core" / "releases.toml").unlink()
             _write_register(rr27, reg_relabelled)
             _write_cut(rr27, _cut_text())
-            if _run_quiet(rr27, "HEAD") != 1:
+            rc27, _out27, err27 = _run_streams(rr27, "HEAD")
+            if rc27 != 2 or "cannot read {} at HEAD: it is absent".format(RELEASES_REL) not in err27:
                 failures.append("git case R27: relabel with the head release-order record absent "
-                                "expected exit 1")
+                                "expected fail-closed exit 2 naming it (got exit {}, stderr {!r})".format(
+                                    rc27, err27))
+            head27 = [{"version": "1.0.5", "tag": "v1.0.5"}, {"version": "1.1.1", "tag": None}]
+            reason27 = _relabel_window_reason(rr27, rr27_sha, head27, "1.1.0", "1.1.1")
+            if reason27 is None or "is absent at HEAD" not in reason27:
+                failures.append("unit case R27: a head release-order record absent must refuse the "
+                                "relabel with its own reason (got {!r})".format(reason27))
 
             # R28 a head release-order record with a MISSPELLED section key is fail-closed (exit 2),
-            # never read as a zero-row window.
+            # never read as a zero-row window. At run() level layer_c's own HEAD validation refuses it
+            # before layer_d runs, so the unit-level call pins the relabel helper's head-side check.
             rr28 = _relabel_repo("relabel-head-ledger-misspelled")
+            rr28_sha = subprocess.run(["git", "-C", str(rr28), "rev-parse", "HEAD"],
+                                      check=True, capture_output=True, text=True).stdout.strip()
             _write(rr28, head_log)
             (rr28 / ".aiqt" / "core" / "releases.toml").write_text(
                 'format-version = 1\n\n[[releases]]\nversion = "1.1.1"\n', encoding="utf-8")
@@ -3409,6 +3681,14 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             if _run_quiet(rr28, "HEAD") != 2:
                 failures.append("git case R28: relabel over a misspelled head ledger key expected "
                                 "fail-closed exit 2")
+            try:
+                reason28 = _relabel_window_reason(rr28, rr28_sha, head27, "1.1.0", "1.1.1")
+                failures.append("unit case R28: a misspelled head ledger key must fail closed "
+                                "(GateError) in the relabel helper, not return {!r}".format(reason28))
+            except GateError as exc:
+                if "unknown top-level key" not in str(exc):
+                    failures.append("unit case R28: the relabel helper refused a misspelled head ledger "
+                                    "key without naming it ({})".format(exc))
 
             # R29 (unit level, over a real base commit) changelog.toml ABSENT at base refuses with
             # its own reason, never read as an empty base changelog. At run() level layer_a reports
