@@ -212,9 +212,42 @@ def _manifest(raw):
 
 
 def _compatibility(manifest, provenance):
-    _require(type(manifest.get("opf")) is dict
-             and manifest["opf"].get("spec_version") == "1.2.0",
-             "VERSION", "manifest", "requires spec_version 1.2.0; older stores need opf upgrade")
+    # The refusal is selected by the declared spec_version and always names the manifest path. Only
+    # a parseable declaration below 2.0.0 is an older store, so only it gets the hand step spec 9.2
+    # gives a tree under a refused older manifest (moved aside by hand, never by OPF); no store
+    # upgrade reaches spec_version 2.0.0 (spec 9.2 defines none), so that refusal offers none. A
+    # declaration of 2.0.0 or above marks a store at a later version, never foreign content (spec
+    # 9.2), and a missing or malformed declaration proves nothing about the store: neither is
+    # offered the hand step.
+    base = manifest.get("opf")
+    raw_version = base.get("spec_version") if type(base) is dict else None
+    declared = store._safe_display(raw_version)
+    parsed = store._parse(raw_version) if type(raw_version) is str else None
+    if type(base) is not dict:
+        raise _Refusal("VERSION", "manifest",
+                       "{} has no [opf] table; this bootstrap requires spec_version 1.2.0 "
+                       "(fail-closed)".format(MANIFEST_PATH))
+    if "spec_version" not in base:
+        raise _Refusal("VERSION", "manifest",
+                       "{} declares no spec_version; this bootstrap requires 1.2.0 "
+                       "(fail-closed)".format(MANIFEST_PATH))
+    if parsed is None:
+        raise _Refusal("VERSION", "manifest",
+                       "{} declares spec_version {}, which is not a bare SemVer; this bootstrap "
+                       "requires 1.2.0 (fail-closed)".format(MANIFEST_PATH, declared))
+    if parsed >= store._parse("2.0.0"):
+        raise _Refusal("VERSION", "manifest",
+                       "{} declares spec_version {}; this bootstrap requires 1.2.0: a store "
+                       "declaring 2.0.0 or above is a store at a later version, never foreign "
+                       "content; use the tooling that implements it (fail-closed)".format(
+                           MANIFEST_PATH, declared))
+    _require(raw_version == "1.2.0",
+             "VERSION", "manifest",
+             "{} declares spec_version {}; this bootstrap requires 1.2.0: no store upgrade reaches "
+             "spec_version 2.0.0, and this bootstrap does not operate on a store at another version; "
+             "to adopt its tree instead, first "
+             "move {} aside by hand: its files are then ordinary foreign content for a first "
+             "adoption".format(MANIFEST_PATH, declared, MANIFEST_PATH))
     _require(store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1,
              "HOMES", "manifest", "this bootstrap keeps homes generation 1")
     checked = store.validate_manifest(manifest)
