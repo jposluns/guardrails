@@ -1153,21 +1153,21 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
-            # point) lies outside every walked root, so its absence is a declared target.
+            # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with its
+            # entry point, and the deny hook) lies outside every walked root, so its absence is a declared target.
             return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):
             # Scaffold the default store (unless one resolves), render its declared views and plant
-            # every enforcement member.
+            # every enforcement member from its pack source, the settings template among them.
             import _opf_init
             init = {"op": "init-store", "store_root": ".",
                     "members": [{"path": ".working/toml/manifest.toml",
                                  "digest": _digest(_opf_init.build_manifest().encode())}]}
             render = {"op": "render-views", "store_root": ".",
                       "members": [{"path": v, "digest": _digest(v.encode())} for v in self.views]}
-            pack = schema.enforcement_install_op(self.bindings["enforcement"])
-            return ([init] if self.with_init else []) + [render, pack]
+            pack = schema.enforcement_install_ops(self.bindings["enforcement"])
+            return ([init] if self.with_init else []) + [render] + pack
 
         def observation(self):
             result = investigate(self.root, sources=self.sources, targets=self.all_targets())
@@ -1181,7 +1181,7 @@ def self_test():
                 expected_observation_digest=tomllib.loads(
                     observation.observation.decode())["observation_digest"],
                 product="opf", decisions=[self.decision] if decisions is None else decisions,
-                ops=self.base_ops(),
+                ops=changes["ops"] if "ops" in changes else self.base_ops(),
                 now=self.now, run_nonce="0123456789abcdef", bindings=self.bindings,
             )
             args.update(changes)
@@ -1277,7 +1277,8 @@ def self_test():
             self.assertIn({"path": preserved, "digest": digest}, p["effects"]["creations"])
             self.assertEqual(p["effects"]["removals"], [{"path": "legacy.md", "digest": digest}])
             self.assertEqual([row["op"] for row in p["ops"]],
-                             ["init-store", "render-views", "install-pack"])
+                             [row["op"] for row in self.base_ops()])
+            self.assertNotIn("install-pack", [row["op"] for row in p["ops"]])
             self.assertEqual(before, self.snapshot())
             self.assertFalse((self.root / ".working").exists())
             # Import references are no longer decision inputs: an old acceptance cannot ride the plan.
@@ -1306,8 +1307,8 @@ def self_test():
             # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
             # member, each tied to the op that writes it, beside the retire removal.
             # (a member two rows share, the mirrored tool entry point, is one creation)
-            pack = schema.enforcement_install_op(self.bindings["enforcement"])["members"]
-            init, render, _ = self.base_ops()
+            init, render, *plants = self.base_ops()
+            pack = [{"path": row["path"], "digest": row["content_digest"]} for row in plants]
             creations = sorted([{"path": preserved, "digest": digest}] + init["members"]
                                + render["members"] + pack, key=lambda r: sorted(r.items()))
             self.assertEqual(p["effects"], {"creations": creations,
@@ -1567,10 +1568,10 @@ def self_test():
             # retire decision keeps the manifest registration chain out of these store-identity cases.
             self.decision = dict(self.decision, disposition="retire")
             self.targets = self.targets + ["other-product", "receipt.toml"]
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             receipt = {"op": "record-adoption", "receipt_path": ".working/toml/adoption.toml",
                        "receipt_core_digest": _digest(b"r")}
-            result = self.make_plan(ops=[init, render, pack, receipt])
+            result = self.make_plan(ops=[init, render, *pack, receipt])
             self.assertEqual(result.status, store.VALID, result.findings)
             created = tomllib.loads(result.plan.decode())["effects"]["creations"]
             for row in (init["members"] + render["members"]
@@ -1579,21 +1580,21 @@ def self_test():
             other_machine = [{"path": ".working/data/manifest.toml", "digest": _digest(b"m")}]
             for label, ops, status in (
                     # an op targeting another store contradicts the frozen store identity
-                    ("other-store", [dict(init, store_root="other-product"), render, pack],
+                    ("other-store", [dict(init, store_root="other-product"), render, *pack],
                      store.INVALID),
                     ("receipt-outside-store",
-                     [init, render, pack, dict(receipt, receipt_path="receipt.toml")], store.INVALID),
-                    ("other-machine-store", [dict(init, members=other_machine), render, pack],
+                     [init, render, *pack, dict(receipt, receipt_path="receipt.toml")], store.INVALID),
+                    ("other-machine-store", [dict(init, members=other_machine), render, *pack],
                      store.INVALID),
                     # render-views writes exactly the declared views, at the frozen store
-                    ("other-render-store", [init, pack, dict(render, store_root="other-product")],
+                    ("other-render-store", [init, *pack, dict(render, store_root="other-product")],
                      store.CANNOT_EVALUATE),
-                    ("render-missing-view", [init, pack, dict(render, members=render["members"][1:])],
+                    ("render-missing-view", [init, *pack, dict(render, members=render["members"][1:])],
                      store.CANNOT_EVALUATE),
                     # the required program (spec 14): a store that does not resolve is scaffolded, and
                     # its declared views are rendered
-                    ("no-init-store", [render, pack], store.CANNOT_EVALUATE),
-                    ("no-render-views", [init, pack], store.CANNOT_EVALUATE),
+                    ("no-init-store", [render, *pack], store.CANNOT_EVALUATE),
+                    ("no-render-views", [init, *pack], store.CANNOT_EVALUATE),
                     # an enforcement member no op installs
                     ("enforcement-uninstalled", [init, render], store.INVALID)):
                 with self.subTest(label):
@@ -1603,23 +1604,31 @@ def self_test():
 
         def test_hook_replacement_binds_observed_bytes(self):
             # A deny hook merged into an existing registration is a replacement tied to its enforcement
-            # member, and its old digest must be the observed bytes.
+            # member, and its old digest must be the observed bytes: an observed settings file takes the
+            # enable-hook row registering the fixed command, an absent one takes the template plant, and
+            # each row over the other state refuses.
+            member = self.bindings["enforcement"][2]["members"][0]
+            observed = _digest(b"{}\n")
+            ops = self.base_ops()[:2] + schema.enforcement_install_ops(self.bindings["enforcement"], observed)
+            hook = [row for row in ops if row["op"] == "enable-hook"]
+            self.assertEqual(hook, [{"op": "enable-hook", "registration_path": ".claude/settings.json",
+                                     "plugin_entry": schema.HOOK_COMMAND, "old_digest": observed,
+                                     "new_digest": member["digest"]}])
+            with self.subTest("absent-registration-enable-hook"):
+                self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
             (self.root / ".claude").mkdir()
             (self.root / ".claude/settings.json").write_bytes(b"{}\n")
-            member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
-            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
-                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
-                    "new_digest": member["digest"]}
-            ops = self.base_ops()[:2] + [schema.enforcement_install_op(others)]
-            result = self.make_plan(ops=ops + [hook])
+            result = self.make_plan(ops=ops)
             self.assertEqual(result.status, store.VALID, result.findings)
-            replacements = tomllib.loads(result.plan.decode())["effects"]["replacements"]
-            self.assertEqual([row for row in replacements if row["path"] == ".claude/settings.json"], [
-                {"path": ".claude/settings.json", "old_digest": hook["old_digest"],
-                 "new_digest": member["digest"]}])
-            for label, ops in (("stale-old-digest", ops + [dict(hook, old_digest=_digest(b"x"))]),
-                               ("planted-over-existing", self.base_ops())):
+            p = tomllib.loads(result.plan.decode())
+            self.assertEqual([row for row in p["effects"]["replacements"]
+                              if row["path"] == ".claude/settings.json"], [
+                {"path": ".claude/settings.json", "old_digest": observed, "new_digest": member["digest"]}])
+            # the merge archives the observed bytes first, so that copy is a bound creation
+            self.assertIn({"path": store.retire_preimage(p["run_id"], ".claude/settings.json"),
+                           "digest": observed}, p["effects"]["creations"])
+            stale = [dict(row, old_digest=_digest(b"x")) if row["op"] == "enable-hook" else row for row in ops]
+            for label, ops in (("stale-old-digest", stale), ("planted-over-existing", self.base_ops())):
                 with self.subTest(label):
                     self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
 
@@ -1664,18 +1673,14 @@ def self_test():
             # 14.2), so no disposition lets the approved plan rewrite it: neither merging the deny hook
             # into a declared registration file nor repointing a declared consumer. Undeclared, the same
             # hook merge plans (test_hook_replacement_binds_observed_bytes).
-            member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
-            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
-                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
-                    "new_digest": member["digest"]}
             repoint = {"op": "repoint-consumer", "path": "legacy.md",
                        "old_digest": _digest(b"legacy\n"), "new_digest": _digest(b"repointed\n")}
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             for source, rewrite, ops in (
-                    ("legacy.md", "legacy.md", [init, render, pack, repoint]),
+                    ("legacy.md", "legacy.md", [init, render, *pack, repoint]),
                     (".claude", ".claude/settings.json",
-                     [init, render, schema.enforcement_install_op(others), hook])):
+                     [init, render] + schema.enforcement_install_ops(self.bindings["enforcement"],
+                                                                     _digest(b"{}\n")))):
                 if source == ".claude":
                     (self.root / ".claude").mkdir()
                     (self.root / ".claude/settings.json").write_bytes(b"{}\n")
@@ -1717,9 +1722,9 @@ def self_test():
                                  for row in p["effects"]["creations"]))
             # Scaffolded bytes other than the default manifest leave the chain underivable, so it
             # refuses.
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             odd = dict(init, members=[{"path": ".working/toml/manifest.toml", "digest": _digest(b"m")}])
-            self.assertEqual(self.make_plan(decisions=keeps, ops=[odd, render, pack]).status,
+            self.assertEqual(self.make_plan(decisions=keeps, ops=[odd, render, *pack]).status,
                              store.CANNOT_EVALUATE)
             # A store that already resolves: the chain starts at the observed manifest bytes.
             (self.root / ".working/toml").mkdir(parents=True)
@@ -1813,9 +1818,13 @@ def self_test():
             # A pre-existing platform file is never overwritten: planting GEMINI.md over it collides,
             # and the same row bound to an absent path beneath the walked .gemini directory plans.
             self.assertEqual(self.make_plan().status, store.CANNOT_EVALUATE)
-            gemini = [{"path": ".gemini/opf.md", "digest": _digest(b"g")}]
-            self.bindings["enforcement"][4]["members"] = gemini
-            self.assertEqual(self.make_plan().status, store.VALID)
+            # (a path outside the opf/ mirror and the destination table has no pack source of its own, so
+            # the row keeps the Gemini member as its source)
+            gemini = {"path": ".gemini/opf.md", "digest": _digest(b"g")}
+            ops = [dict(row, path=gemini["path"], content_digest=gemini["digest"])
+                   if row.get("path") == "GEMINI.md" else row for row in self.base_ops()]
+            self.bindings["enforcement"][4]["members"] = [gemini]
+            self.assertEqual(self.make_plan(ops=ops).status, store.VALID)
 
         def test_ancestry_marks_re_adoption(self):
             def ancestry():
