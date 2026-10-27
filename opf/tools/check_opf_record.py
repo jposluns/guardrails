@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T94)
+  check_opf_record.py --self-test                    the fixture suite (T1-T95)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -587,6 +587,13 @@ Each case runs on its own copy of that template; the root is removed in a finall
       imply (a wrong number, another order, an id missing or extra) with nothing reserved, and the
       plan's own ids then reserve its claims (flip: the planned-id check removed, so only the claims
       are compared and the wrong ids reserve)
+  T95 a legacy importer-authored backlog item seated in the clean index of a doctor-VALID store is never a
+      clean-series operand (spec 8.6, 8.8): a maintainer transition, an assistant proposal and a maintainer
+      done-with-receipt each refuse exit 2 naming importer-authored-operand with every byte untouched, and
+      a new clean item linking derives_from back records with the history's bytes unchanged; a clean
+      decide superseding an importer-authored resolution still records, the target's bytes unchanged and
+      the store doctor VALID (flips: the operand's author check removed, so the refusals publish; the
+      check applied to the --supersedes target too, so the remedy refuses)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -2086,7 +2093,7 @@ def t16_recorded_predecessor(fx):
         _set_status(fx, root, "done/proposed", "proposed by hand")
         refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
                           "no pre-proposal state")
-    # Merge styles of a reject-and-re-propose cycle (the QA3 F1 reproduction): the recorded field rides
+    # Merge styles of a reject-and-re-propose cycle: the recorded field rides
     # the merge, so the rejection still restores the true predecessor and the forged line still fails.
     for style in ("no-ff", "squash"):
         root = fx.case("t16-merge-" + style)
@@ -2123,7 +2130,7 @@ def t16_recorded_predecessor(fx):
 
 
 # A schema-invalid current row (a doctor finding) is never trusted or overwritten, so the verb never launders
-# a doctor-INVALID store into a VALID one (QA4 F1). Each refusal is its own test, so flip_t16_trust must turn
+# a doctor-INVALID store into a VALID one. Each refusal is its own test, so flip_t16_trust must turn
 # EACH one red, not only the first.
 
 def _forged_predecessor(fx, name):
@@ -2201,7 +2208,7 @@ def flip_t16_trust():
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
-# --- T17: the strict type-aware delta comparison (codex QA3 F2) ----------------------------------------------
+# --- T17: the strict type-aware delta comparison -------------------------------------------------------------
 
 MANIFEST = MACH + "/manifest.toml"
 
@@ -2816,7 +2823,7 @@ def flip_t72_archive():
 
 
 def t72_archived_head(fx):
-    """QA4 MINOR-3. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
+    """An archived chain head. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
     doctor VALID. PD-3 decided with --supersedes PD-2 finds the archived head through the chain rule's
     record set, so it lands and the doctor stays VALID, PD-3 the chain's one current resolution."""
     root = fx.case("t72-archived-head")
@@ -9631,6 +9638,99 @@ def flip_t90_no_cap():
     return patch.object(record, "_require_within_read_cap", lambda rel, data: None)
 
 
+# --- T95: importer-authored history is never a clean-series operand (spec 8.6, 8.8) -------------------------
+
+def _importer_item(fx, name, status):
+    """A legacy importer-authored backlog item seated in the clean index with its counter (the T89 seeding),
+    then the views rendered and committed, so the store is doctor VALID before the operation runs."""
+    env = fx.env
+    root = fx.case(name)
+    legacy = {"id": "BI-1", "type": "backlog_item", "status": status, "title": "migrated",
+              "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z",
+              "actor": {"kind": "importer"}}
+    index = model(root, BI_INDEX)
+    index["record"] = index["record"] + [legacy]
+    write_commit(env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "a legacy importer item")
+    counters = model(root, COUNTERS)
+    counters["counters"]["BI"] += 1
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("T95 the views render over the history", rc, err[-800:])
+    fx.commit_all(root, "views")
+    doctor_valid(env, root)
+    return root, legacy
+
+
+def t95_importer_operand_transition(fx):
+    """A transition on a legacy importer-authored item refuses whoever acts, with every byte untouched; acting
+    on that history is a new clean record linking back, which records and leaves the history's bytes alone."""
+    env = fx.env
+    with ticking():
+        root, legacy = _importer_item(fx, "t95-importer-operand-transition", "open")
+        refused_untouched(env, root, ["transition", "BI-1", "active"] + MAINTAINER, "importer-authored-operand")
+        refused_untouched(env, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "importer-authored-operand")
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link", "derives_from=BI-1"]
+             + MAINTAINER, "BI-2 acting on history")
+        assert row(root, "BI-1") == legacy, ("T95 the history keeps its bytes", row(root, "BI-1"))
+        assert row(root, "BI-2")["links"] == [{"rel": "derives_from", "id": "BI-1"}], row(root, "BI-2")
+        doctor_valid(env, root)
+
+
+def t95_importer_operand_receipt(fx):
+    """done-with-receipt on a legacy importer-authored active item refuses with every byte untouched."""
+    with ticking():
+        root, _legacy = _importer_item(fx, "t95-importer-operand-receipt", "active")
+        refused_untouched(fx.env, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "importer-authored-operand")
+
+
+def t95_importer_resolution_superseded(fx):
+    """A --supersedes target is read and linked, never the operand: a clean decide superseding a legacy
+    importer-authored resolution (a doctor finding at rest, spec 8.6) records with the target's bytes
+    unchanged and leaves the store doctor VALID."""
+    env = fx.env
+    root = fx.case("t95-importer-resolution-superseded")
+    ts = "2026-08-01T00:00:00Z"
+    held = {"id": "PD-1", "type": "pending_decision", "status": "decided", "title": "migrated",
+            "created_at": ts, "updated_at": ts, "actor": {"kind": "importer"}, "decision": "use X",
+            "decided_at": ts, "decided_by": "the board"}
+    fresh = {"id": "PD-2", "type": "pending_decision", "status": "open", "title": "resolve it now",
+             "created_at": ts, "updated_at": ts, "actor": {"kind": "maintainer"}}
+    index = model(root, PD_INDEX)
+    index["record"] = index["record"] + [held, fresh]
+    write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "an importer resolution")
+    counters = model(root, COUNTERS)
+    counters["counters"]["PD"] += 2
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    assert rc != 0 and "importer-authored pending_decision 'PD-1'" in out, (
+        "T95 the importer resolution is a doctor finding at rest", rc, out[-1600:])
+    with ticking():
+        step(fx, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by", "the board",
+                        "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes the importer resolution")
+    assert row(root, "PD-1", PD_INDEX) == held, ("T95 the target keeps its bytes", row(root, "PD-1", PD_INDEX))
+    assert row(root, "PD-2", PD_INDEX)["links"] == [{"rel": "supersedes", "id": "PD-1"}], (
+        row(root, "PD-2", PD_INDEX))
+    doctor_valid(env, root)
+
+
+def flip_t95_author():
+    """Drop the operand's author check (the reviewed head's behaviour): each transition and the receipt on
+    importer-authored history publish, so the byte comparison turns each refusal red."""
+    return patch.object(record, "_require_clean_author", lambda row, rid, rel, verb: None)
+
+
+def flip_t95_target():
+    """Apply the author check to the --supersedes target too (the check folded into _require_valid_current
+    or _require_valid_target): the clean decide that resolves an importer-authored chain then refuses, so
+    the remedy's recorded step turns red."""
+    original = record._require_valid_target
+
+    def also_author(trow, ctx, target, rel):
+        original(trow, ctx, target, rel)
+        record._require_clean_author(trow, target, rel, "transition")
+    return patch.object(record, "_require_valid_target", also_author)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -9802,6 +9902,9 @@ TESTS = (
     ("T92-seam-concurrent-processes-distinct", t92_seam_concurrent_processes_distinct, flip_t91_scan_ignored),
     ("T93-seam-threads-serialised", t93_seam_threads_serialised, flip_t93_unserialised),
     ("T94-planned-ids-bound-to-claims", t94_planned_ids_bound_to_claims, flip_t94_ids_unchecked),
+    ("T95-importer-operand-transition-refused", t95_importer_operand_transition, flip_t95_author),
+    ("T95-importer-operand-receipt-refused", t95_importer_operand_receipt, flip_t95_author),
+    ("T95-importer-resolution-superseded", t95_importer_resolution_superseded, flip_t95_target),
 )
 
 

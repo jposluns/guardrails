@@ -80,13 +80,14 @@
     <div class="wrap">
       <h3>Template</h3>
       <p>Closed keysets throughout: an unknown key in any base section is a validation finding. The base
-        <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code> and the
-        spec version the store conforms to. The reference scaffold's base:</p>
+        <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code>, the
+        spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:</p>
       <div class="codecard src">
         <div class="codecard-bar">.working/toml/manifest.toml</div>
         <div class="codebody"><span class="tok-tbl">[opf]</span>
   <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>
-  <span class="tok-key">spec_version</span> = <span class="tok-str">"1.2.0"</span>
+  <span class="tok-key">spec_version</span> = <span class="tok-str">"2.0.0"</span>
+  <span class="tok-key">homes</span> = <span class="tok-num">2</span>
   <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>
   <span class="tok-key">posture</span> = <span class="tok-str">"required"</span>
   <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>
@@ -94,9 +95,11 @@
   <span class="tok-tbl">[modules]</span>
   <span class="tok-key">governance</span> = <span class="tok-num">false</span></div>
       </div>
+      <p>The reference tooling does not yet implement spec 2.0.0: its scaffold still writes
+        <code>spec_version = "1.2.0"</code> with no <code>homes</code> key.</p>
       <p>The top-level tables:</p>
       <div class="tree"><pre>
-  [opf]           standard, spec_version, layout (inline | per-record),
+  [opf]           standard, spec_version, homes (2), layout (inline | per-record),
                   posture (off | warn | required), import_status (none | partial | complete)
   [store]         sync_target (empty under the in-repo default)
   [modules]       governance, delivery_assurance, operational_policy, concurrent_operation
