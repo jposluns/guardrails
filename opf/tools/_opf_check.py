@@ -2990,7 +2990,8 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
     closed); each of these causes is a CANNOT-EVALUATE naming it:
       - `unevaluated` names the clean-record readers (C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM)
         that did not evaluate; the records they could not seat are not graded, and the rules still run
-        over the records in `recs` unless the next cause stops one;
+        over the records in `recs` unless the next cause stops one. That one message covers both
+        provenance-keyed arms, so they are handed no `unevaluated` of their own here;
       - `unread` names the record types the collectors could not read in full, including where a reader
         reports only a finding (a record left unseated, a moved row its destination does not confirm),
         and _make_rec's `unparsed` names the records whose status, links, scopes or actor kind could not
@@ -3067,7 +3068,7 @@ def _firewall_partial(recs, rep, cid, unread, types, rule):
     return True
 
 
-def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
+def _check_importer_receipts(recs, rep, cid, unread=frozenset(), unevaluated=()):
     """The section 8.6 receipt firewall over the clean record set `recs`, keyed on provenance and reported
     under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-RECEIPTS otherwise): "a clean
     backlog item reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor". A
@@ -3083,9 +3084,15 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
     (_FIREWALL_RESIDUALS discloses both). The arm reads the backlog_item, done and maintainer_decision
     records, so when one of those types is in `unread` or a record of one has a status, links or actor
     kind that could not be interpreted, it is CANNOT-EVALUATE naming the cause and is not run
-    (_firewall_partial): a receipt or remedy whose author is unknown neither confers nor withholds. An
-    imported-series row is skipped, as in the receipt join: it is no receipt and no remedy, and owes no
-    receipt (the driver never passes one; the skip is the backstop for a direct caller)."""
+    (_firewall_partial): a receipt or remedy whose author is unknown neither confers nor withholds.
+    `unevaluated` names the clean-record checks that did not evaluate: when one of those types is also in
+    `unread`, the arm is CANNOT-EVALUATE naming them too, never a pass, and is not run; with only other
+    types unread they do not stop the arm. An imported-series row is skipped, as in the
+    receipt join: it is no receipt and no remedy, and owes no receipt (the driver never passes one; the
+    skip is the backstop for a direct caller)."""
+    if unevaluated and unread & {"backlog_item", "done", "maintainer_decision"}:
+        rep.cant("{}: {} did not evaluate, so the receipt firewall (spec 8.6) is not evaluated over the "
+                 "clean records it could not seat".format(cid, ", ".join(unevaluated)))
     if _firewall_partial(recs, rep, cid, unread, {"backlog_item", "done", "maintainer_decision"},
                          "receipt firewall"):
         return
@@ -3115,7 +3122,7 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset()):
                         "(spec 8.6)".format(cid, r.id, ", ".join(sorted(_safe_display(d.id) for d in mine))))
 
 
-def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset()):
+def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset(), unevaluated=()):
     """The section 8.6 decision-chain arm over the clean record set `recs`, keyed on provenance and
     reported under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-DECISION-CHAINS
     otherwise): "An importer-authored decision MUST NOT be treated as the current effective resolution of a
@@ -3129,7 +3136,12 @@ def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset()):
     clean decision. A resolution by any other actor is not graded here. When the pending_decision records
     are in `unread`, or one has a status, links or actor kind that could not be interpreted, the arm is
     CANNOT-EVALUATE naming the cause and is not run (_firewall_partial): a member not read, or one whose
-    author is unknown, could be the importer-authored resolution or hide it."""
+    author is unknown, could be the importer-authored resolution or hide it. `unevaluated` is read as in
+    _check_importer_receipts: when the pending_decision records are also in `unread`, the arm is
+    CANNOT-EVALUATE naming the checks that did not evaluate too, never a pass, and is not run."""
+    if unevaluated and "pending_decision" in unread:
+        rep.cant("{}: {} did not evaluate, so the decision-chain firewall (spec 8.6) is not evaluated "
+                 "over the clean records it could not seat".format(cid, ", ".join(unevaluated)))
     if _firewall_partial(recs, rep, cid, unread, {"pending_decision"}, "decision-chain firewall"):
         return
     for _members, current in decision_chains(recs, by_id, firewall=False):
@@ -4555,19 +4567,23 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # and decision-chain arms below; otherwise that check is off the roster (spec 4.2), so the two arms
     # report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard, with the same `unread` set, so
     # each arm is CANNOT-EVALUATE over a partial set on either path. A store holding an importer-authored
-    # clean record discloses the firewall residuals either way.
+    # clean record discloses the firewall residuals either way. Either way the two arms also fail closed on
+    # a clean-record reader that did not evaluate (spec 8.3/8.6): `unseated` names those readers, and here
+    # an arm whose own record types are unread is then CANNOT-EVALUATE naming them, never a pass.
+    unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
+                if rep.checks.get(cid) == "CANNOT-EVALUATE"]
     if any(r.actor_kind == "importer" for r in recs):
         rep.disclose_firewall()
     rep.ran("C-RECEIPTS")
     _check_receipts(recs, by_id, rep, unread)
     if not imported:
-        _check_importer_receipts(recs, rep, "C-RECEIPTS", unread)
+        _check_importer_receipts(recs, rep, "C-RECEIPTS", unread, unseated)
     rep.ran("C-HANDOFF")
     _check_handoff(recs, rep, unread)
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep, unread)
     if not imported:
-        _check_importer_chains(recs, by_id, rep, "C-DECISION-CHAINS", unread)
+        _check_importer_chains(recs, by_id, rep, "C-DECISION-CHAINS", unread, unseated)
     rep.ran("C-LINKS")
     # C-LINKS reads the rows C-IMPORTED-SCHEMA read, and resolves a target only among those the per-series
     # id grading above reads as series members, keyed by (series key, id) so a same-id row in another leaf
@@ -4585,8 +4601,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # `unparsed` as the joins do (spec 8.3/8.6); its provenance-keyed arms run on an inactive store too
     # (above) ------
     if imported:
-        unseated = [cid for cid in ("C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM")
-                    if rep.checks.get(cid) == "CANNOT-EVALUATE"]
         rep.ran("C-IMPORTED-SEGREGATION")
         _check_imported_segregation(recs, by_id, unseated, rep, unread)
 
@@ -7769,13 +7783,15 @@ def self_test():
                   _i3_off(_i3_flip("_check_imported_segregation", _i3_link(*_i3_refused[0])),
                           "C-IMPORTED-SEGREGATION"))
             # Fail-closed: a clean index nothing could read leaves its records unseated, so the firewall
-            # is CANNOT-EVALUATE naming the reader that did not evaluate, never a pass over them.
+            # is CANNOT-EVALUATE naming the reader that did not evaluate, never a pass over them, in one
+            # message for all its arms (red when the check also hands its arms the unseated list).
             _i3_sgu = _i3_machine()
             _i3_sgu["done.index.toml"] = "record = [ not toml"
             _i3_sgur = _i3_run(_i3_sgu)
             check("imported-segregation-unread-clean-records-cannot-evaluate",
                   _i3_sgur is not None and _i3_sgur.checks.get("C-IMPORTED-SEGREGATION") == "CANNOT-EVALUATE"
-                  and any("C-RECORDS did not evaluate" in m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION")))
+                  and any("C-RECORDS did not evaluate" in m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION"))
+                  and len([m for m in _i3_msgs(_i3_sgur, "C-IMPORTED-SEGREGATION") if "did not evaluate" in m]) == 1)
             # The other two fail-closed arms, each on its own store: an archive bucket whose
             # archive.toml cannot be read makes C-ARCHIVE-ENUM CANNOT-EVALUATE, and a per-record
             # registry row that is not a table makes C-PERRECORD-RECONCILE CANNOT-EVALUATE; the
@@ -9421,6 +9437,48 @@ def self_test():
         _fw_hist = _fw_run(f, _fw_dig)
         check("firewall-inactive-legacy-history-valid",
               _fw_hist is not None and _fw_hist.status == VALID and _fw_disclosed(_fw_hist))
+        # The firewall fails closed on this inactive store as on an active one: a clean-record reader that
+        # did not evaluate leaves its records unseated, so each arm whose own record types are unread is
+        # CANNOT-EVALUATE naming that reader in one message, never a pass over them (red when the driver
+        # hands an arm no unseated list, or the reader leaves that list), and is not run, so it grades none
+        # of the records it did seat (red when either arm runs past its cant). An unread pending_decision
+        # index or registry leaves only the decision-chain arm's type unread, so only that arm is checked
+        # there. The first store is the importer-current-resolution store above with its index unreadable;
+        # the last joins the importer-only receipt and importer-current-resolution stores above beside an
+        # unreadable archive, so each arm has a seated finding it does not raise.
+        def _fw_unseated(r, reader, arms=("C-RECEIPTS", "C-DECISION-CHAINS")):
+            def cants(cid):
+                return [m for m in r.by_check.get(cid, []) if "did not evaluate" in m]
+            return (r is not None and r.status == CANNOT_EVALUATE and r.checks.get(reader) == "CANNOT-EVALUATE"
+                    and all(r.checks.get(cid) == "CANNOT-EVALUATE" and len(cants(cid)) == 1
+                            and cants(cid)[0].startswith("{}: {} did not evaluate".format(cid, reader))
+                            for cid in arms))
+
+        _fw_chain = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        f = clean_machine()
+        f["pending_decision.index.toml"] = _opf_emit.emit(_fw_chain) + "\n[[[ broken\n"
+        f["counters.toml"] = counters(PD=2)
+        check("firewall-inactive-unread-records-cannot-evaluate",
+              _fw_unseated(run(f), "C-RECORDS", ("C-DECISION-CHAINS",)))
+        f = clean_machine()
+        f["archive/2026/archive.toml"] = "moved = [ not toml"
+        check("firewall-inactive-unread-archive-cannot-evaluate", _fw_unseated(run(f), "C-ARCHIVE-ENUM"))
+        f = copy.deepcopy(pr_machine)
+        f["pending_decision.index.toml"] = "schema = 1\nrecord = [ 7 ]\n"
+        check("firewall-inactive-unread-perrecord-cannot-evaluate",
+              _fw_unseated(run(f, product=pr_product, obs=pr_obs), "C-PERRECORD-RECONCILE",
+                           ("C-DECISION-CHAINS",)))
+        f = _fw_receipt()
+        f["pending_decision.index.toml"] = copy.deepcopy(_fw_chain)
+        f["counters.toml"] = counters(PD=2)
+        f["archive/2026/archive.toml"] = "moved = [ not toml"
+        _fw_sd = _fw_run(f, _fw_dig)
+        check("firewall-inactive-unseated-still-grades-seated",
+              _fw_unseated(_fw_sd, "C-ARCHIVE-ENUM")
+              and not any("'BI-1' is authored by a non-importer actor" in m
+                          for m in _fw_sd.by_check.get("C-RECEIPTS", []))
+              and not any("'PD-2' is the current effective resolution" in m
+                          for m in _fw_sd.by_check.get("C-DECISION-CHAINS", [])))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=3)
