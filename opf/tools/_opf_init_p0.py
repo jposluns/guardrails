@@ -115,7 +115,10 @@ def _membership(plan):
     _require(len(sets["E"]) <= 1 and all(e["path"] == operation.CHANGELOG_RELPATH
                                       for e in sets["E"]),
              "UNCLASSIFIED", "E", "only a preserved CHANGELOG.md is permitted")
-    roster = set(operation.BOOTSTRAP_SOURCE_ROSTER) | {operation.PROVENANCE_RELPATH}
+    # The roster of the plan's own generation: operation.plan_generation compares the manifest
+    # payload with the builders' bytes, so an unmatched or malformed one reads as generation 1.
+    roster = set(operation.bootstrap_source_roster(operation._plan_manifest_model(plan))) \
+        | {operation.PROVENANCE_RELPATH}
     if not sets["E"]:
         roster.add(operation.CHANGELOG_RELPATH)
     sources = [e["path"] for e in sets["S"]]

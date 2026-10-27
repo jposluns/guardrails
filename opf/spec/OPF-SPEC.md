@@ -202,7 +202,10 @@ topology constants:
 Durable `imported/` and `archive/` evidence MUST stay tracked. Installation MUST inspect effective
 ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed
 untracking change, never silent index mutation. The block travels with the store and joins the
-indexed-ignore candidate set. Gitignore is not access control: `git add -f` can stage ignored
+indexed-ignore candidate set. At homes 2 an implementation MUST register `.working/.gitignore` by
+its exact path as a managed control file that containment recognizes as OPF control area;
+containment never reads it for drift, and the doctor does not yet grade drift of its managed block.
+Gitignore is not access control: `git add -f` can stage ignored
 state. Journals are machine-local even after completion; a clone without them cannot recover those
 transactions, and requested recovery MUST fail closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim, with one exception: the doctor reads the reservations
