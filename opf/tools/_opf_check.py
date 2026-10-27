@@ -94,7 +94,7 @@ from _opf_schema import (  # noqa: E402
 from _opf_release import (  # noqa: E402
     validate_version, validate_worklog, _entries_by_id,
     check_frozen_coverage, check_ids_partition, check_rotation_only_released, _verify_append_only, _wl_num,
-    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS,
+    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS, RELEASE_OPTIONAL_KEYS, _imported_row_findings,
 )
 
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
@@ -245,7 +245,9 @@ def imported_series_active(manifest_data):
     its emptied-roster tripwire; and the observer's prior imported baseline (_opf_observe._reconstruct_prior,
     which reads _reconstruct_imported only where it holds) and the record counter proof
     (_opf_record._counter_state) read it too. So they cannot disagree on which stores carry
-    the imported series or on the imported managed set."""
+    the imported series or on the imported managed set. homes2_carries_imported_series, asserted by
+    the self-test at the shipped constants, makes this flag read exactly the homes-2 grade
+    (homes_generation >= 2) on every tooling that can ship homes 2."""
     return (_opf_store.homes_generation(manifest_data) >= 2
             and _opf_store.imported_series_declared(manifest_data))
 
@@ -294,6 +296,35 @@ def imported_content_checks_landed():
         return False
     return all(ids <= set(required_checks(h, imported=True))
                for h in range(1, _opf_store.SUPPORTED_HOMES + 1))
+
+
+def homes2_carries_imported_series():
+    """The tooling-side coupling of the homes-2 and imported-series activations (spec 4.2/8.2),
+    asserted by the self-test at the SHIPPED constants: a tooling that activates homes 2
+    (_opf_store.SUPPORTED_HOMES at or above 2) must also support the imported series
+    (_opf_store.imported_series_supported, the ONE support comparison), since the series activates
+    only inside the 2.0.0 / homes = 2 declaration. Under this coupling imported_series_active reads
+    exactly the homes-2 grade (_opf_store.homes_generation >= 2) for every manifest: the graded
+    declaration is HOMES2_SPEC_VERSION, at or above IMPORTED_SPEC_VERSION, so the declared arm holds,
+    and this predicate supplies the support arm. C-CONTAINMENT's registration, its tripwire and the
+    write guard therefore open on every graded homes-2 store, and raising SUPPORTED_HOMES without
+    SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION fails the suite instead of shipping a
+    homes-2 store whose imported leaves grade as unregistered strays. True while homes 2 is inactive
+    (SUPPORTED_HOMES exactly 1). Reads every constant through the _opf_store module (never this
+    module's by-value SUPPORTED_SPEC_VERSION import) and fails closed: a SUPPORTED_HOMES that is
+    missing, not an int (a bool included) or below 1, or a SUPPORTED_SPEC_VERSION or
+    IMPORTED_SPEC_VERSION that is missing, not a string, or not a bare SemVer, answers False rather
+    than raising."""
+    homes = getattr(_opf_store, "SUPPORTED_HOMES", None)
+    if type(homes) is not int or homes < 1:
+        return False
+    if homes < 2:
+        return True
+    for name in ("SUPPORTED_SPEC_VERSION", "IMPORTED_SPEC_VERSION"):
+        version = getattr(_opf_store, name, None)
+        if not isinstance(version, str) or _opf_store._parse(version) is None:
+            return False
+    return _opf_store.imported_series_supported()
 
 
 # --- source-integrity vs deliverable-drift partition (PR-C, the render --write source gate) ---------
@@ -4052,15 +4083,16 @@ def _check_lease(root_fd, machine_rel, rep):
 
 def _wellformed_release_row(row):
     """True when `row` is a structurally well-formed release row: the per-row shape validate_version
-    enforces (keys EXACTLY RELEASE_KEYS, a valid SemVer version, an RFC 3339 date, a well-formed
-    worklog_span, and a sha256 coverage_digest). Cross-row tiling, uniqueness, and monotonicity are NOT
+    enforces (keys EXACTLY RELEASE_KEYS plus any RELEASE_OPTIONAL_KEYS, a valid SemVer version, an RFC
+    3339 date, a well-formed worklog_span, a sha256 coverage_digest, and the optional imported flag under
+    the shared _imported_row_findings rule). Cross-row tiling, uniqueness, and monotonicity are NOT
     applied: this decides only whether an INJECTED prior row can serve as the append-only immutability
     baseline, so a well-formed row that merely DIFFERS from the current ledger still reaches the graded
     rewrite check (a real history rewrite), while a dict of garbage keys is a malformed observation routed
     to CANNOT-EVALUATE rather than a false rewrite finding (F5; guard-input-soundness)."""
     if not isinstance(row, dict):
         return False
-    if set(row) != RELEASE_KEYS:
+    if set(row) - RELEASE_OPTIONAL_KEYS != RELEASE_KEYS:
         return False
     if parse_semver(row.get("version")) is None:
         return False
@@ -4070,6 +4102,8 @@ def _wellformed_release_row(row):
     if _parse_span(row.get("worklog_span"), scratch, "prior release row") is False or scratch:
         return False
     if not _valid_digest(row.get("coverage_digest")):
+        return False
+    if _imported_row_findings(row, "prior release row"):
         return False
     return True
 
@@ -6763,7 +6797,8 @@ def self_test():
                   and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
                           for f in _h1_run.findings))
             # The pure flag over its arms, the support threshold sampled just below, at, and just
-            # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
+            # above IMPORTED_SPEC_VERSION, and the support level also sampled at the homes-2 spec
+            # version HOMES2_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
             # tooling gates raised (red when either arm, or the threshold, moves).
             _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
             _flag_rows = (
@@ -6772,7 +6807,9 @@ def self_test():
                 (2, "1.3.0", {"opf": {"spec_version": "1.3.0"}}, False),
                 (2, "1.3.0", {"opf": {"spec_version": "1.3.0", "homes": 2}}, False),
                 (2, "1.3.0", {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}}, False),
-                (2, "1.3.0", None, False))
+                (2, "1.3.0", None, False),
+                (2, _opf_store.HOMES2_SPEC_VERSION, _pair, True),
+                (2, _opf_store.HOMES2_SPEC_VERSION, {"opf": {"spec_version": "1.3.0"}}, False))
             _flag_got = []
             for _fh, _fv, _fm, _want in _flag_rows:
                 _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _fh, _fv
@@ -7103,6 +7140,78 @@ def self_test():
             _icc_g["required_checks"] = _icc_prev_rc
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
+        # The homes-2 / imported-series coupling at the SHIPPED constants (red when SUPPORTED_HOMES
+        # reaches 2 while SUPPORTED_SPEC_VERSION stays below IMPORTED_SPEC_VERSION): under it
+        # imported_series_active reads exactly the homes-2 grade, so a homes-2 store never ships with
+        # its imported leaves graded as unregistered strays. The SAME predicate is then exercised
+        # under controlled constants (both restored in finally; no store fixture runs inside this
+        # block). A probe that raises reads "raised", never False, so an exception never passes as a
+        # fail-closed answer.
+        check("homes2-carries-imported-series-at-shipped-constants", homes2_carries_imported_series())
+        _h2c_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _h2c_prev_homes = _opf_store.SUPPORTED_HOMES
+        _h2c_missing = object()
+
+        def _h2c_probe(homes, support):
+            _opf_store.SUPPORTED_HOMES = homes
+            if support is _h2c_missing:
+                if hasattr(_opf_store, "SUPPORTED_SPEC_VERSION"):
+                    del _opf_store.SUPPORTED_SPEC_VERSION
+            else:
+                _opf_store.SUPPORTED_SPEC_VERSION = support
+            try:
+                return homes2_carries_imported_series()
+            except Exception:  # noqa: BLE001  a raise is its own result, never a False
+                return "raised"
+
+        try:
+            # Homes 2 or later without imported-series support refuses (red when the predicate
+            # stops consulting the support comparison).
+            check("homes2-imported-coupling-refuses-unsupported",
+                  all(_h2c_probe(_h2c_h, _h2c_v) is False
+                      for _h2c_h, _h2c_v in ((2, "1.2.0"), (2, "1.2.99"), (3, "1.2.0"))))
+            # Homes 2 with support at, above, and well above IMPORTED_SPEC_VERSION is admitted (red
+            # when the support comparison is narrowed to a window below the homes-2 spec version).
+            check("homes2-imported-coupling-admits-supported",
+                  all(_h2c_probe(2, _h2c_v) is True
+                      for _h2c_v in ("1.3.0", "1.3.1", _opf_store.HOMES2_SPEC_VERSION)))
+            # While homes 2 is inactive the coupling defers, whatever the support (red when the
+            # homes-1 deferral is dropped).
+            check("homes2-imported-coupling-defers-below-homes2", _h2c_probe(1, "1.2.0") is True)
+            # A malformed SUPPORTED_HOMES (a bool, a string, None, a float, or below 1) or a
+            # malformed or missing SUPPORTED_SPEC_VERSION at homes 2 answers False and never raises
+            # (red when either guard is dropped).
+            _h2c_bad = ([_h2c_probe(_h2c_h, "1.3.0") for _h2c_h in (True, "2", None, 0, -1, 2.0)]
+                        + [_h2c_probe(2, _h2c_v)
+                           for _h2c_v in ("one.three", None, 130, "1.3.0\n", "", _h2c_missing)])
+            check("homes2-imported-coupling-malformed-fails-closed",
+                  len(_h2c_bad) == 12 and all(_h2c_r is False for _h2c_r in _h2c_bad))
+            # Under each coupled pair of constants the flag equals the homes-2 grade on every manifest
+            # shape; the control at homes 2 without support grades the pair 2, leaves it inactive,
+            # and reads the coupling False (red when the flag reads the homes-2 grade alone, or when
+            # the support threshold moves above the homes-2 spec version).
+            _h2c_pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+            _h2c_manifests = (
+                _h2c_pair, {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}},
+                {"opf": {"homes": 2}}, {"opf": {"spec_version": "1.3.0", "homes": 2}},
+                {"opf": {"spec_version": "1.3.0", "homes": 1}},
+                {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": True}},
+                {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": "2"}},
+                {"opf": {}}, {"opf": []}, {}, None)
+            _h2c_agree = []
+            for _h2c_h, _h2c_v in ((1, "1.2.0"), (2, "1.3.0"), (2, _opf_store.HOMES2_SPEC_VERSION)):
+                _h2c_agree.append(
+                    _h2c_probe(_h2c_h, _h2c_v) is True
+                    and all(imported_series_active(_h2c_m) is (_opf_store.homes_generation(_h2c_m) >= 2)
+                            for _h2c_m in _h2c_manifests))
+            _h2c_control = _h2c_probe(2, "1.2.0")
+            check("imported-active-is-homes2-grade-when-coupled",
+                  _h2c_agree == [True, True, True] and _h2c_control is False
+                  and _opf_store.homes_generation(_h2c_pair) == 2
+                  and imported_series_active(_h2c_pair) is False)
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _h2c_prev_ssv
+            _opf_store.SUPPORTED_HOMES = _h2c_prev_homes
         # The per-series id grading (spec 8.2/8.3), keyed on imported_series_active alone: the graded 2.0.0 /
         # homes = 2 declaration and this tooling's imported-series support. BOTH tooling gates are patched
         # inside the block (the check_opf_homes per-vector idiom), SUPPORTED_HOMES to 2 and
@@ -9984,6 +10093,82 @@ def self_test():
         rp["prior"]["releases"][0]["coverage_digest"] = "sha256:" + "c" * 64
         rpr = run(clean_machine(), obs=rp)
         check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
+
+        # --- the optional imported release-row flag (spec 6.1, 14.3): C-VERSION-LEDGER and the prior-row
+        # check admit it as exactly true on an empty span, and the composed ledger readers (the changelog
+        # gates and the view planner) apply the same rule; the whole-store vector below grades a store
+        # with an imported row VALID end to end.
+        imp_empty = compute_span_digest(full_wl, None)
+
+        def imp_row(version, imported=True):
+            r = {"version": version, "date": "2025-01-01T00:00:00Z", "worklog_span": [],
+                 "coverage_digest": imp_empty}
+            if imported is not None:
+                r["imported"] = imported
+            return r
+
+        def imp_run(rows, prior_rows):
+            m = clean_machine()
+            m["version.toml"]["release"] = rows + m["version.toml"]["release"]
+            o = copy.deepcopy(clean_prior())
+            o["prior"]["releases"] = prior_rows + o["prior"]["releases"]
+            return run(m, obs=o)
+
+        def verdicts(r, *cids):
+            return None if r is None else tuple(r.checks.get(c) for c in cids)
+
+        hist = ("C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION")
+        _imp = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")])
+        check("rel-imported-doctor-accepted", verdicts(_imp, "C-VERSION-LEDGER") == ("PASS",))
+        check("prior-imported-row-wellformed", verdicts(_imp, *hist) == ("PASS",) * 3)
+        # A flag outside the value rule is a C-VERSION-LEDGER finding naming the rule, and the same row in
+        # the prior is a malformed observation, so the history checks cannot evaluate.
+        _impv = imp_run([imp_row("0.9.0", 1)], [imp_row("0.9.0", 1)])
+        check("rel-imported-doctor-int1-refused",
+              verdicts(_impv, "C-VERSION-LEDGER") == ("FINDING",)
+              and any("exactly true" in f for f in _impv.findings)
+              and verdicts(_impv, *hist) == (CANNOT_EVALUATE,) * 3
+              and any("malformed" in m for m in _impv.cannot_evaluate))
+        # The prior-row check applies the value and span rules of validate_version at their boundaries.
+        check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0")))
+        check("prior-row-imported-false-refused", not _wellformed_release_row(imp_row("0.9.0", False)))
+        check("prior-row-imported-int1-refused", not _wellformed_release_row(imp_row("0.9.0", 1)))
+        check("prior-row-imported-nonempty-span-refused", not _wellformed_release_row(
+            dict(imp_row("0.9.0"), worklog_span=["WL-1", "WL-1"],
+                 coverage_digest=compute_span_digest(full_wl, (1, 1)))))
+        check("prior-row-plain-still-wellformed", _wellformed_release_row(imp_row("0.9.0", None)))
+        # The flag MUST NOT be added to or removed from an existing row (spec 6.1): with both ledgers
+        # admitted, C-HISTORY-APPEND-ONLY reads either change as a rewrite.
+        for _imp_label, _imp_cur, _imp_prior in (("added-to", True, None), ("removed-from", None, True)):
+            _impr = imp_run([imp_row("0.9.0", _imp_cur)], [imp_row("0.9.0", _imp_prior)])
+            check("history-flag-{}-existing-row-finding".format(_imp_label),
+                  verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
+                  and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
+        # WHOLE STORE, end to end: a store with a declared VERSION view whose ledger and prior carry an
+        # imported row, with the changelog tiling all three releases, grades VALID with no finding and no
+        # cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the changelog gates, the
+        # view planner behind C-VIEW-DRIFT, and the history checks, so the vector is red when ANY of them
+        # refuses the flag.
+        _e2e_cl = make_changelog(["1.1.0", "1.0.0", "0.9.0"])
+        _e2e_dig = freeze_digests(_e2e_cl, ["1.1.0", "1.0.0", "0.9.0"])
+        _e2e = clean_machine()
+        _e2e["manifest.toml"] = base_manifest(views={"VERSION": {
+            "kind": "deterministic", "sources": ["version"], "target": "VERSION"}})
+        _e2e["version.toml"]["release"] = [imp_row("0.9.0")] + _e2e["version.toml"]["release"]
+        _e2e["version.toml"]["summary"] = [
+            {"covers": "0.9.0", "status": "published", "digest": _e2e_dig["0.9.0"]},
+            {"covers": "1.0.0", "status": "published", "digest": _e2e_dig["1.0.0"]},
+            {"covers": "1.1.0", "status": "published", "digest": _e2e_dig["1.1.0"]},
+            {"covers": "unreleased", "status": "working"}]
+        _e2e_obs = copy.deepcopy(clean_prior())
+        _e2e_obs["prior"]["releases"] = [imp_row("0.9.0")] + _e2e_obs["prior"]["releases"]
+        _e2e_run = run(_e2e, product={"VERSION": "1.1.0\n", "CHANGELOG.md": _e2e_cl}, obs=_e2e_obs)
+        check("rel-imported-doctor-whole-store-valid",
+              _e2e_run is not None and _e2e_run.status == VALID
+              and not _e2e_run.findings and not _e2e_run.cannot_evaluate
+              and _e2e_run.checks.get("C-CHANGELOG-GATES") == "PASS"
+              and _e2e_run.checks.get("C-VIEW-DRIFT") == "PASS"
+              and _e2e_run.checks.get("C-VERSION-LEDGER") == "PASS")
 
         # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
         b5 = clean_machine()

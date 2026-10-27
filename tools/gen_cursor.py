@@ -36,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_chain_or_absent, dir_or_absent  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The reserved output subtree (relative parts, joined under repo root). Everything under it is
@@ -87,11 +87,14 @@ def run(root, check):
         # there but cannot be read as a directory, must fail closed as exit 2, not read as an absent corpus
         # (which would delete every generated .mdc as an orphan below). A symlink to a directory inside the
         # root is read.
-        present, problem = dir_or_absent(src_dir, root)
+        # Then dir_present, bound beneath root, judges every component above it the same way, so a
+        # .aiqt that is dangling, not a directory or a symlink resolving outside the root fails closed
+        # too, never read as an absent corpus.
+        _present, problem = dir_or_absent(src_dir, root)
         if problem is not None:
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
-        if present:
+        if dir_present(src_dir, root=root):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[cursor_rel(rel)] = render_rule(src)
     except (ValueError, OSError) as exc:

@@ -174,7 +174,8 @@ section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specif
 defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
 grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
 VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
-and `opf record` refuse such a store.
+and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
+refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling requires Python 3.14 or newer.
 
