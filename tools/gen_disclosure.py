@@ -58,7 +58,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import is_external_url, repo_root, load_toml, replace_block, reconcile  # noqa: E402
+from _gen_common import (is_external_url, linked_dir_failures, repo_root, load_toml, replace_block,  # noqa: E402
+                         reconcile, target_dir_present)
 
 EN, EM = "–", "—"
 PLACEHOLDER = "[[ARCHITECT"
@@ -339,6 +340,28 @@ def render_md(title, note, site_base, rows):
     return "\n".join(lines).rstrip() + "\n"
 
 
+# A well-formed disclosure.toml and page for the tree the linked-directory vectors render: the same
+# declaration as the in-memory good fixture below, in TOML.
+_TREE_TOML = (
+    'title = "T"\nnote = "N"\nsite_base = "https://aiqt.ai"\n\n'
+    '[[code]]\nprefix = "tools/"\nlabel = "the tooling under tools/"\n\n'
+    '[[code]]\nprefix = "site/"\nlabel = "the JavaScript under site/"\n\n'
+    '[[noncode]]\nprefix = "README.md"\n\n'
+    '[[row]]\nid = "what-it-is-made-of"\ntopic = "A"\nclaim = "C: ' + MARKER + '."\nlimitation = "L"\n'
+    'evidence = [{ text = "e", href = "/evidence#release" }]\n'
+)
+_TREE_PAGE = ("<main>\n      <!-- DISCLOSURE:BEGIN (generated) -->\n      placeholder\n"
+              "      <!-- DISCLOSURE:END -->\n</main>\n")
+
+
+def _write_tree(root):
+    """A synthetic tree with disclosure.toml and site/disclosure.html, for run(root, check)."""
+    root = Path(root)
+    (root / "disclosure.toml").write_text(_TREE_TOML, encoding="utf-8")
+    (root / "site").mkdir()
+    (root / "site" / "disclosure.html").write_text(_TREE_PAGE, encoding="utf-8")
+
+
 def _self_test():
     good = {
         "title": "T", "note": "N", "site_base": "https://aiqt.ai",
@@ -456,22 +479,36 @@ def _self_test():
                 lim_rows[0]["limitation"], want_lim))
     except ValueError as exc:
         failures.append("a limitation carrying the marker REFUSED: {}".format(exc))
+    # site/ above the page symlinked outside the root fails closed (exit 2) in --check and write mode with the
+    # page there untouched and never read: the page there has no markers, and each run prints the link
+    # refusal, not the marker error. Symlinked inside the root, it is read and the page rewritten.
+    import shutil
+    import tempfile
+    try:
+        tmp = tempfile.mkdtemp(prefix="aiqt-gen-disclosure-selftest-")
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        failures.extend(linked_dir_failures(tmp, "site", _write_tree, run, "site", "site/disclosure.html",
+                                            unread=lambda p: p.write_text("no markers\n", encoding="utf-8")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     if failures:
         print("FAIL: gen_disclosure self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 2 happy paths)".format(
-        len(bad), len(good_hrefs)))
+    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 2 happy paths, a site/ symlinked "
+          "outside the root refused unread and one inside it followed)".format(len(bad), len(good_hrefs)))
     return 0
 
 
-def main():
-    args = sys.argv[1:]
-    if "--self-test" in args:
-        return _self_test()
-    check = "--check" in args
-    root = repo_root()
+def run(root, check):
+    """Reconcile DISCLOSURE.md and the DISCLOSURE block on site/disclosure.html under root. Exit 0 in sync, 1
+    on drift (check mode), 2 on malformed input, a missing page or missing markers, or a site/ that cannot be
+    read as a directory inside the repository. Parameterized on root so the self-test drives it against
+    synthetic trees, never the real repo."""
     try:
         data = load_toml(root / "disclosure.toml")
     except (OSError, ValueError) as exc:
@@ -484,11 +521,15 @@ def main():
     except ValueError as exc:
         print("error: disclosure.toml: {}".format(exc), file=sys.stderr)
         return 2
+    page = root / "site" / "disclosure.html"
+    # The directory probe reconcile runs (target_dir_present), for the page before anything is written or read:
+    # a site/ that is there but cannot be read as a directory inside the repository exits 2 here, so the page
+    # is never read through it and DISCLOSURE.md is not rewritten either.
+    target_dir_present(page, root)
     drift = False
-    if reconcile(root / "DISCLOSURE.md", md, check):
+    if reconcile(root / "DISCLOSURE.md", md, check, root):
         print("drift: DISCLOSURE.md")
         drift = True
-    page = root / "site" / "disclosure.html"
     if not page.exists():
         print("error: site/disclosure.html not found (expected generated target)", file=sys.stderr)
         return 2
@@ -497,13 +538,20 @@ def main():
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if reconcile(page, new_html, check):
+    if reconcile(page, new_html, check, root):
         print("drift: site/disclosure.html")
         drift = True
     if check and drift:
         print("run tools/gen_disclosure.py to regenerate")
         return 1
     return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        return _self_test()
+    return run(repo_root(), "--check" in args)
 
 
 if __name__ == "__main__":
