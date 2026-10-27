@@ -7186,8 +7186,9 @@ def flip_t84():
 
 def t78_homes2_needs_the_pair(fx):
     """With homes 2 activated as the record verb will run once activation admits it (SUPPORTED_HOMES = 2
-    alone, without _Homes2SpecGate, so _load_manifest still admits 1.2.0 and the journal-home probe is
-    the only guard), a store declaring homes = 2 at the base spec_version (1.2.0, not
+    alone, without _Homes2SpecGate, so _load_manifest still admits 1.2.0; manifest validation also
+    refuses this declaration, but only after reconciliation, so the journal-home probe is the guard
+    before any write), a store declaring homes = 2 at the base spec_version (1.2.0, not
     HOMES2_SPEC_VERSION) is not a homes-2 store, and the record verb refuses it at that probe before any
     reconciliation or write. Two stores, each with the declaration committed: a fresh one, where a run
     past the probe publishes into the legacy journal and rewrites the operands, and one holding a
