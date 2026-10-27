@@ -96,7 +96,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
-from _standards import dir_present  # noqa: E402
+from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The canonical apex ordering. It MUST appear verbatim in the apex rule body (prjint1), so the skill's
@@ -942,7 +942,8 @@ def build_outputs(root, root_fd=None):
 def run_gen(root, check):
     """Reconcile every output under root. Exit 0 in sync, 1 on drift (check mode), 2 on a malformed
     source, an unknown corpus-id, or a read/write failure. Mirrors gen_cursor.main()'s fail-closed shape:
-    dir_present (not is_dir) so an unreadable .aiqt/ parent fails closed, and a walk whose errors raise so an
+    dir_or_absent (not is_dir) so an unreadable .aiqt/ parent, or a corpus path that cannot be read as a
+    directory, fails closed, and a walk whose errors raise so an
     unreadable output dir fails closed instead of concealing an orphan. The repository root is opened ONCE
     (_open_root), before any input is read, and that one descriptor anchors every input read, scan, output
     read and write of the run. Every refusal of static tree state happens BEFORE the first write: the input
@@ -966,7 +967,12 @@ def run_gen(root, check):
         # output as an orphan for removal, never concealed and never deleted. A PRESENT corpus with a
         # missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
-        if dir_present(corpus_dir):
+        # A corpus path that is there but cannot be read as a directory is a refusal (exit 2), never that
+        # transition; a symlink to a directory inside the root is read.
+        present, problem = dir_or_absent(corpus_dir, root)
+        if problem is not None:
+            raise NotADirectoryError("{} {} (cannot evaluate)".format(corpus_dir, problem))
+        if present:
             reserved_map, standalone, binary = build_outputs(root, root_fd)
         else:
             reserved_map, standalone, binary = {}, [], []
@@ -2236,6 +2242,45 @@ def self_test_main():
                                         code, pw_instr.read_text(encoding="utf-8") == "local edit\n", out))
             finally:
                 signal.signal(signal.SIGALRM, prev21)
+
+        # 22. A corpus path that is there but is not a directory is refused in both modes (exit 2), never read
+        #     as the absent-corpus transition, which on a tree with no outputs yet is a clean exit 0.
+        nondir = tmp / "nondir-corpus"
+        nondir.joinpath(*CORPUS_PARTS[:-1]).mkdir(parents=True)
+        nondir.joinpath(*CORPUS_PARTS).write_text("not a directory\n", encoding="utf-8")
+        for chk in (True, False):
+            code, out = capture(nondir, chk)
+            if code != 2 or "is not a directory" not in out:
+                failures.append("a corpus path that is a regular file expected exit 2 naming it (check={}), got "
+                                "{}\n{}".format(chk, code, out))
+
+        # 23. A corpus path that is a symlink, on a generated tree: to the corpus moved elsewhere inside the root,
+        #     it is read (--check exit 0, in sync); dangling, to a regular file inside the root, or to the corpus
+        #     moved outside the root (so following it would be in sync), it is refused in both modes (exit 2),
+        #     named, never read as the absent-corpus transition and never followed.
+        for shape, want, reason in (("in-root", 0, None), ("dangling", 2, "whose target does not exist"),
+                                    ("to-file", 2, "whose target is not a directory"),
+                                    ("outside", 2, "whose target resolves outside the repository")):
+            linked = tmp / ("linked-corpus-" + shape)
+            linked.mkdir()
+            _write_fixture(linked, good_src)
+            capture(linked, False)
+            corpus = linked.joinpath(*CORPUS_PARTS)
+            target = {"in-root": linked / "shared" / "rules", "dangling": linked / "absent",
+                      "to-file": linked / "file.txt", "outside": tmp / "outside-corpus"}[shape]
+            if shape in ("in-root", "outside"):
+                target.parent.mkdir(exist_ok=True)
+                shutil.move(str(corpus), str(target))
+            else:
+                shutil.rmtree(corpus)
+            if shape == "to-file":
+                target.write_text("not a directory\n", encoding="utf-8")
+            corpus.symlink_to(target if shape == "outside" else os.path.relpath(target, corpus.parent))
+            for chk in ((True,) if want == 0 else (True, False)):
+                code, out = capture(linked, chk)
+                if code != want or (reason is not None and "is a symbolic link " + reason not in out):
+                    failures.append("a corpus path that is a symlink {} expected exit {} (check={}), got {}\n{}".format(
+                        shape, want, chk, code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2264,7 +2309,9 @@ def self_test_main():
           "version (a second plain-whitespace mention, a stale, capitalized, wrapped or commented sentence, a "
           "longer version or suffix straight after the version, and a missing page are --check drift; "
           "deliberate markup around or inside the phrase or after a '.' is out of scope); a hard-linked input "
-          "is refused as an input (break the link, never git rm); a facet-misplaced rule fails closed (exit 2).")
+          "is refused as an input (break the link, never git rm); a facet-misplaced rule and a corpus path that "
+          "is not a directory or a symlink to a directory inside the root fail closed (exit 2), and a corpus "
+          "symlinked to a directory inside the root is read.")
     return 0
 
 
