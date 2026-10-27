@@ -3069,6 +3069,175 @@ def _gate_read_cost_edge_failures():
     return out
 
 
+_GW_FLOOR = 0.1
+_GW_SIZES = 9
+# The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
+# system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
+_GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
+_GW_USAGE_LABELS = (("user CPU", "{:.3f}s"), ("system CPU", "{:.3f}s"), ("minor page faults", "{}"),
+                    ("involuntary context switches", "{}"), ("cyclic collections", "{}"))
+
+
+def _gw_usage():
+    """(user CPU s, system CPU s, minor page faults, involuntary context switches, cyclic collections) this
+    process has used so far, best effort: an entry is None when it cannot be read (no resource module, a
+    getrusage result without that field, or a collector statistic without 'collections'), so a host that lacks
+    one still runs the gw-lin rows to their verdict and a failing row reports what it can. Both modules are
+    imported here, at each reading, so a check can stand one in through sys.modules."""
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+    except (ImportError, AttributeError, OSError):
+        rusage = None
+    usage = [getattr(rusage, name, None) for name in _GW_RUSAGE_FIELDS]
+    try:
+        import gc
+        usage.append(sum(stats["collections"] for stats in gc.get_stats()))
+    except (ImportError, AttributeError, KeyError, TypeError):
+        usage.append(None)
+    return tuple(usage)
+
+
+def _gw_usage_text(use_n, use_2n):
+    """The usage clause of a failed gw-lin row: each reading for both timed calls, or '<reading> usage
+    unavailable' for one that could not be read for either call."""
+    parts = []
+    for (name, form), used_n, used_2n in zip(_GW_USAGE_LABELS, use_n, use_2n):
+        if used_n is None or used_2n is None:
+            parts.append("{} usage unavailable".format(name))
+        else:
+            parts.append(("{} " + form + " then " + form).format(name, used_n, used_2n))
+    return ", ".join(parts)
+
+
+def _gw_scan_once(cmd, scan):
+    """(CPU seconds, decision, usage) for one scan of cmd; usage is what _gw_usage grew by across the call,
+    read outside the timed region, with None for a reading unavailable before or after it."""
+    u0 = _gw_usage()
+    t0 = time.process_time()
+    decision = scan(cmd)
+    t = time.process_time() - t0
+    return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
+
+
+def _gw_scan_ratio(unit, prefix, suffix, scan):
+    """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
+    t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions, (usage_n, usage_2n)), or (None, t_n, None,
+    length, decisions, None) when the floor was never cleared in the bound, so the caller fails 'linearity not
+    evaluated'; decisions lists every timed scan's decision, in order. The input is a command string for the
+    whole-command scan or a word list for the dequoted-word scan."""
+    reps = 4000
+    decisions = []
+    for _ in range(_GW_SIZES):
+        t_n, decision, use_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
+        decisions.append(decision)
+        if t_n > _GW_FLOOR:
+            cmd_2n = prefix + unit * (reps * 2) + suffix
+            t_2n, decision, use_2n = _gw_scan_once(cmd_2n, scan)
+            decisions.append(decision)
+            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n)
+        reps *= 2
+    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None
+
+
+def _gw_lin_failures(cases):
+    """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
+    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
+    floor, or on a ratio over 3 (reporting the usage of both timed calls)."""
+    out = []
+    for label, unit, prefix, suffix, scan, want in cases:
+        ratio, t_n, t_2n, length_2n, got, use = _gw_scan_ratio(unit, prefix, suffix, scan)
+        wrong = [decision for decision in got if decision != want]
+        if wrong:
+            out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
+                       .format(label, wrong[0], len(wrong), len(got), want))
+        if ratio is None:
+            out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
+                       "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
+        elif ratio > 3.0:
+            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
+                       "{:.3f}s then {:.3f}s for an input of length {} ({})"
+                       .format(label, ratio, t_n, t_2n, length_2n, _gw_usage_text(*use)))
+    return out
+
+
+def _gw_spin_scan(power):
+    """A stand-in scan that spends CPU time growing with the input's length to the given power: 0.12 s at
+    4000 characters, so the first size clears the floor and the ratio is about 2 ** power."""
+    def scan(cmd):
+        until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power
+        while time.process_time() < until:
+            pass
+        return None
+    return scan
+
+
+@contextlib.contextmanager
+def _gw_module_as(name, stand_in):
+    """sys.modules[name] is stand_in inside the block (None makes importing it raise ModuleNotFoundError),
+    restored after it."""
+    had = name in sys.modules
+    saved = sys.modules.get(name)
+    sys.modules[name] = stand_in
+    try:
+        yield
+    finally:
+        if had:
+            sys.modules[name] = saved
+        else:
+            del sys.modules[name]
+
+
+def _gw_lin_usage_failures():
+    """(gw-lin-usage-readable, gw-lin-usage-no-resource, gw-lin-usage-no-field, gw-lin-usage-no-collections)
+    The gw-lin rows' usage report, through stand-in scans that spend CPU time in proportion to the input
+    (linear) or to its square (super-linear). With every reading available, a super-linear row fails with each
+    usage field for both timed calls. With no resource module, with a getrusage result missing a field and
+    with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
+    their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
+    unavailable' for each reading it lost and the readings it kept."""
+    pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
+    pair = r"\d+ then \d+"
+    lost = "usage unavailable"
+
+    def rusage_without_nivcsw(_who):
+        return types.SimpleNamespace(ru_utime=time.process_time(), ru_stime=0.0, ru_minflt=0)
+
+    no_field = types.SimpleNamespace(RUSAGE_SELF=0, getrusage=rusage_without_nivcsw)
+    no_collections = types.SimpleNamespace(get_stats=lambda: [{"collected": 0}])
+    out = []
+    for label, module, stand_in, clause in (
+            ("gw-lin-usage-readable", None, None,
+             "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
+             "cyclic collections {1}".format(pair_s, pair)),
+            ("gw-lin-usage-no-resource", "resource", None,
+             "user CPU {0}, system CPU {0}, minor page faults {0}, involuntary context switches {0}, "
+             "cyclic collections {1}".format(lost, pair)),
+            ("gw-lin-usage-no-field", "resource", no_field,
+             "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {2}, "
+             "cyclic collections {1}".format(pair_s, pair, lost)),
+            ("gw-lin-usage-no-collections", "gc", no_collections,
+             "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
+             "cyclic collections {2}".format(pair_s, pair, lost))):
+        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
+                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s for an input of "
+                          r"length 8000 \(" + clause + r"\)\Z")
+        rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
+        if module is not None:
+            rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
+        try:
+            with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
+                got = _gw_lin_failures(rows)
+        except Exception as exc:
+            out.append("({}) the gw-lin rows raised {}: {} instead of reaching their verdict"
+                       .format(label, type(exc).__name__, exc))
+            continue
+        if len(got) != 1 or not want.match(got[0]):
+            out.append("({}) the gw-lin rows gave {!r}, want only the super-linear row's failure matching {!r}"
+                       .format(label, got, want.pattern))
+    return out
+
+
 # Commands for the lexer's skip_empty reading: runs of separators, blank lines, a comment and a quoted heredoc
 # opener (segments with no word and no redirect, some with a raw slice that is not blank), redirect-only
 # segments (kept), and commands the lexer refuses or, in partial mode, recovers in part.
@@ -3517,6 +3686,7 @@ _DEADLINE_SHAPES = {
     "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
     "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
     "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
+    "fg_heredocs_plain": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na b\nE\n", n)}),
     "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
     "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
     # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
@@ -3530,6 +3700,13 @@ _DEADLINE_SHAPES = {
     # running-index-walk row does.
     "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
                                                         + ")" * (n // 5 - 1)}),
+    # A here-document under a quoted delimiter whose body is a run of lines each holding a bare `&`: the raw
+    # scan reads each `&` as a detach and the shared lexer places each in the body, so the detector lifts
+    # every one (_orch_foreground_detach_lexed), the only shape here that reads every `&` under both scan
+    # rules and places each through the lexer's spans, and the note scan then skips the body as data in its
+    # lifted mode.
+    "fg_quoted_heredoc_amps": lambda n, base: ("Bash", {"command": "cat > f <<'E'\n" + _repeat(
+        "a & b\n", n - 14, "E\n")}),
     "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
@@ -3595,8 +3772,9 @@ _DEADLINE_CASES = {
 # from the orchestration repository: the truncation guard scans a foreground command there too, for its
 # out-of-scope detach note.
 _DEADLINE_PLAIN_CASES = {
-    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredoc_ops_open",
-                              "fg_subshells", "fg_nested_glued_substs", "fg_setsid_options"),
+    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredocs_plain",
+                              "fg_heredoc_ops_open", "fg_subshells", "fg_nested_glued_substs",
+                              "fg_quoted_heredoc_amps", "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
@@ -3606,24 +3784,29 @@ _DEADLINE_DENY_CASES = frozenset((
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
-# a detach or detacher (fg_detach_after, fg_setsid_options), or a construct left open at the end of the
+# a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
 # scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
-# unreadable instead of a silent allow.
+# unreadable instead of a silent allow, and the `&` in a body under an unquoted delimiter
+# (fg_heredocs_amp), which the in-scope detector reads as a bare detach (an accepted over-note).
 _DEADLINE_NOTE_CASES = frozenset((
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
-    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open")))
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
+    ("orch_truncation_guard", "fg_heredocs_amp")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
-# bound: the plain-delimiter heredoc bodies (their `&`
-# and apostrophe are skipped data and every body is closed; a quoted delimiter would note, and its early
+# bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
+# `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
+# a quoted delimiter would note, and its early
 # note would also cut the
 # timing short), the balanced subshells and the nested glued command
 # substitutions are all skipped, provably closed or carry no outer
-# detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
-# mistook one for a detach.
+# detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
+# the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
+# timing shapes from passing a scanner that mistook one for a detach.
 _DEADLINE_ALLOW_CASES = frozenset((
-    ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),
-    ("orch_truncation_guard", "fg_nested_glued_substs")))
+    ("orch_truncation_guard", "fg_nested_glued_substs"),
+    ("orch_truncation_guard", "fg_quoted_heredoc_amps")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -15787,6 +15970,19 @@ def _main_isolated(monitor):
         # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
         # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
         # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
+        # What else a timed call is charged for was measured on Python 3.14.4 with the whole suite running:
+        # no cyclic collection ran inside any timed call (the dequoted-word scan makes no lasting
+        # collector-tracked allocation, so none starts there even with the collector's count at its
+        # threshold), and every row's ratio stayed between 1.93 and 2.09 with the collector left on and with
+        # it disabled around each call. The one cost that grew faster than the input was the kernel's work
+        # on the page faults that first touch the memory a scan allocates (about 2.5 times the faults per
+        # doubling), under a tenth of t_2n there. A ratio above 3 that a CI runner measured for gw-lin-dq-off
+        # was not reproduced that way, nor with other processes loading the same CPU, so its cause is not
+        # known. A failing row therefore reports what the process used across each of its two timed calls,
+        # read outside the timed region: user and system CPU time, minor page faults, involuntary context
+        # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
+        # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
+        # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -15813,36 +16009,6 @@ def _main_isolated(monitor):
         # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
         # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
-        import time as _time_lin
-
-        _gw_floor = 0.1
-        _gw_sizes = 9
-
-        def _gw_scan_once(cmd, scan):
-            # (CPU seconds, decision) for one scan of cmd
-            _t0 = _time_lin.process_time()
-            decision = scan(cmd)
-            return _time_lin.process_time() - _t0, decision
-
-        def _gw_scan_ratio(unit, prefix, suffix, scan):
-            # Double n (from 4000, at most _gw_sizes sizes) until t_n clears the _gw_floor floor, then
-            # compare t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
-            # decisions) when the floor was never cleared in the bound, so the caller fails 'linearity not
-            # evaluated'; decisions lists every timed scan's decision, in order. The input is a command string
-            # for the whole-command scan or a word list for the dequoted-word scan.
-            reps = 4000
-            decisions = []
-            for _ in range(_gw_sizes):
-                t_n, decision = _gw_scan_once(prefix + unit * reps + suffix, scan)
-                decisions.append(decision)
-                if t_n > _gw_floor:
-                    cmd_2n = prefix + unit * (reps * 2) + suffix
-                    t_2n, decision = _gw_scan_once(cmd_2n, scan)
-                    decisions.append(decision)
-                    return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions
-                reps *= 2
-            return None, t_n, None, len(prefix + unit * reps + suffix), decisions
-
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_unread_scan = aiqt_hooks._gate_unread_bypass
@@ -15860,19 +16026,8 @@ def _main_isolated(monitor):
             ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"], _gw_dq_scan, None),
             ("gw-lin-unread-roster", " g'i't push", "echo", " -n", _gw_unread_scan, None),
         )
-        for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan, _gw_want in _gw_lin_cases:
-            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n, _gw_got = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
-            _gw_wrong = [got for got in _gw_got if got != _gw_want]
-            if _gw_wrong:
-                failures.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
-                                .format(_gw_lbl, _gw_wrong[0], len(_gw_wrong), len(_gw_got), _gw_want))
-            if _gw_ratio is None:
-                failures.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
-                                "{} sizes (last {:.4f}s)".format(_gw_lbl, _gw_floor, _gw_sizes, _gw_tn))
-            elif _gw_ratio > 3.0:
-                failures.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                                "{:.3f}s then {:.3f}s for an input of length {}"
-                                .format(_gw_lbl, _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n))
+        failures.extend(_gw_lin_failures(_gw_lin_cases))
+        failures.extend(_gw_lin_usage_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -22384,6 +22539,20 @@ def _main_isolated(monitor):
                             "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
                             "tool_input, a non-string command, a non-boolean run_in_background); got {}"
                             .format(_f18_oos_badinput))
+        # (noask-trunc-oos-reader-notes) with NO orchestration registry, a foreground command the in-scope
+        # detector cannot read to its end (an open quote) draws that detector's note, and a detacher word it
+        # does not read (setsid) draws the note scan's note: one probe per note site, each an allow WITH A
+        # NOTE, never ask, deny or the silent allow.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_readers = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": _f18_cmd, "run_in_background": False}, "cwd": str(_f18_plain)})
+                for _f18_cmd in ("echo 'oops & bg", "setsid long_job")]
+        if _f18_oos_readers != ["allow-note"] * 2:
+            failures.append("(noask-trunc-oos-reader-notes) orch_truncation_guard must ALLOW WITH A NOTE an "
+                            "out-of-scope foreground command it cannot read to its end and one running "
+                            "setsid; got {}".format(_f18_oos_readers))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
