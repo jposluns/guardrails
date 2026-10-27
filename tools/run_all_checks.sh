@@ -38,9 +38,11 @@ run_gate() {
 run_gate "secrets"   python3 -I -B tools/check_secrets.py
 run_gate "secrets-selftest" python3 -I -B tools/check_secrets.py --self-test
 
-# gitleaks is a second, independent secret gate, and it is required here: a member head gets no
-# Quality run, so this run is its evidence. If gitleaks is not installed locally its scan cannot
-# run, and the gitleaks-pin gate below fails the run rather than letting it pass without the scan.
+# gitleaks is a second, independent secret gate, and it is required whenever this full runner runs.
+# A member head gets no Quality run: its evidence is its named suites plus every generated-file
+# --check and the manifest check, and the train pull request's Quality run on the identical tree is
+# the standing full evidence. If gitleaks is not installed locally its scan cannot run, and the
+# gitleaks-pin gate below fails the run rather than letting it pass without the scan.
 # A no-root user install (the recommended non-root path) lands in ~/.local/bin, which a
 # non-login shell may not carry on PATH; fall back to it ONLY when the normal lookup fails,
 # and append rather than prepend, so an on-PATH gitleaks keeps precedence and a user-local
@@ -139,7 +141,16 @@ run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --sel
 run_gate "opf-init-operation-selftest" python3 -I -B opf/tools/_opf_init_operation.py --self-test
 run_gate "opf-init-p0-selftest" python3 -I -B opf/tools/check_opf_init_p0.py --self-test --red-on-revert
 run_gate "opf-init-observe-selftest" python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
-run_gate "opf-standalone-closure" python3 -I -B tools/check_opf_standalone_closure.py
+run_gate "opf-standalone-closure-selftest-a" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-a
+run_gate "opf-standalone-closure-selftest-b" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-b
+run_gate "opf-standalone-closure-selftest-c" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
+run_gate "opf-standalone-closure-selftest-d" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-d
+run_gate "opf-standalone-closure-selftest-e" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
+run_gate "opf-standalone-closure-a" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-a
+run_gate "opf-standalone-closure-b" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-b
+run_gate "opf-standalone-closure-c" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-c
+run_gate "opf-standalone-closure-d" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-d
+run_gate "opf-standalone-closure-e" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-e
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check

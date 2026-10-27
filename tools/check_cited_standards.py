@@ -137,7 +137,7 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import (load_manifests, ManifestError, dir_or_absent, ensure_listable,  # noqa: E402
+from _standards import (load_manifests, ManifestError, dir_or_absent, dir_present, ensure_listable,  # noqa: E402
                         LINK_OUTSIDE_ROOT)
 
 DEFAULT_CORPUS = (".aiqt/core/rules/*.md",)
@@ -380,13 +380,14 @@ def expand_corpus(root, globs):
         deep = len(static) < len(parts) - 1      # a wildcard in a directory component
         matched = 0
         try:
-            # dir_or_absent (not dir_present): a base that is there but cannot be read as a directory (a regular
+            # dir_or_absent: a base that is there but cannot be read as a directory (a regular
             # file, or a symlink that is dangling, whose target is not a directory or resolves outside the root)
             # is refused before it is listed; a symlink to a directory inside the root is read.
-            present, problem = dir_or_absent(base, root)
+            # dir_present, bound beneath root, then judges every component above it the same way.
+            _present, problem = dir_or_absent(base, root)
             if problem is not None:
                 raise CannotEvaluate("corpus glob {!r}: {} {}".format(pattern, base, problem))
-            if present:
+            if dir_present(base, root=root):
                 # Path.glob silently yields nothing for a directory it cannot list; force the read error.
                 ensure_listable(base)
                 if deep:
@@ -484,7 +485,7 @@ def run(root, config=None):
     root = Path(root)
     try:
         try:
-            manifests = load_manifests(root / STANDARDS_REL)
+            manifests = load_manifests(root / STANDARDS_REL, root=root)
         except (ManifestError, OSError) as exc:
             raise CannotEvaluate("standards manifests: {}".format(exc))
         registered = manifest_identities(manifests)
