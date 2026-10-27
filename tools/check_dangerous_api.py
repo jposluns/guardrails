@@ -429,10 +429,6 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "shell", 2,
      "self-test deny table: (module, name) seams patched to refuse process and file effects"
      " (subprocess.Popen and os names from a fixed literal tuple); replaced, never called"),
-    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", "code", 2,
-     "self-test flip: exec_module builds a module from the repository's own _opf_upgrade"
-     " source with one literal replacement, and types.FunctionType rebinds its code; no"
-     " external input"),
     ("tools/check_instruction_budget.py", "_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own production source with"
      " one reviewed literal substitution; no external input"),
