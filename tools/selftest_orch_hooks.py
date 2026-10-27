@@ -11809,18 +11809,74 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # Inside registry scope the deny reads a here-document body and arithmetic as code and does not
-        # read setsid, nohup or disown, exactly as before the out-of-scope note was added: the note's own
-        # scan must not leak into the deny.
-        check("trunc/fg-heredoc-amp-still-denies",
-              _verdict(bg("cat > /tmp/f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        # Inside registry scope the deny reads arithmetic as code and does not read setsid, nohup or
+        # disown, exactly as before the out-of-scope note was added: the note's own scan must not leak into
+        # the deny. (A bare `&` in a quoted here-document body is no detach and allows there: the
+        # trunc/fg-quoted-heredoc-amp-allows row below.)
         check("trunc/fg-arith-amp-still-denies", _verdict(bg("echo $(( 6 & 3 ))", rib=False)), "deny")
         check("trunc/fg-setsid-still-allows", _verdict(bg("setsid long_job", rib=False)), "allow")
         # With no orchestration registry the guard denies nothing, but a readable foreground command that
-        # detaches work is allowed WITH A NOTE (the reducer's "warn") naming the tracked background
-        # mechanism; every other call stays the silent allow.
+        # may detach work is allowed WITH ONE NOTE (the reducer's "warn") naming rule trkasy and the tracked
+        # background mechanism (run_in_background): the note of the detector the registry scope denies on
+        # where it reads a bare-& detach or cannot read the command to its end, else the note scan's note,
+        # never a prompt and never a silent allow; every other call stays the silent allow (a background
+        # dispatch, and an `&` that is no bare detach). Each warn row reads "allow" with the guard returning
+        # its silent allow before reading the call.
         ti = Fixture(tmp, "trunc-no-registry")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
+        ti_call = lambda tool_input: aiqt_hooks.orch_truncation_guard(ti.payload("PreToolUse", "Bash", tool_input))
+        ti_warn = ti_call({"command": "long_job &", "run_in_background": False})
+        ti_note = (ti_warn[1] or {}).get("systemMessage", "")
+        check("trunc/fg-detach-no-registry-warns",
+              (_verdict(ti_warn), "trkasy" in ti_note, "run_in_background" in ti_note), ("warn", True, True))
+        check("trunc/fg-detach-shapes-no-registry-warn",
+              [_verdict(ti_call({"command": v})) for v in (
+                  "dispatch_retry.sh 12 &", "./gate_merge.sh &", "nohup dispatch_retry.sh > log 2>&1 &",
+                  "worker & wait", "cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB")], ["warn"] * 5)
+        check("trunc/fg-nonbare-amp-no-registry-allows",
+              [_verdict(ti_call({"command": v, "run_in_background": False})) for v in (
+                  "build && test", "build &> out.log", "build 2>&1", "build |& tee log", "echo 'a & b'",
+                  "echo done # & comment", "cat > f <<'EOF'\nFix A & B\nEOF", "ls")], ["allow"] * 8)
+        # A command whose quoting or comments the detector cannot read to its end ("unbalanced": an open
+        # quote, or a '#' whose comment reading depends on context) warns with a note saying so, since a
+        # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
+        # open while bash starts `sleep 1` in the background. The quoted here-document row is the disclosed
+        # over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
+        # silent allow on "unbalanced", and the note check fails if it gives the detach note instead.
+        ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
+        check("trunc/fg-unbalanced-no-registry-warns",
+              [(_verdict(res), "could not read this foreground command to its end" in ti_note_of(res),
+                "trkasy" in ti_note_of(res), "run_in_background" in ti_note_of(res))
+               for res in (ti_call({"command": v}) for v in (
+                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOF",
+                   "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN"))],
+              [("warn", True, True, True)] * 4)
+        # A run_in_background that is present but not a boolean gets the unreadable-input note naming the
+        # malformed flag (the platform's reading of such a flag is unknown, so the call may run in the
+        # foreground), whatever the command holds, so the open-quote row gets that note too, not the
+        # detector's "to its end" note. Each row reads ("allow", False, False, False, False) with the guard
+        # keeping its silent allow on a malformed flag.
+        check("trunc/fg-malformed-rib-no-registry-warns",
+              [(_verdict(res), "not a boolean" in ti_note_of(res), "trkasy" in ti_note_of(res),
+                "run_in_background" in ti_note_of(res), "to its end" in ti_note_of(res))
+               for res in (ti_call({"command": c, "run_in_background": r}) for c, r in (
+                   ("long_job &", "false"), ("long_job &", None), ("long_job &", 0), ("long_job &", "true"),
+                   ("echo 'oops & bg", None)))],
+              [("warn", True, True, True, False)] * 5)
+        # No readable command (a tool_input that is not an object, a command that is not a string), and a
+        # malformed run_in_background beside a command with no bare `&`, get the unreadable-input note,
+        # never the silent allow. Each row reads ("allow", False) with the guard keeping its silent allow on
+        # input it cannot read.
+        check("trunc/fg-malformed-no-registry-warns",
+              [(_verdict(res), "input could not be read" in ti_note_of(res))
+               for res in (aiqt_hooks.orch_truncation_guard(dict(
+                   ti.payload("PreToolUse", "Bash"), tool_input=tool_input)) for tool_input in (
+                   "long_job &", ["long_job &"], {"command": 5}, {}, {"command": 5, "run_in_background": "false"},
+                   {"command": "ls", "run_in_background": "false"}, {"command": "ls", "run_in_background": None}))],
+              [("warn", True)] * 7)
+        check("trunc/bg-no-registry-still-inert",
+              [_verdict(ti_call({"command": v, "run_in_background": True})) for v in (
+                  "python3 build.py | tail -5", "long_job &")], ["allow"] * 2)
         check("trunc/fg-detach-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "warn")
@@ -11856,17 +11912,18 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-double-quoted-amp-allows", _fg('echo "a & b"'), "allow"),
                 ("trunc/oos-escaped-amp-allows", _fg("echo a \\& b"), "allow"),
                 ("trunc/oos-comment-amp-allows", _fg("echo done # & comment"), "allow"),
-                # A here-document delimiter that is one plain word is its own delimiter, so the body is
-                # skipped as data (an `&` or a detacher word in it stays silent); a QUOTED delimiter is a
-                # spelling the note scan does not model (bash joins and quote-removes it), so it draws the
-                # note rather than a guessed skip.
-                ("trunc/oos-heredoc-quoted-delim-notes",
-                 _fg("cat > /tmp/f <<'EOF'\nFix A & B\nEOF"), "warn"),
-                ("trunc/oos-heredoc-unquoted-amp-allows",
-                 _fg("cat > /tmp/f <<EOF\nFix A & B\nEOF"), "allow"),
+                # A here-document delimiter that is one plain word is its own delimiter, so the note scan
+                # skips the body as data (a detacher word in it stays silent). A body `&` under an unquoted
+                # delimiter, and a bitwise `&` in arithmetic, are a bare-& detach to the detector the
+                # registry scope denies on, which reads such a body and arithmetic as code, so each gives
+                # that detector's note: accepted over-warns for this warn-first release (nothing detaches).
+                # A body `&` under a QUOTED delimiter is no detach to that detector and draws no note (the
+                # trunc/fg-nonbare-amp-no-registry-allows row above).
+                ("trunc/oos-heredoc-unquoted-amp-notes",
+                 _fg("cat > /tmp/f <<EOF\nFix A & B\nEOF"), "warn"),
                 ("trunc/oos-heredoc-detach-word-allows", _fg("cat <<EOF\nsetsid x\nEOF"), "allow"),
-                ("trunc/oos-arith-expansion-allows", _fg("echo $(( 6 & 3 ))"), "allow"),
-                ("trunc/oos-arith-command-allows", _fg("(( x = 6 & 3 ))"), "allow"),
+                ("trunc/oos-arith-expansion-notes", _fg("echo $(( 6 & 3 ))"), "warn"),
+                ("trunc/oos-arith-command-notes", _fg("(( x = 6 & 3 ))"), "warn"),
                 ("trunc/oos-setsid-wait-allows", _fg("setsid -w long_job"), "allow"),
                 ("trunc/oos-setsid-wait-long-allows", _fg("setsid --wait long_job"), "allow"),
                 ("trunc/oos-detach-word-argument-allows", _fg("git log --grep setsid"), "allow"),
@@ -12015,21 +12072,24 @@ def _main_isolated(report_path=None):
                  _fg("cat <<EOF>(x y)\nbody\nEOF>(x y)\nlong_job &\nEOF"), "warn"),
                 ("trunc/oos-heredoc-extglob-delim-notes",
                  _fg("shopt -s extglob\ncat <<a+(b c)\nbody\na+(b c)\nlong_job &"), "warn"),
-                ("trunc/oos-heredoc-plain-set-delim-allows",
-                 _fg("cat <<-END.v1+x\n\tFix A & B\n\tEND.v1+x"), "allow"),
-                ("trunc/oos-heredoc-delim-then-redirect-allows",
-                 _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "allow"),
+                # The plain-delimiter controls below skip the body silently in the note scan; the
+                # body `&` under their unquoted delimiter gives the detector's note (accepted over-warns).
+                ("trunc/oos-heredoc-plain-set-delim-notes",
+                 _fg("cat <<-END.v1+x\n\tFix A & B\n\tEND.v1+x"), "warn"),
+                ("trunc/oos-heredoc-delim-then-redirect-notes",
+                 _fg("cat <<EOF>/tmp/f\nFix A & B\nEOF"), "warn"),
                 # bash joins a backslash-newline in an unquoted body before it matches the closing line,
                 # so `EO\` then `F` closes the body and a raw `x\` then `EOF` does not; either way the raw
                 # line match would skip the real detach, so one anywhere up to the closing line notes. A
                 # continuation after the closing line is live command text, and a live backslash-newline
                 # anywhere outside a single-quoted span notes too (the class is closed as a whole, below);
-                # a backslash before another character stays silent.
+                # a backslash before another character stays silent in the note scan (its body `&` under
+                # an unquoted delimiter gives the detector's note, an accepted over-warn).
                 ("trunc/oos-heredoc-continued-close-line-notes",
                  _fg("cat <<EOF\nbody\nEO\\\nF\nlong_job &\nEOF"), "warn"),
                 ("trunc/oos-heredoc-continued-body-line-notes",
                  _fg("cat <<EOF\nx\\\nEOF\nit's\nEOF\nlong_job &"), "warn"),
-                ("trunc/oos-heredoc-body-backslash-allows", _fg("cat <<EOF\na\\b & c\nEOF"), "allow"),
+                ("trunc/oos-heredoc-body-backslash-notes", _fg("cat <<EOF\na\\b & c\nEOF"), "warn"),
                 ("trunc/oos-heredoc-continuation-after-close-notes",
                  _fg("cat <<EOF\nA & B\nEOF\necho a \\\nb"), "warn"),
                 # An ANSI-C $'...' delimiter is a quoted spelling, so it notes like any other non-plain
@@ -12165,11 +12225,15 @@ def _main_isolated(report_path=None):
                 # row's command sets `$!`). The balanced-body row is the disclosed over-note (nothing
                 # in it detaches, and the note still fires); the literal `<<` rows are the boundary:
                 # a `<<` inside plain double quotes with no substitution open, or inside a
-                # single-quoted span within the substitution, is data and stays silent.
-                ("trunc/oos-commit-heredoc-amp-exposed-notes",
-                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "warn"),
+                # single-quoted span within the substitution, is data and stays silent. A body whose
+                # quotes expose its `&` to the raw scan is no detach to the detector (the shared lexer
+                # places that `&` in the quoted body) and draws no note: the
+                # trunc/oos-commit-heredoc-quoted-amp-no-note row below, which notes if the note scan's
+                # unreadable `<<` is not lifted with that `&`.
                 ("trunc/oos-commit-heredoc-amp-body-notes",
                  _fg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""), "warn"),
+                ("trunc/oos-commit-heredoc-quoted-amp-no-note",
+                 _fg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\""), "allow"),
                 ("trunc/oos-commit-heredoc-open-quote-notes",
                  _fg("git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\"\nlong_job &"), "warn"),
                 ("trunc/oos-dq-subst-heredoc-shifted-amp-notes",
@@ -12200,8 +12264,10 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-dq-subst-printf-dq-heredoc-miss-allows",
                  _fg("git_commit_stub -m \"$(printf '%s\\n' \"Title\"; cat <<'EOF'\nSupport 5\" screens\n"
                      "EOF\n)\" & long_job # 5\" screens"), "allow"),
-                ("trunc/oos-dq-subst-sq-dq-amp-miss-allows",
-                 _fg("echo \"$(echo 'x\"y')\" & job # '"), "allow"),
+                # This row's real detach is now noted: the detector the registry scope denies on reads
+                # its `&` as a bare detach, so the note scan's miss no longer leaves it silent.
+                ("trunc/oos-dq-subst-sq-dq-amp-miss-notes",
+                 _fg("echo \"$(echo 'x\"y')\" & job # '"), "warn"),
                 ("trunc/oos-dq-subst-case-pattern-heredoc-miss-allows",
                  _fg(": \"$(case a in a) cat <<'EOF'\nSupport 5\" screens\nEOF\n;; esac)\" & long_job"
                      " # 5\" screens"), "allow"),
@@ -12538,13 +12604,205 @@ def _main_isolated(report_path=None):
                 os.environ.pop(_rr, None)
             else:
                 os.environ[_rr] = _rr_old
-        # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
-        # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
-        # as double-quoted text and allowed.
-        check("trunc/fg-heredoc-amp-overrefusal-residual-denies",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        # The guard reads a foreground detach through the shared lexer beside the raw scan
+        # (_orch_foreground_detach_lexed). The scan reads a here-document body as code, so it reads each `&`
+        # in the allow rows below as a bare detach; the lexer places that `&` in one of the three shapes that
+        # alone lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message
+        # form's body), a single- or double-quoted string (the scan's quote state shifted by a body quote),
+        # and a comment. Each allow row denies with the guard reading the scan alone (as it did before).
+        check("trunc/fg-quoted-heredoc-amp-allows",
+              [_verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)),
+               _verdict(bg('cat > f <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
+        check("trunc/fg-commit-heredoc-quoted-amp-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"", rib=False)), "allow")
+        check("trunc/fg-quote-shift-single-quoted-amp-allows",
+              _verdict(bg("cat <<'A'\nit's\nA\necho 'a & b'\ncat <<'B'\nit's\nB", rib=False)), "allow")
+        check("trunc/fg-quote-shift-double-quoted-amp-allows",
+              _verdict(bg("cat <<'A'\nsay \"hi\nA\necho \"a & b\"\ncat <<'B'\nsay \"bye\nB", rib=False)),
+              "allow")
+        check("trunc/fg-quote-shift-comment-amp-allows",
+              _verdict(bg("cat <<'EOF'\nit's\nEOF\necho ok # it's a & b", rib=False)), "allow")
         check("trunc/fg-commit-template-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
+        # Every other case where the lexer and the scan disagree still denies: an `&` the lexer places in a
+        # substitution that a double-quoted string holds (even inside a quoted string there, which the
+        # lexer skips whole), one in an ANSI-C $'...' quote, and a quoted-delimiter body `&` after which
+        # the scan ends inside a quote (an apostrophe in the body). The first two rows allow if the
+        # narrowing lifts a scan detach without the lexer's place, the first also if it reads the outermost
+        # span holding the `&`, and the third if it lifts one without the scan reading to the end.
+        check("trunc/fg-amp-in-dq-substitution-denies",
+              _verdict(bg('echo "$(echo "a & b")"', rib=False)), "deny")
+        check("trunc/fg-amp-in-ansi-c-quote-denies", _verdict(bg("echo $'it\\'s & b' \\'", rib=False)), "deny")
+        check("trunc/fg-quoted-heredoc-amp-then-open-quote-denies",
+              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOF", rib=False)), "deny")
+        # A substitution after the commit-message form's body makes the lexer lex again reading no body
+        # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
+        # allows if a pass keeps the places recorded by the pass it replaced.
+        check("trunc/fg-commit-heredoc-retried-lex-amp-denies",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\" \"$(date)\"", rib=False)),
+              "deny")
+        # The lexer's bare `&` separator denies where the scan reads the `&` as quoted or commented text:
+        # the scan's QUOTE SHIFT (an apostrophe in each of two quoted here-document bodies around a real
+        # detach) and COMMENT SHIFT false allows. Each row allows with the guard reading the scan alone.
+        check("trunc/fg-quote-shift-heredoc-detach-denies",
+              _verdict(bg("cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB", rib=False)), "deny")
+        check("trunc/fg-comment-shift-detach-denies",
+              _verdict(bg('echo "$(echo "a" "b # ")" & job # "', rib=False)), "deny")
+        # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
+        # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
+        # command it reads with no bare `&` allows.
+        check("trunc/fg-unlexable-falls-back-denies",
+              [_verdict(bg(v, rib=False)) for v in ("cat > f <<EOF\nFix A & B\nEOF", "echo 'oops & bg",
+                                                    "cat <(job &)")], ["deny"] * 3)
+        check("trunc/fg-unlexable-no-amp-allows",
+              [_verdict(bg(v, rib=False)) for v in ("diff <(sort a) <(sort b)", 'grep x <<< "a & b"')],
+              ["allow"] * 2)
+        # The places the lexer records (_LexPlaces) change nothing it returns, and a single-quoted string, a
+        # substitution inside a double-quoted string, that string and a comment each record their span.
+        _places_vectors = ("cat > f <<'EOF'\nFix A & B\nEOF",
+                           "git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"",
+                           "echo 'a' \"b $(c)\" # d", "x=$(true)# e\n f")
+        _places_plain = [aiqt_hooks._lex_command(v) for v in _places_vectors]
+        with aiqt_hooks._LexPlaces():
+            _places_recorded = [aiqt_hooks._lex_command(v) for v in _places_vectors]
+        check("trunc/lex-places-same-segments", _places_recorded, _places_plain)
+        with aiqt_hooks._LexPlaces() as _places_spans:
+            aiqt_hooks._lex_reading("echo 'a' \"b $(c)\" # d", False, {})
+        check("trunc/lex-places-spans", sorted(_places_spans),
+              [(5, 8, "quote"), (9, 17, "quote"), (12, 16, "code"), (18, 21, "comment")])
+        # The lexer reads a here-document delimiter word as bash does (_parse_heredoc_delim): a
+        # backslash-newline in the word, or between '<<' and the word, is a line continuation bash removes,
+        # never quoting, so the joined word is the delimiter, quoted only by a quoting character left after
+        # that removal, and the body ends at that delimiter with what follows read as commands again. Each
+        # row allows if the lexer reads the pair as an escaped newline: the delimiter then matches no line,
+        # so the real detach after the body read as body and the narrowing lifted it.
+        check("trunc/fg-heredoc-continued-delim-denies",
+              _verdict(bg("cat <<EO\\\nF\nbody\nEOF\nlong_job &", rib=False)), "deny")
+        check("trunc/fg-heredoc-quoted-continued-delim-denies",
+              _verdict(bg("cat <<\"EO\\\nF\"\nbody\nEOF\nlong_job &", rib=False)), "deny")
+        # Each delimiter shape below runs through real bash (env -i and the literal /usr/bin/bash, in this
+        # run's temporary directory, the command read by eval as a -c string is read) with `sleep 0 &` as
+        # its job, recording whether `$!` is set afterwards, and the guard's verdicts must agree: a real
+        # detach denies in registry scope and draws the note with no registry, and a shape bash reads as no
+        # detach allows in both. The shapes put a continuation inside the word, before it, between '<<' and
+        # the '-' of the <<- form, inside a double-quoted or $"..." fragment, after a quoted fragment and
+        # before one, and under <<- tab stripping, and one holds a '$(...)' span bash keeps whole, which the
+        # lexer refuses so the raw scan decides. The single-quoted row and the quoted-body row are controls
+        # (bash keeps a backslash-newline inside single quotes, so that body runs to the end of the
+        # command): they pass with the lexer's earlier reading too, and fail if the continuation is removed
+        # inside single quotes.
+        for check_id, shape, detaches in (
+            ("trunc/heredoc-delim-continued-bash-agrees", "cat <<EO\\\nF\nbody\nEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-dq-continued-bash-agrees", "cat <<\"EO\\\nF\"\nbody\nEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-sq-continued-bash-agrees", "cat <<'EO\\\nF'\nbody\nEOF\nsleep 0 &", False),
+            ("trunc/heredoc-delim-leading-continuation-bash-agrees", "cat <<\\\nEOF\nbody\nEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-strip-tabs-continued-bash-agrees",
+             "cat <<-EO\\\nF\n\tbody\n\tEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-strip-tabs-mixed-continued-bash-agrees",
+             "cat <<-'EO'\\\nF\n\tbody\n\tEOF\nsleep 0 &", True),
+            ("trunc/heredoc-delim-continued-into-quote-bash-agrees", "cat <<E\\\n'OF'\nbody\nEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-continued-dash-bash-agrees", "cat <<\\\n-'EOF'\n\tbody\n\tEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-quoted-continued-tail-bash-agrees",
+             "cat <<'EOF'\\\nX\nbody\nEOFX\nsleep 0 &", True),
+            ("trunc/heredoc-delim-locale-continued-bash-agrees", "cat <<$\"EO\\\nF\"\nbody\nEOF\nsleep 0 &",
+             True),
+            ("trunc/heredoc-delim-cmdsubst-bash-agrees", "cat <<'E'$(x)\nbody\nE$(x)\nsleep 0 &", True),
+            ("trunc/heredoc-delim-quoted-body-amp-bash-agrees", "cat <<'EOF'\nA & B\nEOF", False),
+        ):
+            try:
+                _bash = subprocess.run(
+                    ["/usr/bin/env", "-i", "/usr/bin/bash", "-c", 'eval "$1"; echo "BANG=$!"', "probe", shape],
+                    cwd=str(tmp), capture_output=True, text=True, timeout=30)
+                _bang = [line for line in _bash.stdout.split("\n") if line.startswith("BANG=")]
+                _bang_set = _bang[-1] != "BANG=" if _bang else None
+            except (OSError, subprocess.SubprocessError):
+                _bang_set = None
+            check(check_id,
+                  (_bang_set, _verdict(bg(shape, rib=False)),
+                   _verdict(ti_call({"command": shape, "run_in_background": False}))),
+                  (detaches, "deny" if detaches else "allow", "warn" if detaches else "allow"))
+        # DIFFERENTIAL ORACLE against real bash over a bounded generated here-document corpus: every
+        # delimiter form the shared parsers model (unquoted, single-quoted, double-quoted,
+        # backslash-escaped, partially quoted, ANSI-C, plus the <<- strip-tabs rows appended last),
+        # opened at the top level, inside a command substitution (its close glued to the delimiter
+        # line, 'EOF)', and on its own line), inside a subshell (both close forms), inside backquotes
+        # and inside a double-quoted command substitution (the commit-message form), over bodies
+        # holding a bare '&', an apostrophe, a double-quoted '&', a '#' comment with an '&', a
+        # trailing-backslash line continuation and plain text, each followed or not by a real
+        # background job. Each case runs through real bash (env -i and the literal /usr/bin/bash, in
+        # this oracle's own temporary directory under the run fixture root; the command is read by
+        # eval from a -c string; nothing in the corpus touches the network or writes outside that
+        # directory), recording ONLY whether $! is set afterwards, and the REGISTRY-SCOPE verdict
+        # must agree with bash in both directions: a command after which bash sets $! (a real
+        # detach) must DENY, and a command bash does not background must ALLOW on the rows the
+        # three-shape narrowing lifts (expected_allow below: a top-level or commit-message-form body
+        # '&' under a quoted delimiter with an exact closing line and no trailing job; every other
+        # non-detaching row may fail closed). A bash run that yields no BANG line, or a probe error,
+        # is missing fixture evidence and FAILS its row rather than passing it. The corpus is a
+        # deterministic product of 506 cases, one short bash run each, well under the 60-second
+        # budget for the whole oracle.
+        oracle_dir = tmp / "trunc-bash-oracle"
+        oracle_dir.mkdir()
+        _oracle_specs = (("unquoted", "EOF"), ("squote", "'EOF'"), ("dquote", '"EOF"'),
+                         ("escaped", "\\EOF"), ("partial", "EO'F'"), ("ansi", "$'EOF'"))
+        _oracle_lifted_specs = frozenset(("squote", "dquote", "escaped", "partial", "ansi"))
+        _oracle_bodies = (("amp", "A & B"), ("apos", "it's"), ("dq-amp", 'say "a & b"'),
+                         ("comment-amp", "# x &"), ("cont", "x\\"), ("plain", "body"))
+        _oracle_contexts = (
+            ("top", "cat <<{s}\n{b}\nEOF{t}"),
+            ("cmdsubst-glued", "x=$(cat <<{s}\n{b}\nEOF){t}"),
+            ("cmdsubst-own-line", "x=$(cat <<{s}\n{b}\nEOF\n){t}"),
+            ("subshell-glued", "(cat <<{s}\n{b}\nEOF){t}"),
+            ("subshell-own-line", "(cat <<{s}\n{b}\nEOF\n){t}"),
+            ("backquote", "x=`cat <<{s}\n{b}\nEOF`{t}"),
+            ("dq-subst", ": \"$(cat <<{s}\n{b}\nEOF\n)\"{t}"),
+        )
+        _oracle_tails = (("alone", ""), ("job", "\nsleep 0 &"))
+        oracle_cases = []
+        for _ckey, _template in _oracle_contexts:
+            for _skey, _spec in _oracle_specs:
+                for _bkey, _body in _oracle_bodies:
+                    for _tkey, _tail in _oracle_tails:
+                        expected_allow = (
+                            _tkey == "alone"
+                            and ((_ckey == "top" and _skey in _oracle_lifted_specs
+                                  and _bkey == "amp")
+                                 # the commit-message form's exact close; its delimiter spec must
+                                 # hold no '$' (the shared close parser refuses one, fail closed)
+                                 or (_ckey == "dq-subst" and _skey in _oracle_lifted_specs
+                                     and _skey != "ansi" and _bkey in ("amp", "dq-amp"))))
+                        oracle_cases.append(
+                            ("/".join((_ckey, _skey, _bkey, _tkey)),
+                             _template.format(s=_spec, b=_body, t=_tail), expected_allow))
+        oracle_cases.append(("top/strip-tabs/amp/alone", "cat <<-'EOF'\n\tA & B\n\tEOF", True))
+        oracle_cases.append(
+            ("top/strip-tabs/amp/job", "cat <<-'EOF'\n\tA & B\n\tEOF\nsleep 0 &", False))
+        oracle_failures = []
+        for _okey, _oshape, _oexpect_allow in oracle_cases:
+            try:
+                _obash = subprocess.run(
+                    ["/usr/bin/env", "-i", "/usr/bin/bash", "-c", 'eval "$1"; echo "BANG=$!"',
+                     "probe", _oshape],
+                    cwd=str(oracle_dir), capture_output=True, text=True, timeout=30)
+                _obang = [line for line in _obash.stdout.split("\n") if line.startswith("BANG=")]
+                _obang_set = _obang[-1] != "BANG=" if _obang else None
+            except (OSError, subprocess.SubprocessError):
+                _obang_set = None
+            _overdict = _verdict(bg(_oshape, rib=False))
+            if _obang_set is None:
+                oracle_failures.append("{}: missing or malformed bash evidence".format(_okey))
+            elif _obang_set and _overdict != "deny":
+                oracle_failures.append(
+                    "{}: bash sets $! but registry scope reads {}".format(_okey, _overdict))
+            elif not _obang_set and _oexpect_allow and _overdict != "allow":
+                oracle_failures.append(
+                    "{}: bash does not background and the narrowing lifts this shape, but registry "
+                    "scope reads {}".format(_okey, _overdict))
+        check("trunc/oracle-heredoc-bash-differential",
+              (len(oracle_cases), oracle_failures), (506, []))
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -12624,9 +12882,10 @@ def _main_isolated(report_path=None):
               _verdict(bg("x=$(true) #; python3 build.py | head")), "warn")
         # The lexer vectors of the shared comment rule, run as foreground commands: bash 5.3.9 runs the RUN
         # or RAN command in each (vectors a and b detach it with a bare `&`), and each `#` is right after a
-        # `)` or at a word start inside an open ${...}, so the foreground scan denies every one as
-        # unbalanced. At the base commit a and b denied as a detach and c to i allowed; the earlier comment
-        # rule allowed all nine.
+        # `)` or at a word start inside an open ${...}, so the foreground scan reads every one as
+        # unbalanced, and the guard denies every one (a and b as the detach a lexer reading reaches). At the
+        # base commit a and b denied as a detach and c to i allowed; the earlier comment rule allowed all
+        # nine.
         _fg_hash_vectors = (
             'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
             'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
@@ -12708,6 +12967,8 @@ def _main_isolated(report_path=None):
         # and git-toplevel union find no registry allows BY DEFAULT (a git FAILURE alone never denies by
         # default: the round-3 git lockout is withdrawn; the registry-required exception is pinned by
         # trunc/registry-required-git-unavailable-core-worktree-denies). The confirmed-outside CONTROL row passes before and after the fix.
+        # Each no-registry allow row below probes with the bare-& detach of nocwd, so it reads "warn": the
+        # no-registry warn allows the call with a note, where a registry in scope denies it.
         def _cwd_case(cwd):
             res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
             why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -16782,12 +17043,14 @@ def _main_isolated(report_path=None):
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both), allows-with-note a readable foreground "
-          "detach where no registry is found (naming the tracked background mechanism; redirect operands "
-          "keep their command position pending), while dropping a word-start `#` comment "
-          "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
-          "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
-          "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
-          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
+          "command that may detach where no registry is found (one note per call naming the tracked "
+          "background mechanism, from the in-scope detector or else the note scan; redirect operands keep "
+          "their command position pending), while dropping a word-start `#` comment "
+          "and failing a scan that ends inside an open quote toward a deny with its own reason (the shared "
+          "lexer's bare '&' separator also denies where that scan misreads a quote in mid-string, and the "
+          "scan's detach is lifted only where the lexer places every '&' in a quoted here-document body, a "
+          "quoted string or a comment, the lexer reading a here-document delimiter word as bash does, its "
+          "line continuations removed), reads a '#' comment by bash's word-start rule as well, denies every "
           "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found or the nearest registry entry cannot be evaluated (a discovery fault never satisfies that mode; by default it keeps the guard active), and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
