@@ -85,7 +85,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
-from _standards import dir_or_absent, LINK_OUTSIDE_ROOT  # noqa: E402
+from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
 import gen_enforceability  # noqa: E402  reuse build_ledger so the register can never accept a stale ledger
@@ -768,13 +768,14 @@ def build_views(root):
     ValueError/OSError/gen_site.SchemaError on any malformed, unreadable, stale, or contradictory input
     (including a bad site shell or a display-fidelity failure); the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
-    # dir_or_absent (not is_dir or dir_present): a corpus that is there but cannot be read as a directory (a
+    # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
     # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
     # root) is never read; a symlink to a directory inside the root is read.
-    present, problem = dir_or_absent(rules_dir, root)
+    # dir_present, bound beneath root, then judges every component above it the same way.
+    _present, problem = dir_or_absent(rules_dir, root)
     if problem is not None:
         raise ValueError("cannot build the register: {} {} (cannot evaluate)".format(rules_dir, problem))
-    if not present:
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot build the register: no {} to load".format(rules_dir))
     ledger = load_ledger(root)
     by_cid, controls, linkage = ledger_index(ledger)

@@ -69,7 +69,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
-from _standards import dir_or_absent, LINK_OUTSIDE_ROOT  # noqa: E402
+from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
 import gen_agents  # noqa: E402  the AGENTS.md ordering and body transform (sort_key, body_of, HEADER)
 import _adapter_compose as adapter_compose  # noqa: E402  the AGENTS.md layout (load_registry, compose)
@@ -168,13 +168,14 @@ def measure(root):
     the corpus loader's ValueError/OSError) on an unreadable or ambiguous input."""
     agents = read_agents(root / AGENTS_REL)
     src_dir = root.joinpath(*RULES_PARTS)
-    # dir_or_absent (not is_dir or dir_present): a corpus that is there but cannot be read as a directory (a
+    # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
     # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
     # root) is never read; a symlink to a directory inside the root is read.
-    present, problem = dir_or_absent(src_dir, root)
+    # dir_present, bound beneath root, then judges every component above it the same way.
+    _present, problem = dir_or_absent(src_dir, root)
     if problem is not None:
         raise DemoError("the rule corpus {} {} (cannot evaluate)".format("/".join(RULES_PARTS), problem))
-    if not present:
+    if not dir_present(src_dir, root=root):
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
     pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
