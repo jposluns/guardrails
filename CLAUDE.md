@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.15** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.16** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -67,7 +67,14 @@ adopter-conformance suite, an enforceability-ledger drift gate with a bidirectio
 reads `actions/runs`, needing Actions: Read; under `--wait` it also reads pull requests: `pulls`, for
 which a private repository's token also needs Pull requests: Read, and `commits/<sha>/pulls`, expected
 to need the same (not verified live); see the script's header), never `gh pr checks` (a fine-grained token cannot read
-the Checks API) and never `commits/<sha>/status` (which always reads pending). The gate roster grows
+the Checks API) and never `commits/<sha>/status` (which always reads pending). The script also offers
+`--match-tree [--head <rev>] [--require-job-success <job name>]...`, which succeeds only on a completed
+successful run of `.github/workflows/quality.yml` whose head commit's TREE equals the queried commit's
+tree (each run's tree is read from `git/commits/<sha>`, expected to need Contents: Read, not verified
+live), with optional per-job success requirements: every job of each name given concluded success in that
+run, so a skipped job never counts, and it refuses the tree when any completed run of that file on a commit
+with the same tree, within its read window, concluded anything but success, since a later pass never
+erases an earlier failure. The gate roster grows
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
 Quality runs on a pull request only when a label is added to it: `quality.yml` triggers on the `labeled`

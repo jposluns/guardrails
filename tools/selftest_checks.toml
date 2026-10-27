@@ -1782,6 +1782,16 @@ expected-check-ids = [
   "ci/wait-pr-probe-associated-read",
   "ci/wait-pr-probe-merged-beside-candidate",
   "ci/wait-pr-probe-merged-at-timestamp",
+  "ci/match-tree-identical-green",
+  "ci/match-tree-mismatch-exit1",
+  "ci/match-tree-no-run-exit1",
+  "ci/match-tree-nonsuccess-run-refused",
+  "ci/match-tree-wrong-workflow-file-refused",
+  "ci/match-tree-required-job-skipped-refused",
+  "ci/match-tree-jobs-read-malformed-fail-closed",
+  "ci/match-tree-head-flag-consumed",
+  "ci/match-tree-repeated-flag-refused",
+  "ci/match-tree-failed-run-on-same-tree-refused",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
