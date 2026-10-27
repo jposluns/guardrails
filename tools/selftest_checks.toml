@@ -2676,6 +2676,10 @@ expected-check-ids = [
   "probe/ancestor-replaced-before-open-raises",
   "probe/outside-root-raises",
   "probe/parent-climb-raises",
+  "probe/link-outside-root-refused",
+  "probe/link-climbing-above-root-refused",
+  "probe/search-only-link-to-root-listable",
+  "probe/search-only-past-linked-ancestor-reads-true",
   "probe/descriptors-closed-once",
   # ---------- the manifest loader, probed beneath its root ----------
   "loader/aiqt-ancestor-dangling-refused",
@@ -2710,6 +2714,10 @@ expected-check-ids = [
   "gate/rules-vanished-before-open-exits-2",
   "gate/claude-replaced-before-open-exits-2",
   "gate/rules-swapped-after-open-reads-judged",
+  "gate/family-symlink-rules-swapped-after-open-reads-judged",
+  "gate/relative-family-symlink-claude-swapped-after-open-reads-judged",
+  "gate/family-symlink-through-claude-swapped-after-open-reads-judged",
+  "gate/vendored-source-symlink-rules-swapped-after-open-reads-judged",
   # ---------- links and non-regular rule files below the rules directory ----------
   "gate/family-symlink-reads-family",
   "gate/rule-file-symlink-exits-2",
@@ -2733,6 +2741,8 @@ expected-check-ids = [
   "mutant/held-identity-unchecked-caught",
   "mutant/held-final-unopened-caught",
   "mutant/vanished-reads-absent-caught",
+  "mutant/link-outside-root-admitted-caught",
+  "mutant/link-climb-above-root-admitted-caught",
   "mutant/listing-identity-unchecked-caught",
   # ---------- the gate's own --root guard ----------
   "vector/every-vector-holds",

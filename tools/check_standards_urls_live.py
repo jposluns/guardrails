@@ -120,9 +120,10 @@ def run(std_dir, timeout, *, root, search_only=False):
 def self_test_main():
     """Offline self-test of the explicit --std probe, launched through main: a real directory exits 0,
     as does a --std that is a symlink to a directory inside its root, sits beneath such a symlinked
-    ancestor, or is swapped for such a symlink after its probe; a dangling --std, or a live symlink to
-    a directory outside its root, exits 2 naming it. The fixture manifest carries no url, so no vector
-    reaches the network."""
+    ancestor, or is swapped for such a symlink after its probe (read through the loader's held
+    descriptor when the directory it names is swapped after the loader's open); a dangling --std, or
+    a live symlink to a directory outside its root, swapped in after its probe included, exits 2
+    naming it. The fixture manifests carry no url, so no vector reaches the network."""
     import io
     import shutil
     import tempfile
@@ -154,8 +155,10 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: an explicit --std that is a real directory exits 0, as does one that is a "
           "symlink to a directory inside its root, sits beneath such a symlinked ancestor or is swapped "
-          "for such a symlink after its probe, and one that is a dangling symlink or a live symlink to a "
-          "directory outside its root exits 2 naming it (offline, no network)")
+          "for such a symlink after its probe (read through the loader's held descriptor when its target "
+          "is swapped after the loader's open), and one that is a dangling symlink or a live symlink to "
+          "a directory outside its root, swapped in after its probe included, exits 2 naming it "
+          "(offline, no network)")
     return 0
 
 

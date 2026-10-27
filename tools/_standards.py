@@ -173,16 +173,26 @@ _lstat = os.lstat
 # The link resolution primitives the walk uses on a symlink it meets, bound at import as _lstat is, so a
 # self-test that stands in for the os module inside a probe module still sees every call the walk makes.
 _realpath = os.path.realpath
-_commonpath = os.path.commonpath
+_readlink = os.readlink
 
 # The dir_fd capability, bound at import so it reflects the platform, not a later rebinding of an os
 # attribute (a self-test may wrap os.open); _adapter_compose binds its _DIR_FD_REQUIRES the same way.
-_DIR_FD_OK = os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
+_DIR_FD_OK = (os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
+              and os.readlink in os.supports_dir_fd)
 
 # The search-only open flag for a search_only walk, bound at import for the same reason: O_PATH where
 # the platform has it (a directory opened for search needs no read permission), else 0, so the walk
-# opens for reading as the default probe does.
+# opens for reading as the default probe does. A symlink is read through an O_PATH descriptor for the
+# link itself, so where the platform has no O_PATH every symlink is refused (_read_link).
 _SEARCH = getattr(os, "O_PATH", 0)
+
+# Every directory the walk opens below its root, and every directory a symlink's target is walked
+# through, is opened beneath its parent's descriptor with these flags (search added where it applies).
+_STEP_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+# The most symlinks one resolution may meet, the kernel's own bound (Linux MAXSYMLINKS); one more is a
+# loop, refused as the kernel refuses it.
+_MAX_LINKS = 40
 
 
 def dir_present(path, *, root, search_only=False):
@@ -197,10 +207,17 @@ def dir_present(path, *, root, search_only=False):
     or from opening a directory it must walk through). An inspected entry that EXISTS but cannot be
     read as a directory raises NotADirectoryError (an OSError, so the callers' existing fail-closed
     handlers refuse it): a regular file, a FIFO, a device, or a symlink that is dangling, whose
-    target is not a directory, or whose target resolves outside root. A symlink is resolved once
-    (os.path.realpath, strict) and tested against the resolved root; the directory it resolves to is
-    then walked to from the resolved root, every component of that walk judged as below and none of
-    them followed, so a symlink met there (swapped in after the resolution) is refused.
+    target is not a directory, or whose target resolves outside root. A symlink is never resolved by
+    name: it is read beneath the descriptor of the directory holding it, through a descriptor for the
+    link itself whose st_dev and st_ino must equal the lstat that judged it, and its target is walked
+    beneath the descriptors the walk holds (_follow): a relative target from that directory, '..'
+    stepping back to the held parent and never above root (a target that climbs above root is
+    refused, even one that names root again on its way back in), an absolute one from root's own
+    descriptor once it lies lexically beneath root as named or as resolved, a component that names a
+    directory the walk already holds (by the name it opened it under) read through that descriptor,
+    every other component judged and opened as below, and every symlink met on the way read the same
+    way. A target that is missing at any component reads as a dangling symlink, never as absence;
+    one that meets more than 40 symlinks raises OSError (ELOOP).
 
     root is required and keyword-only: the directory the caller already trusts (its resolved
     repository or --root directory, or a directory it just created), which path must lie beneath.
@@ -225,10 +242,11 @@ def dir_present(path, *, root, search_only=False):
     ensure_listable catches a reachable-but-unlistable directory.
 
     search_only opens root and every directory the walk passes through for search only (O_PATH where
-    the platform has it), so a traversable but unreadable directory on the way does not raise; the
-    default opens them for reading, so such a directory raises EACCES. Every judgement is the same
-    either way: each component is judged by lstat, and O_PATH with O_DIRECTORY|O_NOFOLLOW refuses a
-    symlink as O_RDONLY does."""
+    the platform has it), a directory a symlink's target passes through or names included, so a
+    traversable but unreadable directory on the way does not raise; the default opens them for
+    reading, so such a directory raises EACCES. Every judgement is the same either way: each
+    component is judged by lstat, and O_PATH with O_DIRECTORY|O_NOFOLLOW refuses a symlink as
+    O_RDONLY does."""
     return _walk(path, root, _SEARCH if search_only else 0, False) is not None
 
 
@@ -246,78 +264,226 @@ def open_dir(path, *, root, search_only=False):
     (os.scandir on the descriptor, os.open with dir_fd) is then bound to that directory whatever
     later happens to its name. search_only opens root and the directories the walk passes through
     as dir_present's does; the final directory is opened for reading either way, since its caller
-    lists it."""
+    lists it (one a symlink names, root included, is opened again for reading beneath the
+    descriptor that holds it)."""
     return _walk(path, root, _SEARCH if search_only else 0, True)
 
 
-def _linked_dir(link, root):
-    """(target, resolved root) when the symlink at link resolves (os.path.realpath, strict) to an
-    existing directory inside root, root resolved too; None when it is dangling, resolves outside
-    root, or names something that is not a directory, which the walk then refuses. A link that
-    cannot be resolved other than by absence (a loop, an unreadable component) raises OSError."""
+def open_chain(path, *, root):
+    """open_dir, returning every descriptor its walk holds rather than only the last: the list of
+    (descriptor, name) pairs from root's own (named "") down to path's, each directory the physical
+    parent of the next and each name the one the next was opened under beneath it (a symlink on the
+    way is read as the directory it names, so the list runs through that directory's real parents),
+    all opened for reading; None on genuine absence. The caller owns and closes every one
+    (close_chain). A caller that walks on below path extends the list with each directory it opens
+    beneath the last, by its name, and resolves a symlink it lists there with follow_link beneath
+    the list, never by name from root."""
+    return _walk(path, root, 0, _CHAIN)
+
+
+def close_chain(chain):
+    """Close the descriptor of every (descriptor, name) pair in the list chain, the last first, as
+    open_chain and follow_link return them to their caller."""
+    for held, _name in reversed(chain):
+        os.close(held)
+
+
+def follow_link(chain, name, judged, path, root):
+    """Resolve the symlink name listed beneath chain[-1], judged by judged (its lstat, as the
+    caller's listing took it), where chain is the (descriptor, name) list open_chain returned for
+    root, or one extended from it: (kept, new), the directory the link names being the last of
+    chain[:kept] + new, every one opened for reading, new a list of pairs opened here and owned by
+    the caller (close_chain). Anything but a symlink to a real directory inside root raises
+    NotADirectoryError naming path, and a link replaced since judged raises OSError naming it
+    (_follow)."""
+    kept, new, new_names = _follow([held for held, _step in chain], [step for _held, step in chain],
+                                   name, judged, path, Path(root), 0)
+    return kept, list(zip(new, new_names))
+
+
+# The hold that makes _walk return every descriptor it holds (open_chain) rather than the last.
+_CHAIN = "chain"
+
+
+def _refused(path):
+    """The refusal of a symlink that cannot be read as a directory inside the root, naming path."""
+    return NotADirectoryError(errno.ENOTDIR, "a symlink where a directory is required", str(path))
+
+
+def _read_link(dir_fd, name, judged, path):
+    """The target of the symlink name beneath dir_fd, read through a descriptor for the link itself
+    (O_PATH|O_NOFOLLOW) whose st_dev and st_ino must equal judged's (the lstat that judged it), so a
+    link replaced in between (by another link or anything else) raises OSError(ESTALE) naming path,
+    and one removed in between raises the same, never read as absence. Where the platform has no
+    O_PATH a link cannot be read bound to its judgement, so it raises OSError(ENOSYS) naming path."""
+    if not _SEARCH:
+        raise OSError(errno.ENOSYS, "reading a symlink bound to the lstat that judged it (O_PATH) is "
+                      "unavailable on this platform, so it is never followed", str(path))
     try:
-        real = _realpath(link, strict=True)
-        real_root = _realpath(root)
-        if _commonpath([real, real_root]) != real_root or not stat.S_ISDIR(_lstat(real).st_mode):
-            return None
-    except (FileNotFoundError, ValueError):
-        return None
-    return Path(real), Path(real_root)
+        link_fd = os.open(name, _SEARCH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise OSError(errno.ESTALE, "the symlink the probe judged is gone (removed or renamed in "
+                      "between)", str(path))
+    try:
+        opened = os.fstat(link_fd)
+        if not stat.S_ISLNK(opened.st_mode) or (opened.st_dev, opened.st_ino) != (judged.st_dev,
+                                                                                 judged.st_ino):
+            raise OSError(errno.ESTALE, "the symlink opened is not the one the probe judged (it was "
+                          "replaced in between)", str(path))
+        return _readlink("", dir_fd=link_fd)
+    finally:
+        os.close(link_fd)
 
 
-def _walk(path, root, search, hold, follow=True):
-    """The walk dir_present and open_dir share. Return None on genuine absence; otherwise True, or
-    with hold the final directory's descriptor, the only one it leaves open, opened for reading
-    whatever search is. Every directory it opens below root is checked by st_dev and st_ino against
-    the lstat that judged it; root itself is opened as named. With follow, a symlink at a component
-    that resolves to a directory inside root (_linked_dir) is read as that directory: it is walked
-    to from the resolved root without follow, held when a later component is judged beneath it or
-    when it is the held final component; any other symlink is refused."""
+def _beneath(target, base):
+    """The components of the absolute symlink target below the probe root base, as named (made
+    absolute) or as resolved, whichever it lies lexically beneath; None when it lies beneath neither,
+    which _follow refuses as outside root. The root's path is resolved by name when the link is
+    followed, and decides only whether the target is taken as beneath root, never what is read: the
+    components returned are walked beneath root's held descriptor."""
+    parts = Path(target).parts
+    for named in (base.absolute(), Path(_realpath(base))):
+        if parts[:len(named.parts)] == named.parts:
+            return parts[len(named.parts):]
+    return None
+
+
+def _follow(fds, names, name, judged, path, base, search):
+    """Resolve the symlink name, judged by lstat beneath fds[-1], where fds holds the descriptors of
+    the directories from the probe root base (fds[0]) down to it, each the physical parent of the
+    next, and names[i] is the name fds[i] was opened under beneath fds[i - 1]. The link is read
+    through a descriptor for itself (_read_link), and its target is walked beneath held descriptors
+    only, never by name from the root: a relative target from fds[-1], an absolute one from fds[0]
+    once it lies lexically beneath base (_beneath); '..' steps back to the held parent and never
+    above fds[0]; a component naming, beneath a held directory, the next directory held below it (by
+    the name it was opened under) is that held directory, never looked up again; every symlink met
+    on the way is read the same way (at most _MAX_LINKS in all); and every other directory reached
+    is judged by lstat, opened beneath its parent's descriptor with O_DIRECTORY|O_NOFOLLOW (search
+    added) and checked by st_dev and st_ino against that lstat. Return (kept, new, new_names): the
+    directory the link names is the last of fds[:kept] + new, new opened here, each under the name
+    at the same place in new_names, and owned by the caller. A target missing at any component,
+    climbing above the root, lying outside it or naming a non-directory raises NotADirectoryError
+    naming path; a directory replaced or removed between its lstat and its open raises
+    OSError(ESTALE) naming path. Nothing it opens is left open when it raises."""
+    kept, new, new_names, spare = len(fds), [], [], []
+    pending = []
+    links = 0
+    target = _read_link(fds[-1], name, judged, path)
+    try:
+        while target is not None:
+            links += 1
+            if links > _MAX_LINKS:
+                raise OSError(errno.ELOOP, "more symlinks than one resolution may meet", str(path))
+            if not target:
+                raise _refused(path)
+            parts = Path(target).parts
+            if Path(target).is_absolute():
+                parts = _beneath(target, base)
+                if parts is None:
+                    raise _refused(path)
+                kept = 1
+                spare.extend(new)
+                del new[:], new_names[:]
+            pending.extend(reversed(parts))
+            target = None
+            while pending and target is None:
+                part = pending.pop()
+                if part == "..":
+                    if new:
+                        spare.append(new.pop())
+                        new_names.pop()
+                    elif kept > 1:
+                        kept -= 1
+                    else:
+                        raise _refused(path)
+                    continue
+                if not new and kept < len(fds) and part == names[kept]:
+                    # The next directory the walk already holds, by the name it was opened under:
+                    # read through that descriptor, so a swap of it after its open changes nothing.
+                    kept += 1
+                    continue
+                here = new[-1] if new else fds[kept - 1]
+                try:
+                    st = _lstat(part, dir_fd=here)
+                except FileNotFoundError:
+                    raise _refused(path)
+                if stat.S_ISLNK(st.st_mode):
+                    # Read beneath the directory holding it; its target is walked from there.
+                    target = _read_link(here, part, st, path)
+                    continue
+                if not stat.S_ISDIR(st.st_mode):
+                    raise _refused(path)
+                try:
+                    new.append(os.open(part, _STEP_FLAGS | search, dir_fd=here))
+                except FileNotFoundError:
+                    raise OSError(errno.ESTALE, "a directory the symlink's target names is gone "
+                                  "(removed or renamed in between)", str(path))
+                new_names.append(part)
+                reached = os.fstat(new[-1])
+                if (reached.st_dev, reached.st_ino) != (st.st_dev, st.st_ino):
+                    raise OSError(errno.ESTALE, "a directory the symlink's target names is not the one "
+                                  "the probe judged (it was replaced in between)", str(path))
+    except BaseException:
+        spare.extend(new)
+        del new[:]
+        raise
+    finally:
+        for gone in reversed(spare):
+            os.close(gone)
+    return kept, new, new_names
+
+
+def _walk(path, root, search, hold):
+    """The walk dir_present, open_dir and open_chain share. Return None on genuine absence;
+    otherwise True, or with hold the final directory's descriptor, opened for reading whatever
+    search is, the only one it leaves open, or with hold _CHAIN every descriptor it holds, root's
+    first, each paired with its name (open_chain). Every directory it opens below root is checked by
+    st_dev and st_ino against the lstat that judged it; root itself is opened as named. A symlink at
+    a component is resolved beneath the descriptors the walk holds (_follow) and read as the
+    directory it names, when that is a real directory inside root; any other symlink is refused."""
     path = Path(path)
     base = Path(root)
     try:
         parts = path.relative_to(base).parts
     except ValueError:
         parts = None
-    if parts is None or ".." in parts or (hold and not parts and follow):
+    if parts is None or ".." in parts or (hold and not parts):
         raise OSError(errno.EINVAL, "not a path beneath the probe root {}".format(base), str(path))
     if not _DIR_FD_OK:
         raise OSError(
-            errno.ENOSYS, "directory probing bound beneath a descriptor (os.open and os.lstat "
-            "with dir_fd) is unavailable on this platform", str(path))
+            errno.ENOSYS, "directory probing bound beneath a descriptor (os.open, os.lstat and "
+            "os.readlink with dir_fd) is unavailable on this platform", str(path))
     walked = base
     fds = []
+    names = [""]   # the name each directory in fds was opened under beneath the one before it
+    spare = []
+    linked = False
     try:
         try:
             fds.append(os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | search))
             for i, name in enumerate(parts):
                 walked = walked / name
                 st = _lstat(name, dir_fd=fds[-1])
-                if follow and stat.S_ISLNK(st.st_mode):
-                    linked = _linked_dir(walked, base)
-                    if linked is not None:
-                        reached = _walk(linked[0], linked[1], search, hold or i + 1 < len(parts), False)
-                        if reached is None:
-                            # The resolution found the directory, so it is gone only because the
-                            # tree changed in between: never absence.
-                            raise OSError(errno.ESTALE, "the directory the symlink resolved to is gone "
-                                          "(removed or renamed in between)", str(walked))
-                        if reached is not True:
-                            fds.append(reached)
-                        continue
+                linked = stat.S_ISLNK(st.st_mode)
+                if linked:
+                    # The directories '..' in its target steps back past are no longer on the way;
+                    # they are closed with the rest when the walk ends.
+                    kept, new, new_names = _follow(fds, names, name, st, walked, base, search)
+                    spare.extend(fds[kept:])
+                    fds[kept:] = new
+                    names[kept:] = new_names
+                    continue
                 if not stat.S_ISDIR(st.st_mode):
-                    kind = "a symlink" if stat.S_ISLNK(st.st_mode) else "a non-directory entry"
                     raise NotADirectoryError(
-                        errno.ENOTDIR, "{} where a directory is required".format(kind), str(walked))
+                        errno.ENOTDIR, "a non-directory entry where a directory is required", str(walked))
                 if hold or i + 1 < len(parts):
                     # The next component is judged beneath THIS component's descriptor; O_NOFOLLOW
                     # refuses even a symlink swapped in between the lstat above and this open. The
                     # final component is opened only when it is held (for reading, as its caller
                     # lists it): otherwise its lstat is the whole judgement.
                     try:
-                        fds.append(os.open(name,
-                                           os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-                                           | (search if i + 1 < len(parts) else 0), dir_fd=fds[-1]))
+                        fds.append(os.open(name, _STEP_FLAGS | (search if i + 1 < len(parts) else 0),
+                                           dir_fd=fds[-1]))
                     except FileNotFoundError:
                         # The lstat above found this entry, so it is gone only because the tree
                         # changed in between: that is never absence. Not ENOENT, which the handler
@@ -332,11 +498,25 @@ def _walk(path, root, search, hold, follow=True):
                     if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
                         raise OSError(errno.ESTALE, "the directory opened is not the one the probe "
                                       "judged (it was replaced in between)", str(walked))
+                    names.append(name)
         except FileNotFoundError:
             return None
+        if hold and linked and search:
+            # The final directory was named by a symlink, so it is held by a search-only descriptor
+            # (its own, or root's or an ancestor's when the target names one): open it again for
+            # reading through '.' beneath that descriptor, which names that directory and no other.
+            try:
+                fds.append(os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fds[-1]))
+            except FileNotFoundError:
+                raise OSError(errno.ESTALE, "the directory the symlink names is gone (removed in "
+                              "between)", str(walked))
+        if hold == _CHAIN:
+            held = list(zip(fds, names))
+            del fds[:]
+            return held
         return fds.pop() if hold else True
     finally:
-        for fd in reversed(fds):
+        for fd in reversed(fds + spare):
             os.close(fd)
 
 
@@ -371,12 +551,18 @@ def _std_root_vectors(launch, base, today, failures):
     and returns (exit code, stderr text); base is a fresh writable directory; today dates the fixture
     manifest (a current, url-free manifest, so no vector reaches the network). A real --std exits 0,
     also beneath a traversable but unreadable directory where the platform has O_PATH; a --std that
-    is a live symlink to a directory inside its root (std_root's), sits beneath such a symlinked
-    ancestor, or holds no manifest and is swapped for such a symlink to the real tree right after
-    std_root's probe judged it (a hook on the probe primitive), is read and exits 0; a --std that is
-    a dangling symlink, or a live symlink to a directory outside its root, exits 2 naming the
-    symlink. Each failure is appended to failures as one line."""
-    global _lstat
+    is a live symlink to a directory inside its root (std_root's), or sits beneath such a symlinked
+    ancestor, is read and exits 0. A --std that holds no manifest and is swapped for such a symlink
+    right after std_root's probe judged it (a hook on the probe primitive) is read through the
+    loader's own walk and exits 0: the directory it names holds two manifests, and right after the
+    loader validates the first (a hook on its manifest class) that directory is moved aside and one
+    holding a malformed copy of the second put at its name, so a loader that read the second by name
+    would exit 2 where one reading through the descriptor it holds does not. A --std that is a dangling
+    symlink, or a live symlink to a directory outside its root, exits 2 naming the symlink, and so
+    does one swapped for such a symlink right after std_root's probe (the loader refuses it naming
+    it, with the walk's refusal or dir_or_absent's reason). Each failure is appended to failures as
+    one line."""
+    global _lstat, Manifest
     base = Path(base).resolve()   # the fixture's own ancestors must hold no symlink
     body = ('map-key = "map-cur"\nname = "Self-test cur"\npublisher = "AIQT self-test"\n'
             'edition = "2026"\nkind = "control"\nstatus = "stable"\ncitation-unit = "control"\n'
@@ -385,13 +571,20 @@ def _std_root_vectors(launch, base, today, failures):
     real = base / "std-real"
     opaque = base / "std-opaque"
     swapped = base / "std-swapped"
-    swapped.mkdir()
+    swap_target = base / "std-swap-target"
     for directory in (real, opaque / "standards", base / "std-ancestor-real" / "standards"):
         directory.mkdir(parents=True)
         (directory / "cur.toml").write_text(body, encoding="utf-8")
+    swap_target.mkdir()
+    for stem in ("a", "b"):
+        (swap_target / (stem + ".toml")).write_text(
+            body.replace('"map-cur"', '"map-{}"'.format(stem)), encoding="utf-8")
     # A --std two levels below base, so its root (std_root's) is base / "nest" and real lies outside it.
     out_link = base / "nest" / "inner" / "std-out-link"
+    swapped_out = base / "nest" / "inner" / "std-swapped-out"
     out_link.parent.mkdir(parents=True)
+    for directory in (swapped, swapped_out):
+        directory.mkdir()
     try:
         (base / "std-link").symlink_to(real)
         (base / "std-dangling").symlink_to(base / "no-such-target")
@@ -401,42 +594,68 @@ def _std_root_vectors(launch, base, today, failures):
         failures.append("NOT RUN: the --std symlink vectors: cannot create a symlink ({})".format(exc))
         return
     real_lstat = _lstat
-    moved = []
+    real_manifest = Manifest
 
-    def _swapping_lstat(name, dir_fd=None):
-        # Judge swapped as it is, then, once, move it aside and link its name to the real tree.
-        st = real_lstat(name, dir_fd=dir_fd)
-        if name == swapped.name and not moved:
-            moved.append(swapped.rename(swapped.with_name(swapped.name + "-judged")))
-            swapped.symlink_to(real)
-        return st
+    def _swapping_lstat(target, link_to):
+        # Judge target as it is, then, once, move it aside and link its name to link_to.
+        moved = []
+
+        def probe(name, dir_fd=None):
+            st = real_lstat(name, dir_fd=dir_fd)
+            if name == target.name and not moved:
+                moved.append(target.rename(target.with_name(target.name + "-judged")))
+                target.symlink_to(link_to)
+            return st
+        return probe
+
+    def _swapping_manifest():
+        # The loader's manifest class, which, once, right after the first manifest is validated,
+        # moves the swap target aside and puts at its name a directory holding a malformed b.toml.
+        moved = []
+
+        class SwappingManifest(real_manifest):
+            def __init__(self, path, data):
+                super().__init__(path, data)
+                if not moved:
+                    moved.append(swap_target.rename(swap_target.with_name(swap_target.name + "-judged")))
+                    swap_target.mkdir()
+                    (swap_target / "b.toml").write_text("not a manifest [\n", encoding="utf-8")
+        return SwappingManifest
+
+    def _refusal(path):
+        return ("a symlink where a directory is required: '{}'".format(path),)
 
     opaque.chmod(0o711)
     try:
-        # (vector, --std, expected exit, the path the refusal must name, the probe primitive)
-        for vector, std, want, named, probe in (
-                ("real --std directory", real, 0, None, real_lstat),
+        # (vector, --std, expected exit, the refusals one of which the error must hold, the probe
+        # primitive, the loader's manifest class)
+        for vector, std, want, refusals, probe, manifest in (
+                ("real --std directory", real, 0, None, real_lstat, real_manifest),
                 ("real --std beneath a traversable but unreadable directory", opaque / "standards",
-                 0 if _SEARCH else 2, None, real_lstat),
+                 0 if _SEARCH else 2, None, real_lstat, real_manifest),
                 ("--std that is a live symlink to a directory inside its root", base / "std-link", 0, None,
-                 real_lstat),
-                ("--std that is a live symlink to a directory outside its root", out_link, 2, out_link,
-                 real_lstat),
-                ("--std that is a dangling symlink", base / "std-dangling", 2, base / "std-dangling",
-                 real_lstat),
+                 real_lstat, real_manifest),
+                ("--std that is a live symlink to a directory outside its root", out_link, 2,
+                 _refusal(out_link), real_lstat, real_manifest),
+                ("--std that is a dangling symlink", base / "std-dangling", 2,
+                 _refusal(base / "std-dangling"), real_lstat, real_manifest),
                 ("--std beneath a symlinked ancestor inside its root", base / "std-ancestor-link" / "standards",
-                 0, None, real_lstat),
-                ("--std swapped for a symlink inside its root after its probe", swapped, 0, None,
-                 _swapping_lstat)):
-            _lstat = probe
+                 0, None, real_lstat, real_manifest),
+                ("--std swapped for a symlink inside its root after its probe, its target swapped after "
+                 "the loader's open", swapped, 0, None, _swapping_lstat(swapped, swap_target),
+                 _swapping_manifest()),
+                ("--std swapped for a symlink outside its root after its probe", swapped_out, 2,
+                 _refusal(swapped_out) + ("{} {}".format(swapped_out, LINK_OUTSIDE_ROOT),),
+                 _swapping_lstat(swapped_out, real), real_manifest)):
+            _lstat, Manifest = probe, manifest
             try:
                 code, err = launch(["--std", str(std)])
             finally:
-                _lstat = real_lstat
-            if code != want or (named is not None and "a symlink where a directory is required: "
-                                "'{}'".format(named) not in err):
+                _lstat, Manifest = real_lstat, real_manifest
+            if code != want or (refusals is not None and not any(text in err for text in refusals)):
                 failures.append("{}: expected exit {}{}, got exit {} ({!r})".format(
-                    vector, want, "" if named is None else " naming " + str(named), code, err))
+                    vector, want, "" if refusals is None else " holding one of " + repr(refusals), code,
+                    err))
     finally:
         opaque.chmod(0o755)
 
@@ -462,9 +681,11 @@ def dir_or_absent(path, root):
     when something is there that cannot be read as that directory: a regular file or other non-directory, or
     a symbolic link that is dangling, whose target is not a directory, or whose target resolves outside root.
     A symbolic link whose target is an existing directory inside root is a directory, as dir_present also
-    reads it: the link is resolved once (os.path.realpath, strict), and that one resolved path is the path
-    tested against the resolved root and, with os.lstat, as a directory. RAISE OSError when the path cannot be
-    examined other than by absence (an unreadable ancestor, an ancestor that is not a directory, or a
+    reads it (dir_present, and so open_dir, refuses one whose target climbs above root on its way, even
+    to come back in): the link is resolved once (os.path.realpath, strict), and that one resolved path is
+    the path tested against the resolved root and, with os.lstat, as a directory. RAISE OSError when the
+    path cannot be examined other than by absence (an unreadable ancestor, an ancestor that is not a
+    directory, or a
     symbolic link loop), as dir_present does. dir_present raises NotADirectoryError on each such reason
     instead of giving it; a caller that must name why it cannot evaluate an input refuses the reason given
     here as cannot-evaluate. Only the last

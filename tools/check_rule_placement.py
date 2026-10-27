@@ -24,7 +24,7 @@ Residual: the root is checked once, before it is read, so a root removed or repl
 the read (by another writer at the same moment) is not detected and can still read as a tree with no
 .claude/rules/.
 
-An existing .claude/rules that cannot be read as a directory (also a FIFO) exits 2: _standards.open_dir
+An existing .claude/rules that cannot be read as a directory (also a FIFO) exits 2: _standards.open_chain
 probes it as the three-way dir_present does, refusing a wrong-type entry rather than reading it as absent,
 so this gate can never PASS a wrong-type input as "no tree". The probe is bound beneath the gate's root,
 so a wrong-type entry, or a symlink that is dangling or whose target is not a directory or resolves
@@ -35,21 +35,35 @@ absence, but one whose lstat found it and which is gone by its open (removed or 
 which is replaced there by another directory (.claude included), exits 2 as a changed tree, never read as
 absence and never walked into.
 
-The tree is read only through the descriptor open_dir returns for the .claude/rules it judged
-(.claude and then rules each opened beneath its parent's descriptor with O_DIRECTORY|O_NOFOLLOW, and
-each one's st_dev and st_ino checked against the probe's lstat of it; a symlink to a directory inside
-the root is walked to from the resolved root the same way), never by name: every listing is made
-through a held descriptor, and every family directory and vendored source is opened, and every rule
-file read, beneath its parent's descriptor with O_NOFOLLOW, or, for an entry that is a symlink to a
-directory inside the root, through open_dir beneath the root, which reads it as that directory. So a
-.claude/rules swapped for a symlink or another directory between the probe and the listing, or a
-.claude replaced by another directory between its lstat and its open, exits 2 naming it, a swap after
-the open changes nothing read, and any other symlink at an entry the walk inspects (an entry of the tree
-root, of a family directory or of external/, or a vendored source's PROVENANCE.md or LICENSE; a
-dot-named entry of the tree root or of a flat family is skipped unread, as is everything else inside a
-vendored source) exits 2 naming it, never followed. A rule file that is not a regular file (a FIFO or a
-symlink included), in a family directory or loose at the tree root, exits 2 the same way even when its
-name is bad: its listed type is judged before its name, and the descriptor it is read through is judged
+The tree is read only through the descriptors open_chain holds for the .claude/rules it judged, the
+root's own and every directory down to rules (.claude and then rules each opened beneath its parent's
+descriptor with O_DIRECTORY|O_NOFOLLOW, and each one's st_dev and st_ino checked against the probe's
+lstat of it; a symlink on the way is read beneath the descriptor holding it and its target walked
+beneath held descriptors the same way), never by name: every listing is made through a held
+descriptor, and every family directory and vendored source is opened, and every rule file read,
+beneath its parent's descriptor with O_NOFOLLOW. An entry that is a symlink to a directory inside the
+root is read as that directory without any name lookup from the root: the link is read beneath the
+held directory listing it, through a descriptor for the link itself whose st_dev and st_ino must
+equal the listing's lstat of it, and its target is walked beneath the held chain ('..' steps back to
+a held parent, an absolute target starts at the root's held descriptor, and a directory the walk
+holds is read through its held descriptor whenever the target names it), every other directory on
+the way judged by lstat, opened with O_NOFOLLOW and checked by st_dev and st_ino
+(_standards.follow_link). So a .claude/rules swapped for a symlink or another directory between the
+probe and the listing, or a .claude replaced by another directory between its lstat and its open,
+exits 2 naming it; a .claude/rules or .claude directory swapped after the open changes nothing read,
+a symlinked family or vendored source included; and any other symlink at an entry the walk inspects
+(an entry of the tree root, of a family directory or of external/, or a vendored source's
+PROVENANCE.md or LICENSE; a dot-named entry of the tree root or of a flat family is skipped unread, as
+is everything else inside a vendored source), one whose target climbs above the root on its way
+included, exits 2 naming it, never followed. Where the platform cannot read a symlink through a
+descriptor for the link itself (no O_PATH), every symlink the walk meets exits 2 naming it.
+Residual: a component of a symlink's target that does not name a directory the walk holds, by the
+name it opened it under, is looked up beneath its held parent when the walk follows the link and
+read as it is then, not as it was when the entry was listed (a symlink on the way included, such as
+a .claude that is itself a symlink, named again by an absolute target); what it reaches is still a
+real directory inside the root. A rule file that is not a regular file (a FIFO or a symlink
+included), in a family directory or loose at the tree root, exits 2 the same way even when its name
+is bad: its listed type is judged before its name, and the descriptor it is read through is judged
 again (opened without blocking). A dot-named entry is skipped before its type is checked, and the
 tree-root metadata names (README.md, PROVENANCE.md) are not type-checked as rule files.
 
@@ -92,7 +106,7 @@ import _selftest_exit_report  # noqa: E402  (the execution report, finalized at 
 import _standards  # noqa: E402  (the module itself, so the self-test can patch its probe primitive)
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, parse_source_text, derive  # noqa: E402
-from _standards import dir_or_absent, dir_present, map_keys, open_dir  # noqa: E402
+from _standards import close_chain, dir_or_absent, dir_present, follow_link, map_keys, open_chain  # noqa: E402
 from _standards import LINK_DANGLING, LINK_NOT_A_DIRECTORY, LINK_OUTSIDE_ROOT  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,33 +237,31 @@ def _listing(dir_fd, path):
     return listed
 
 
-def _refuse_link(entry, path, root):
-    """Whether the listed entry is a symlink to a real directory inside root, which the walk reads as
-    that directory (judged by dir_present beneath root, as the probe of .claude/rules judges it); any
-    other symlink (dangling, to a non-directory, or resolving outside root) raises OSError naming
-    path, never followed."""
-    if not entry.is_symlink():
-        return False
+def _follow_entry(chain, path, entry, root):
+    """(kept, new) for the listed entry path, a symlink beneath chain[-1], where chain is the held
+    (descriptor, name) list from root down (open_chain's, or one extended from it): the directory it
+    names is the last of chain[:kept] + new, new opened here and closed by the caller.
+    _standards.follow_link reads the link through a descriptor for the link itself, checked against
+    the listing's lstat of it, and walks its target beneath held descriptors only, never by name from
+    the root, a directory the chain holds being read through its held descriptor whenever the target
+    names it by the name it was opened under, so a rules directory or ancestor directory swapped
+    after its open changes nothing it reads (the residual is _scan_tree's). Any symlink but one to a
+    real directory inside root (dangling, to a non-directory, or resolving outside or climbing above
+    root) raises OSError naming path, never followed, as does a link replaced since the listing."""
     try:
-        if dir_present(path, root=root):
-            return True
+        return follow_link(chain, path.name, entry.stat(follow_symlinks=False), path, root)
     except NotADirectoryError:
-        pass
-    raise OSError(errno.ELOOP, "a symlink in the rules tree that is not to a directory inside the root, "
-                  "which is never followed", str(path))
+        raise OSError(errno.ELOOP, "a symlink in the rules tree that is not to a directory inside the "
+                      "root, which is never followed", str(path))
 
 
-def _open_dir_entry(dir_fd, path, entry, linked, root):
-    """A descriptor for the directory path, listed as entry beneath dir_fd: _open_at's when it is a
-    real directory; for a symlink to a directory inside root (linked), open_dir's beneath root, which
-    holds the directory it resolves to, and raises OSError naming path when it is gone by then."""
-    if not linked:
-        return _open_at(dir_fd, path, _DIR_FLAGS, entry)
-    fd = open_dir(path, root=root)
-    if fd is None:
-        raise OSError(errno.ESTALE, "the symlinked directory the listing judged is gone (removed in "
-                      "between)", str(path))
-    return fd
+def _open_dir_entry(chain, path, entry, root):
+    """(kept, new) for the directory path, listed as entry beneath chain[-1], as _follow_entry gives
+    them: for a real directory, the descriptor _open_at opens beneath chain[-1], paired with its
+    name; for a symlink, _follow_entry's."""
+    if entry.is_symlink():
+        return _follow_entry(chain, path, entry, root)
+    return len(chain), [(_open_at(chain[-1][0], path, _DIR_FLAGS, entry), path.name)]
 
 
 def _open_at(dir_fd, path, flags, entry):
@@ -302,21 +314,23 @@ def _entry_present(dir_fd, path):
     return True
 
 
-def _scan_family(family, item, family_fd, rules, report, checked):
-    """Check one family directory, held open at family_fd, as _scan_tree does."""
+def _scan_family(family, item, chain, rules, report, checked):
+    """Check one family directory, held open at chain[-1] (chain as _scan_tree holds it), as
+    _scan_tree does."""
     root = rules.parent.parent
+    family_fd = chain[-1][0]
     if family == "external":
         for entry in _listing(family_fd, item):
             sub = item / entry.name
-            linked = _refuse_link(entry, sub, root)
-            if not (linked or entry.is_dir(follow_symlinks=False)):
+            if not (entry.is_symlink() or entry.is_dir(follow_symlinks=False)):
                 continue
             checked(sub)
-            sub_fd = _open_dir_entry(family_fd, sub, entry, linked, root)
+            kept, new = _open_dir_entry(chain, sub, entry, root)
             try:
+                sub_fd = (chain[:kept] + new)[-1][0]
                 present = [_entry_present(sub_fd, sub / name) for name in ("PROVENANCE.md", "LICENSE")]
             finally:
-                os.close(sub_fd)
+                close_chain(new)
             if not all(present):
                 report(sub, "missing-provenance", "a vendored source lacks PROVENANCE.md or LICENSE")
         return
@@ -327,7 +341,11 @@ def _scan_family(family, item, family_fd, rules, report, checked):
         if entry.name.startswith("."):
             continue
         path = item / entry.name
-        if _refuse_link(entry, path, root) or entry.is_dir(follow_symlinks=False):
+        if entry.is_symlink():
+            # Judged as the walk would read it (a symlink to a real directory inside the root), then
+            # reported: a flat family is not walked into.
+            close_chain(_follow_entry(chain, path, entry, root)[1])
+        if entry.is_symlink() or entry.is_dir(follow_symlinks=False):
             report(path, "nested-dir", "a flat family admits no subdirectory")
             continue
         if path.suffix != ".md":
@@ -347,9 +365,11 @@ def _scan_family(family, item, family_fd, rules, report, checked):
             report(path, drift[0], drift[1])
 
 
-def _scan_tree(rules, rules_fd, report, checked=lambda path: None):
-    """Check the rules tree held open at rules_fd (the directory open_dir judged at rules), calling
-    report(path, code, detail) for each violation, and checked(path) once for each rule file and
+def _scan_tree(rules, chain, report, checked=lambda path: None):
+    """Check the rules tree held open at chain[-1], where chain is the (descriptor, name) list
+    open_chain returned for the .claude/rules it judged (root's first; rules is
+    <root>/.claude/rules), calling report(path, code, detail) for each violation, and checked(path)
+    once for each rule file and
     vendored source it evaluates (conformance C3 counts them). Every listing is made through a held
     descriptor, and every directory it descends into is opened, and every rule file read, beneath its
     parent's descriptor with O_NOFOLLOW, and each opened descriptor's st_dev and st_ino are checked
@@ -357,38 +377,50 @@ def _scan_tree(rules, rules_fd, report, checked=lambda path: None):
     naming it, and the tree read is the one the probe and the listings judged, whatever later happens to
     its names. Residual: an entry replaced between the listing's read of the directory and its lstat of
     that entry is judged as the replacement. An entry of the tree root, of a family directory or of
-    external/ that is a symlink to a real directory inside the root (rules is <root>/.claude/rules) is
-    read as that directory (_refuse_link), opened through open_dir beneath the root; any other symlink
-    at an entry the walk inspects (such an entry, or a vendored source's PROVENANCE.md or LICENSE)
-    raises OSError naming it, never followed, as does a rule file that is not a regular file, in a
-    family or loose at the tree root, whatever its name (its type is judged before its name). Residual:
-    a symlink retargeted between its judgement and that open is read as retargeted, still only to a
-    directory inside the root. Dot-named entries of the tree root and of a flat family are skipped
-    unread, and nothing else inside a vendored source is inspected."""
+    external/ that is a symlink to a real directory inside the root is read as that directory
+    (_follow_entry): the link is read beneath the held directory listing it, through a descriptor for
+    the link itself checked against the listing's lstat, and its target walked beneath the held chain
+    (from root's descriptor in it, for an absolute target), every directory of the chain it names,
+    by the name it was opened under, read through its held descriptor, so a rules directory or
+    ancestor directory swapped after its open changes nothing read. Residual: a component of the
+    target that names no directory the chain holds (a symlink on the way included) is looked up
+    beneath its held parent when the link is followed and read as it is then (a directory judged by
+    lstat, opened with O_NOFOLLOW and checked by st_dev and st_ino), not as when the listing was made;
+    what it reaches is still a real directory inside the root. Any other symlink at an
+    entry the walk inspects (such an entry, or a vendored source's PROVENANCE.md or LICENSE) raises
+    OSError naming it, never followed, as does a rule file that is not a regular file, in a family or
+    loose at the tree root, whatever its name (its type is judged before its name). Dot-named entries
+    of the tree root and of a flat family are skipped unread, and nothing else inside a vendored source
+    is inspected."""
     root = rules.parent.parent
-    for entry in _listing(rules_fd, rules):
+    for entry in _listing(chain[-1][0], rules):
         if entry.name.startswith("."):
             continue
         item = rules / entry.name
-        linked = _refuse_link(entry, item, root)
         if entry.is_file(follow_symlinks=False):
             if item.suffix == ".md" and item.name not in METADATA:
                 report(item, "loose", "a rule file at the tree root, not on the metadata allowlist")
             continue
-        if (item.suffix == ".md" and item.name not in METADATA and not linked
+        if entry.is_symlink():
+            # Judged (and opened) once, beneath the held chain; a symlink to anything but a real
+            # directory inside the root raises here, whatever its name.
+            kept, new = _follow_entry(chain, item, entry, root)
+        elif (item.suffix == ".md" and item.name not in METADATA
                 and not entry.is_dir(follow_symlinks=False)):
             # A loose rule file that is not a regular file raises, as one in a family does, never
             # reading as only an unknown family.
             raise OSError(errno.EINVAL, _NOT_REGULAR, str(item))
-        family = entry.name
-        if family not in BUILTIN_FAMILIES:
-            report(item, "unknown-family", "not a registered family directory")
-            continue
-        family_fd = _open_dir_entry(rules_fd, item, entry, linked, root)
+        elif entry.name in BUILTIN_FAMILIES:
+            kept, new = _open_dir_entry(chain, item, entry, root)
+        else:
+            kept, new = len(chain), []
         try:
-            _scan_family(family, item, family_fd, rules, report, checked)
+            if entry.name not in BUILTIN_FAMILIES:
+                report(item, "unknown-family", "not a registered family directory")
+            else:
+                _scan_family(entry.name, item, chain[:kept] + new, rules, report, checked)
         finally:
-            os.close(family_fd)
+            close_chain(new)
 
 
 def main(argv=None):
@@ -436,21 +468,21 @@ def main(argv=None):
     # absent tree and PASS, and so must a .claude/rules that is there but cannot be read as the tree (a
     # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
     # root), refused naming the reason as the standards probe above names it: only genuine absence passes.
-    # Then open_dir, bound beneath root, judges every component above it the same way (a .claude that is
+    # Then open_chain, bound beneath root, judges every component above it the same way (a .claude that is
     # dangling, not a directory or a symlink resolving outside the root is refused, never followed and never
     # read as absence); a symlink to a directory inside the root is read, at rules or above it. The tree is
-    # then listed and read only through the descriptor open_dir returns, never by name, so a rules
+    # then listed and read only through the descriptors open_chain holds, never by name, so a rules
     # directory swapped for a symlink or another directory after the probe is never what is read.
     try:
         _present, problem = dir_or_absent(rules, root)
-        rules_fd = None if problem is not None else open_dir(rules, root=root)
+        chain = None if problem is not None else open_chain(rules, root=root)
     except OSError as exc:
         print("cannot read {}: {}".format(rules, exc), file=sys.stderr)
         return 2
     if problem is not None:
         print("cannot read {}: {} {} (cannot evaluate)".format(rules, rules, problem), file=sys.stderr)
         return 2
-    if rules_fd is None:
+    if chain is None:
         print("PASS: no .claude/rules/ tree")
         return 0
     findings = []
@@ -459,12 +491,12 @@ def main(argv=None):
         findings.append("{}: {}: {}".format(path.relative_to(root), code, detail))
 
     try:
-        _scan_tree(rules, rules_fd, report)
+        _scan_tree(rules, chain, report)
     except OSError as exc:
         print("error: cannot read the rules tree: {}".format(exc), file=sys.stderr)
         return 2
     finally:
-        os.close(rules_fd)
+        close_chain(chain)
     if findings:
         print("FAIL: {} placement violation(s)".format(len(findings)))
         for finding in sorted(set(findings)):
@@ -498,8 +530,11 @@ def main(argv=None):
 # it reads only the rules directory its probe judged, through the held
 # descriptor (a swap or a removal before the listing exits 2, as does a .claude replaced by another
 # directory before its open, and a swap after the open changes nothing
-# read), reads a family directory or vendored source below it symlinked to a directory inside the
-# root, and exits 2 on a symlinked rule file or a FIFO rule file (with a bad name or loose at the tree
+# read, a symlinked family directory or vendored source included, also with .claude swapped), reads a
+# family directory or vendored source below it symlinked to a directory inside the root (a symlink
+# whose target lies outside the root or climbs above it is refused, and search_only holds a listable
+# descriptor for a link to the root and opens past a symlinked ancestor for search only),
+# and exits 2 on a symlinked rule file or a FIFO rule file (with a bad name or loose at the tree
 # root too), never following or blocking on either, and on a family directory or vendored source
 # replaced by another directory after its listing, never walked into; each
 # listed probe mutant (a scratch copy of _standards.py with one guard reverted, loaded with
@@ -638,6 +673,77 @@ def _replaced_after_listing(module, base, name, entry, inside, fill):
     return got, target
 
 
+def _swapping_listing(real_listing, listed, target, link_to):
+    """A walk listing that, once, right after the listing of listed, moves target (listed itself or an
+    ancestor of it) aside and puts at its name a symlink to link_to: a swap after the gate's open of
+    listed, which must not change what is read."""
+    moved = []
+
+    def _listing(dir_fd, path):
+        entries = real_listing(dir_fd, path)
+        if not moved and path == listed:
+            moved.append(target.rename(target.with_name(target.name + "-judged")))
+            target.symlink_to(link_to)
+        return entries
+    return _listing
+
+
+def _linked_swapped_after_open(module, base, name, swapped, entry, inside, fill, relative,
+                               where="target"):
+    """Run module's gate over a fresh root whose .claude/rules/<entry> is a symlink (absolute, or with
+    relative a relative one) to <root>/<where>, a directory holding the files named in inside, while
+    a copy of the tree under <root>/alt links the same entry the same way to <root>/alt/<where>,
+    holding the files named in fill. Right after the gate lists .claude/rules, the directory swapped
+    names (rules or .claude) is moved aside and its name linked to its counterpart under alt: a swap
+    after the gate's open, which a read of the entry by name from the root would follow to the alt
+    target and pass, as would a read of a target under .claude that looked .claude up again. Returns
+    (exit code, stdout, stderr)."""
+    root = _root_fixture(base, name, rules="dir").resolve()
+    for tree, files in ((root, inside), (root / "alt", fill)):
+        link = tree / ".claude" / "rules" / entry
+        link.parent.mkdir(parents=True, exist_ok=True)
+        target = tree / where
+        target.mkdir()
+        for file_name in files:
+            (target / file_name).write_text("{}\n".format(file_name), encoding="utf-8")
+        link.symlink_to(os.path.relpath(target, link.parent) if relative else target)
+    rules = root / ".claude" / "rules"
+    target = rules if swapped == "rules" else rules.parent
+    hook = _swapping_listing(module._listing, rules, target, root / "alt" / target.relative_to(root))
+    with _patched(module, "_listing", hook):
+        return _gate(module, ["--root", str(root)])
+
+
+def _search_only_listing(module, path, root):
+    """One search-only open_dir outcome under root: "listed:<entries>" when the descriptor returned
+    can be listed, "absent", or "error:<errno name>" for an OSError, at the open or at the listing."""
+    try:
+        fd = module.open_dir(path, root=root, search_only=True)
+        if fd is None:
+            return "absent"
+        try:
+            with os.scandir(fd) as entries:
+                return "listed:{}".format(len(list(entries)))
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        return "error:" + errno.errorcode.get(exc.errno, type(exc).__name__)
+
+
+def _search_only_opaque(module, paths):
+    """The search-only dir_present outcome for the opaque fixture, its real directory made traversable
+    but unreadable for the probe: "present", "absent" or "error:<type>"."""
+    real = paths["opaque-root"] / "real"
+    real.chmod(0o311)
+    try:
+        present = module.dir_present(paths["opaque-linked"], root=paths["opaque-root"], search_only=True)
+    except OSError as exc:
+        return "error:" + type(exc).__name__
+    finally:
+        real.chmod(0o755)
+    return "present" if present else "absent"
+
+
 def _refused_naming(got, path):
     """Whether a gate run exited 2 on the rules tree, naming path, with nothing on stdout."""
     code, out, err = got
@@ -749,11 +855,14 @@ class _CountingOs:
 
 
 # One fixture per probe path that holds a descriptor when it ends: present, absent, refused at the
-# final component and at an ancestor, an error raised after the root is open, and an ancestor gone, or
-# replaced by another directory, between its lstat and its open; open_dir also meets a final component
-# swapped for a symlink, replaced, or removed, between its lstat and its open.
+# final component and at an ancestor, an error raised after the root is open, a symlink whose target
+# names an ancestor already held (here the directory holding the link), one refused after its target
+# opened a directory, and an ancestor gone, or replaced by another directory, between its lstat and its
+# open; open_dir also meets a final component swapped for a symlink, replaced, or removed, between its
+# lstat and its open.
 _SHARED_DESCRIPTOR_FIXTURES = ("dir", "absent-path", "regular-file", "nested-dir", "ancestor-symlink",
-                               "ancestor-dangling", "ancestor-absent", "unreachable")
+                               "ancestor-dangling", "ancestor-absent", "unreachable", "root-link",
+                               "link-dangling-past-directory")
 _DESCRIPTOR_FIXTURES = _SHARED_DESCRIPTOR_FIXTURES + ("ancestor-vanished", "ancestor-replaced")
 _HELD_DESCRIPTOR_FIXTURES = _SHARED_DESCRIPTOR_FIXTURES + ("final-swapped", "final-replaced", "final-vanished")
 
@@ -817,6 +926,27 @@ def _probe_paths(base):
     (base / "walkdangling").symlink_to(base / "no-such-target")
     paths["ancestor-dangling"] = base / "walkdangling" / "sub"
     paths["ancestor-absent"] = base / "walkmissing" / "sub"
+    # The confined fixtures, each probed with root=paths["confined"]: a symlink whose absolute target
+    # is a real directory outside that root, one whose relative target climbs above it to the same
+    # directory, and one ('.') that names the root itself.
+    paths["confined"] = base / "confined"
+    paths["confined"].mkdir()
+    paths["outside-link"] = paths["confined"] / "outlink"
+    paths["outside-link"].symlink_to(paths["dir"])
+    paths["climbing-link"] = paths["confined"] / "climblink"
+    paths["climbing-link"].symlink_to(Path("..", paths["dir"].name))
+    paths["root-link"] = paths["confined"] / "self"
+    paths["root-link"].symlink_to(".")
+    # A symlink whose target opens a directory on its way and then names nothing there (dangling past
+    # a directory), for the descriptor count: the resolution's refusal closes what it opened.
+    paths["link-dangling-past-directory"] = paths["confined"] / "deeplink"
+    paths["link-dangling-past-directory"].symlink_to(Path("..", paths["dir"].name, "missing"))
+    # The opaque fixture, probed search-only with root=paths["opaque-root"]: a traversable but
+    # unreadable directory real holding mid/x, reached through a symlink link to it (opaque-root/link/mid/x).
+    paths["opaque-root"] = base / "opaque-root"
+    (paths["opaque-root"] / "real" / "mid" / "x").mkdir(parents=True)
+    (paths["opaque-root"] / "link").symlink_to("real")
+    paths["opaque-linked"] = paths["opaque-root"] / "link" / "mid" / "x"
     # The loader fixtures: each is its own root, its .aiqt a dangling link, a live link to a real
     # directory inside that root whose standards/ holds one valid manifest (so reading through the
     # link loads it), or absent.
@@ -1164,6 +1294,23 @@ def self_test(report_path=None):
                     ("probe/parent-climb-raises", base / "walkdir" / ".." / "realdir")):
                 got = _probe(_standards, "probed", {"probed": probed}, base / "walkdir")
                 check(cid, got == "error:OSError", got)
+            # A symlink is followed only to a real directory inside the root, its target walked beneath
+            # the descriptors the probe holds: one whose absolute target lies outside the root, or
+            # whose relative target climbs above it (here to that same outside directory), is refused,
+            # where a walk that dropped either test would reach that directory and read it present.
+            for cid, fixture in (
+                    ("probe/link-outside-root-refused", "outside-link"),
+                    ("probe/link-climbing-above-root-refused", "climbing-link")):
+                got = _probe(_standards, fixture, paths, paths["confined"])
+                check(cid, got == "refused", got)
+            # search_only holds a listable descriptor for a symlink naming the root itself, and still
+            # opens for search only past a symlinked ancestor: a traversable but unreadable directory
+            # reached through a symlink does not raise where the platform has O_PATH.
+            got = _search_only_listing(_standards, paths["root-link"], paths["confined"])
+            check("probe/search-only-link-to-root-listable", got == "listed:4", got)
+            got = _search_only_opaque(_standards, paths)
+            check("probe/search-only-past-linked-ancestor-reads-true",
+                  got == ("present" if _standards._SEARCH else "error:PermissionError"), got)
             got = _descriptor_outcome(_standards, paths, base)
             check("probe/descriptors-closed-once", got == "each-closed-once", got)
 
@@ -1296,6 +1443,28 @@ def self_test(report_path=None):
                     if swap == "ancestor":
                         ok = ok and "'{}'".format(rules.parent) in err
                 check(cid, ok, (code, out, err))
+            # A family directory or vendored source that is a symlink is read beneath the descriptors
+            # the gate holds, never by name from the root: with .claude/rules (or .claude) swapped,
+            # right after the gate lists .claude/rules, for a copy whose same entry links to a clean
+            # target, the judged link and its violating target are still what is read, so the
+            # violation is found (exit 1), where a read by name from the root would follow the swap
+            # to the clean target and pass. The relative link steps back through the held parents,
+            # and an absolute target under .claude is read through the .claude the gate holds, never
+            # looked up again.
+            for cid, swapped, entry, inside, fill, relative, where, finding in (
+                    ("gate/family-symlink-rules-swapped-after-open-reads-judged", "rules", "aiqt",
+                     ("bad.md",), (), False, "target", ".claude/rules/aiqt/bad.md: bad-name: "),
+                    ("gate/relative-family-symlink-claude-swapped-after-open-reads-judged", ".claude",
+                     "aiqt", ("bad.md",), (), True, "target", ".claude/rules/aiqt/bad.md: bad-name: "),
+                    ("gate/family-symlink-through-claude-swapped-after-open-reads-judged", ".claude",
+                     "aiqt", ("bad.md",), (), False, ".claude/target",
+                     ".claude/rules/aiqt/bad.md: bad-name: "),
+                    ("gate/vendored-source-symlink-rules-swapped-after-open-reads-judged", "rules",
+                     "external/vendor", ("PROVENANCE.md",), ("PROVENANCE.md", "LICENSE"), False, "target",
+                     ".claude/rules/external/vendor: missing-provenance: ")):
+                code, out, err = _linked_swapped_after_open(this, base, "gate-" + cid.split("/")[1], swapped,
+                                                            entry, inside, fill, relative, where)
+                check(cid, code == 1 and finding in out.replace(os.sep, "/") and err == "", (code, out, err))
 
             # 2d. a rule file below .claude/rules that is a symlink is refused (exit 2 naming it),
             # never followed, though its target is clean and following it would pass. A FIFO where a rule file is expected exits 2 the same way, never
@@ -1369,7 +1538,10 @@ def self_test(report_path=None):
             # checks st_dev and st_ino only at the final component, so an ancestor replaced by
             # another directory is walked into; the two held mutants drop that check at the held
             # final component only, or leave it unopened; the vanished mutant reads an entry gone
-            # between its lstat and its open as absence.
+            # between its lstat and its open as absence. The two link mutants drop the outside-root
+            # tests of a symlink's target: one takes an absolute target's components below the root's
+            # depth without comparing its prefix to the root, the other steps above the root on '..'
+            # as the kernel would; each then reads the outside directory as present.
             source = (Path(__file__).resolve().parent / "_standards.py").read_text(encoding="utf-8")
             mutant_dir = base / "mutants"
             mutant_dir.mkdir()
@@ -1406,7 +1578,13 @@ def self_test(report_path=None):
                     ("mutant/vanished-reads-absent-caught",
                      'raise OSError(errno.ESTALE, "the entry the probe judged is gone',
                      'return None and OSError(errno.ESTALE, "the entry the probe judged is gone',
-                     "ancestor-vanished", "error:OSError")):
+                     "ancestor-vanished", "error:OSError"),
+                    ("mutant/link-outside-root-admitted-caught",
+                     "if parts[:len(named.parts)] == named.parts:", "if True:", "outside-link", "refused"),
+                    ("mutant/link-climb-above-root-admitted-caught",
+                     "else:\n                        raise _refused(path)\n                    continue",
+                     "else:\n                        new.append(os.open('..', _STEP_FLAGS, dir_fd=fds[0]))\n"
+                     "                    continue", "climbing-link", "refused")):
                 number += 1
                 if source.count(old) != 1:
                     caught, got = False, "mutation anchor found {} times".format(source.count(old))
@@ -1417,7 +1595,8 @@ def self_test(report_path=None):
                     elif cid.startswith("mutant/held-"):
                         got = _held_probe(mutant, fixture, paths, base)
                     else:
-                        got = _probe(mutant, fixture, paths, base)
+                        got = _probe(mutant, fixture, paths, paths["confined"]
+                                     if fixture in ("outside-link", "climbing-link") else base)
                     caught = got != want
                 check(cid, caught, got)
 
@@ -1511,7 +1690,10 @@ def self_test(report_path=None):
           "root, and exits 2 on a symlinked rule file "
           "and on a FIFO rule file, with a bad name or loose at the tree root too, and on a "
           "family directory or vendored source replaced by another directory after its listing, "
-          "while still finding a rule's frontmatter drift; 11 probe mutants and a placement mutant "
+          "while still finding a rule's frontmatter drift, and the violation behind a symlinked family "
+          "or vendored source when .claude/rules or .claude is swapped after its open; a symlink whose "
+          "target lies outside or climbs above the root is refused, and search_only holds a listable "
+          "link to the root and passes a symlinked ancestor; 13 probe mutants and a placement mutant "
           "each caught; {} --root vectors: a repeated, empty, missing, comma-joined, dangling or "
           "non-directory --root, and a .claude/rules or .aiqt/standards that is a regular file or a "
           "symlink that is dangling, to a regular file or to a directory outside the root, is "

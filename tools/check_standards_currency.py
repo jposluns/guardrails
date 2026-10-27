@@ -427,9 +427,11 @@ def self_test_main(_mkdtemp=None, _vectors=True):
 
             # An explicit --std, launched through main: a real directory exits 0, as does a --std that is
             # a symlink to a directory inside its root, sits beneath such a symlinked ancestor, or is
-            # swapped for such a symlink after its probe; a dangling --std, or a live symlink to a
-            # directory outside its root, exits 2 naming it, never followed. main audits as of the wall
-            # clock, so the fixture is dated one day before it.
+            # swapped for such a symlink after its probe (read through the loader's held descriptor
+            # when the directory it names is swapped after the loader's open); a dangling --std, or a
+            # live symlink to a directory outside its root, swapped in after its probe included, exits
+            # 2 naming it, never followed. main audits as of the wall clock, so the fixture is dated
+            # one day before it.
             def _launch(argv):
                 err = io.StringIO()
                 with redirect_stdout(io.StringIO()), redirect_stderr(err):
@@ -455,8 +457,10 @@ def self_test_main(_mkdtemp=None, _vectors=True):
           "fail-closed, audit precedence (MALFORMED > FAIL > OK), url validation (https-with-host "
           "required, malformed fails closed, absent -> None), the run()-level exit contract, and an "
           "explicit --std (a real directory, or a symlink to a directory inside its root at it or at "
-          "an ancestor, swapped in after its probe included, exits 0; a dangling symlink or one to a "
-          "directory outside its root exits 2) all hold; an unavailable temp directory is a NOT RUN "
+          "an ancestor, swapped in after its probe included and read through the loader's held "
+          "descriptor when its target is swapped after the loader's open, exits 0; a dangling symlink "
+          "or one to a directory outside its root, swapped in after its probe included, exits 2) all "
+          "hold; an unavailable temp directory is a NOT RUN "
           "failure (nonzero exit), never a silent PASS")
     return 0
 

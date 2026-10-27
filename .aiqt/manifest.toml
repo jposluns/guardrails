@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ce7159e348d8938f39c6f4356842b005e1d98003101bb216dde2c89c3820ce56"
+tree-sha256 = "c0be40988b091eac5dc424091c698c6e3d8b1172c2cd4f48183f5b977846c950"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "91d95446f44916fc7cba0e3a84ce20f75345fec86a45941746ab94e959a7dfa8"
+sha256 = "50438819e41294867dd544c26ec8f27211552c915c003601fd17856adfb89eda"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3301,8 +3301,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 42898
-sha256 = "72de16ae7e6e3d80943e8974eabc875eeb10456237fae13ad16f259d278a51e9"
+bytes = 55566
+sha256 = "0ffe8b30b91bbc70e3dc958161ecbd3b0c4be1b093d4d1cce21fab6cefd83c28"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3546,8 +3546,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 87848
-sha256 = "af4d3951499e1984df6786bb5928205654e49441f17ebefbf8874a44610977de"
+bytes = 101190
+sha256 = "a7aee4a4c218a76bb776140fccc16123bd338e01d5bb4307a7c191ddd609ace2"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3576,13 +3576,13 @@ sha256 = "df2a9de523bf1ea7c1ba1bdd4aa53050d5a67bffae362df6b52573f437b648cd"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
-bytes = 27716
-sha256 = "c108791bd843507bdf206e732541055668f91eabe0a96c918bfc8ac8a4f4141b"
+bytes = 28049
+sha256 = "19c07ca3d47554aad38f69ab38db1b98595af8714ea4bf5f876dcea5d9b71eed"
 
 [[sources]]
 path = "tools/check_standards_urls_live.py"
-bytes = 9000
-sha256 = "9af82e03bdaf0497595d1ffea819364030788432daafcc73211b47729285b51b"
+bytes = 9306
+sha256 = "7422a69b4ce6513111622aa77115546fa1b82883c1dee2e3fdc7d9a52e9c9579"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
@@ -3601,8 +3601,8 @@ sha256 = "e3961b4ee28fd7b01f0b02c1a59e5f837774e2fb1fe9b0238089140d50aee561"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 96618
-sha256 = "986c614eb696d1ee68378739c48a0ab6ce8880269209cade7c54381de7bdbd87"
+bytes = 98489
+sha256 = "95fcd50b2a181cca6951f9378f1026755f5626be5577dbe67edfd1117d2093e0"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3801,8 +3801,8 @@ sha256 = "f54a442a7d889ec6c78c7ec065b51ceec542617afd6ddabd695a220a579fc7c3"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 128976
-sha256 = "87c3cea5509532e18a9e6b96ddf372b3b6a73906a635e0b107b1024709a2fd2c"
+bytes = 129533
+sha256 = "c1b4e18fc4bb2b885f1556f574b0efdda1b4cc5e726699e880d267563963730d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

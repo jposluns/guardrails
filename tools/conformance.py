@@ -65,8 +65,8 @@ import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cu
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  _scan_tree (with check_name, check_drift)
-from _standards import (dir_chain_or_absent, dir_or_absent, dir_present, load_manifests,  # noqa: E402
-                        map_keys, open_dir, validate_mappings, ManifestError)
+from _standards import (close_chain, dir_chain_or_absent, dir_or_absent, dir_present,  # noqa: E402
+                        load_manifests, map_keys, open_chain, validate_mappings, ManifestError)
 
 
 # Status constants for a single check's outcome.
@@ -421,36 +421,39 @@ def check_c2(root, cache):
 def check_c3(root):
     """The read tree obeys the taxonomy: family, flatness, naming, frontmatter-derived path, apex,
     provenance. Runs the placement gate's own walk (check_rule_placement._scan_tree, with its
-    check_name / check_drift and module constants) over the descriptor _standards.open_dir returns for
-    the .claude/rules it judged, so the orchestrator keeps control of reporting and counts what was
+    check_name / check_drift and module constants) over the descriptors _standards.open_chain holds
+    for the .claude/rules it judged, so the orchestrator keeps control of reporting and counts what was
     checked. The tree is never read by name: every listing is made through a held descriptor, and
     every family directory and vendored source is opened, and every rule file read, beneath its
-    parent's descriptor with O_NOFOLLOW, or, for an entry that is a symlink to a directory inside the
-    root, through open_dir beneath the root, which reads it as that directory, as the gate does. So a
+    parent's descriptor with O_NOFOLLOW, and an entry that is a symlink to a directory inside the root
+    is read as that directory by reading the link beneath the held directory listing it and walking
+    its target beneath the held descriptors, never by name from the root, as the gate does. So a
     .claude/rules swapped for a symlink or another directory, or removed, between the probe and its
     open, a .claude replaced by another directory between its lstat and its open, any other symlink at
     an entry the walk inspects (a rule file included) and a rule file that is not a regular file,
-    whatever its name, are each MALFORMED (exit 2) naming the path, never followed. Runs
+    whatever its name, are each MALFORMED (exit 2) naming the path, never followed, and a .claude/rules
+    directory swapped after its open changes nothing read, a symlinked family included (the gate's
+    residual for a symlink's target applies). Runs
     unconditionally: it needs only
     .claude/rules/, which every adopter has. An absent tree, or one holding no rule file or vendored
     source, validated nothing and is NOT APPLICABLE, never a hollow PASS."""
     rules = root / ".claude" / "rules"
     # dir_chain_or_absent, as gen_rules probes the same paths: the tree and each family directory it generates,
     # at every component under the root (.claude/ too), before the first read. The tree is then read only
-    # through the descriptor open_dir holds for the .claude/rules it judged.
+    # through the descriptors open_chain holds for the .claude/rules it judged.
     present, err = _reachable(rules, root, dir_chain_or_absent)
     if err:
         return Result("C3", "placement", MALFORMED, err)
     try:
-        rules_fd = open_dir(rules, root=root) if present else None
+        chain = open_chain(rules, root=root) if present else None
     except OSError as exc:
         return Result("C3", "placement", MALFORMED, "cannot read {}: {}".format(rules, exc))
-    if rules_fd is None:
+    if chain is None:
         return Result("C3", "placement", NA, "no .claude/rules/ tree installed to validate")
     for family in ("aiqt", "security"):
         _present, err = _reachable(rules / family, root, dir_chain_or_absent)
         if err:
-            os.close(rules_fd)
+            close_chain(chain)
             return Result("C3", "placement", MALFORMED, err)
     findings = []
     evaluated = []  # rule files / vendored sources actually checked; none means nothing was validated
@@ -459,11 +462,11 @@ def check_c3(root):
         findings.append("{}: {}: {}".format(path.relative_to(root), code, detail))
 
     try:
-        crp._scan_tree(rules, rules_fd, report, evaluated.append)
+        crp._scan_tree(rules, chain, report, evaluated.append)
     except OSError as exc:
         return Result("C3", "placement", MALFORMED, "cannot read the rules tree: {}".format(exc))
     finally:
-        os.close(rules_fd)
+        close_chain(chain)
     if findings:
         return Result("C3", "placement", FAIL,
                       "{} violation(s): {}".format(len(findings), "; ".join(sorted(set(findings)))))
@@ -1618,6 +1621,27 @@ def self_test_main():
             failures.append("a family directory replaced after C3's listing expected C3 MALFORMED "
                             "naming it, got {}: {}".format(got.status, got.detail))
 
+        # 16m. A family directory that is a symlink to a directory inside the root, holding a badly
+        #      named rule, is read beneath the descriptors C3 holds, never by name from the root: with
+        #      .claude/rules swapped, right after C3's listing of it, for a copy whose same family links
+        #      to a clean copy, C3 still FAILs naming the violation, never a PASS read through the swap.
+        linked_swap = (tmp / "family-link-swapped").resolve()
+        linked_swap.mkdir()
+        _build_conformant(linked_swap)
+        rules = linked_swap / ".claude" / "rules"
+        shutil.copytree(rules, linked_swap / "alt" / ".claude" / "rules")
+        for tree in (linked_swap, linked_swap / "alt"):
+            family = tree / ".claude" / "rules" / "aiqt"
+            family.rename(tree / "family-target")
+            family.symlink_to(tree / "family-target")
+        (linked_swap / "family-target" / "bad.md").write_text("# bad\n", encoding="utf-8")
+        with crp._patched(crp, "_listing", crp._swapping_listing(
+                crp._listing, rules, rules, linked_swap / "alt" / ".claude" / "rules")):
+            got = check_c3(linked_swap)
+        if got.status != FAIL or ".claude/rules/aiqt/bad.md: bad-name: " not in got.detail.replace(os.sep, "/"):
+            failures.append("a symlinked family directory with .claude/rules swapped after C3's open expected "
+                            "C3 FAIL naming its violation, got {}: {}".format(got.status, got.detail))
+
         # 17. An input that is there but is not a directory fails closed (exit 2, MALFORMED), never read
         #     as absent -> NOT APPLICABLE: (a) a regular file at .aiqt/core/rules (C1), (b) at .claude/rules
         #     (C3), (c) at a generated family .claude/rules/security, which the C2 orphan scan would skip.
@@ -1797,7 +1821,8 @@ def self_test_main():
           "site/ or .github/ (an empty "
           "one at .cursor/ or plugin/ included), and a bad --root fail closed; a symlink there to a directory "
           "inside the root is read and passes, a family directory below .claude/rules symlinked inside the "
-          "root included; the every-component probe refuses a path outside the root or "
+          "root included, and that family's violation is still found with .claude/rules swapped after C3's "
+          "open; the every-component probe refuses a path outside the root or "
           "holding a .. component" + skip_note)
     return 0
 
