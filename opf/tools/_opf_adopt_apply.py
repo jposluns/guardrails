@@ -6357,10 +6357,11 @@ def _self_test_checks():
     failures = []
     failure_details = {}
     checked = [0]
-    skipped = []    # (check, why): a check this platform cannot evaluate, named, never silently dropped
+    skipped = []    # (check, why): a check this platform cannot evaluate, named (exit 2, never a pass)
     bound_expired = []  # each child bound that expired, named: its checks did not run (exit 2, never a pass)
     # The descriptor census the inode-reuse, handoff and NFS vectors use is /proc/self/fd; a platform
-    # without it (macOS) skips exactly those vectors, each named with this note, never a partial run.
+    # without it (macOS) skips exactly those vectors, each named with this note, and the run then reports
+    # cannot evaluate (exit 2, _self_test_outcome), never a pass over the checks it did not run.
     census = Path("/proc/self/fd").is_dir()
     no_census = _NO_CENSUS
 
@@ -14449,7 +14450,7 @@ def _self_test_checks():
         skipped.append(("self-test-leaves-no-descriptor-open", no_census))
     for name, why in skipped:
         print("  SKIPPED: {} ({})".format(name, why))
-    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)
+    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)
 
 
 def _st_fixture_plan(run_id_):
@@ -14688,11 +14689,12 @@ def _class_sweep_record(check, bound_expired, run=None):
             check(name, rows[index][1], observed=rows[index][2])
 
 
-def _self_test_outcome(failures, failure_details, checked, bound_expired):
+def _self_test_outcome(failures, failure_details, checked, bound_expired, skipped=()):
     """Print the run's verdict and return its exit code: 1 when a check failed (each bound that expired is
-    named beside the failures), 2 when the only problem is a bound that expired (cannot evaluate: the
-    checks behind it did not run, because either the host was too slow or the code under test hangs, and
-    the expiry does not tell which), else 0."""
+    named beside the failures), 2 when the only problems are a bound that expired or a required check
+    this platform could not run (cannot evaluate: the checks behind an expired bound did not run, because
+    either the host was too slow or the code under test hangs, and the expiry does not tell which; each
+    skipped (check, why) entry was never evaluated, so the run is not a pass), else 0."""
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
         for f in failures:
@@ -14702,12 +14704,18 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired):
         for entry in bound_expired:
             print("  BOUND EXPIRED: {}".format(entry))
         return 1
-    if bound_expired:
+    if bound_expired or skipped:
         for entry in bound_expired:
             print("  BOUND EXPIRED: {}".format(entry))
-        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({} bound(s) expired: the checks behind each "
-              "did not run, because either the host was too slow or the code under test hangs; the other "
-              "{} checks passed)".format(len(bound_expired), checked))
+        reasons = []
+        if bound_expired:
+            reasons.append("{} bound(s) expired: the checks behind each did not run, because either the host "
+                           "was too slow or the code under test hangs".format(len(bound_expired)))
+        if skipped:
+            reasons.append("{} required check(s) skipped, never evaluated on this platform: {}".format(
+                len(skipped), ", ".join(name for name, _why in skipped)))
+        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({}; the other {} checks passed)".format(
+            "; ".join(reasons), checked))
         return 2
     print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
           "init-store, the registration ops, enable-hook and the finish ops)".format(checked))
@@ -14850,10 +14858,11 @@ def _skip_list_write_sites(tree):
     capture, a mapping-pattern rest, an import alias, an except-as target, a global or nonlocal
     declaration's name list) and the string wherever else it occurs (a keyword argument name, an
     attribute name, a string constant equal to `skipped`). Sanctioned, and so not foreign: the one
-    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, and `skipped` as
-    a for statement's iterable (the skip report's read). The skip report is honest only while nothing
-    erases, rebinds or hands off the list between a skip's recording and the report, and the executed
-    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
+    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, `skipped` as a for
+    statement's iterable (the skip report's read), and `skipped` as the fifth and last positional argument
+    of a keyword-free _self_test_outcome call (the verdict's read). The skip report is honest only while
+    nothing erases, rebinds or hands off the list between a skip's recording and the report, and the
+    executed reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
     unsanctioned field carrying the string is refused HERE. Residual: an erasure that reaches the list
     object without the string `skipped` in any field (through another name already bound to the same
     object, or an indirect read of the frame's locals) is outside this reader's scope."""
@@ -14876,6 +14885,10 @@ def _skip_list_write_sites(tree):
                 elif (isinstance(sub, ast.For) and isinstance(sub.iter, ast.Name)
                         and sub.iter.id == "skipped"):
                     sanctioned.add(id(sub.iter))
+                elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "_self_test_outcome" and len(sub.args) == 5 and not sub.keywords
+                        and isinstance(sub.args[4], ast.Name) and sub.args[4].id == "skipped"):
+                    sanctioned.add(id(sub.args[4]))
             foreign = sorted(
                 "line {}: {}.{}".format(getattr(sub, "lineno", 0), type(sub).__name__, field)
                 for sub in ast.walk(node) if id(sub) not in sanctioned
@@ -15110,6 +15123,33 @@ def _class_sweep_bound_self_test(check):
           and said["clean"][0] == 0 and "SELF-TEST: PASS (41 " in said["clean"][1]
           and "BOUND EXPIRED" not in said["clean"][1],
           observed=repr(said))
+    # A required check this platform could not run is cannot-evaluate too: one skipped check alone is exit 2,
+    # naming it and never PASS; a failure beside it is still 1; a skip beside an expired bound is 2 naming
+    # both; an empty skip list is the clean 0. Red against a verdict that ignores the skip list (the
+    # descriptor-census skips printed as SKIPPED while the run exits 0).
+    skip_one = [("self-test-leaves-no-descriptor-open", _NO_CENSUS)]
+    skip_said = {}
+    for label, args in (("one", ([], {}, 41, [], skip_one)),
+                        ("two", ([], {}, 41, [], skip_one + [("x-census-check", _NO_CENSUS)])),
+                        ("fail", (["x"], {}, 41, [], skip_one)),
+                        ("bound", ([], {}, 40, ["class sweep child killed at its 3000s bound"], skip_one)),
+                        ("none", ([], {}, 41, [], []))):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = _self_test_outcome(*args)
+        skip_said[label] = (code, out.getvalue())
+    check("self-test-exit-skipped-check-cannot-evaluate",
+          skip_said["one"][0] == 2 and "CANNOT EVALUATE (1 required check(s) skipped" in skip_said["one"][1]
+          and "self-test-leaves-no-descriptor-open" in skip_said["one"][1]
+          and "PASS" not in skip_said["one"][1] and "FAIL" not in skip_said["one"][1]
+          and skip_said["two"][0] == 2 and "2 required check(s) skipped" in skip_said["two"][1]
+          and "self-test-leaves-no-descriptor-open, x-census-check" in skip_said["two"][1]
+          and skip_said["fail"][0] == 1 and "FAILED: x" in skip_said["fail"][1]
+          and skip_said["bound"][0] == 2 and bound_line in skip_said["bound"][1]
+          and "1 bound(s) expired" in skip_said["bound"][1]
+          and "1 required check(s) skipped" in skip_said["bound"][1]
+          and skip_said["none"][0] == 0 and "SELF-TEST: PASS (41 " in skip_said["none"][1],
+          observed=repr(skip_said))
     # The no-census skip roster: every census-only sweep check is named, each with the given reason, in
     # _CLASS_SWEEP_CHECKS order, then the parent comparison and the expiry probe, and nothing else.
     entries = _class_sweep_skip_entries("probe reason")
@@ -15157,14 +15197,14 @@ def _class_sweep_bound_self_test(check):
             "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
             "    else:\n"
             "        _class_sweep_record(check, bound_expired)\n"
-            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)\n")
+            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)\n")
     wiring_probes = {}
     for label, text in (("good", good),
                         ("fresh-list", good.replace("_class_sweep_record(check, bound_expired)",
                                                     "_class_sweep_record(check, [])")),
                         ("other-list", good.replace(
-                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired)",
-                            "_self_test_outcome(failures, failure_details, checked[0], [])")),
+                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)",
+                            "_self_test_outcome(failures, failure_details, checked[0], [], skipped)")),
                         ("no-skips", good.replace(
                             "        skipped.extend(_class_sweep_skip_entries(no_census))",
                             "        pass"))):
@@ -15179,8 +15219,8 @@ def _class_sweep_bound_self_test(check):
     # The reporting, proved by RUNNING the real statements: the sweep-reporting slice of this module's
     # own _self_test_checks (_sweep_report_source) is executed with the sweep child controlled, asserting
     # the final exit code and the emitted entries. A controlled no-census run must put every sweep check
-    # into the skip report and still exit 0; a controlled expiry must exit 2 with the bound entry emitted
-    # and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
+    # into the skip report and exit 2, cannot evaluate, naming them; a controlled expiry must exit 2 with
+    # the bound entry emitted and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
 
     def _slice_outcomes(module_text):
         slice_source = _sweep_report_source(ast.parse(module_text))
@@ -15207,9 +15247,16 @@ def _class_sweep_bound_self_test(check):
                 outcomes[label] = (code, list(skipped_list), recorded_calls, out.getvalue())
         return outcomes
     live_report = _slice_outcomes(source_text)
+    # The no-census verdict line itself names every skipped sweep check (not only the SKIPPED lines).
+    no_census_verdict = [] if live_report is None else [
+        line for line in live_report["no-census"][3].splitlines()
+        if line.startswith("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (")]
     check("class-sweep-reporting-slice-reports-skips-and-expiry",
           live_report is not None
-          and live_report["no-census"][0] == 0
+          and live_report["no-census"][0] == 2
+          and "PASS" not in live_report["no-census"][3]
+          and len(no_census_verdict) == 1
+          and all(name in no_census_verdict[0] for name in names)
           and [entry[0] for entry in live_report["no-census"][1]] == names
           + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
              "class-sweep-bound-expiry-attributed-to-the-bound"]
@@ -15228,14 +15275,21 @@ def _class_sweep_bound_self_test(check):
     # Negative controls: each reporting mutation, applied to this module's source, must change what the
     # executed slice reports. A bare call that drops the skip entries, an extend into a throwaway list,
     # and a rebinding of the expiry list to empty just before the verdict each keep the name-reading
-    # wiring check above green; the executed slice refuses all three.
+    # wiring check above green; the executed slice refuses all three. A verdict that no longer reads the
+    # skip list ("verdict-blind") keeps the skip report but lets a no-census run exit 0; the executed
+    # slice refuses it too.
     extend_stmt = "        skipped.extend(_class_sweep_skip_entries(no_census))"
-    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)"
+    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)"
+    # The verdict statement on a line of its own, so a mutation lands on the live statement and never inside
+    # a probe string above that quotes it; a live verdict without that exact form leaves the source
+    # unchanged, which the check below refuses.
+    verdict_line = "\n" + verdict_stmt + "\n"
     mutated = {
         "discard": source_text.replace(extend_stmt, "        _class_sweep_skip_entries(no_census)", 1),
         "throwaway": source_text.replace(
             extend_stmt, "        [].extend(_class_sweep_skip_entries(no_census))", 1),
-        "rebind": source_text.replace(verdict_stmt, "    bound_expired = []\n" + verdict_stmt, 1),
+        "rebind": source_text.replace(verdict_line, "\n    bound_expired = []" + verdict_line, 1),
+        "verdict-blind": source_text.replace(verdict_line, verdict_line.replace(", skipped)", ")"), 1),
     }
     mutant_reports = {label: _slice_outcomes(text) for label, text in mutated.items()}
     check("class-sweep-reporting-slice-refuses-dropped-skips-and-rebound-expiry",
@@ -15246,7 +15300,10 @@ def _class_sweep_bound_self_test(check):
           and "SKIPPED" not in mutant_reports["throwaway"]["no-census"][3]
           and mutant_reports["rebind"]["expiry"][0] == 0
           and "BOUND EXPIRED" not in mutant_reports["rebind"]["expiry"][3]
-          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3],
+          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3]
+          and mutant_reports["verdict-blind"]["no-census"][0] == 0
+          and "  SKIPPED: " in mutant_reports["verdict-blind"]["no-census"][3]
+          and "CANNOT EVALUATE" not in mutant_reports["verdict-blind"]["no-census"][3],
           observed=repr({label: None if report is None else
                          (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
                          for label, report in mutant_reports.items()}))
@@ -15266,7 +15323,8 @@ def _class_sweep_bound_self_test(check):
                   "        skipped.append((name, no_census))\n"
                   "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
                   "    for name, why in skipped:\n"
-                  "        print(name, why)\n")
+                  "        print(name, why)\n"
+                  "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)\n")
     report_loop = "    for name, why in skipped:"
     shape_probes = {}
     for label, inserted in (("good", None),
@@ -15287,7 +15345,11 @@ def _class_sweep_bound_self_test(check):
                              "    try:\n        pass\n"
                              "    except Exception as skipped:\n        pass\n"),
                             ("global-declared", "    global skipped\n"),
-                            ("keyword-named", "    _some_helper(skipped=[])\n")):
+                            ("keyword-named", "    _some_helper(skipped=[])\n"),
+                            ("verdict-keyword", "    _self_test_outcome(failures, failure_details, checked[0], "
+                             "bound_expired, skipped=skipped)\n"),
+                            ("verdict-other-slot", "    _self_test_outcome(skipped, failure_details, checked[0], "
+                             "bound_expired, [])\n")):
         text = shape_good if inserted is None else shape_good.replace(
             report_loop, inserted + report_loop, 1)
         shape_probes[label] = _skip_list_write_sites(ast.parse(text))
@@ -15302,7 +15364,8 @@ def _class_sweep_bound_self_test(check):
           and all(shape_probes[label][0] == 1 and shape_probes[label][1] != []
                   for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped",
                                 "match-captured", "star-captured", "mapping-rest", "import-aliased",
-                                "except-bound", "global-declared", "keyword-named"))
+                                "except-bound", "global-declared", "keyword-named", "verdict-keyword",
+                                "verdict-other-slot"))
           and cleared_live is not None and cleared_live[0] == 1 and cleared_live[1] != []
           and captured_live is not None and captured_live[0] == 1 and captured_live[1] != []
           and _skip_list_write_sites(ast.parse("def other():\n    skipped = []\n")) is None,
