@@ -816,8 +816,8 @@ def _fixture(root, skip_policy="no-skip", imports=None, events=()):
     init["members"] = [dict(path=_MACHINE + "/manifest.toml", digest=_digest(b"manifest\n"))]
     render = schema.canonical_op("render-views")
     render["members"] = [dict(path=_OCCUPYING, digest=_digest(_RENDERED))]
-    ops = [dict(op="retire-file", path=_RETIRED, preimage_digest=_digest(_LIVE[_RETIRED])), init, render,
-           schema.enforcement_install_op(bindings["enforcement"])]
+    ops = [dict(op="retire-file", path=_RETIRED, preimage_digest=_digest(_LIVE[_RETIRED])), init, render] + \
+        schema.enforcement_install_ops(bindings["enforcement"])
     plan = _sealed(dict(format=schema.PLAN_FORMAT, schema=schema.SCHEMA_VERSION, product="aiqt",
                         inventory_digest="sha256:" + "2" * 64, run_id=_RUN, revision=bindings["revision"],
                         store=dict(store_root=".", machine_rel=_MACHINE, adoption="first-adoption"),

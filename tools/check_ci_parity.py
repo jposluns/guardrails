@@ -148,7 +148,15 @@ body, so the workflow that runs it must list opened, synchronize, reopened and
 edited (MSG_LEAKS_PULL_REQUEST_TYPES) in its pull_request types, and a workflow
 that does not run it must not carry edited on pull_request or
 pull_request_target (EDIT_EVENTS), because edited re-runs every job of that
-workflow on a metadata-only change. Each departure is a trigger finding (exit
+workflow on a metadata-only change. quality.yml must list exactly
+QUALITY_PULL_REQUEST_TYPES (labeled) on its pull_request event and carry no
+pull_request_target, because a pull request run of it is scheduled only by the
+label the merge lane applies to the train pull request, so a member head gets
+no Quality run; a quality.yml whose on: block names no pull_request event, and
+one with no top-level on: line at all, is a trigger finding too, because a
+train head then gets no Quality run either (tools/ci-status.sh reads that as
+missing, never as passing, but this rule names the cause). Each departure is a
+trigger finding (exit
 1). The rule reads the top-level on: block: an event key at indent 2 with no
 value reads as GitHub's default types (opened, synchronize, reopened); types:
 at indent 4 is a one-line flow list, one plain scalar, or a block list at
@@ -216,9 +224,9 @@ outside it because the registry job runs them unconditioned, so for the
 byte-canon-matrix job only its presence, its pinned if: and its members'
 parity are held, not a relocation of its commands); whether GitHub
 evaluates the pinned expressions as their text says (this rule compares text);
-and a cancelled run left on a live head (a reopen while its run is in progress,
-or a push back to an earlier head), which tools/ci-status.sh then refuses until
-a new head commit.
+and a cancelled run left on a live head (a label added while its run is in
+progress, the merge-train label re-applied included, or a push back to an
+earlier head), which tools/ci-status.sh then refuses until a new head commit.
 OPF GROUPS. The OPF tooling self-test runs in CI as parallel shards, one
 opf/tools/opf.py --self-test-group NAME step per group of SELF_TEST_GROUPS in
 that file. The self-test reads SELF_TEST_GROUPS from the live file with ast
@@ -287,7 +295,8 @@ contain is unclassified even when its value looks inert: bash evaluates a value
 assigned to an integer special variable as arithmetic (RANDOM=failed=0 resets
 failed), a compound array subscript assigns (x=([failed=0]=1)), and notrun=0 is
 accepted only at top level before the first gate, where the real runner puts it,
-because a later notrun=0 would hide the NOT RUN disclaimer. Behind that membership,
+because a later notrun=0 would clear the NOT RUN state, so its failure could no
+longer fire. Behind that membership,
 each expansion must still be a plain $NAME, ${NAME} or $? of a name the runner
 itself sets or manages (failed, notrun, failed_names, name, rc, gitleaks_rc, HOME,
 PATH): under set -u, a plain expansion of any other, possibly unset, variable
@@ -394,8 +403,9 @@ the runner inherits, which can change what an accepted literal line resolves
 to at runtime. Three: the runner-internal ORDER of the remaining accepted
 literal lines beyond the position-checked ones. No non-position-checked
 scaffold echo or assignment expands anything that can be unbound, so
-relocating one rewords the log (a stray RESULT: PASS echo or a notrun=1
-mid-roster) without touching an exit code; the recognized [ ] test lines do
+relocating one rewords the log (a stray RESULT: PASS echo) without touching
+an exit code, or (a notrun=1 mid-roster) can only turn a pass into the NOT
+RUN failure; the recognized [ ] test lines do
 expand failure state, so a copy relocated above its initializer still ends
 the runner loudly under set -u before any gate, the same bounded early-exit
 class as the closed HOME, gitleaks_rc and failed_names placements. A
@@ -634,6 +644,10 @@ MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
 EDIT_EVENTS = ("pull_request", "pull_request_target")
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
+# The only pull_request types quality.yml may list (module docstring, TRIGGER): a pull request run is
+# scheduled by the label the merge lane applies to the train pull request, never by a member's open,
+# push or reopen.
+QUALITY_PULL_REQUEST_TYPES = ("labeled",)
 
 ALLOWLIST = (
     {
@@ -711,6 +725,20 @@ ALLOWLIST = (
             "opf.py holds to every registered self-test exactly once."
         ),
         "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_gitleaks_pin.py",
+        "reason": (
+            "The local run requires the gitleaks version quality.yml pins on "
+            "PATH; the CI secrets job downloads that pinned binary and verifies "
+            "its checksum before it scans, so only the gate's self-test runs in CI."
+        ),
+        "backlog": (
+            "documented in the gitleaks-pin residue of "
+            ".aiqt/core/gates/manifest.toml and the Gates and CI section of "
+            "CLAUDE.md"
+        ),
     },
     {
         "side": "local-only",
@@ -1316,7 +1344,7 @@ FAILED_GATES_ECHO = 'echo "FAILED GATES: ${failed_names}"'
 # HISTCMD as arithmetic (RANDOM=failed=0 resets failed), a compound array subscript
 # assigns (x=([failed=0]=1)), and an expansion of an unset variable aborts under
 # set -u (x=$BASH_ENV, echo "$stub_log"). notrun=0 is accepted only at top level
-# before the first gate, because a later reset would hide the NOT RUN disclaimer.
+# before the first gate, because a later reset would clear the NOT RUN failure.
 # The gitleaks-block lines (PATH_APPEND_LINE, GITLEAKS_RC_LINE and
 # GITLEAKS_FAILED_ECHO) and FAILED_GATES_ECHO are deliberately NOT members
 # here: extract_local accepts each of them only inside its real block and
@@ -1328,11 +1356,11 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     "echo",
     'echo "--- secrets (gitleaks) ---"',
     'echo "PASS: gitleaks found no leaks"',
-    'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
-    'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
+    'echo "MISSING: gitleaks is not on PATH locally, so its scan cannot run here, and the"',
+    'echo "  gitleaks-pin gate below fails this run. Install the pinned version to fix it:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
     'echo "RESULT: FAIL"',
-    'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+    'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
     'echo "RESULT: PASS"',
     # opf/tools/run_all_checks.sh (adapted): its distinct summary echoes
     'echo "OPF STANDALONE SUBSET: FAILED"',
@@ -1349,8 +1377,8 @@ TERMINAL_SUMMARIES = (
         "exit 1",
         "fi",
         'if [ "$notrun" -ne 0 ]; then',
-        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
-        "exit 0",
+        'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
+        "exit 1",
         "fi",
         'echo "RESULT: PASS"',
     ),
@@ -1928,7 +1956,7 @@ def extract_local(text):
             scaffold = not if_stack and not members
         elif stripped == "notrun=0":
             # Only where the real runner puts it: top level, before any gate. A
-            # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
+            # later notrun=0 would clear the NOT RUN state, so its failure could not fire.
             scaffold = not if_stack and not members
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
@@ -2537,7 +2565,8 @@ def _lane_findings(job_ids, job_fields, lines, source, job_members):
 
 
 def _edit_event_types(lines, source, diagnostics):
-    """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:.
+    """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:,
+    or None when the file has no top-level on: line at all.
 
     The shapes read are those the module docstring lists (TRIGGER); any
     other shape under an edit event appends a trigger-shape diagnostic."""
@@ -2612,7 +2641,7 @@ def _edit_event_types(lines, source, diagnostics):
         start = index
         break
     if start is None:
-        return events
+        return None
     value = _strip_comment(lines[start]).split(":", 1)[1].strip()
     if value:
         for event in names(start + 1, value):
@@ -2723,17 +2752,66 @@ def _edit_event_types(lines, source, diagnostics):
     return events
 
 
+def _quality_trigger_findings(events, source):
+    """Hold quality.yml's pull_request types to QUALITY_PULL_REQUEST_TYPES
+    and refuse pull_request_target there (module docstring, TRIGGER). An
+    on: block with no pull_request event is a finding too, and so is a file
+    with no top-level on: line (events is None)."""
+    if source != CI_SOURCE:
+        return []
+    if events is None:
+        return [Finding(
+            "trigger",
+            source,
+            "{} has no top-level on: line: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none".format(source),
+        )]
+    findings = []
+    types = events.get("pull_request")
+    if types is None:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} has no pull_request event: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none either".format(source),
+        ))
+    elif types != QUALITY_PULL_REQUEST_TYPES:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} lists pull_request types [{}], not exactly [{}]: a pull "
+            "request run of it is scheduled only by the label the merge lane "
+            "applies to the train pull request, so a member head gets no "
+            "Quality run".format(source, ", ".join(types),
+                                 ", ".join(QUALITY_PULL_REQUEST_TYPES)),
+        ))
+    if "pull_request_target" in events:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} carries pull_request_target, which schedules runs outside "
+            "its labeled pull_request trigger".format(source),
+        ))
+    return findings
+
+
 def _trigger_findings(lines, members, source, diagnostics):
     """Require pull_request edited exactly where the message/metadata leak
-    scan runs (module docstring, TRIGGER)."""
+    scan runs, and quality.yml's labeled trigger (module docstring,
+    TRIGGER)."""
     events = _edit_event_types(lines, source, diagnostics)
+    findings = _quality_trigger_findings(events, source)
+    if events is None:
+        events = {}
     if MSG_LEAKS_SCAN in members:
         types = events.get("pull_request", ())
         missing = [kind for kind in MSG_LEAKS_PULL_REQUEST_TYPES
                    if kind not in types]
         if not missing:
-            return []
-        return [Finding(
+            return findings
+        return findings + [Finding(
             "trigger",
             source,
             "{} runs {} but its pull_request types lack {}, so the scan does "
@@ -2741,7 +2819,7 @@ def _trigger_findings(lines, members, source, diagnostics):
             "a PR title/body change)".format(
                 source, MSG_LEAKS_SCAN, ", ".join(missing)),
         )]
-    return [Finding(
+    return findings + [Finding(
         "trigger",
         source,
         "{} carries {} type edited but does not run {}, so a PR title/body "
@@ -4214,13 +4292,18 @@ def self_test():
             "      - uses: actions/checkout@v4",
         ))
 
-    # A quality.yml fixture carries the pinned concurrency: block, which the
+    # A quality.yml fixture carries the labeled pull_request trigger the
+    # TRIGGER rule requires there and the pinned concurrency: block, which the
     # LANES rule requires there, plus the heavy jobs and the Quality gates
     # aggregator the multi-job rules then require; a msg-leaks.yml fixture
-    # passes top=() and heavy=False.
+    # passes trigger=(), top=() and heavy=False.
+    labeled_trigger = ("on:", "  pull_request:", "    branches: [main]",
+                       "    types: [labeled]", "  push:",
+                       "    branches: [main]")
+
     def ci_fixture(commands=(), extra_steps=(), top=CONCURRENCY_BLOCK,
-                   heavy=True):
-        lines = ["name: Test"] + list(top) + [
+                   heavy=True, trigger=labeled_trigger):
+        lines = ["name: Test"] + list(trigger) + list(top) + [
             "jobs:",
             "  quality:",
             "    runs-on: ubuntu-latest",
@@ -4242,6 +4325,13 @@ def self_test():
                          for job in ["quality"] + sorted(HEAVY_JOBS))
             lines.extend(REQUIRED_STATUS_JOB[3:])
         return "\n".join(lines) + "\n"
+
+    def without_trigger(text):
+        # A quality.yml fixture's labeled trigger removed, so the vector sets
+        # its own.
+        return text.replace(
+            "name: Test\n" + "\n".join(labeled_trigger) + "\n", "name: Test\n",
+            1)
 
     def case(
             name,
@@ -5263,7 +5353,13 @@ def self_test():
             ("summary copied before gates finish",
              mutate((gitleaks, live_runner[live_runner.index(summary):] + gitleaks))),
             ("wrong terminal exit",
-             mutate(("  exit 1\n", "  exit 0\n"))),
+             mutate(('  echo "RESULT: FAIL"\n  exit 1\n',
+                     '  echo "RESULT: FAIL"\n  exit 0\n'))),
+            # The NOT RUN branch fails the run, as the gitleaks-pin gate does:
+            # its earlier exit 0 passed a run whose gitleaks scan did not run.
+            ("NOT RUN branch passing",
+             mutate(('NOT RUN locally (see above)"\n  exit 1\n',
+                     'NOT RUN locally (see above)"\n  exit 0\n'))),
             ("gate after summary",
              live_runner + 'run_gate "late" python3 -I -B tools/check_leaks.py\n'),
         )
@@ -6007,7 +6103,8 @@ def self_test():
     # without the change.
     def multi_job_ci(aggregator, first=("python3 tools/a.py",),
                      second=("python3 tools/b.py",), run_tail=()):
-        lines = ["name: Test"] + list(CONCURRENCY_BLOCK) + ["jobs:"]
+        lines = (["name: Test"] + list(labeled_trigger)
+                 + list(CONCURRENCY_BLOCK) + ["jobs:"])
         for job, commands in (("one", common + first), ("two", second)):
             lines.extend((
                 "  " + job + ":",
@@ -6218,7 +6315,8 @@ def self_test():
                  ()),
         "duplicate-key")
     case("31m a key under a later top-level on: is not read as a job",
-         evaluate(multi_local, good_multi + "on:\n  push:\n", ()), 0)
+         evaluate(multi_local, without_trigger(good_multi)
+                  + "on:\n  pull_request:\n    types: [labeled]\n  push:\n", ()), 0)
 
     # 32 RESULT-MASKING KEYS: continue-on-error, uses, defaults and container
     # on any job are each a required-status finding whatever their value,
@@ -6532,12 +6630,14 @@ def self_test():
     local_msg = local_fixture(common + (msg_selftest,))
 
     def with_on(text, on_block):
-        return text.replace("name: Test\n", "name: Test\non:\n" + on_block, 1)
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\non:\n" + on_block, 1)
 
     def with_on_header(text, header):
         # Insert a raw top-level header (no on: line is added), for vectors
         # that exercise the on: header spelling itself.
-        return text.replace("name: Test\n", "name: Test\n" + header, 1)
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\n" + header, 1)
 
     def pr_types(types):
         return ("  pull_request:\n    branches: [main]\n    types: " + types
@@ -6545,8 +6645,11 @@ def self_test():
 
     defaults = pr_types("[opened, synchronize, reopened]")
     edited = pr_types("[opened, synchronize, reopened, edited]")
-    quality_side = with_on(ci_fixture(common), defaults)
-    scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False)
+    # quality.yml lists the labeled type alone (module docstring, TRIGGER).
+    labeled = pr_types("[labeled]")
+    quality_side = with_on(ci_fixture(common), labeled)
+    scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False,
+                           trigger=())
     msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
 
     def scan_case(name, quality, scan, want_code, kinds=(), local_only=None,
@@ -6582,7 +6685,8 @@ def self_test():
                       block_list + "      - reopened\n      - edited\n"),
               msg_side, 1, ("trigger",))
     scan_case("35g a block list without edited on quality.yml passes",
-              with_on(ci_fixture(common), block_list + "      - reopened\n"),
+              with_on(ci_fixture(common),
+                      "  pull_request:\n    types:\n      - labeled\n"),
               msg_side, 0)
     scan_case("35h a block list with all four types on msg-leaks.yml passes",
               quality_side,
@@ -6598,14 +6702,34 @@ def self_test():
               ((MSG_LEAKS_CI_SOURCE, scan_text.replace(
                   "name: Test\n", "name: Test\non: [push, pull_request]\n", 1)),),
               1, ("trigger",))
-    scan_case("35k a one-line on: list on quality.yml passes (no edited)",
-              ci_fixture(common).replace(
-                  "name: Test\n", "name: Test\non: [push, pull_request]\n", 1),
-              msg_side, 0)
-    scan_case("35l the scan and edited in one workflow pass (the rule follows "
-              "the scan, not a file name)",
-              with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
-              (), 0)
+    # 35k: a one-line on: list on quality.yml is read: it lists no edited, so
+    # it draws no edited finding, and it lists no pull_request, so its one
+    # finding is the missing-trigger finding (41i holds that on the block form).
+    one_line_quality = with_on_header(
+        ci_fixture(common), "on: [push, workflow_dispatch]\n")
+    scan_case("35k a one-line on: list on quality.yml with no pull_request draws "
+              "only the missing-trigger finding",
+              one_line_quality, msg_side, 1, ("trigger",))
+    one_line = evaluate(local_msg, one_line_quality, msg_waiver, msg_side)
+    count += 1
+    if [finding.message for finding in one_line.findings
+            if "has no pull_request event" not in finding.message]:
+        failures.append("35k a finding other than the missing trigger: {!r}".format(
+            one_line.findings))
+    # 35l: the edited rule follows the scan, not a file name, so the scan with
+    # edited in quality.yml draws no edited finding; the labeled pin on
+    # quality.yml's own types is then the one finding.
+    together = evaluate(
+        local_msg, with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
+        msg_waiver, ())
+    case("35l the scan and edited in one workflow draw only the labeled pin "
+         "(the edited rule follows the scan, not a file name)",
+         together, 1, ("trigger",))
+    count += 1
+    if [finding.message for finding in together.findings
+            if "not exactly [labeled]" not in finding.message]:
+        failures.append("35l a finding other than the labeled pin: {!r}".format(
+            together.findings))
     for label, shape in (
             ("a flow mapping", "  pull_request: {types: [edited]}\n"),
             ("a quoted event key", "  \"pull_request\":\n    types: [edited]\n"),
@@ -6740,9 +6864,10 @@ def self_test():
     # value stays read: a silently skipped on: header flips its exit 0 to 1
     # (its edited goes unread), while every other control reads the same
     # under a skipped header (on quality.yml the scalar and flow list read
-    # as no edited either way, and the block control keeps exit 1 through
-    # the msg-leaks.yml side's own missing-edited finding; on msg-leaks.yml
-    # the scalar and flow list lack edited either way). So the six controls
+    # exit 1 either way: read, through their missing-trigger finding, and
+    # skipped, through the msg-leaks.yml side's own missing-edited finding,
+    # which also keeps the block control at exit 1; on msg-leaks.yml the
+    # scalar and flow list lack edited either way). So the six controls
     # establish NOT REFUSED each, and the skip discrimination rests on the
     # msg-leaks.yml block control (shown red under a skipped-header mutant).
     for label, header, named in (
@@ -6772,12 +6897,13 @@ def self_test():
                   ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, header)),),
                   2, diagnostic=named)
     scan_case("35t a plain scalar on: value on quality.yml is not refused "
-              "(no edited: pass)",
-              with_on_header(ci_fixture(common), "on: push\n"), msg_side, 0)
+              "(no pull_request: the missing-trigger finding)",
+              with_on_header(ci_fixture(common), "on: push\n"), msg_side, 1,
+              ("trigger",))
     scan_case("35t a one-line flow list after on: on quality.yml is not "
-              "refused (no edited: pass)",
-              with_on_header(ci_fixture(common), "on: [push, pull_request]\n"),
-              msg_side, 0)
+              "refused (no pull_request: the missing-trigger finding)",
+              with_on_header(ci_fixture(common), "on: [push, workflow_dispatch]\n"),
+              msg_side, 1, ("trigger",))
     scan_case("35t a block on: value on quality.yml stays read (edited there "
               "is still a trigger finding)",
               with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
@@ -6858,10 +6984,10 @@ def self_test():
     scan_case("35q a gate moved from quality.yml into msg-leaks.yml is a "
               "relocation finding",
               with_on(ci_fixture(tuple(
-                  item for item in common if item != moved)), defaults),
+                  item for item in common if item != moved)), labeled),
               ((MSG_LEAKS_CI_SOURCE, with_on(
                   ci_fixture((msg_selftest, msg_scan, moved), top=(),
-                             heavy=False),
+                             heavy=False, trigger=()),
                   edited)),),
               1, ("relocation",))
 
@@ -6910,7 +7036,7 @@ def self_test():
                      "        run: |") + block_lines
         if on_quality:
             expr_report = evaluate(
-                local_msg, with_on(ci_fixture(common, expr_step), defaults),
+                local_msg, with_on(ci_fixture(common, expr_step), labeled),
                 msg_waiver, msg_side)
             expr_source = CI_SOURCE
         else:
@@ -6918,7 +7044,7 @@ def self_test():
                 local_msg, quality_side, msg_waiver,
                 ((MSG_LEAKS_CI_SOURCE, with_on(
                     ci_fixture((msg_selftest, msg_scan), expr_step, top=(),
-                               heavy=False),
+                               heavy=False, trigger=()),
                     edited)),))
             expr_source = MSG_LEAKS_CI_SOURCE
         case("35x a GitHub expression in a run: shell comment is "
@@ -6932,7 +7058,7 @@ def self_test():
                 "{!r}".format(label, expr_source, expr_report.diagnostics))
     inline_expr = evaluate(
         local_msg,
-        with_on(ci_fixture(common + ("echo " + pr_title,)), defaults),
+        with_on(ci_fixture(common + ("echo " + pr_title,)), labeled),
         msg_waiver, msg_side)
     case("35x control: an inline run: expression stays refused", inline_expr,
          2)
@@ -7139,7 +7265,7 @@ def self_test():
     dedented_comment = evaluate(
         local_msg,
         with_on(ci_fixture(common, block_step(
-            ("            echo ok", "          # " + pr_title))), defaults),
+            ("            echo ok", "          # " + pr_title))), labeled),
         msg_waiver, msg_side)
     case("36 a YAML comment dedented below the run: block content is "
          "outside the scalar (pass)", dedented_comment, 0)
@@ -7156,7 +7282,7 @@ def self_test():
              ("         echo ok", "         # " + pr_title))):
         inside = evaluate(
             local_msg,
-            with_on(ci_fixture(common, block_step(block_lines)), defaults),
+            with_on(ci_fixture(common, block_step(block_lines)), labeled),
             msg_waiver, msg_side)
         case("36 a comment inside the scalar carries the expression: "
              + label, inside, 2)
@@ -7170,7 +7296,7 @@ def self_test():
         local_msg,
         with_on(ci_fixture(common, block_step(
             ("            echo ok", "          # a dedented comment",
-             "            echo again"))), defaults),
+             "            echo again"))), labeled),
         msg_waiver, msg_side)
     case("36 content after a dedented comment is a layout YAML rejects, "
          "refused", reentry, 2)
@@ -7199,7 +7325,7 @@ def self_test():
         over = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                (blank, "            echo ok"), indicator)), defaults),
+                (blank, "            echo ok"), indicator)), labeled),
             msg_waiver, msg_side)
         case("37 an over-indented leading blank in a run: block is a "
              "layout YAML rejects, refused: " + label, over, 2)
@@ -7218,7 +7344,7 @@ def self_test():
         at_or_below = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                (blank, "            echo ok"), indicator)), defaults),
+                (blank, "            echo ok"), indicator)), labeled),
             msg_waiver, msg_side)
         case("37 control: a leading blank at or below the content "
              "indentation stays inside the scalar: " + label,
@@ -7244,7 +7370,7 @@ def self_test():
         two_blanks = evaluate(
             local_msg,
             with_on(ci_fixture(common, block_step(
-                blanks + ("            echo ok",))), defaults),
+                blanks + ("            echo ok",))), labeled),
             msg_waiver, msg_side)
         case("37 two leading blanks, one past the content indentation, are "
              "refused in either order: " + label, two_blanks, 2)
@@ -7263,7 +7389,7 @@ def self_test():
         local_msg,
         with_on(ci_fixture(common, block_step(
             ("            echo ok", " " * 20, "            echo again"))),
-            defaults),
+            labeled),
         msg_waiver, msg_side)
     case("37 control: a blank after the first content line, indented past "
          "the content indentation, stays inside the scalar", later_blank, 0)
@@ -7329,7 +7455,7 @@ def self_test():
                 light_commands=None, opf_id="opf",
                 opf_commands=("python3 tools/b.py",), drop_heavy=()):
         other_heavy = sorted(HEAVY_JOBS - {"opf"} - set(drop_heavy))
-        lines = ["name: Test"] + list(top) + ["jobs:"]
+        lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
         for job, commands, condition in (
                 ("secrets",
                  common + ("python3 tools/a.py",)
@@ -7670,6 +7796,58 @@ def self_test():
     count += 1
     if _opf_group_names("SELF_TEST_GROUPS = (('a', ('x',)), ('b', ()))\n") != ("a", "b"):
         failures.append("40 SELF_TEST_GROUPS names are not read in order")
+
+    # 41 LABELED TRIGGER (module docstring, TRIGGER): quality.yml's pull_request
+    # types are exactly [labeled], so a member's open, push or reopen schedules
+    # no Quality run. The first departure is the trigger quality.yml carried
+    # before the change; each departure names the pin, and msg-leaks.yml, which
+    # runs the scan on its four types, draws no pin finding (35a).
+    def labeled_case(name, on_block, want_code, needle=None, header=False):
+        nonlocal count
+        quality = (with_on_header if header else with_on)(ci_fixture(common), on_block)
+        report = evaluate(local_msg, quality, msg_waiver, msg_side)
+        case(name, report, want_code, ("trigger",) if needle else ())
+        if needle is not None:
+            count += 1
+            if not any(finding.kind == "trigger" and needle in finding.message
+                       for finding in report.findings):
+                failures.append("{}: no trigger finding holds {!r}: {!r}".format(
+                    name, needle, report.findings))
+
+    pinned = "not exactly [labeled]"
+    labeled_case("41a the member-head trigger [opened, synchronize, reopened] "
+                 "is a trigger finding", defaults, 1, pinned)
+    labeled_case("41b labeled beside synchronize is a trigger finding",
+                 pr_types("[labeled, synchronize]"), 1, pinned)
+    labeled_case("41c labeled listed twice is a trigger finding",
+                 pr_types("[labeled, labeled]"), 1, pinned)
+    labeled_case("41d a pull_request event with no types (GitHub's default "
+                 "types) is a trigger finding",
+                 "  pull_request:\n    branches: [main]\n  push:\n", 1, pinned)
+    labeled_case("41e a one-line on: list naming pull_request is a trigger "
+                 "finding", "on: [push, pull_request]\n", 1, pinned,
+                 header=True)
+    labeled_case("41f a block list of other types is a trigger finding",
+                 "  pull_request:\n    types:\n      - opened\n      - labeled\n",
+                 1, pinned)
+    labeled_case("41g pull_request_target beside the labeled pull_request is a "
+                 "trigger finding",
+                 labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
+                 "pull_request_target")
+    labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a plain scalar types: labeled passes",
+                 pr_types("labeled"), 0)
+    # A quality.yml with no top-level on: line schedules no Quality run for the
+    # train pull request either; this vector passed clean before the missing
+    # on: finding.
+    labeled_case("41h a quality.yml with no top-level on: line is a trigger "
+                 "finding", "", 1, "has no top-level on: line", header=True)
+    # A quality.yml whose on: block names no pull_request event schedules no
+    # Quality run for the train pull request either; this vector passed clean
+    # before the missing-trigger finding.
+    labeled_case("41i an on: block with no pull_request event is a trigger "
+                 "finding", "  push:\n    branches: [main]\n", 1,
+                 "has no pull_request event")
 
     if failures:
         print("SELF-TEST FAIL:")
