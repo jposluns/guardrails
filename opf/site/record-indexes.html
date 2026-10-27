@@ -469,8 +469,7 @@
       <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
         link <code>exemplifies</code> to the <a href="./record-indexes#preference-pattern">preference pattern</a> it
         instantiates, feeding the distillation of standing preferences from individual rulings. It is
-        baseline as of spec 1.1.0 (it was module-tier in 1.0.0); the additive schema upgrade carries a
-        populated 1.0.0 governance-module index forward byte for byte.</p>
+        baseline as of spec 1.1.0 (it was module-tier in 1.0.0).</p>
     </div>
   </section>
 
@@ -569,8 +568,7 @@
       <p>The shared index shape with the standard envelope plus <code>context</code> and
         <code>rationale</code>. <a href="./record-indexes#maintainer-decision">Maintainer decisions</a> may link
         <code>exemplifies</code> toward the pattern they instantiate, so the evidence for a pattern
-        accumulates as links. It is baseline as of spec 1.1.0 (module-tier in 1.0.0); a populated
-        1.0.0 decision-support index is preserved as is by the schema upgrade.</p>
+        accumulates as links. It is baseline as of spec 1.1.0 (module-tier in 1.0.0).</p>
     </div>
   </section>
 
@@ -1049,7 +1047,7 @@
                              holding such records from its retired import path
   </pre></div>
     <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
-    <p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it. Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped. Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence. A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store. In a store that holds <code>legacy_fragment</code> records, as in a store with module-tier records, doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does not validate those records' content schemas. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+    <p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it. Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped. Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence. A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store. In a store that holds <code>legacy_fragment</code> records, as in a store with module-tier records, doctor reports cannot-evaluate and <code>opf render --write</code> refuses, because the baseline validator does not validate those records' content schemas. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>

@@ -305,14 +305,6 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_doctor.py
 
-      - name: OPF store-schema upgrade gate self-test
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_upgrade.py --self-test
-
-      - name: OPF store-schema upgrade gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_upgrade.py
-
       - name: OPF record-authoring gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert

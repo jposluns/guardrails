@@ -1513,7 +1513,8 @@ Base spec 2.0.0 is the baseline, and it declares the homes generation with the r
 than the integer `2`, MUST be refused. This specification defines no earlier base version, so this
 section defines no upgrade into 2.0.0; its rules bind each later base-schema version bump.
 Every later base-schema version bump MUST keep every manifest discoverable through the exact base
-discovery token `opf` (section 4.5).
+discovery token `opf` (section 4.5). No later base version exists, so the reference tooling defines
+no store upgrade (section 16.1).
 
 A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`) in at
 least one published implementation (section 16.1), the reference tooling, so that a store below
@@ -2108,7 +2109,8 @@ pre-release format this specification does not define, and it makes no claim of 
 this specification. The reference tooling's `opf doctor` grades a manifest declaring
 `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its VALID verdict on such a
 store says nothing about conformance to this specification, and its `opf upgrade` and `opf record`
-refuse such a store.
+refuse such a store. The reference tooling defines no store upgrade: its `opf upgrade` refuses every
+invocation with exit 2, reading and writing nothing.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter
 writes, its release identity and its supported `spec_version`, homes generation, and
