@@ -648,7 +648,8 @@ def self_test():
     FIFO CHANGELOG.md refused as non-regular (never blocking), an oversized CHANGELOG.md refused before the
     read (the pre-open st.st_size ceiling), a non-UTF-8 CHANGELOG.md, an un-encodable
     (lone-surrogate) changelog, an unresolvable --root, run()'s exit-code mapping, and the two unreleased
-    heading vectors (a heading with no summary row, and a misplaced not-first entry)."""
+    heading vectors (a heading with no summary row, and a misplaced not-first entry). The imported
+    release-row flag (spec 6.1, 14.3): run_gates passes a covered imported row."""
     import tempfile
     import shutil
 
@@ -920,6 +921,17 @@ def self_test():
     # rejected the third date as "text after the covers token", a false positive.
     cl_f5 = cl.replace("## 1.0.0 (2026-06-01)", "## 1.0.0 (2026-06-01, 2026-06-02, 2026-06-03)")
     check("f5-multi-date-suffix-pass", run_gates(base_version(cl_f5), worklog, cl_f5).status == PASS)
+
+    # The imported release-row flag (spec 6.1, 14.3): the gates grade an imported historical row by
+    # validate_version's own rule, so a covered imported row PASSES end to end.
+    cl_imp = cl + "\n## 0.9.0 (2026-05-01)\n\n- imported historical release\n"
+    v_imp = base_version(cl_imp)
+    v_imp["release"] = [{"version": "0.9.0", "date": "2026-05-01T00:00:00Z", "worklog_span": [],
+                         "coverage_digest": _opf_release.compute_span_digest(by_id, None),
+                         "imported": True}] + v_imp["release"]
+    v_imp["summary"].append({"covers": "0.9.0", "status": "published",
+                             "digest": freeze_of(cl_imp, "0.9.0")})
+    check("imported-row-pass", run_gates(v_imp, worklog, cl_imp).status == PASS)
 
     # F7: the CLI arg parser is fail-closed. In-process (no subprocess): a missing --root value or an
     # unknown arg is a usage error, --root with a value is accepted, and --self-test is honoured only alone.

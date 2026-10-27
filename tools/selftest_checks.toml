@@ -1914,7 +1914,6 @@ expected-check-ids = [
   "route/check-gensrc-failclose",
   "route/check-mistakes-register",
   "route/check-opf-init",
-  "route/check-opf-upgrade",
   "route/check-portability",
   "route/check-record-drift",
   "route/check-record-sections",
@@ -1988,8 +1987,6 @@ expected-check-ids = [
   "config/check_opf_doctor/rc",
   "config/check_opf_init/hooks",
   "config/check_opf_init/rc",
-  "config/check_opf_upgrade/hooks",
-  "config/check_opf_upgrade/rc",
   "config/check_portability/hooks",
   "config/check_portability/rc",
   "config/check_record_drift/hooks",
@@ -2046,7 +2043,6 @@ expected-check-ids = [
   "config/check_mistakes_register/malformed",
   "config/check_opf_doctor/malformed",
   "config/check_opf_init/malformed",
-  "config/check_opf_upgrade/malformed",
   "config/check_portability/malformed",
   "config/check_record_drift/malformed",
   "config/check_record_sections/fsmonitor",
@@ -2076,7 +2072,6 @@ expected-check-ids = [
   "config/system-control",
   "env/lifecycle-probe-timeout-vectors",
   "env/opf-tooling-home-lifecycle",
-  "env/opf-upgrade-home-lifecycle",
   "env/registered-opf-lifecycles",
 ]
 
