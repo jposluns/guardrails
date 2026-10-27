@@ -682,6 +682,7 @@ tools/check_entry_guard.py text eol=lf
 tools/check_footer.py text eol=lf
 tools/check_gensrc_failclose.py text eol=lf
 tools/check_git_option_table.py text eol=lf
+tools/check_gitleaks_pin.py text eol=lf
 tools/check_hooks_preview.py text eol=lf
 tools/check_install_page.py text eol=lf
 tools/check_instruction_budget.py text eol=lf
