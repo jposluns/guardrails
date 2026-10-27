@@ -16024,8 +16024,12 @@ def _main_isolated(monitor):
                 ("gw-rt-hd-res-stray-comment", "cat <<EOF # <<X\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-stray-sq-after", "cat <<EOF '<<X'\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-stray-line", "echo '<<X'\ncat <<EOF >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-comment-line",
+                 "echo x # <<X\ncat <<EOF >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-stray-arith", "cat <<EOF >notes.txt; (( 1<<2 ))\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-stray-arith-subst", "cat <<EOF; echo $((1<<2))\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
+                ("gw-rt-hd-res-stray-arith-line",
+                 "echo $((1<<2))\ncat <<EOF >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-delim-cont", "cat <<E\\\nOF >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-delim-ansi", "cat <<$'EOF' >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
                 ("gw-rt-hd-res-delim-locale", "cat <<$\"EOF\" >notes.txt\nDon't\nEOF\n$G commit -m 'a;b' -nv"),
@@ -16112,6 +16116,32 @@ def _main_isolated(monitor):
                 ("gw-rt-lit-ctl-log-git", "g'i't log --grep commit $N git")):
             gexpect("({}) a git written as such keeps the closed literal grammar's reading".format(_gw_lbl), _gw_cmd,
                     "allow")
+        # A quote-assembled git carrying the separated arg-consuming global option whose NAME holds 'git'
+        # (--git-dir) before its roster verb. The mask keeps a 'git' glued to a '-' intact, so the option-skip
+        # walk reads --git-dir, skips its value and reaches the verb; were the mask to rewrite --git-dir to
+        # --xxx-dir, the walk would read the option's value as the subcommand and nothing would deny (the value
+        # is not a roster verb), the skip these forms exercise. With O=-nv and L=--no-verify bash runs each as a
+        # hook-skipping git commit, am, push or merge (confirmed by the real-bash oracle), behind sudo, sh -c,
+        # eval and a here-document wrapper, in the backslash and double-quote spellings and on the parse-error
+        # path too; each allowed before. The value holding no 'git' (/srv/r) pins the cause on the option name.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-gitdir-commit", "g'i't --git-dir .git commit $O"),
+                ("gw-rt-gitdir-commit-nogit-val", "g'i't --git-dir /srv/r commit $O"),
+                ("gw-rt-gitdir-push", "g'i't --git-dir .git push $L"),
+                ("gw-rt-gitdir-merge", "g'i't --git-dir /srv/r merge $L topic"),
+                ("gw-rt-gitdir-am", "g'i't --git-dir /srv/r am $O x.mbox"),
+                ("gw-rt-gitdir-sudo", "sudo g'i't --git-dir .git commit $O"),
+                ("gw-rt-gitdir-sh-c", "sh -c \"g'i't --git-dir .git commit \\$O\""),
+                ("gw-rt-gitdir-eval", "eval \"g'i't --git-dir /srv/r commit ~\""),
+                ("gw-rt-gitdir-heredoc", "bash <<'EOF'\ng'i't --git-dir /srv/r commit $O\nEOF"),
+                ("gw-rt-gitdir-bs", "g\\it --git-dir .git commit $O"),
+                ("gw-rt-gitdir-dq", "g\"i\"t --git-dir .git commit $O"),
+                ("gw-rt-gitdir-pe", "g'i't --git-dir .git commit $O <<<x")):
+            gdeny_names("({}) a quote-assembled git before --git-dir <value> and a roster verb denies"
+                        .format(_gw_lbl), _gw_cmd,
+                        "a de-quoted reading of the command names git ('git'), and a later ")
+        gexpect("(gw-rt-gitdir-ctl-log) g'i't --git-dir .git log off the roster allows (control)",
+                "g'i't --git-dir .git log $N", "allow")
         # With extglob already on before the call, one extglob command word builds git with no shopt in the text.
         gdeny_names("(gw-rt-extglob-onepiece) an extglob command word denies with no shopt in the text",
                     "/usr/bin/+(gi)t commit -nv", "is built at run time")
@@ -16297,15 +16327,17 @@ def _main_isolated(monitor):
             rdexpect("(gw-rt-split-spans-{}) a doubt piece of either split is read to the end".format(_gw_lbl),
                      (lambda text: (text.index("$G"), len(text)) in _gw_ss(text)[1]) if _gw_ss is not None else None,
                      _gw_text, True)
-        # The mask of every git the closed literal grammar reads ('git' at a word boundary in either case, a path's
-        # last part and a '.git' ending included, never one glued to a letter), and the walk from each git a reading
-        # of the masked piece names: its subcommand found as _git_sub_and_args finds it (an option value skipped, a
-        # leading assignment that names git read as an assignment), a later git read after an off-roster one, and a
-        # roster verb with no word built at run time after it giving none.
-        rdexpect("(gw-rt-masked-git) every git the closed literal grammar reads is masked, one for one",
+        # The mask of every git the closed literal grammar reads as a command word ('git' at a word boundary in
+        # either case, a path's last part and a '.git' ending included, never one glued to a letter), and a 'git'
+        # glued to a '-' left intact (an option name like --git-dir; masking it to --xxx-dir would drop the
+        # arg-consuming option skip), and the walk from each git a reading of the masked piece names: its
+        # subcommand found as _git_sub_and_args finds it (an option value skipped, a leading assignment that names
+        # git read as an assignment), a later git read after an off-roster one, and a roster verb with no word
+        # built at run time after it giving none.
+        rdexpect("(gw-rt-masked-git) every git read as a command word is masked, --git-dir kept",
                  getattr(aiqt_hooks, "_gate_runtime_masked_git", None),
-                 "g'i't commit $O git GIT /usr/bin/git x.git -Sgit gitx",
-                 "g'i't commit $O xxx xxx /usr/bin/xxx x.xxx -Sgit gitx")
+                 "g'i't commit $O git GIT /usr/bin/git x.git -Sgit gitx --git-dir .git",
+                 "g'i't commit $O xxx xxx /usr/bin/xxx x.xxx -Sgit gitx --git-dir .xxx")
         _gw_ar = getattr(aiqt_hooks, "_gate_assembled_reading", None)
         for _gw_lbl, _gw_words, _gw_want in (
                 ("first", ["git", "commit", "$O"], ("git", "commit", "the word '$O', built at run time, which may "
@@ -16314,6 +16346,9 @@ def _main_isolated(monitor):
                                                                   "which may expand to a hook-skip spelling for it")),
                 ("gopt", ["git", "-C", "git", "-c", "a=b", "push", "x", "$L"],
                  ("git", "push", "the word '$L', built at run time, which may expand to a hook-skip spelling for it")),
+                ("gopt-masked", ["git", "--git-dir", ".xxx", "commit", "$O"],
+                 ("git", "commit", "the word '$O', built at run time, which may expand to a hook-skip spelling for "
+                  "it")),
                 ("off", ["git", "-C", "git", "log", "commit", "$O"], None),
                 ("assign", ["X=/a/git", "commit", "$O"], None),
                 ("no-runtime", ["git", "commit", "-m", "x"], None),
@@ -16415,7 +16450,8 @@ def _main_isolated(monitor):
                  "across its pieces"),
                 ("gw-res-runtime-literal", "and each git that a de-quoted reading assembles and the closed literal "
                  "grammar does not read as written"),
-                ("gw-res-runtime-literal-masked", "read with every git written as such masked out of the piece"),
+                ("gw-res-runtime-literal-masked", "read with every git the grammar reads as a command word masked "
+                 "out of the piece"),
                 ("gw-res-runtime-literal-overdeny", "any quote-assembled git starts a walk, an operand included"),
                 ("gw-res-runtime-attached-overdeny", "git log -Sgit commit $x denies"),
                 ("gw-res-runtime-tilde-overdeny", "a tilde word counts whatever it expands to"),

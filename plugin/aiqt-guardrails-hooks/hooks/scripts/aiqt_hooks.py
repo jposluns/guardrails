@@ -13414,10 +13414,14 @@ def _gate_runtime_hit(words, k, tilde=False):
     return None
 
 
-# A git the closed literal grammar reads in raw text: 'git' at a word boundary, in either case, the pattern it
-# starts a judgement at (_GATE_GIT_WORD_RE). Each is masked out of the copy of a raw piece the walk from a
-# quote-assembled git reads (_gate_runtime_masked_git), so that walk never starts at a git the grammar judges.
-_GATE_RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
+# A git the closed literal grammar reads as a command word in raw text: 'git' at a word boundary, in either
+# case, that is not glued to a '-'. Each is masked out of the copy of a raw piece the walk from a quote-assembled
+# git reads (_gate_runtime_masked_git), so that walk never starts at a git the grammar judges. A '-'-adjacent
+# 'git' is never a command word whose basename is git (an option name like --git-dir, or a dashed builtin name
+# like git-commit, has a basename the walk does not read as git), so it is left intact; masking it would rewrite
+# the option name the option-skip walk reads (--git-dir to --xxx-dir drops the arg-consuming skip, so the walk
+# would read the option's value as the subcommand), which must not happen.
+_GATE_RAW_GIT_RE = re.compile(r"(?i)(?<![\w-])git(?![\w-])")
 # The characters a de-quoted reading removes to join a word (quote characters and backslashes; an ANSI-C quote,
 # the one escape a reading decodes, holds a quote too): a masked piece with none of them and no 'git' left in
 # any case has no reading that names git (_gate_runtime_piece_hit).
@@ -13425,10 +13429,12 @@ _GATE_ASSEMBLY_CHARS = frozenset("'\"\\")
 
 
 def _gate_runtime_masked_git(text):
-    """text with each git the closed literal grammar reads (_GATE_RAW_GIT_RE) replaced by 'xxx', one for one, so a
-    de-quoted reading of the result names git only where quote removal, a backslash or an ANSI-C escape assembles
-    it (g'i't, g\\it, $'\\x67it') or an option's attached value adds it (env -Sgit): the git words the grammar does
-    not read as written. Linear in the length of text."""
+    """text with each git the closed literal grammar reads as a command word (_GATE_RAW_GIT_RE) replaced by 'xxx',
+    one for one, so a de-quoted reading of the result names git only where quote removal, a backslash or an ANSI-C
+    escape assembles it (g'i't, g\\it, $'\\x67it') or an option's attached value adds it (env -Sgit): the git words
+    the grammar does not read as written. A 'git' glued to a '-' is left intact (an option name like --git-dir, a
+    dashed builtin name like git-commit): it is never a command word the walk reads as git, and masking it would
+    rewrite the option name the option-skip walk reads. Linear in the length of text."""
     return _GATE_RAW_GIT_RE.sub("xxx", text)
 
 
@@ -13444,15 +13450,17 @@ def _gate_runtime_reading(words, tilde):
 
 def _gate_assembled_reading(words):
     """(word, sub, what) for the words of one de-quoted reading of a raw piece with every git the closed literal
-    grammar reads masked out (_gate_runtime_masked_git), else None: the walk from each word naming git
-    (_gate_word), a git quote removal assembles, in turn, when that git's subcommand (_git_sub_and_args) is a
-    roster verb with a word built at run time after it, which may expand to a hook-skip spelling for it (g'i't
+    grammar reads as a command word masked out (_gate_runtime_masked_git), else None: the walk from each word
+    naming git (_gate_word), a git quote removal assembles, in turn, when that git's subcommand (_git_sub_and_args)
+    is a roster verb with a word built at run time after it, which may expand to a hook-skip spelling for it (g'i't
     commit $O, sudo g'i't commit ~, g'i't commit $O git, whose last git is an operand, and sh -c "g'i't log;
     g'i't commit \\$O", whose first git's subcommand is off the roster). The closed literal grammar denies git
     commit $O and accepts its one here-document message form, but it reads a git word only as written, so a git
     assembled by quote removal is read here, wherever a git written as such stands in the same piece. Each git's
-    subcommand is found as _git_sub_and_args finds it, from tables built in one pass from the end, so the walk is
-    linear in the word count however many git words the reading holds."""
+    subcommand is found as _git_sub_and_args finds it, from tables (command_at, sub_at, runtime_at) built from the
+    SAME words in one pass from the end, so an option name the mask leaves intact (--git-dir) is read by the option
+    skip and its value is not taken for the subcommand; the walk is linear in the word count however many git words
+    the reading holds."""
     gits = [p for p, w in enumerate(words) if _gate_word(w) == "git"]
     if not gits:
         return None
@@ -13622,9 +13630,11 @@ def _gate_runtime_bypass(text):
     so it denies as the closed literal grammar denies git commit $O, and it denies after each git a reading
     assembles by quote removal, behind a wrapper or not, when that git's subcommand is a roster verb (g'i't
     commit $O, sudo g'i't commit ~: _gate_assembled_reading), read with every git the closed literal grammar
-    reads masked out of the piece (_gate_runtime_masked_git), since that grammar judges each, so a git written
-    as such elsewhere in the piece, an operand, a message or an option value, hides none (g'i't commit $O git,
-    sudo g'i't commit ~ -m git), and a later assembled git is read too (sh -c "g'i't log; g'i't commit \\$O").
+    reads as a command word masked out of the piece (_gate_runtime_masked_git), since that grammar judges each, so
+    a git written as such elsewhere in the piece, an operand, a message or an option value, hides none (g'i't
+    commit $O git, sudo g'i't commit ~ -m git); an option name like --git-dir keeps its text, so the option-skip
+    walk reads it and a git before --git-dir <value> and a roster verb denies (g'i't --git-dir .git commit $O), and
+    a later assembled git is read too (sh -c "g'i't log; g'i't commit \\$O").
     text is split into raw command pieces at the ;, &, | and newline separators outside
     any quoting _skip_quoting can prove (_raw_push_segments, which keeps a substitution whole, so $(cd /; echo
     git) commit -nv is one piece, and splits a here-document body at its newlines). Where that split may cut
@@ -13947,9 +13957,11 @@ def gate_weakening(data):
     -nv), inside an sh -c or eval script and on a here-document body line too, and so does each git a
     de-quoted reading assembles that the closed literal grammar does not read as written (g'i't commit $O, sudo
     g'i't commit ~, sh -c "g'i't log; g'i't commit \\$O") with a word built at run time after its roster verb,
-    read with every git written as such masked out of the piece, since that grammar judges each, so a git
-    operand, message or option value in the same piece hides none (g'i't commit $O git, g\\it commit $O -m git,
-    g'i't commit $O --author=git); behind an unjudged '#' the doubt test reads
+    read with every git the grammar reads as a command word masked out of the piece, since that grammar judges
+    each, so a git operand, message or option value in the same piece hides none (g'i't commit $O git, g\\it commit
+    $O -m git, g'i't commit $O --author=git); an option name like --git-dir keeps its text, so the option-skip walk
+    reads it and a git before --git-dir <value> and a roster verb denies (g'i't --git-dir .git commit $O); behind
+    an unjudged '#' the doubt test reads
     such a character, or a '~', before a roster verb as it reads git (_RAW_RUNTIME_NOVERIFY_VERB_RE). A word
     with no such character keeps the readings above (make commit -n, make g++ commit -n, a~b commit -nv,
     ~/bin/x commit -nv and '~' commit -nv allow), and so does such a word with no roster verb after it carrying
