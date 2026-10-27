@@ -362,9 +362,9 @@ NOTE_CONSTRUCTORS = (
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard", "_redirect_deny",
-    "_wrtscp_deny")
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_runtime_deny",
+    "_git_discard_fallback", "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard",
+    "_redirect_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -11357,9 +11357,14 @@ _GATE_ALTS = (
 # The way on named in every hook-skip and grammar deny a git commit whose quoted message only quotes a
 # hook-skip spelling can draw: the message read from a file is never opened here, so git commit -F FILE and
 # cat FILE | git commit -F - allow (a '<' redirection or a here-document on the git segment still denies).
+# Behind a '#' the shared lexer could not judge, the doubt test denies any option on a roster verb, -F
+# included (_gate_doubt_bypass), so the route names that exception in the words of _hash_doubt_reason.
 _GATE_FILE_ROUTE = (
     "If a commit message only quotes a hook-skip spelling, write it to a file and commit with git commit -F FILE "
-    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data.")
+    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data. One exception: "
+    "behind a '#' this guard could not read (right after a '(', ')' or backquote, or at the start of a word "
+    "inside an open substitution), git commit -F denies too until that '#' is fixed: put a blank before it "
+    "outside any grouping or substitution, or drop it.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
@@ -11371,6 +11376,10 @@ _GATE_FILE_ROUTE = (
 # (_gate_doubt_bypass, _gate_doubt_checker) instead of these spelling probes, so widening a spelling here
 # is never the mechanism that closes a doubt-path gap.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
+# The doubt path's sibling for a git word built at run time (_gate_doubt_bypass): a character that opens an
+# expansion, a substitution, a glob or a brace expansion (_OPAQUE_WORD_CHARS), then a roster verb. A separate
+# sequence, not an alternation inside the git step, so every step but the last stays one fixed-length match.
+_RAW_RUNTIME_NOVERIFY_VERB_RE = _RawSequence(r"[$`*?\[{]", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
@@ -11411,12 +11420,14 @@ def _gate_doubt_sink(scan):
 
 # The hook-bypass test behind a '#' whose comment reading the shared lexer could not judge under both
 # readings. Like the sink test above it is fail-closed BY CONSTRUCTION, not spelling-matched: text that
-# names git with a subcommand that accepts --no-verify (commit, merge, push, pull, rebase, am) and
-# carries ANY dash-prefixed option token DENIES, because behind such a '#' nothing can bind an option to
-# that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a probe that spells
-# out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings) misses the next
-# spelling it did not enumerate. An option token starts at the text's start, after whitespace or after a
-# shell operator character (; & | < > ( )), and takes one of two shapes. In the first, a '-' stands
+# names git (or holds a character that builds a word at run time that may be git, before the subcommand:
+# _RAW_RUNTIME_NOVERIFY_VERB_RE) with a subcommand that accepts --no-verify (commit, merge, push, pull,
+# rebase, am) and carries ANY dash-prefixed option token DENIES, because behind such a '#' nothing can
+# bind an option to that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a
+# probe that spells out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings)
+# misses the next spelling it did not enumerate. An option token starts at the text's start, after
+# whitespace or after a shell operator character (; & | < > ( )), and takes one of two shapes. In the
+# first, a '-' stands
 # right at that start and one character follows it that does not end the token in bash: anything but a
 # blank (space, tab, newline) or one of those operator characters. So a lone '-' (a stdin operand)
 # spelled with no quote or backslash next to it does not match, even where an operator ends it
@@ -11454,11 +11465,13 @@ _RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])(?:-(?:[^ \t\n;&|<>()]|[<>]
 
 
 def _gate_doubt_bypass(scan):
-    """True when scan (a _hash_doubt_scan text) names git with a subcommand that accepts --no-verify and
-    carries a dash-prefixed option token anywhere, read in scan as written and with its backslash-newlines
-    removed (the comment above _RAW_DOUBT_OPTION_RE): the bounded fail-closed hook-bypass test behind a '#'
-    whose comment reading the shared lexer could not judge under both readings."""
-    return _RAW_NOVERIFY_VERB_RE.search(scan) is not None and (
+    """True when scan (a _hash_doubt_scan text) names git, or holds a character that builds a word at run time
+    that may be git (_RAW_RUNTIME_NOVERIFY_VERB_RE: $G commit -nv), with a subcommand that accepts --no-verify
+    after it, and carries a dash-prefixed option token anywhere, read in scan as written and with its
+    backslash-newlines removed (the comment above _RAW_DOUBT_OPTION_RE): the bounded fail-closed hook-bypass
+    test behind a '#' whose comment reading the shared lexer could not judge under both readings."""
+    return (_RAW_NOVERIFY_VERB_RE.search(scan) is not None
+            or _RAW_RUNTIME_NOVERIFY_VERB_RE.search(scan) is not None) and (
         _RAW_DOUBT_OPTION_RE.search(scan) is not None
         or _RAW_DOUBT_OPTION_RE.search(scan.replace("\\\n", "")) is not None)
 
@@ -12941,11 +12954,12 @@ def _gate_dequoted_words(text):
     joined, quote characters and backslashes removed) split at blanks. After an option word whose attached
     value names git (a '--name=' value whose basename is git, or a single-dash word ending in git:
     env --split-string='g"i"t ...', env -S'git ...') a 'git' word is added, so the git that option runs starts
-    the walk too. A raw-text reading only: it can only add a deny, never prove a command safe. It reads no
-    git word built at run time (an expansion, a substitution, a glob or brace expansion), and a quote is
-    removed wherever it stands, so a quoted word holding a blank is split into several words. This is the
-    blank-split reading: its escapes keep a NUL and the rest of the quote, and it splits at every character
-    str.split() treats as whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
+    the walk too. A raw-text reading only: it can only add a deny, never prove a command safe. A git
+    word built at run time (an expansion, a substitution, a glob or brace expansion) is kept as written, never
+    read as git here; _gate_runtime_bypass reads such a word from these words. A quote is removed wherever it
+    stands, so a quoted word holding a blank is split into several words. This is the blank-split reading:
+    its escapes keep a NUL and the rest of the quote, and it splits at every character str.split() treats as
+    whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
     deny it gives is kept."""
     words = []
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _GATE_ANSI_C_ESCAPE_RE.sub(_gate_ansi_c_escape, m.group(1)), text)
@@ -13081,15 +13095,17 @@ def _gate_bash_readings(text):
             _gate_reading_words(decoded))
 
 
-def _gate_any_word_bypass(words):
+def _gate_any_word_bypass(words, first=None):
     """(sub, spelling) when a word after the first word naming git (_gate_word) is a roster verb and a word after
     that verb is a hook-skip spelling for it, else None: a '--' word naming a prefix of no-verify
     (_has_long_prefix) after any roster verb, or a single-dash word holding an 'n' after commit or am. Each word
     is read on its own: no '--' ends the options, no option takes the next word or the rest of its own word as
     its value, and no global option between git and the verb is resolved, so a quoted span that splits into a
     '--', a value-taking option or a global option can never swallow a real -n. One pass from the end, linear
-    in the word count."""
-    first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+    in the word count. first, when given, is the index of the word the walk reads after instead (a word built
+    at run time that may be git, _gate_runtime_bypass)."""
+    if first is None:
+        first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
     long_at = short_at = None  # the nearest long and short spelling words after the word being read
     found = None
     for p in range(len(words) - 1, first, -1):
@@ -13169,6 +13185,62 @@ def _gate_unread_bypass(text):
         if bypass is not None:
             return bypass
     return None
+
+
+def _gate_runtime_word(word):
+    """True when word, one word of a de-quoted reading, holds a character that opens an expansion, a
+    substitution, a glob or a brace expansion (_OPAQUE_WORD_CHARS: '$', backquote, '*', '?', '[', '{'), so the
+    word bash runs there is built at run time and may be git."""
+    return not _OPAQUE_WORD_CHARS.isdisjoint(word)
+
+
+def _gate_runtime_bypass(text):
+    """(word, sub, spelling) when a word built at run time (_gate_runtime_word) may be git and a later word of
+    the same raw command piece is a roster verb carrying a hook-skip spelling for it, else None: the git word
+    no other reading sees, because bash builds it ($G commit -nv, "$G" commit -nv, g$(true)it commit -nv,
+    g${x}it commit -nv, $(echo git) commit -nv, /usr/bin/g?t commit -nv). text is split into raw command
+    pieces at the ;, &, | and newline separators outside any quoting _skip_quoting can prove
+    (_raw_push_segments, which keeps a substitution whole, so $(cd /; echo git) commit -nv is one piece, and
+    splits a here-document body at its newlines). In each piece's de-quoted readings (_gate_dequoted_words,
+    _gate_bash_readings) the any-word walk (_gate_any_word_bypass) reads after the first such word, so a
+    wrapper on any list or none (sudo $G commit -nv), an sh -c or eval script (sh -c '$G commit -nv') and a
+    here-document body line are read too; a later word built at run time adds nothing the walk from the first
+    one does not read. A word with no such character is left to the other readings (make commit -n allows),
+    and so is such a word with no roster verb and hook-skip spelling after it ($G log -n 5, $G push -n origin x,
+    $G commit -m x). A raw-text reading only: it can only add a deny, never prove a command safe. Disclosed
+    safe-direction over-deny: any such word counts, an operand or quoted text included, so pytest tests/*.py
+    -k commit -n 4, echo $((1+1)) commit -nv, git status # $X commit -n and git commit -m 'use $X, then commit
+    -n' deny too. Disclosed residual: a verb also built at run time ($G $V -nv, $G co$()mmit -nv), and words
+    fed to git from another stage (echo commit -nv | xargs $G), are not read. Each piece's readings are built
+    only when it holds such a character: a reading only removes characters or decodes an ANSI-C escape, which
+    needs a '$', so a piece with none of them has no such word. Linear in the length of text."""
+    if _OPAQUE_WORD_CHARS.isdisjoint(text):
+        return None
+    for piece in _raw_push_segments(text):
+        if _OPAQUE_WORD_CHARS.isdisjoint(piece):
+            continue
+        for words in (_gate_dequoted_words(piece),) + _gate_bash_readings(piece):
+            k = next((k for k, w in enumerate(words) if _gate_runtime_word(w)), None)
+            if k is not None:
+                bypass = _gate_any_word_bypass(words, k)
+                if bypass is not None:
+                    return (words[k],) + bypass
+    return None
+
+
+def _gate_runtime_deny(hit):
+    """The gatdis deny for a word built at run time that may be git, followed by a roster verb carrying a
+    hook-skip spelling (_gate_runtime_bypass); hit is that reading's (word, sub, spelling)."""
+    word, sub, spelling = hit
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): the word {!r} is built at run time (an expansion, a substitution, a "
+        "glob or a brace expansion), so bash may run git there, and a later {} in the same command carries {}, "
+        "a hook-skip spelling for it; a bypass of the verification hooks that gate git cannot be ruled out, so "
+        "it is denied fail-closed. Never weaken a gate to obtain a pass; fix the artefact instead. Spell git "
+        "literally, and if the text only quotes such a spelling, keep it out of the command. {} {}".format(
+            word[:40], sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+        "AIQT guardrail: denied a possible git verification-hook bypass (--no-verify family) behind a word "
+        "built at run time (rule gatdis, fail-closed).")
 
 
 def _gate_word_start(raw, argv, idx):
@@ -13342,7 +13414,8 @@ def gate_weakening(data):
     deny such a message can draw (parsed, de-quoted, parse-error fallback and opaque '#' doubt) ends with the
     way on (_GATE_FILE_ROUTE): commit the message from a file with git commit -F FILE, or cat FILE | git
     commit -F -, which allows because this guard never opens the file; a '<' redirection or here-document on
-    the git segment, or a stage before it whose own text names the spelling, still denies.
+    the git segment, or a stage before it whose own text names the spelling, still denies, and behind a '#'
+    this guard could not read the -F commit denies too until that '#' is fixed, which the route says.
     DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
     git (printf ... | xargs git commit) is not reconstructed, and an alias or shell function that renames
     git is not resolved. A command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid,
@@ -13384,11 +13457,25 @@ def gate_weakening(data):
     such a word denies (git commit -m 'see git log; then commit -n'); a quoted operator or blank splits words
     inside any script, so a later unrelated -n there counts (sh -c 'git commit -m x; ls -n'); and a \\_ is
     read as a separator wherever it stands, not only inside an env -S value (env -S g"i"t\\_commit\\_-nv, which
-    bash does not split, denies). This reading still cannot see a git word built at run time (an expansion, a
-    substitution, a glob or brace expansion: $g commit -nv, g$()it commit -nv), a here-document body a shell
-    reads as commands, or an ANSI-C quote the two level readings do not decode (two or more shell levels in,
-    or behind a quote inside a command substitution standing in double quotes, which they pair at the outer
-    level) whose opener the raw match also pairs with an earlier '$''. A verb off the roster
+    bash does not split, denies). This reading still cannot see a git spelled with no run-time character in a
+    here-document body a shell reads as commands, or an ANSI-C quote the two level readings do not decode (two
+    or more shell levels in, or behind a quote inside a command substitution standing in double quotes, which
+    they pair at the outer level) whose opener the raw match also pairs with an earlier '$''.
+    A GIT WORD BUILT AT RUN TIME (an expansion, a substitution, a glob or brace expansion: $G commit -nv, "$G"
+    commit -nv, g$(true)it commit -nv, g${x}it commit -nv, $(echo git) commit -nv, g?t commit -nv) has its own
+    rule (_gate_runtime_bypass), read after every other deny on this path and on the ordinary parse-error
+    path, over the whole raw text: a word of a de-quoted reading holding '$', a backquote, '*', '?', '[' or '{'
+    may be git, so a later roster verb in the same raw command piece (split at ;, &, | and newline outside
+    provable quoting) carrying a hook-skip spelling for it denies fail-closed, behind a wrapper (sudo $G commit
+    -nv), inside an sh -c or eval script and on a here-document body line too; behind an unjudged '#' the
+    doubt test reads such a character before a roster verb as it reads git (_RAW_RUNTIME_NOVERIFY_VERB_RE). A
+    word with no such character keeps the readings above (make commit -n allows), and so does such a word with
+    no roster verb and hook-skip spelling after it ($G log -n 5, $G push -n origin x, $G commit -m x).
+    Disclosed safe-direction over-deny: any such word counts, an operand or quoted text included (pytest
+    tests/*.py -k commit -n 4, echo $((1+1)) commit -nv, git status # $X commit -n, git commit -m 'use $X,
+    then commit -n', and a git commit -m "$(cat <<'EOF' ... EOF)" message whose body names a roster verb and
+    then such a spelling). Disclosed residual: a verb also built at run time ($G $V -nv, $G co$()mmit -nv) and
+    words fed to git from another stage (echo commit -nv | xargs $G) are not read. A verb off the roster
     is untouched (git log ${x}-n, git log
     --format="$f"). On a parse error the same judgement reads every segment the partial lex recovers, the
     in-progress segment the lexer stopped in included, and outside the doubt path the text from that
@@ -13420,11 +13507,13 @@ def gate_weakening(data):
     segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
     _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word in text that holds a
     '|' DENIES wherever each stands (_gate_doubt_sink, fail-closed by construction over the doubled scan),
-    text naming git with a subcommand that accepts --no-verify plus ANY dash-prefixed option token DENIES
+    text naming git (or holding a character that builds a word at run time, before the subcommand) with a
+    subcommand that accepts --no-verify plus ANY dash-prefixed option token DENIES
     (_gate_doubt_bypass, fail-closed by construction: no list of bypass spellings is left for a new
     abbreviation, cluster alphabet or token ending to escape, at the stated cost of a NEW OVER-DENIAL,
-    since a harmless option there, 'git commit -m x' behind such a '#', denies too, as does a lone '-'
-    spelled with a quote or backslash next to it), and remaining text
+    since a harmless option there, 'git commit -m x' behind such a '#', denies too, as does 'make commit
+    -j4' after a backquote holding such a '#' and a lone '-' spelled with a quote or backslash next to it),
+    and remaining text
     holding a checker-shaped word (_gate_doubt_checker, the parsed recognizer's own name splitter and
     lexicon, called rather than re-spelled) and a pipe, process substitution or here-string
     ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a readable spelling of the same
@@ -13557,6 +13646,11 @@ def gate_weakening(data):
                     "run. " + _GATE_ALTS,
                     "AIQT guardrail: denied an unparseable command whose quoting spells a git "
                     "verification-hook bypass (rule gatdis, fail-safe).")
+            # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
+            # on the parsed path (_gate_runtime_bypass), after the denies above, so each keeps its message.
+            runtime_hit = _gate_runtime_bypass(command)
+            if runtime_hit is not None:
+                return _gate_runtime_deny(runtime_hit)
             return _gate_weakening_fallback(command)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
@@ -13587,8 +13681,9 @@ def gate_weakening(data):
         # over-denial: a harmless option there denies too).
         if _gate_doubt_bypass(scan):
             return _deny(
-                _hash_doubt_reason("gatdis (gate-discipline)", "its text names git with a subcommand that "
-                                   "accepts --no-verify (commit, merge, push, pull, rebase or am) and "
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text names git, or a word built at run "
+                                   "time that may be git, with a subcommand that accepts --no-verify (commit, "
+                                   "merge, push, pull, rebase or am) and "
                                    "carries a dash-prefixed option this guard cannot bind to that "
                                    "subcommand's grammar past that '#', so a verification-hook bypass "
                                    "spelling cannot be ruled out") + " " +
@@ -13706,6 +13801,13 @@ def gate_weakening(data):
             return _deny(reason, banner)
         if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
             return _gate_weakening_fallback(command, heredoc_message=True)
+    # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
+    # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
+    # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
+    # here-document body are read too. It runs after every other deny, so each keeps its own message.
+    runtime_hit = _gate_runtime_bypass(command)
+    if runtime_hit is not None:
+        return _gate_runtime_deny(runtime_hit)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)

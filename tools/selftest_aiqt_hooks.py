@@ -2485,21 +2485,23 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_PUSH_RE",), r"(?is)\bgit\b.*?\bpush\b"),
     (("_RAW_COMMIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
     (("_RAW_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b"),
+    (("_RAW_RUNTIME_NOVERIFY_VERB_RE",), r"(?is)[$`*?\[{].*?\b(?:commit|merge|push|pull|rebase|am)\b"),
     (("_RAW_SHORT_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|am)\b"),
     (("_RAW_COMMIT_MSG_GIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
     (("_STASH_WORD_RE",), r"(?is)\bgit\b.*?\bstash\b"),
     (("_BRANCH_CREATE_WORD_RE",), r"(?is)\bgit\b.*?\b(?:checkout|switch|branch|worktree)\b"),
 )
 # Words and joiners the differential corpus is drawn from: each verb, its case and word-boundary
-# neighbours, the breadth and prune selectors and their near misses, quotes, and the two non-ASCII letters
-# the case-folded patterns also match (a long s for s, a Kelvin sign for k).
+# neighbours, the breadth and prune selectors and their near misses, quotes, the characters that build a word
+# at run time, and the two non-ASCII letters the case-folded patterns also match (a long s for s, a Kelvin
+# sign for k).
 _RAW_SEQUENCE_WORDS = (
     "git", "GIT", "Git", "xgit", "gitx", "git-x", "x-git", "push", "PUSH", "pushx", "commit", "Commit", "am",
     "merge", "pull", "rebase", "add", "fetch", "diff", "show", "ſhow", "log", "range-diff", "worKtree",
     "-A", "-a", "-xA", "-xa", "a-a", "--all", "--allx", "--prune", "--prune-tags", "--prunex", "-p", "-xp", "-P",
     "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")", "stash", "stashx", "checkout", "switch",
-    "branch")
-_RAW_SEQUENCE_JOINERS = (" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
+    "branch", "$G", "`", "g*t", "g?t", "[g]", "{g,}")
+_RAW_SEQUENCE_JOINERS =(" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
 # Half the corpus is drawn from the words the three-step probes need, so their orderings are well covered.
 _RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "push", "-p", "-xp", "-A", "-a", "-xa",
                        "--all", "--prune", "--prune-tags", ".", ":/", "x", "'")
@@ -14659,9 +14661,14 @@ def _main_isolated(monitor):
                 ("gw-fr-fb-shortn", "git commit -m \"$(cat <<'EOF'\nDon't use -n\nEOF\n)\""),
                 ("gw-fr-fb-grammar", 'git commit -m "x" $y "unbalanced'),
                 ("gw-fr-opaque", "x=`true #`\ngit commit -m 'docs: git commit -n is banned'"),
-                ("gw-fr-doubt", "x=`true #`\ngit commit -m \" git commit -n \"")):
+                ("gw-fr-doubt", "x=`true #`\ngit commit -m \" git commit -n \""),
+                ("gw-fr-runtime", "$G commit -m 'docs: commit -n is banned'")):
             gdeny_names("({}) a quoted-message commit denies and its reason names -F".format(_fr_label), _fr_cmd,
                         "git commit -F FILE")
+        # Behind a '#' the shared lexer could not judge, the doubt test denies any option on a roster verb, -F
+        # included, so the route names that exception; a route that drops it points at a command denied there.
+        gdeny_names("(gw-fr-doubt-file) behind an unjudged '#' git commit -F denies and the route names that",
+                    "(true #'\n)\ngit commit -F /tmp/msg.txt", "git commit -F denies too until that '#' is fixed")
         # The 'bypass' branch of the grammar messages, parsed and unparsed: the walks before it catch every
         # bypass spelling these rows can write, so the message is read directly.
         for _fr_unparsed in (False, True):
@@ -15527,6 +15534,114 @@ def _main_isolated(monitor):
                  ("commit", "the short -n (--no-verify) in '-n'"))
         rdexpect("(gw-rd-walk-pushn) push's -n is no bypass", _gw_awb, ["git", "push", "-n"], None)
         rdexpect("(gw-rd-walk-before-git) a verb before git does not count", _gw_awb, ["commit", "-n", "git"], None)
+        # A GIT WORD BUILT AT RUN TIME (_gate_runtime_bypass): a word holding '$', a backquote, '*', '?', '[' or '{'
+        # may be git, so a later roster verb in the same raw command piece carrying a hook-skip spelling denies.
+        # Each allowed before that rule (no reading saw a git word in it), and bash runs a hook-skipping git commit,
+        # push or am for each where the word expands to git. The reason names the rule, so a deny from another
+        # path does not pass a row. The last two (a here-string) take the parse-error path, the rest the parsed path.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-subst-mid", "g$(true)it commit -nv"),
+                ("gw-rt-brace-mid", "g${x}it commit -nv"),
+                ("gw-rt-var", "$G commit -nv"),
+                ("gw-rt-var-dq", "\"$G\" commit -nv"),
+                ("gw-rt-subst-echo", "$(echo git) commit -nv"),
+                ("gw-rt-subst-list", "$(cd /; echo git) commit -nv"),
+                ("gw-rt-subst-prefix", "$(printf gi)t commit -nv"),
+                ("gw-rt-glob", "g?t commit -nv"),
+                ("gw-rt-glob-path", "/usr/bin/g?t commit -nv"),
+                ("gw-rt-long", "$G commit --no-verify"),
+                ("gw-rt-am", "$G am -n x.mbox"),
+                ("gw-rt-push", "$G push --no-verify origin main"),
+                ("gw-rt-global-opt", "$G -C /r commit -nv"),
+                ("gw-rt-assign", "G=git; $G commit -nv"),
+                ("gw-rt-after-sep", "echo hi && $G commit -nv"),
+                ("gw-rt-sudo", "sudo $G commit -nv"),
+                ("gw-rt-env", "env $G commit -nv"),
+                ("gw-rt-ionice", "ionice $G commit -nv"),
+                ("gw-rt-sh-c", "sh -c '$G commit -nv'"),
+                ("gw-rt-eval", "eval \"\\$G commit -nv\""),
+                ("gw-rt-heredoc", "bash <<'EOF'\n$G commit -nv\nEOF"),
+                ("gw-rt-pe-herestr", "$G commit -nv <<<x"),
+                ("gw-rt-pe-subst", "g$(true)it commit -nv <<<x")):
+            gdeny_names("({}) a git word built at run time before a hook-skip spelling denies".format(_gw_lbl),
+                        _gw_cmd, "is built at run time")
+        # Behind a '#' the shared lexer could not judge, such a character before a roster verb counts as git does.
+        gdeny_names("(gw-rt-doubt) behind an unjudged '#', a word built at run time before commit -nv denies",
+                    "(true #'\n)\n$G commit -nv", "a word built at run time that may be git")
+        # The reason names the word as typed and the way on.
+        gdeny_names("(gw-rt-msg-word) the run-time deny names the word", "ionice $G commit -nv", "'$G'")
+        gdeny_names("(gw-rt-msg-verb) the run-time deny names the verb and the spelling", "$G am -n x.mbox",
+                    "a later am in the same command carries the short -n")
+        # Controls: a word with no run-time character keeps its reading (make commit -n), and a word built at run
+        # time allows with no roster verb after it, with a roster verb but no hook-skip spelling for it (push's -n
+        # is --dry-run), or with the spelling in another raw piece (after ';' or on the next line).
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-ctl-plain", "make commit -n"),
+                ("gw-rt-ctl-off-roster", "$G log -n 5"),
+                ("gw-rt-ctl-push-n", "$G push -n origin x"),
+                ("gw-rt-ctl-msg", "$G commit -m x"),
+                ("gw-rt-ctl-editor", "$EDITOR notes.txt"),
+                ("gw-rt-ctl-grep", "git log --grep=\"$x\" -n 5"),
+                ("gw-rt-ctl-piece", "echo \"$x\"; git commit -m 'fix -n'"),
+                ("gw-rt-ctl-line", "$G commit -m x\ngit status -n"),
+                ("gw-rt-ctl-loop", "for f in *.py; do echo commit -n; done"),
+                ("gw-rt-ctl-heredoc-msg", "git commit -m \"$(cat <<'EOF'\ngatdis: read a run-time git word\nEOF\n)\"")):
+            gexpect("({}) no run-time word before a roster verb and its hook-skip spelling allows".format(_gw_lbl),
+                    _gw_cmd, "allow")
+        # The disclosed residuals, pinned so a change to them is a deliberate one: a verb also built at run time,
+        # and words fed to git from another stage.
+        gexpect("(gw-rt-residual-verb) a verb built at run time after $G allows (disclosed residual)",
+                "$G $V -nv", "allow")
+        gexpect("(gw-rt-residual-stage) words fed to $G from another stage allow (disclosed residual)",
+                "echo commit -nv | xargs $G", "allow")
+        # The disclosed safe-direction over-denies: any word built at run time counts, an operand or quoted text
+        # included, and behind an unjudged '#' any roster verb after such a character with any option denies.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rt-overdeny-glob", "pytest tests/*.py -k commit -n 4"),
+                ("gw-rt-overdeny-operand", "find $HOME -name commit -print"),
+                ("gw-rt-overdeny-arith", "echo $((1+1)) commit -nv"),
+                ("gw-rt-overdeny-comment", "git status # $X commit -n"),
+                ("gw-rt-overdeny-quoted", "git commit -m 'use $X, then commit -n'"),
+                ("gw-rt-overdeny-body", "gh pr create --title \"$t\" --body 'denies commit -n'"),
+                ("gw-rt-overdeny-heredoc-msg", "git commit -m \"$(cat <<'EOF'\nfix: then commit -n\nEOF\n)\""),
+                ("gw-rt-overdeny-doubt", "x=`true #`\nmake commit -j4")):
+            gexpect("({}) a run-time word before a roster verb and a skip spelling denies (disclosed over-deny)"
+                    .format(_gw_lbl), _gw_cmd, "deny")
+        # Direct unit cases: the run-time characters (each one, and a word with none, '~' included), the walk from
+        # a given start (the start word itself is never the verb: an index just below, at and past the verb), and
+        # the whole-text reading (a piece split, the long spelling, and text with no such character).
+        _gw_rtw = getattr(aiqt_hooks, "_gate_runtime_word", None)
+        _gw_rtb = getattr(aiqt_hooks, "_gate_runtime_bypass", None)
+        for _gw_index, (_gw_word, _gw_want) in enumerate((
+                ("$G", True), ("`x`", True), ("g*t", True), ("g?t", True), ("[g]it", True), ("{git,}", True),
+                ("git", False), ("~/bin/x", False), ("-n", False))):
+            rdexpect("(gw-rt-word-{}) the run-time character test on {!r}".format(_gw_index, _gw_word), _gw_rtw,
+                     _gw_word, _gw_want)
+        for _gw_first, _gw_want in ((0, ("commit", "the short -n (--no-verify) in '-n'")), (1, None), (2, None)):
+            rdexpect("(gw-rt-walk-first-{}) the walk reads after the given start".format(_gw_first),
+                     (lambda words, first=_gw_first: _gw_awb(words, first)) if _gw_awb is not None else None,
+                     ["$G", "commit", "-n"], _gw_want)
+        rdexpect("(gw-rt-read-word) the reading names the first run-time word", _gw_rtb, "x $G y $H commit -nv",
+                 ("$G", "commit", "the short -n (--no-verify) in '-nv'"))
+        rdexpect("(gw-rt-read-long) a --no-verify prefix after merge counts", _gw_rtb, "$G merge --no-v x",
+                 ("$G", "merge", "a --no-verify spelling"))
+        rdexpect("(gw-rt-read-piece) a ';' ends the piece", _gw_rtb, "echo $x; commit -n", None)
+        rdexpect("(gw-rt-read-none) text with no run-time character gives None", _gw_rtb, "g'i't commit -nv", None)
+        # The readings are built only for a piece holding a run-time character: a reading only removes characters
+        # or decodes an ANSI-C escape, which needs a '$', so a piece with none has no run-time word to start at.
+        _gw_built = []
+        _gw_real_readings = aiqt_hooks._gate_bash_readings
+        aiqt_hooks._gate_bash_readings = lambda text: _gw_built.append(text) or _gw_real_readings(text)
+        try:
+            for _gw_text, _gw_want in (("make commit -n; git log -n 3", []), ("ls; $G log", [" $G log"])):
+                del _gw_built[:]
+                if _gw_rtb is not None:
+                    _gw_rtb(_gw_text)
+                if _gw_built != _gw_want:
+                    failures.append("(gw-rt-read-fast) _gate_runtime_bypass({!r}) built readings for {!r}, want {!r}"
+                                    .format(_gw_text, _gw_built, _gw_want))
+        finally:
+            aiqt_hooks._gate_bash_readings = _gw_real_readings
         # Direct unit cases for _gate_dequoted_words: the ANSI-C decoding (each escape form, and the \U code
         # just inside, at and just past the last Unicode code point) and the attached-value git word (a
         # single-dash word of four characters, the boundary, and five and six).
@@ -15580,7 +15695,11 @@ def _main_isolated(monitor):
         for _gw_rlbl, _gw_needle in (
                 ("gw-res-runout-url", "so a quoted URL or path ending in .git on any git line denies too"),
                 ("gw-res-behind-overdeny", "so sudo git commit -m \"fix -n\" denies"),
-                ("gw-res-behind-residual", "it cannot see a git word built at run time"),
+                ("gw-res-behind-residual", "it cannot see a git spelled with no run-time character in a here-document"),
+                ("gw-res-runtime-rule", "A GIT WORD BUILT AT RUN TIME has its own fail-closed rule"),
+                ("gw-res-runtime-overdeny", "any such word counts, an operand or quoted text included"),
+                ("gw-res-runtime-residual", "a verb also built at run time"),
+                ("gw-res-runtime-doubt", "or make commit -j4 after a backquote that holds such a #"),
                 ("gw-res-anyword-overdeny", "any later roster-verb word counts as the verb"),
                 ("gw-res-value-overdeny", "an option value holding an n counts after the verb"),
                 ("gw-res-us-overdeny", "a \\_ is read as a separator wherever it stands"),
@@ -15728,6 +15847,10 @@ def _main_isolated(monitor):
         #   or -m's value): each git word's walk read every later word, quadratic. A walk that found no bypass
         #   now passes over every later git word of the same verb whose words it already read, so both are
         #   linear. gw-lin-unread-roster times the de-quoted text reading over the quote-concatenated shape.
+        # gw-lin-runtime (`$x commit -m y `*n) times the run-time word reading (_gate_runtime_bypass) over one
+        #   piece in which every unit holds a word built at run time and a roster verb with no hook-skip
+        #   spelling: the walk starts at the first such word only, so it is linear; a walk restarted at every
+        #   such word reads every later word again, quadratic.
         # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
         # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
@@ -15764,6 +15887,7 @@ def _main_isolated(monitor):
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_unread_scan = aiqt_hooks._gate_unread_bypass
+        _gw_runtime_scan = aiqt_hooks._gate_runtime_bypass
         _gw_lin_cases = (
             ("gw-dq-lin-sq", "git -C 'a;' log ", "", "", _gw_cmd_scan, None),
             ("gw-dq-lin-dq", 'git log "a;" ', "", "", _gw_cmd_scan, None),
@@ -15777,6 +15901,7 @@ def _main_isolated(monitor):
             ("gw-lin-dq-roster", ["git", "push"], ["echo"], ["-n"], _gw_dq_scan, None),
             ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"], _gw_dq_scan, None),
             ("gw-lin-unread-roster", " g'i't push", "echo", " -n", _gw_unread_scan, None),
+            ("gw-lin-runtime", "$x commit -m y ", "", "", _gw_runtime_scan, None),
         )
         for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan, _gw_want in _gw_lin_cases:
             _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n, _gw_got = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
