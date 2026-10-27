@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T94)
+  check_opf_record.py --self-test                    the fixture suite (T1-T109)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -70,9 +70,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       review and the lease released (flip: skip the final doctor)
   T11 worklog-append claims the next WL id with no status qualifier; an id inside a released span refuses
       exit 2, bytes untouched (flip: drop the released-span check)
-  T12 an interrupted journal while another live run holds the shared lease (taken through the upgrade
-      verb) refuses exit 2 with every byte untouched and the peer's lease intact (flip: recover without
-      the lease)
+  T12 an interrupted journal while another live run holds the shared lease (taken under the `upgrade`
+      label, which no writer of this tooling now uses) refuses exit 2 with every byte untouched and the
+      peer's lease intact (flip: recover without the lease)
   T13 an interrupted journal whose operand was edited after the interruption, on the prestate side or the
       poststate side, refuses exit 2 naming the path, every byte untouched; once the edit is undone the
       next run reconciles (flip: drop the intervening-edit check)
@@ -473,7 +473,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
       _DECLARED_INJECTIONS); the child receives the token pools alone, as what it needs to raise the
       declared injections. A line binds only when its bytes carry exactly one recorded, unconsumed
       token whose label the flip declares and are the backstop envelope the record CLI shares with
-      opf upgrade and opf adopt around a repr EQUAL to one the parent computed for that token's
+      opf adopt around a repr EQUAL to one the parent computed for that token's
       injection; anything the child prints that the parent did not record binds nothing, and
       a token the parent never minted binds nothing however it is shaped (tokens are unguessable and
       parent-held). So an unrelated crash under a declared flip, another exception type carrying the
@@ -587,6 +587,52 @@ Each case runs on its own copy of that template; the root is removed in a finall
       imply (a wrong number, another order, an id missing or extra) with nothing reserved, and the
       plan's own ids then reserve its claims (flip: the planned-id check removed, so only the claims
       are compared and the wrong ids reserve)
+  T95 a legacy importer-authored backlog item seated in the clean index of a doctor-VALID store is never a
+      clean-series operand (spec 8.6, 8.8): a maintainer transition, an assistant proposal and a maintainer
+      done-with-receipt each refuse exit 2 naming importer-authored-operand with every byte untouched, and
+      a new clean item linking derives_from back records with the history's bytes unchanged; a clean
+      decide superseding an importer-authored resolution still records, the target's bytes unchanged and
+      the store doctor VALID (flips: the operand's author check removed, so the refusals publish; the
+      check applied to the --supersedes target too, so the remedy refuses)
+  T96 a malformed lease is present, so it is held: a create refuses exit 2 with the held-lease refusal,
+      the lease not deleted and every byte untouched (flip: an acquisition that reads a lease it cannot
+      parse as absent and removes it)
+  T97 a store below its git repository root, with a foreign held lease, reaches the held-lease refusal
+      naming the holder, never the dirty-store refusal; the lease and every byte untouched (flip: the
+      lease exclusion compares porcelain paths without the store's prefix strip)
+  T98 a FIFO at the lease path refuses promptly in a bounded child, naming a present non-regular lease;
+      the FIFO and every byte untouched (flip: the held-lease message opens the lease without
+      O_NONBLOCK, so the child blocks past its bound)
+  T99 a canonical, uncommitted counters edit refuses exit 2 before mutation, naming the path and advising
+      commit or move aside with no restore command; every byte, the index and HEAD untouched (flip: the
+      cleanliness gate as a no-op)
+  T100 an ignored, untracked file at a view's destination refuses exit 2 the same way, every byte and the
+      index untouched; moved aside, the absent destination still refuses its ignore rule, and with the
+      rule corrected the create records, the saved owner bytes and the ignored content outside the
+      planned scope intact (flip: the dirty probe without --ignored=matching)
+  T101 the whole store untracked and ignored, which git collapses to `!! .working/`, still names every
+      planned destination and refuses exit 2, every byte untouched (flip: no ignored-ancestor expansion)
+  T102 an ignored directory at a view's destination, which git reports with a trailing slash, refuses
+      exit 2 naming it, every byte untouched (flip: the dirty probe without --ignored=matching)
+  T103 ignored content at a declared unmanaged prefix sibling of a destination, which git reports under
+      literal pathspecs, is outside the planned scope: the create records and the bytes survive (flip:
+      every ignored record admitted as dirt)
+  T104 declared unmanaged, ignored content inside .working is outside the planned scope: the create
+      records and the bytes survive (flip: the store scope widened to all of .working)
+  T105 a store nested under a real non-UTF-8 directory name with an ignored, untracked operand, view
+      destination, or collapsed .working ancestor refuses exit 2 naming the destination; every byte, the
+      index and HEAD untouched (flip: the lossy prefix round trip with its silent non-match fallback)
+  T106 an absent ignored view destination, and an absent ignored product destination (the root VERSION
+      view), each refuse exit 2 naming the path, every byte untouched (flip: the ignore probe for absent
+      destinations as a no-op)
+  T107 an ignored lease, and a directory lease (untracked, or ignored), each get the never-seize
+      refusal, never the dirty-store remedy, the lease and every byte untouched (flip: a lease exclusion
+      that excludes nothing)
+  T108 a lease committed at HEAD and deleted in the worktree refuses exit 2 naming the TRACKED lease and
+      spec 5.7, every byte untouched (flip: the old exclusion dropping every record on the lease path)
+  T109 a view under an external normalizing clean filter (the git-lfs shape) reads dirty in the racy-clean
+      window because the probe never runs the filter: the create refuses exit 2 naming the git-lfs-shape
+      filter and settling the worktree, every byte untouched (flip: no filter neutralization)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -1429,13 +1475,13 @@ T5_TWO_CURRENT = "T5 an intermediate on-disk state holds two current handoffs"
 T5_TWO_CURRENT_EXPOSURE = (T5_TWO_CURRENT, ("handoff-supersede", "torn-payload:1"), 2)
 
 
-def child(env, root, args, kill=None, flip=""):
+def child(env, root, args, kill=None, flip="", timeout=180):
     script = _CHILD.format(tools=str(TOOLS), flip=flip)
     child_env = dict(env.vars)
     if kill is not None:
         child_env[journal.KILL_ENV] = kill
     proc = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)] + list(args),
-                          capture_output=True, text=True, timeout=180, env=child_env)
+                          capture_output=True, text=True, timeout=timeout, env=child_env)
     _note_backstops(proc.stderr)
     _oop_forward(proc.stderr)
     return proc
@@ -1811,7 +1857,8 @@ def _interrupted(fx, name, point="after-apply-0"):
 def t12_recovery_lease(fx):
     env = fx.env
     root = _interrupted(fx, "t12-live-peer")
-    # A live peer takes the shared lease through the upgrade verb, as `opf upgrade` does.
+    # A live peer takes the shared lease under another verb's label (`upgrade`, which no writer of this
+    # tooling now uses), so the record recovery treats it as a live peer, never its own leftover.
     root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     try:
         peer = guard.acquire_lease(root_fd, MACH, "upgrade")
@@ -2086,7 +2133,7 @@ def t16_recorded_predecessor(fx):
         _set_status(fx, root, "done/proposed", "proposed by hand")
         refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
                           "no pre-proposal state")
-    # Merge styles of a reject-and-re-propose cycle (the QA3 F1 reproduction): the recorded field rides
+    # Merge styles of a reject-and-re-propose cycle: the recorded field rides
     # the merge, so the rejection still restores the true predecessor and the forged line still fails.
     for style in ("no-ff", "squash"):
         root = fx.case("t16-merge-" + style)
@@ -2123,7 +2170,7 @@ def t16_recorded_predecessor(fx):
 
 
 # A schema-invalid current row (a doctor finding) is never trusted or overwritten, so the verb never launders
-# a doctor-INVALID store into a VALID one (QA4 F1). Each refusal is its own test, so flip_t16_trust must turn
+# a doctor-INVALID store into a VALID one. Each refusal is its own test, so flip_t16_trust must turn
 # EACH one red, not only the first.
 
 def _forged_predecessor(fx, name):
@@ -2201,7 +2248,7 @@ def flip_t16_trust():
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
-# --- T17: the strict type-aware delta comparison (codex QA3 F2) ----------------------------------------------
+# --- T17: the strict type-aware delta comparison -------------------------------------------------------------
 
 MANIFEST = MACH + "/manifest.toml"
 
@@ -2816,7 +2863,7 @@ def flip_t72_archive():
 
 
 def t72_archived_head(fx):
-    """QA4 MINOR-3. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
+    """An archived chain head. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
     doctor VALID. PD-3 decided with --supersedes PD-2 finds the archived head through the chain rule's
     record set, so it lands and the doctor stays VALID, PD-3 the chain's one current resolution."""
     root = fx.case("t72-archived-head")
@@ -8138,7 +8185,7 @@ def _oop_declared(allowed):
 
 # The diagnostic envelope of the record CLI backstops (record.cli, opf._cmd_record) in a line _BACKSTOP
 # found: the printed repr of the exception is everything between the fixed head and the fixed tail. The
-# envelope is shared: the backstops of opf upgrade and of opf adopt plan and status print the same one,
+# envelope is shared: the backstops of opf adopt plan and status print the same one,
 # and the verb prefix that tells them apart lies before the _BACKSTOP match, so the envelope alone never
 # shows which verb printed a line; only the recorded token and parent-computed repr, which the record
 # tests' injections alone carry, make a line bind.
@@ -9631,6 +9678,565 @@ def flip_t90_no_cap():
     return patch.object(record, "_require_within_read_cap", lambda rel, data: None)
 
 
+# --- T95: importer-authored history is never a clean-series operand (spec 8.6, 8.8) -------------------------
+
+def _importer_item(fx, name, status):
+    """A legacy importer-authored backlog item seated in the clean index with its counter (the T89 seeding),
+    then the views rendered and committed, so the store is doctor VALID before the operation runs."""
+    env = fx.env
+    root = fx.case(name)
+    legacy = {"id": "BI-1", "type": "backlog_item", "status": status, "title": "migrated",
+              "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z",
+              "actor": {"kind": "importer"}}
+    index = model(root, BI_INDEX)
+    index["record"] = index["record"] + [legacy]
+    write_commit(env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "a legacy importer item")
+    counters = model(root, COUNTERS)
+    counters["counters"]["BI"] += 1
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("T95 the views render over the history", rc, err[-800:])
+    fx.commit_all(root, "views")
+    doctor_valid(env, root)
+    return root, legacy
+
+
+def t95_importer_operand_transition(fx):
+    """A transition on a legacy importer-authored item refuses whoever acts, with every byte untouched; acting
+    on that history is a new clean record linking back, which records and leaves the history's bytes alone."""
+    env = fx.env
+    with ticking():
+        root, legacy = _importer_item(fx, "t95-importer-operand-transition", "open")
+        refused_untouched(env, root, ["transition", "BI-1", "active"] + MAINTAINER, "importer-authored-operand")
+        refused_untouched(env, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "importer-authored-operand")
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link", "derives_from=BI-1"]
+             + MAINTAINER, "BI-2 acting on history")
+        assert row(root, "BI-1") == legacy, ("T95 the history keeps its bytes", row(root, "BI-1"))
+        assert row(root, "BI-2")["links"] == [{"rel": "derives_from", "id": "BI-1"}], row(root, "BI-2")
+        doctor_valid(env, root)
+
+
+def t95_importer_operand_receipt(fx):
+    """done-with-receipt on a legacy importer-authored active item refuses with every byte untouched."""
+    with ticking():
+        root, _legacy = _importer_item(fx, "t95-importer-operand-receipt", "active")
+        refused_untouched(fx.env, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "importer-authored-operand")
+
+
+def t95_importer_resolution_superseded(fx):
+    """A --supersedes target is read and linked, never the operand: a clean decide superseding a legacy
+    importer-authored resolution (a doctor finding at rest, spec 8.6) records with the target's bytes
+    unchanged and leaves the store doctor VALID."""
+    env = fx.env
+    root = fx.case("t95-importer-resolution-superseded")
+    ts = "2026-08-01T00:00:00Z"
+    held = {"id": "PD-1", "type": "pending_decision", "status": "decided", "title": "migrated",
+            "created_at": ts, "updated_at": ts, "actor": {"kind": "importer"}, "decision": "use X",
+            "decided_at": ts, "decided_by": "the board"}
+    fresh = {"id": "PD-2", "type": "pending_decision", "status": "open", "title": "resolve it now",
+             "created_at": ts, "updated_at": ts, "actor": {"kind": "maintainer"}}
+    index = model(root, PD_INDEX)
+    index["record"] = index["record"] + [held, fresh]
+    write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "an importer resolution")
+    counters = model(root, COUNTERS)
+    counters["counters"]["PD"] += 2
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    assert rc != 0 and "importer-authored pending_decision 'PD-1'" in out, (
+        "T95 the importer resolution is a doctor finding at rest", rc, out[-1600:])
+    with ticking():
+        step(fx, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by", "the board",
+                        "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes the importer resolution")
+    assert row(root, "PD-1", PD_INDEX) == held, ("T95 the target keeps its bytes", row(root, "PD-1", PD_INDEX))
+    assert row(root, "PD-2", PD_INDEX)["links"] == [{"rel": "supersedes", "id": "PD-1"}], (
+        row(root, "PD-2", PD_INDEX))
+    doctor_valid(env, root)
+
+
+def flip_t95_author():
+    """Drop the operand's author check (the reviewed head's behaviour): each transition and the receipt on
+    importer-authored history publish, so the byte comparison turns each refusal red."""
+    return patch.object(record, "_require_clean_author", lambda row, rid, rel, verb: None)
+
+
+def flip_t95_target():
+    """Apply the author check to the --supersedes target too (the check folded into _require_valid_current
+    or _require_valid_target): the clean decide that resolves an importer-authored chain then refuses, so
+    the remedy's recorded step turns red."""
+    original = record._require_valid_target
+
+    def also_author(trow, ctx, target, rel):
+        original(trow, ctx, target, rel)
+        record._require_clean_author(trow, target, rel, "transition")
+    return patch.object(record, "_require_valid_target", also_author)
+
+
+# --- T96-T98: the held-lease refusal over a malformed, a nested and a non-regular lease (spec 5.7) ----------
+# The record verb runs the check_clean lease exclusion and the acquire_lease claim that the removed
+# store-upgrade gate used to exercise, so each is driven here.
+
+T96_MALFORMED = b"not valid = = = toml\n"
+T98_BOUND = 30
+
+
+def t96_malformed_lease(fx):
+    """A malformed lease is present, so it is held, never absent: the create refuses exit 2 with the
+    held-lease refusal, the lease is not deleted and every byte is untouched."""
+    root = fx.case("t96-malformed-lease")
+    (Path(root) / LEASE).write_bytes(T96_MALFORMED)
+    before = snapshot(root)
+    result = record_cli(fx.env, root, CREATE)
+    refused(result, "never seized")
+    assert "a present lease with an unreadable payload" in result[2], result[2][-800:]
+    assert read(root, LEASE) == T96_MALFORMED, "T96 the malformed lease is not deleted"
+    assert snapshot(root) == before, "T96 every byte untouched"
+
+
+def flip_t96():
+    """An acquisition that reads a lease it cannot parse as absent: it removes that lease, then claims."""
+    original = guard.acquire_lease
+
+    def absent_if_malformed(root_fd, machine_rel, verb):
+        rel = "{}/{}".format(machine_rel, opf_check.LEASE_NAME)
+        with contextlib.suppress(FileNotFoundError):
+            with open(os.open(rel, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd), "rb") as handle:
+                raw = handle.read()
+            try:
+                tomllib.loads(raw.decode("utf-8"))
+            except ValueError:
+                os.unlink(rel, dir_fd=root_fd)
+        return original(root_fd, machine_rel, verb)
+    return patch.object(guard, "acquire_lease", absent_if_malformed)
+
+
+def t97_nested_store_held_lease(fx):
+    """A store root BELOW its git repository root, with a foreign held lease, reaches the held-lease
+    refusal naming the holder, never the dirty-store refusal: the porcelain paths are repository-root-
+    relative, so the lease is excluded only once the store's prefix is stripped. The lease survives and
+    every byte is untouched."""
+    env = fx.env
+    outer = fx.case("t97-nested")
+    store = outer / "product" / "store"
+    store.mkdir(parents=True)
+    for entry in sorted(outer.iterdir()):
+        if entry.name not in (".git", "product"):
+            entry.rename(store / entry.name)
+    env.git(outer, "add", "-A")
+    env.git(outer, "commit", "-q", "-m", "nest the store below the repository root")
+    assert env.git(store, "rev-parse", "--show-prefix") == "product/store/\n", "T97 the store is nested"
+    (store / LEASE).write_bytes(PEER_LEASE)   # untracked, as a live peer leaves it
+    before = snapshot(outer)
+    result = record_cli(env, store, CREATE)
+    refused(result, "never seized")
+    assert "peer-runner" in result[2] and "the working tree is not clean" not in result[2], result[2][-800:]
+    assert read(store, LEASE) == PEER_LEASE and snapshot(outer) == before, "T97 the peer lease survives"
+
+
+def flip_t97():
+    """The un-normalized lease exclusion: each porcelain path is compared without the store's prefix strip."""
+    original = guard.parse_porcelain
+    return patch.object(guard, "parse_porcelain",
+                        lambda raw, prefix, lease, specs, verb: original(raw, b"", lease, specs, verb))
+
+
+def t98_fifo_lease(fx):
+    """A FIFO at the lease path refuses promptly: the held-lease refusal names a present non-regular lease
+    without reading it. The create runs in a child bounded by T98_BOUND, so a blocking open turns this
+    test red rather than hanging the gate. The FIFO is untouched and every byte is unchanged."""
+    if not hasattr(os, "mkfifo"):
+        raise CannotEvaluate("T98 needs os.mkfifo to plant a FIFO lease")
+    root = fx.case("t98-fifo-lease")
+    os.mkfifo(str(Path(root) / LEASE))
+    before = snapshot(root)
+    try:
+        proc = child(fx.env, root, CREATE, flip=_t98_flip[0], timeout=T98_BOUND)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("T98 the FIFO lease held the run past {} s, never refused".format(T98_BOUND))
+    assert proc.returncode == 2, ("T98 exit 2", proc.returncode, proc.stderr[-800:])
+    assert "a present non-regular lease (held)" in proc.stderr and "never seized" in proc.stderr, (
+        proc.stderr[-800:])
+    assert stat.S_ISFIFO((Path(root) / LEASE).lstat().st_mode) and snapshot(root) == before, (
+        "T98 the FIFO is untouched")
+
+
+# The T98 flip, applied inside the bounded child: the held-lease message opens the lease without
+# O_NONBLOCK, so its open of a writer-less FIFO blocks. The wrapper forwards dir_fd, so it is listed in
+# os.supports_dir_fd, as the containment probe requires of os.open. _t98_flip holds the child's prelude.
+_t98_flip = [""]
+FLIP_T98 = """
+_open = os.open
+def _blocking_open(path, flags, *args, **kwargs):
+    if path == "lease.toml" and not flags & os.O_CREAT:
+        flags &= ~os.O_NONBLOCK
+    return _open(path, flags, *args, **kwargs)
+os.open = _blocking_open
+os.supports_dir_fd.add(_blocking_open)
+"""
+
+
+@contextlib.contextmanager
+def flip_t98():
+    _t98_flip[0] = FLIP_T98
+    try:
+        yield
+    finally:
+        _t98_flip[0] = ""
+
+
+# --- T99-T109: the planned-destination cleanliness, ignore and lease guards before mutation ----------------
+# The record verb runs check_clean and check_ignored before its lease, the cleanliness, ignore and lease
+# guards (and the normalizing-filter refusal note) that the removed store-upgrade gate used to exercise,
+# so each is driven here through `opf record create`.
+
+CONTRIBUTIONS_VIEW = ".working/CONTRIBUTIONS.md"
+VERSION_VIEW = ".working/VERSION.md"
+OWNER_BYTES = b"the owner's own notes\n"
+T105_PREFIX = b"nested-\xff/"
+
+
+def _exclude(root, *rules):
+    """Replace the repository's .git/info/exclude with `rules` (bytes), one per line."""
+    info = Path(root) / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "exclude").write_bytes(b"".join(rule + b"\n" for rule in rules))
+
+
+def _untrack(env, root, *rels):
+    """Remove `rels` from the index, keeping the files, and commit, so HEAD no longer holds them."""
+    env.git(root, "rm", "-q", "-r", "--cached", "--", *rels)
+    env.git(root, "commit", "-q", "-m", "untrack " + " ".join(rels))
+
+
+def _with_manifest(fx, root, **tables):
+    """Commit the manifest with each named top-level table replaced, emitted canonically."""
+    document = model(root, MANIFEST)
+    document.update(tables)
+    write_commit(fx.env, root, MANIFEST, emit.emit_checked(document).encode("utf-8"), "manifest tables")
+
+
+def _git_bytes(root, args, run_git=guard._opf_observe._run_git):
+    """A git observation's raw stdout, through the production bytes boundary (paths need not be UTF-8),
+    bound at import so a flip that patches the probe's git leaves the fixture's own checks alone."""
+    out = run_git(guard._opf_observe._git_path(), str(root), args)
+    if not out.completed or out.rc != 0:
+        raise Harness("fixture git {} failed: {}".format(args, out.err))
+    return out.out
+
+
+def _index_and_head(root):
+    return _git_bytes(root, ["ls-files", "--stage", "-z"]), _git_bytes(root, ["rev-parse", "HEAD"])
+
+
+def _status_ignored(root, rel):
+    return _git_bytes(root, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                             "--ignored=matching", "--no-renames", "--", rel]).split(b"\x00")
+
+
+def _create_refused(env, root, needle):
+    """refused_untouched over CREATE, returning the refusal's stderr: the byte comparison is asserted
+    first, so a guard removed under a flip turns the test red on what was written."""
+    before = snapshot(root)
+    result = record_cli(env, root, CREATE)
+    assert snapshot(root) == before, ("bytes untouched on refusal", result[0], result[2][-800:])
+    refused(result, needle)
+    return result[2]
+
+
+def t99_dirty_operand(fx):
+    """A canonical, uncommitted counters edit at a planned rewrite destination refuses exit 2 BEFORE any
+    mutation: the refusal names the path and advises committing or moving the work aside, offering no
+    restore command (the dirt is the owner's), and every byte is untouched."""
+    env = fx.env
+    root = fx.case("t99-dirty-operand")
+    (Path(root) / COUNTERS).write_bytes(read(root, COUNTERS).replace(b"BI = 0", b"BI = 1"))
+    state = _index_and_head(root)
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert COUNTERS in err and "the working tree is not clean" in err, err[-800:]
+    assert "restore --staged" not in err, err[-800:]
+    assert _index_and_head(root) == state, "T99 index and HEAD unchanged"
+
+
+def flip_t99():
+    """The cleanliness gate as a no-op."""
+    return patch.object(guard, "check_clean", lambda *args: None)
+
+
+def t100_ignored_render_target(fx):
+    """An ignored, untracked file at a declared view's destination is the owner's work, not a clean
+    destination: the create refuses exit 2 before mutation with the dirty-store remedy naming it, every
+    byte and the index untouched. Moved aside, the absent destination still refuses its ignore rule; with
+    the rule corrected the create records, and the saved owner bytes and the ignored content outside the
+    planned scope survive."""
+    env = fx.env
+    root = fx.case("t100-ignored-render-target")
+    _untrack(env, root, CONTRIBUTIONS_VIEW)
+    (Path(root) / CONTRIBUTIONS_VIEW).write_bytes(OWNER_BYTES)
+    (Path(root) / "outside-build").mkdir()
+    (Path(root) / "outside-build" / "cache").write_bytes(b"unrelated ignored content\n")
+    _exclude(root, b"/" + CONTRIBUTIONS_VIEW.encode("utf-8"), b"/outside-build/")
+    assert env.git(root, "check-ignore", "--", CONTRIBUTIONS_VIEW).strip() == CONTRIBUTIONS_VIEW, (
+        "T100 the fixture target is ignored")
+    state = _index_and_head(root)
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert CONTRIBUTIONS_VIEW in err and "restore --staged" not in err, err[-800:]
+    assert _index_and_head(root) == state, "T100 index and HEAD unchanged"
+    saved = Path(root).parent / (Path(root).name + "-owner-notes")
+    (Path(root) / CONTRIBUTIONS_VIEW).rename(saved)
+    _create_refused(env, root, "ignored planned destinations")
+    _exclude(root, b"/outside-build/")
+    recorded(record_cli(env, root, CREATE))
+    assert saved.read_bytes() == OWNER_BYTES, "T100 the saved owner bytes survive"
+    assert read(root, "outside-build/cache") == b"unrelated ignored content\n", (
+        "T100 ignored content outside the planned scope is untouched")
+
+
+def flip_unignored_probe():
+    """The dirty probe without --ignored=matching (and its expansion): status then reports no ignored entry."""
+    original = guard._opf_observe._run_git
+
+    def run_git(git, root, args, **kwargs):
+        return original(git, root, [a for a in args if a not in ("--ignored=matching", "--ignored=traditional")],
+                        **kwargs)
+    return patch.object(guard._opf_observe, "_run_git", run_git)
+
+
+def t101_collapsed_ignored_ancestor(fx):
+    """A collapsed ignored ancestor (`!! .working/`, the whole store untracked and ignored) does not hide
+    the planned destinations beneath it: the expansion over the same destinations names them, and the
+    create refuses exit 2 before mutation with the dirty-store remedy, every byte untouched."""
+    env = fx.env
+    root = fx.case("t101-collapsed-ancestor")
+    _untrack(env, root, ".working")
+    _exclude(root, b"/.working/")
+    assert b"!! .working/" in _status_ignored(root, CONTRIBUTIONS_VIEW), "T101 git collapses the ancestor"
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert "16 dirty path(s)" in err and CONTRIBUTIONS_VIEW in err, (
+        "T101 the refusal counts every planned destination and names them", err[-800:])
+
+
+def flip_t101():
+    """No ignored-ancestor expansion: the traditional-mode status reports nothing."""
+    original = guard._opf_observe._run_git
+
+    def run_git(git, root, args, **kwargs):
+        if "--ignored=traditional" in args:
+            return guard._opf_observe._GitOutcome(True, 0, b"", "")
+        return original(git, root, args, **kwargs)
+    return patch.object(guard._opf_observe, "_run_git", run_git)
+
+
+def t102_directory_at_destination(fx):
+    """An ignored directory at a declared view's destination is a collision, though git reports it with a
+    trailing slash: the create refuses exit 2 before mutation naming it, every byte untouched."""
+    env = fx.env
+    root = fx.case("t102-directory-at-destination")
+    _untrack(env, root, CONTRIBUTIONS_VIEW)
+    (Path(root) / CONTRIBUTIONS_VIEW).unlink()
+    (Path(root) / CONTRIBUTIONS_VIEW).mkdir()
+    (Path(root) / CONTRIBUTIONS_VIEW / "owner").write_bytes(OWNER_BYTES)
+    _exclude(root, b"/" + CONTRIBUTIONS_VIEW.encode("utf-8") + b"/")
+    assert b"!! " + CONTRIBUTIONS_VIEW.encode("utf-8") + b"/" in _status_ignored(root, CONTRIBUTIONS_VIEW), (
+        "T102 git reports the directory with a trailing slash")
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert CONTRIBUTIONS_VIEW in err, ("T102 the refusal names the destination", err[-800:])
+
+
+def t103_ignored_prefix_sibling(fx):
+    """Ignored content at a declared unmanaged prefix sibling of a destination (.working/CONTRIBUTIONS.md.bak/,
+    which --ignored=matching reports even under literal pathspecs) is outside the planned scope: the
+    create records and the sibling's bytes survive."""
+    env = fx.env
+    root = fx.case("t103-ignored-prefix-sibling")
+    sibling = CONTRIBUTIONS_VIEW + ".bak"
+    _with_manifest(fx, root, unmanaged={"paths": [sibling]})
+    _exclude(root, b"/" + sibling.encode("utf-8") + b"/")
+    (Path(root) / sibling).mkdir()
+    (Path(root) / sibling / "owner").write_bytes(OWNER_BYTES)
+    assert b"!! " + sibling.encode("utf-8") + b"/" in _status_ignored(root, CONTRIBUTIONS_VIEW), (
+        "T103 git reports the prefix sibling")
+    recorded(record_cli(env, root, CREATE))
+    assert read(root, sibling + "/owner") == OWNER_BYTES, "T103 the sibling's bytes survive"
+
+
+def flip_t103():
+    """No ignored-record scope filter: every ignored record git reports is admitted as dirt."""
+    original = guard.parse_porcelain
+
+    def parse(raw, prefix, lease, specs, verb):
+        extra = [os.fsdecode(r[3:]).removeprefix(os.fsdecode(prefix)).rstrip("/")
+                 for r in raw.split(b"\x00") if r.startswith(b"!! ")]
+        return original(raw, prefix, lease, list(specs) + extra, verb)
+    return patch.object(guard, "parse_porcelain", parse)
+
+
+def t104_unmanaged_ignored_content(fx):
+    """Declared unmanaged, ignored content inside .working (.working/cache/) is outside the planned scope:
+    the create records and its bytes survive."""
+    env = fx.env
+    root = fx.case("t104-unmanaged-ignored")
+    _with_manifest(fx, root, unmanaged={"paths": [".working/cache"]})
+    _exclude(root, b"/.working/cache/")
+    (Path(root) / ".working" / "cache").mkdir()
+    (Path(root) / ".working" / "cache" / "output.bin").write_bytes(b"unmanaged output\n")
+    recorded(record_cli(env, root, CREATE))
+    assert read(root, ".working/cache/output.bin") == b"unmanaged output\n", "T104 the unmanaged bytes survive"
+
+
+def flip_t104():
+    """The whole-store scope: the store's planned destinations widened to all of .working."""
+    original = guard.plan_write_scope
+
+    def scope(*args):
+        return dict(original(*args), store=(".working",))
+    return patch.object(guard, "plan_write_scope", scope)
+
+
+def t105_non_utf8_prefix(fx):
+    """A store nested below its repository root under a real non-UTF-8 directory name: git's -z paths and
+    --show-prefix carry those bytes. An ignored, untracked operand (counters), view destination, or
+    collapsed .working ancestor refuses exit 2 before mutation with the dirty-store remedy naming the
+    destination; every byte, the index and HEAD untouched."""
+    env = fx.env
+    for case, rel, untrack in (("counters", COUNTERS, COUNTERS), ("render", CONTRIBUTIONS_VIEW, CONTRIBUTIONS_VIEW),
+                               ("ancestor", CONTRIBUTIONS_VIEW, ".working")):
+        outer = fx.case("t105-" + case)
+        nested = outer / os.fsdecode(T105_PREFIX.rstrip(b"/"))
+        nested.mkdir()
+        for entry in sorted(outer.iterdir()):
+            if entry.name not in (".git", nested.name):
+                entry.rename(nested / entry.name)
+        env.git(outer, "add", "-A")
+        env.git(outer, "commit", "-q", "-m", "nest the store below a non-UTF-8 directory")
+        _untrack(env, nested, untrack)
+        if case == "render":
+            (nested / rel).write_bytes(OWNER_BYTES)
+        ignored = b".working/" if case == "ancestor" else rel.encode("utf-8")
+        _exclude(outer, b"/" + T105_PREFIX + ignored)
+        assert _git_bytes(nested, ["rev-parse", "--show-prefix"]) == T105_PREFIX + b"\n", (
+            "T105 a real non-UTF-8 prefix", case)
+        assert b"!! " + T105_PREFIX + ignored in _status_ignored(nested, rel), ("T105 a real ignored record", case)
+        state = _index_and_head(outer)
+        before = snapshot(outer)
+        result = record_cli(env, nested, CREATE)
+        assert snapshot(outer) == before, ("T105 bytes untouched on refusal", case, result[0], result[2][-800:])
+        refused(result, "Commit your changes (or move them aside)")
+        assert rel in result[2], (case, result[2][-800:])
+        assert _index_and_head(outer) == state, ("T105 index and HEAD unchanged", case)
+
+
+def flip_t105():
+    """The lossy prefix round trip and its silent non-match fallback."""
+    def old_status_path(pbytes, prefix):
+        prefix_b = os.fsencode(prefix).decode("utf-8", "replace").encode("utf-8")
+        return pbytes[len(prefix_b):] if prefix_b and pbytes.startswith(prefix_b) else pbytes
+    return patch.object(guard, "status_path", old_status_path)
+
+
+def t106_absent_ignored_destination(fx):
+    """An absent planned destination has no status entry, so its ignore rule is probed: an absent ignored
+    view destination, and an absent ignored product destination (the root VERSION view), each refuse exit
+    2 before mutation naming the path, every byte untouched."""
+    env = fx.env
+    root = fx.case("t106-absent-view")
+    _untrack(env, root, CONTRIBUTIONS_VIEW)
+    (Path(root) / CONTRIBUTIONS_VIEW).unlink()
+    _exclude(root, b"/" + CONTRIBUTIONS_VIEW.encode("utf-8"))
+    err = _create_refused(env, root, "ignored planned destinations")
+    assert repr(CONTRIBUTIONS_VIEW) in err, ("T106 the view destination is named", err[-800:])
+    root = fx.case("t106-absent-product")
+    views = dict(model(root, MANIFEST)["views"],
+                 VERSION={"kind": "deterministic", "sources": ["version"], "target": "VERSION"})
+    _with_manifest(fx, root, views=views)
+    _exclude(root, b"/VERSION")
+    err = _create_refused(env, root, "ignored planned destinations")
+    assert "'VERSION'" in err, ("T106 the product destination is named", err[-800:])
+
+
+def flip_t106():
+    """The ignore probe for absent destinations as a no-op."""
+    return patch.object(guard, "check_ignored", lambda *args: None)
+
+
+def t107_ignored_and_directory_lease(fx):
+    """An ignored lease, and a directory lease (untracked, or ignored and so collapsed), are held: each
+    create refuses exit 2 with the never-seize refusal, never the dirty-store remedy, the lease and every
+    byte untouched."""
+    env = fx.env
+    root = fx.case("t107-ignored-lease")
+    (Path(root) / LEASE).write_bytes(PEER_LEASE)
+    _exclude(root, b"/" + LEASE.encode("utf-8"))
+    assert env.git(root, "check-ignore", "--", LEASE).strip() == LEASE, "T107 the fixture lease is ignored"
+    err = _create_refused(env, root, "The lease is never seized (spec 5.7)")
+    assert "peer-runner" in err and "confirmed NO opf run is live" in err, err[-800:]
+    assert "Commit your changes" not in err, err[-800:]
+    assert read(root, LEASE) == PEER_LEASE, "T107 the ignored lease survives"
+    for ignored in (False, True):
+        root = fx.case("t107-directory-lease-" + ("ignored" if ignored else "untracked"))
+        (Path(root) / LEASE).mkdir()
+        (Path(root) / LEASE / "owner").write_bytes(b"held by another run\n")
+        if ignored:
+            _exclude(root, b"/" + LEASE.encode("utf-8") + b"/")
+        err = _create_refused(env, root, "The lease is never seized (spec 5.7)")
+        assert "Commit your changes" not in err, ("T107 no dirt advice", ignored, err[-800:])
+        assert (Path(root) / LEASE).is_dir(), ("T107 the directory lease survives", ignored)
+
+
+def flip_t107():
+    """A lease exclusion that excludes nothing: the lease record reads as ordinary dirt."""
+    original = guard.parse_porcelain
+    return patch.object(guard, "parse_porcelain",
+                        lambda raw, prefix, lease, specs, verb: original(raw, prefix, None, specs, verb))
+
+
+def t108_committed_deleted_lease(fx):
+    """A lease committed at HEAD (a spec 5.7 violation) and deleted in the worktree emits a tracked " D"
+    record on the lease path: the create refuses exit 2 naming the TRACKED lease and spec 5.7, rather than
+    claiming the now-absent lease and sweeping its deletion into the change; every byte untouched."""
+    env = fx.env
+    root = fx.case("t108-committed-deleted-lease")
+    write_commit(env, root, LEASE, PEER_LEASE, "a committed lease")
+    (Path(root) / LEASE).unlink()
+    err = _create_refused(env, root, "is TRACKED in git")
+    assert "spec 5.7" in err, ("T108 the refusal names spec 5.7", err[-800:])
+
+
+def flip_t108():
+    """The old lease exclusion: every record on the lease path is dropped, whatever its status."""
+    original = guard.parse_porcelain
+
+    def parse(raw, prefix, lease, specs, verb):
+        if lease is not None:
+            path = os.fsencode(prefix) + os.fsencode(lease)
+            raw = b"".join(r + b"\x00" for r in raw.split(b"\x00")[:-1] if r[3:] != path)
+        return original(raw, prefix, lease, specs, verb)
+    return patch.object(guard, "parse_porcelain", parse)
+
+
+def t109_normalizing_filter_note(fx):
+    """A store whose view carries an external normalizing clean filter (the git-lfs shape: the index holds
+    the cleaned blob, the worktree the uncleaned body) reads dirty in the racy-clean window, because the
+    probe never runs the filter: the create refuses exit 2 before mutation, and the refusal names the
+    git-lfs-shape filter and settling the worktree; every byte untouched."""
+    env = fx.env
+    root = fx.case("t109-normalizing-filter")
+    env.git(root, "config", "filter.norm.clean", "sed 's/[0-9]//g'")
+    env.git(root, "config", "filter.norm.required", "true")
+    (Path(root) / ".gitattributes").write_text(VERSION_VIEW + " filter=norm\n", encoding="utf-8")
+    env.git(root, "add", "--renormalize", "--", VERSION_VIEW)
+    env.git(root, "add", "--", ".gitattributes")
+    env.git(root, "commit", "-q", "-m", "a normalizing filter")
+    assert not re.search("[0-9]", env.git(root, "show", ":" + VERSION_VIEW)) and re.search(
+        b"[0-9]", read(root, VERSION_VIEW)), "T109 the index holds the cleaned blob"
+    os.utime(str(Path(root) / VERSION_VIEW), (4102444800, 4102444800))   # 2100-01-01: status must re-hash
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert "git-lfs-shape" in err and "Settle the worktree" in err, err[-800:]
+
+
+def flip_t109():
+    """No filter neutralization: the probe runs the filter, so the normalizing store reads clean."""
+    return patch.object(guard._opf_observe, "_filter_neutralizing_config", lambda *args, **kwargs: [])
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -9802,6 +10408,23 @@ TESTS = (
     ("T92-seam-concurrent-processes-distinct", t92_seam_concurrent_processes_distinct, flip_t91_scan_ignored),
     ("T93-seam-threads-serialised", t93_seam_threads_serialised, flip_t93_unserialised),
     ("T94-planned-ids-bound-to-claims", t94_planned_ids_bound_to_claims, flip_t94_ids_unchecked),
+    ("T95-importer-operand-transition-refused", t95_importer_operand_transition, flip_t95_author),
+    ("T95-importer-operand-receipt-refused", t95_importer_operand_receipt, flip_t95_author),
+    ("T95-importer-resolution-superseded", t95_importer_resolution_superseded, flip_t95_target),
+    ("T96-malformed-lease-refused-as-held", t96_malformed_lease, flip_t96),
+    ("T97-nested-store-held-lease", t97_nested_store_held_lease, flip_t97),
+    ("T98-fifo-lease-refused-promptly", t98_fifo_lease, flip_t98),
+    ("T99-dirty-operand-refused", t99_dirty_operand, flip_t99),
+    ("T100-ignored-render-target-refused", t100_ignored_render_target, flip_unignored_probe),
+    ("T101-collapsed-ignored-ancestor-refused", t101_collapsed_ignored_ancestor, flip_t101),
+    ("T102-directory-at-destination-refused", t102_directory_at_destination, flip_unignored_probe),
+    ("T103-ignored-prefix-sibling-outside-scope", t103_ignored_prefix_sibling, flip_t103),
+    ("T104-unmanaged-ignored-outside-scope", t104_unmanaged_ignored_content, flip_t104),
+    ("T105-non-utf8-prefix-refused", t105_non_utf8_prefix, flip_t105),
+    ("T106-absent-ignored-destination-refused", t106_absent_ignored_destination, flip_t106),
+    ("T107-ignored-and-directory-lease-held", t107_ignored_and_directory_lease, flip_t107),
+    ("T108-committed-deleted-lease-refused", t108_committed_deleted_lease, flip_t108),
+    ("T109-normalizing-filter-note", t109_normalizing_filter_note, flip_t109),
 )
 
 

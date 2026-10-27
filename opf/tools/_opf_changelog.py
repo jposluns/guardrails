@@ -519,7 +519,8 @@ def _load_inputs(resolution, product_root):
     # its [vendors]: an invalid manifest is a fail-closed cannot-evaluate, never a silent partial pass.
     # validate_manifest returns CANNOT-EVALUATE for a non-table / non-opf manifest and INVALID for a
     # schema violation; either is fail-closed here.
-    mv = _opf_store.validate_manifest(manifest_data)
+    mv = _opf_store.validate_manifest(
+        manifest_data, manifest_rel=resolution.machine_rel + "/" + _opf_store.MANIFEST_NAME)
     if mv.status != VALID:
         return None, None, None, frozenset(), ("manifest.toml does not validate against the manifest "
                                                 "schema: {} (fail-closed, spec 4.5/9)".format(
@@ -647,7 +648,8 @@ def self_test():
     FIFO CHANGELOG.md refused as non-regular (never blocking), an oversized CHANGELOG.md refused before the
     read (the pre-open st.st_size ceiling), a non-UTF-8 CHANGELOG.md, an un-encodable
     (lone-surrogate) changelog, an unresolvable --root, run()'s exit-code mapping, and the two unreleased
-    heading vectors (a heading with no summary row, and a misplaced not-first entry)."""
+    heading vectors (a heading with no summary row, and a misplaced not-first entry). The imported
+    release-row flag (spec 6.1, 14.3): run_gates passes a covered imported row."""
     import tempfile
     import shutil
 
@@ -920,6 +922,17 @@ def self_test():
     cl_f5 = cl.replace("## 1.0.0 (2026-06-01)", "## 1.0.0 (2026-06-01, 2026-06-02, 2026-06-03)")
     check("f5-multi-date-suffix-pass", run_gates(base_version(cl_f5), worklog, cl_f5).status == PASS)
 
+    # The imported release-row flag (spec 6.1, 14.3): the gates grade an imported historical row by
+    # validate_version's own rule, so a covered imported row PASSES end to end.
+    cl_imp = cl + "\n## 0.9.0 (2026-05-01)\n\n- imported historical release\n"
+    v_imp = base_version(cl_imp)
+    v_imp["release"] = [{"version": "0.9.0", "date": "2026-05-01T00:00:00Z", "worklog_span": [],
+                         "coverage_digest": _opf_release.compute_span_digest(by_id, None),
+                         "imported": True}] + v_imp["release"]
+    v_imp["summary"].append({"covers": "0.9.0", "status": "published",
+                             "digest": freeze_of(cl_imp, "0.9.0")})
+    check("imported-row-pass", run_gates(v_imp, worklog, cl_imp).status == PASS)
+
     # F7: the CLI arg parser is fail-closed. In-process (no subprocess): a missing --root value or an
     # unknown arg is a usage error, --root with a value is accepted, and --self-test is honoured only alone.
     check("f7-root-missing-value-usage-error", _parse_cli(["--root"])[2] is not None)
@@ -1133,6 +1146,25 @@ def self_test():
         check("f5-manifest-missing-types-cannot-eval",
               evaluate(build_store(version_text, worklog_text, cl_disk, manifest_no_types)).status
               == CANNOT_EVALUATE)
+
+        # The below-supported spec_version refusal read through this gate names the resolved
+        # manifest's own path (_load_inputs's own validate_manifest call); falling back to the
+        # unnamed "the store manifest" wording is red. On the live path the worklog loader
+        # validates the manifest first and names the path itself, so it is bypassed here to
+        # reach exactly this module's call.
+        manifest_old = manifest.replace(
+            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+        _orig_load_worklog_at = _opf_worklog.load_worklog_at
+        _opf_worklog.load_worklog_at = (
+            lambda fd, machine_rel, required=False: {"schema": 1, "entry": []})
+        try:
+            r_old = evaluate(build_store(version_text, worklog_text, cl_disk, manifest_old))
+        finally:
+            _opf_worklog.load_worklog_at = _orig_load_worklog_at
+        check("older-manifest-refusal-names-path",
+              r_old.status == CANNOT_EVALUATE
+              and any("'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in f
+                      for f in r_old.findings))
 
         # M3 end-to-end: a store whose MANIFEST registers x-acme and whose worklog USES x-acme resolves
         # and PASSES only because _load_inputs reads the manifest and threads [vendors].registered through

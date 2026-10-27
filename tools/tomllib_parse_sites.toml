@@ -322,15 +322,23 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_plan.py"
-function = "self_test.PlanningTests.test_ancestry_store_debris_is_re_adoption"
+function = "self_test.PlanningTests.test_ancestry_ignores_manifestless_reserved_content"
 form = "call"
-count = 4
+count = 3
 class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_plan.py"
-function = "self_test.PlanningTests.test_ancestry_store_debris_is_re_adoption.ancestry"
+function = "self_test.PlanningTests.test_refused_older_manifest_and_hand_step"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_plan.py"
+function = "self_test.PlanningTests.test_ancestry_ignores_manifestless_reserved_content.ancestry"
 form = "call"
 count = 1
 class = "EXEMPT"
@@ -703,7 +711,7 @@ reason = "test-code"
 path = "opf/tools/_opf_record.py"
 function = "_self_test_units"
 form = "call"
-count = 1
+count = 2
 class = "EXEMPT"
 reason = "test-code"
 
@@ -761,7 +769,7 @@ reason = "test-code"
 path = "opf/tools/_opf_views.py"
 function = "self_test"
 form = "call"
-count = 9
+count = 10
 class = "EXEMPT"
 reason = "test-code"
 
@@ -802,14 +810,6 @@ path = "opf/tools/_opf_worklog_regressions.py"
 function = "_manifest_intake_regressions"
 form = "call"
 count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/_opf_worklog_regressions.py"
-function = "_upgrade_preflight_regressions"
-form = "call"
-count = 3
 class = "EXEMPT"
 reason = "test-code"
 
@@ -919,6 +919,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_record.py"
+function = "flip_t96.absent_if_malformed"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_record.py"
 function = "model"
 form = "call"
 count = 1
@@ -984,71 +992,6 @@ reason = "test-code"
 [[site]]
 path = "opf/tools/check_opf_record.py"
 function = "t8_collision.<genexpr>"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-# fixture parses inside the isolated suite harness (its own try maps a harness exception to exit 2)
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated"
-form = "call"
-count = 2
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated.<genexpr>"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated._p1_variant"
-form = "call"
-count = 2
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated._plan_refuses"
-form = "call"
-count = 2
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated.canon_cnt"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated.canon_man"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated.cnt_of"
-form = "call"
-count = 1
-class = "EXEMPT"
-reason = "test-code"
-
-[[site]]
-path = "opf/tools/check_opf_upgrade.py"
-function = "_suite_isolated.man_of"
 form = "call"
 count = 1
 class = "EXEMPT"

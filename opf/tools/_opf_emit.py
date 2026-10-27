@@ -1572,7 +1572,7 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
 
 
 # array is required: socket.send_fds/recv_fds cold-import it inside their own
-# bodies, so importing socket alone does not load it (QA19 F4).
+# bodies, so importing socket alone does not load it.
 _FIXTURE_GUARDIAN_MODULES = (
     "array", "ctypes", "errno", "gc", "json", "pathlib", "resource", "select",
     "signal", "socket", "time", "traceback")
@@ -1677,7 +1677,7 @@ class _FixtureProcess:
     fork; construction resources are never disposed while the launcher can still
     use them. A failed construction (e.g. thread exhaustion) aborts the launch,
     releases every resource, and surfaces the original error. Cancellation
-    masking (fix 2w/2x): close() runs its ENTIRE ownership decision, transfer,
+    masking: close() runs its ENTIRE ownership decision, transfer,
     collection and cleanup sequence -- and poll() its collection-to-recording
     step -- with SIGINT and SIGTERM masked on the calling thread
     (pthread_sigmask), and the LAUNCHER is created with the same pair blocked
@@ -1686,15 +1686,15 @@ class _FixtureProcess:
     single-threaded caller EVERY thread blocks the pair during the sequence
     and even a PROCESS-directed cancellation -- the real Ctrl-C delivery
     shape, which the kernel may hand to ANY thread with it unblocked -- stays
-    kernel-pending (QA19 F2, QA20, QA21 claude F1). The prior mask is
+    kernel-pending. The prior mask is
     captured by QUERY before the restoring try and the block is the try's
-    FIRST statement, restored exactly in the finally (QA21 claude F3): a
+    FIRST statement, restored exactly in the finally: a
     cancellation landing before the block installs disposes NOTHING, not
     even the thread's signal state, and close() can simply run again. The
     pending cancellation is delivered AT the restore, inside close()/poll()'s
-    own finally (QA21 claude F4): close() then raises the KeyboardInterrupt
+    own finally: close() then raises the KeyboardInterrupt
     itself, with any in-flight refusal preserved on the exception chain
-    (callers walk __context__). The deferral is BOUNDED (QA21 gemini F3, an
+    (callers walk __context__). The deferral is BOUNDED (an
     accepted trade-off: guaranteed ownership and cleanup over immediate
     termination): every masked wait carries its own deadline, so a pending
     cancellation -- including a job supervisor's SIGTERM -- is delayed at
@@ -1729,23 +1729,23 @@ class _FixtureProcess:
     buffered receipt before closing that socket. A guardian that cannot be
     collected within the bounded cleanup budget is frozen (SIGSTOP via its
     pidfd, so a live guardian's pid/pgid cannot be recycled), then the
-    receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP
-    (fix 2y): while the frozen guardian lives it is the tree's subreaper, so
+    receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP:
+    while the frozen guardian lives it is the tree's subreaper, so
     every observed member is verified through its OWN pidfd against /proc
     -- group membership AND a CURRENT parent chain reaching the guardian
     anchor,
     re-checked AFTER the pidfd is opened -- NEVER a numeric killpg and NEVER
-    a census anchored on the subject's bare numeric pid (QA20 claude F1,
-    QA21 codex F3, fix 2y codex F1: only unreapability pins a pid or pgid
-    NUMBER against reuse; neither a held pidfd nor SIGSTOP delivery does).
+    a census anchored on the subject's bare numeric pid (only unreapability
+    pins a pid or pgid NUMBER against reuse; neither a held pidfd nor
+    SIGSTOP delivery does).
     Members die BEFORE the leader (the census excludes the leader; its
     held-pidfd SIGKILL runs last), so no member is stranded by its leader's
     death, and every observed member the census could not address is
-    accounted (fix 2y codex F2; a member no census observed -- the
+    accounted (a member no census observed -- the
     disclosed fork-race and pid-wraparound residual -- can be neither
-    addressed nor accounted, per the ruling PD-335-TREE-CLAIM-STALL). The
-    "tree" claim then rests on OBSERVATION, never on the kill sends alone
-    (fix 2z; maintainer ruling PD-335-TREE-CLAIM-STALL):
+    addressed nor accounted, so the refusal discloses it rather than
+    claiming past it). The
+    "tree" claim then rests on OBSERVATION, never on the kill sends alone:
     while the guardian stays frozen, a bounded verification census must
     observe NO live, signalable group member in TWO CONSECUTIVE clean
     passes -- an observation, never a proof (a continuously forking chain
@@ -1757,19 +1757,17 @@ class _FixtureProcess:
     the named partial accounting. Then the guardian itself is SIGKILLed. On ANY guardian
     failure, escalated or not -- including a failure FIRST collected by
     poll(), which kills the subject AT COLLECTION TIME and records the
-    failure for close() to prove and re-raise (QA19 F1), an UNRESOLVED
+    failure for close() to prove and re-raise, an UNRESOLVED
     collection (guardian reaped, status never validated, no failure
-    recorded: treated as a failure of close()'s own, QA20 codex F1), and a
+    recorded: treated as a failure of close()'s own), and a
     LOST-OWNERSHIP collection (the guardian disappeared without this
-    close()'s reap, fix 2y claude Finding 2) -- a receipt-identified subject
+    close()'s reap) -- a receipt-identified subject
     is killed and its disappearance proven on its pidfd or refused loudly;
     on every one of those guardian-DEAD paths the kill is SUBJECT-ONLY: the
     dead guardian owns no orphans, so NO member census runs, NO new pidfds
-    are opened, and only the already-held subject pidfd is signalled (fix
-    2y, D2).
+    are opened, and only the already-held subject pidfd is signalled.
 
-    Refusal wording, class-wide (each names ONLY the steps actually taken,
-    QA19 F3 / QA20 claude F3 / fix 2y codex F2):
+    Refusal wording, class-wide (each names ONLY the steps actually taken):
 
       kill state ran               refusal names
       ---------------------------  ------------------------------------------
@@ -1798,7 +1796,7 @@ class _FixtureProcess:
     of a subject whose guardian is DEAD survive the subject-only
     kill (no process owns the orphans after the subreaper guardian's death,
     so a census there could only trust recyclable numbers and unverifiable
-    reparented chains; fix 2y, D2) -- both disclosed in the refusal, never
+    reparented chains) -- both disclosed in the refusal, never
     claimed killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
     extra coverage, failing closed to these residuals where unavailable.
     Hosts without pidfd degrade escalation to guardian-only with the same
@@ -1848,7 +1846,7 @@ class _FixtureProcess:
         self._launcher = None
         self._launch_error = None
         # The recorded guardian failure, set at COLLECTION time by whichever
-        # collector reads the failed report first (QA19 F1); close() re-raises
+        # collector reads the failed report first; close() re-raises
         # it after addressing the receipt-identified subject.
         self._failure = None
         self._launch_lock = threading.Lock()
@@ -2186,7 +2184,7 @@ class _FixtureProcess:
         """Record a supervision failure at COLLECTION time, whichever collector
         observed it first: close() must address the receipt-identified subject
         and re-raise the recorded failure even when poll() or start() was the
-        collector that read the failed report (QA19 F1). A recorded failure
+        collector that read the failed report. A recorded failure
         is a RESOLVED collection; the subject-cleanup obligation it creates is
         tracked by `cleaned`, never by `unresolved`."""
         self._failure = failure
@@ -2439,8 +2437,8 @@ class _FixtureProcess:
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
         launcher has not recorded its result yet, ABANDON the launch to it (the
-        launcher is then the fork's last owner and collects its own fork,
-        QA19 F2) and report True; a result recorded in the meantime keeps this
+        launcher is then the fork's last owner and collects its own fork)
+        and report True; a result recorded in the meantime keeps this
         close() the owner."""
         with self._launch_lock:
             if self._launched.is_set():
@@ -2504,8 +2502,8 @@ class _FixtureProcess:
         # path, because the launcher and its guardian can still use it all. An
         # exception raised INSIDE this coordination -- normally impossible for a
         # masked cancellation, but reachable by a pre-mask interpreter flag or a
-        # non-signal asynchronous exception -- must leave the same owner
-        # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
+        # non-signal asynchronous exception -- must leave the same owner:
+        # the launcher for an unrecorded launch (abandoned under the
         # launch lock before re-raising), or this close(), which finishes
         # collecting before re-raising.
         def release_launcher():
@@ -2660,31 +2658,30 @@ class _FixtureProcess:
 
     def _escalation_refusal(self, failure):
         """Annotate an escalated refusal with ONLY what the escalation
-        actually did (QA19 F3), accounting every observed member (fix 2y,
-        codex F2; a member no census observed -- the disclosed fork-race
+        actually did, accounting every observed member (a member no
+        census observed -- the disclosed fork-race
         and pid-wraparound residual -- can be neither addressed nor
-        accounted, per the ruling PD-335-TREE-CLAIM-STALL):
+        accounted, so the refusal discloses it rather than claiming past it):
         "subject tree killed" is claimed ONLY when the guardian-anchored
         census addressed every OBSERVED member (a census can only address
         members it observed) AND the bounded post-kill verification
         census then OBSERVED no live, signalable member left in two
-        consecutive clean passes (fix 2z: the claim rests on observation,
-        never on the kill sends alone; the maintainer ruling
-        PD-335-TREE-CLAIM-STALL words even that claim as an observation with
+        consecutive clean passes (the claim rests on observation,
+        never on the kill sends alone; even that claim
+        is worded as an observation with
         its residual, never a proof); a census with skipped or unknown
         members names them, and unverifiable entries -- possible members,
-        never established ones (round 24, claude F1) -- are named apart; a
+        never established ones -- are named apart; a
         subject-only kill (no guardian ownership) disclosed its unaddressed
-        descendants (the orphan-escape residual, pdeathsig-backed, D2). A
+        descendants (the orphan-escape residual, pdeathsig-backed). A
         census kill recorded by a PRIOR interrupted close ("tree"/"partial")
         is disclosed with the same accounting, claiming the pidfd exit proof
-        only when this close actually ran it (fix 2z, claude F4). The freeze
+        only when this close actually ran it. The freeze
         needs the guardian's pidfd, and the subject kill with its exit proof
         needs the receipt's subject pidfd, so a pid-only receipt
         (pidfd-absent host) is a guardian-only escalation whose subject
         cleanup is UNVERIFIED, and a missing receipt is INCOMPLETE cleanup
-        -- never a claimed kill this close() could not address (QA18 codex
-        F2)."""
+        -- never a claimed kill this close() could not address."""
         frozen = ("guardian frozen" if self.pidfd is not None
                   else "guardian not frozen: no pidfd")
         if self._subject_kill == "tree":
@@ -2889,13 +2886,13 @@ class _FixtureProcess:
                             self._read_report(raw)
                         except ChildStatusUnavailable:
                             pass  # recorded by _read_report; addressed below
-                # HOISTED out of the not-collected gate (QA19 F1): the subject
+                # HOISTED out of the not-collected gate: the subject
                 # kill and exit proof run on ANY guardian failure, including one
                 # FIRST collected by poll() -- the layer's primary collection
                 # path, which killed the subject pin-first at collection time
                 # and recorded the failure for this close(). An armed guardian
                 # collected WITHOUT a validated status or recorded failure is
-                # UNRESOLVED (QA20 codex F1): the subject's fate is unknown, so
+                # UNRESOLVED: the subject's fate is unknown, so
                 # close() treats it as a failure of its own. A startup failure
                 # start() already surfaced (never armed) has no subject and
                 # nothing to re-raise.
@@ -3315,7 +3312,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
                 child.close()
             except ChildStatusUnavailable as exc:
                 # close() re-raises a recorded failure the poll above already
-                # reported (QA19 F1) AFTER addressing the receipt-identified
+                # reported AFTER addressing the receipt-identified
                 # subject, possibly ANNOTATED (subject-only kill disclosure,
                 # pid-only receipt): report each refusal once, keeping the
                 # annotated form when one extends the other.

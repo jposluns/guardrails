@@ -6,15 +6,12 @@ Only explicit source roots, .working, and DETECTION_ROOTS are inventoried.
 are exclusions, recorded in the inventory; foreign content inside those excluded
 subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
-Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresolved
-content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
-debris never reads as a zero-seedable first adoption. The journals control subtree
-(.working/journals) is NOT ancestry: it records transactions, refused and reversed
-runs included, whose counters never published, a reversal retains it (spec 14.2), and
-counters are never seeded from it, so a .working holding only the adoption journal is
-the present-without-manifest first-adoption posture a fresh run re-admits.
-first-adoption only means none
-of these: git history is not read, and a manifestless store under any other .working
+Ancestry marks re-adoption when a pointer or a resolved store manifest is present.
+first-adoption means neither is: the pointers and the manifest alone decide, because a
+tree whose refused manifest the operator has moved aside by hand is ordinary foreign
+content for a section 14 first adoption (spec 4.5/9.2), and nothing distinguishes such
+a tree from other manifestless content at a reserved .working name. git history is not
+read, and a manifestless store under any .working
 name reads as foreign content. Durable OPF history outside .working also reads as
 first-adoption on its own, including: root import-promotion state (.aiqt/import,
 .aiqt/import/journal, .aiqt/import-archive), the record journal (.aiqt/record/journal)
@@ -103,18 +100,6 @@ DETECTION_ROOTS = (
     ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
-# OPF-reserved .working names, from the store module's own constants: the standard machine
-# subdirectory and every reserved store control subdirectory EXCEPT the journals control
-# subtree. Content at any is ancestry. The journals subtree is recovery state, never
-# ancestry: it records transactions, refused and reversed runs included, whose counters
-# never published, a reversal retains it holding only the journal (spec 14.2), and no
-# counter is ever seeded from a journal, so that retained posture must re-plan as the
-# first adoption a fresh run re-admits, not as a re-adoption demanding an ancestral
-# seed that never existed.
-ANCESTRY_RESERVED = tuple(sorted(
-    store.WORKING_DIRNAME + "/" + name
-    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS
-    if name != store.JOURNALS_DIRNAME))
 RESIDUALS = (
     "Only the enumerated scope is covered; detection is by path, not semantics.",
     "Machine-store and unmanaged exclusions are not inspected for foreign files.",
@@ -123,10 +108,8 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
-    "Ancestry reads pointers, the resolved manifest and reserved .working names outside the "
-    "journals control subtree (the retained adoption journal of a refused or reversed run is "
-    "recovery state, never ancestry); git history "
-    "and a manifestless store under another .working name are not read as ancestry. "
+    "Ancestry reads the pointers and the resolved manifest; git history and manifestless "
+    ".working content, a reserved name included, are not read as ancestry. "
     "Durable OPF history outside .working also reads as first-adoption on its own, including: "
     "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), "
     "the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.",
@@ -642,7 +625,7 @@ def _inventory(root, sources, targets):
             raw = manifest_raw
             manifest_budget(len(raw), manifest_path)
             manifest = tomllib.loads(raw.decode("utf-8"))
-            checked = store.validate_manifest(manifest)
+            checked = store.validate_manifest(manifest, manifest_rel=manifest_path)
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
@@ -673,13 +656,6 @@ def _inventory(root, sources, targets):
                                      exclusions=excluded, walk=walk)
         exclusions, requested = observed["exclusions"], observed["scope"]
         entries = dict((row["path"], row) for row in observed["entries"])
-        if resolution.status != store.RESOLVED:
-            # With no resolved store, content at a reserved name (for example counters and
-            # records, or import runs, left without a manifest) is still prior ancestry. The
-            # journals control subtree is carved out of ANCESTRY_RESERVED: the retained
-            # adoption journal of a refused or reversed run is recovery state, not ancestry.
-            traces += [path for path in ANCESTRY_RESERVED
-                       if entries.get(path, {}).get("kind") in ("file", "directory")]
         check_fd = store._open_dir_nofollow(root)
         try:
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):
@@ -714,16 +690,16 @@ def _inventory(root, sources, targets):
                 for path in DETECTION_ROOTS if path in entries
             ],
             # Prior-OPF ancestry, from the same pointer and manifest reads that fixed the
-            # exclusions plus the walked reserved names, so the seeded-versus-zero counters
-            # choice is plan-visible. Debris is re-adoption, not a third value that a
-            # consumer testing only for re-adoption could zero-seed.
+            # exclusions, so the seeded-versus-zero counters choice is plan-visible. A tree
+            # with neither is a first adoption: once the spec 4.5/9.2 hand step has moved a
+            # refused manifest aside, its files are ordinary foreign content, and manifestless
+            # content at a reserved .working name is read the same way (an occupying candidate
+            # still takes a disposition and is archived before init-store writes there).
             "ancestry": {
                 "adoption": "re-adoption" if traces else "first-adoption",
                 "traces": traces,
-                "evidence": "live pointers, resolved manifest and reserved .working names "
-                            "outside the journals control subtree (the retained adoption "
-                            "journal of a refused or reversed run is recovery state, never "
-                            "ancestry); git history and other .working names are not ancestry. "
+                "evidence": "live pointers and the resolved manifest; git history and "
+                            "manifestless .working content are not ancestry. "
                             "Durable OPF history outside .working also reads as first-adoption "
                             "on its own, including: root import-promotion state (.aiqt/import, "
                             ".aiqt/import/journal, .aiqt/import-archive), the record journal "
@@ -1171,21 +1147,21 @@ def self_test():
             self.views = sorted(v["target"] for v in views)
 
         def all_targets(self):
-            # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
-            # point) lies outside every walked root, so its absence is a declared target.
+            # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with its
+            # entry point, and the deny hook) lies outside every walked root, so its absence is a declared target.
             return sorted(set(self.targets) | {schema.PACK_MIRROR_ROOT})
 
         def base_ops(self):
             # Scaffold the default store (unless one resolves), render its declared views and plant
-            # every enforcement member.
+            # every enforcement member from its pack source, the settings template among them.
             import _opf_init
             init = {"op": "init-store", "store_root": ".",
                     "members": [{"path": ".working/toml/manifest.toml",
                                  "digest": _digest(_opf_init.build_manifest().encode())}]}
             render = {"op": "render-views", "store_root": ".",
                       "members": [{"path": v, "digest": _digest(v.encode())} for v in self.views]}
-            pack = schema.enforcement_install_op(self.bindings["enforcement"])
-            return ([init] if self.with_init else []) + [render, pack]
+            pack = schema.enforcement_install_ops(self.bindings["enforcement"])
+            return ([init] if self.with_init else []) + [render] + pack
 
         def observation(self):
             result = investigate(self.root, sources=self.sources, targets=self.all_targets())
@@ -1199,7 +1175,7 @@ def self_test():
                 expected_observation_digest=tomllib.loads(
                     observation.observation.decode())["observation_digest"],
                 product="opf", decisions=[self.decision] if decisions is None else decisions,
-                ops=self.base_ops(),
+                ops=changes["ops"] if "ops" in changes else self.base_ops(),
                 now=self.now, run_nonce="0123456789abcdef", bindings=self.bindings,
             )
             args.update(changes)
@@ -1295,7 +1271,8 @@ def self_test():
             self.assertIn({"path": preserved, "digest": digest}, p["effects"]["creations"])
             self.assertEqual(p["effects"]["removals"], [{"path": "legacy.md", "digest": digest}])
             self.assertEqual([row["op"] for row in p["ops"]],
-                             ["init-store", "render-views", "install-pack"])
+                             [row["op"] for row in self.base_ops()])
+            self.assertNotIn("install-pack", [row["op"] for row in p["ops"]])
             self.assertEqual(before, self.snapshot())
             self.assertFalse((self.root / ".working").exists())
             # Import references are no longer decision inputs: an old acceptance cannot ride the plan.
@@ -1324,8 +1301,8 @@ def self_test():
             # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
             # member, each tied to the op that writes it, beside the retire removal.
             # (a member two rows share, the mirrored tool entry point, is one creation)
-            pack = schema.enforcement_install_op(self.bindings["enforcement"])["members"]
-            init, render, _ = self.base_ops()
+            init, render, *plants = self.base_ops()
+            pack = [{"path": row["path"], "digest": row["content_digest"]} for row in plants]
             creations = sorted([{"path": preserved, "digest": digest}] + init["members"]
                                + render["members"] + pack, key=lambda r: sorted(r.items()))
             self.assertEqual(p["effects"], {"creations": creations,
@@ -1391,7 +1368,7 @@ def self_test():
                 decide(".working/toml/counters.toml", "migrate")])
             self.assertEqual(result.status, store.VALID, result.findings)
             p = tomllib.loads(result.plan.decode())
-            self.assertEqual(p["store"]["adoption"], "re-adoption")
+            self.assertEqual(p["store"]["adoption"], "first-adoption")
             rows = {row["path"]: row for row in p["sources"]}
             for path, disposition in ((".working/TODO.md", "move"),
                                       (".working/toml/counters.toml", "migrate")):
@@ -1585,10 +1562,10 @@ def self_test():
             # retire decision keeps the manifest registration chain out of these store-identity cases.
             self.decision = dict(self.decision, disposition="retire")
             self.targets = self.targets + ["other-product", "receipt.toml"]
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             receipt = {"op": "record-adoption", "receipt_path": ".working/toml/adoption.toml",
                        "receipt_core_digest": _digest(b"r")}
-            result = self.make_plan(ops=[init, render, pack, receipt])
+            result = self.make_plan(ops=[init, render, *pack, receipt])
             self.assertEqual(result.status, store.VALID, result.findings)
             created = tomllib.loads(result.plan.decode())["effects"]["creations"]
             for row in (init["members"] + render["members"]
@@ -1597,21 +1574,21 @@ def self_test():
             other_machine = [{"path": ".working/data/manifest.toml", "digest": _digest(b"m")}]
             for label, ops, status in (
                     # an op targeting another store contradicts the frozen store identity
-                    ("other-store", [dict(init, store_root="other-product"), render, pack],
+                    ("other-store", [dict(init, store_root="other-product"), render, *pack],
                      store.INVALID),
                     ("receipt-outside-store",
-                     [init, render, pack, dict(receipt, receipt_path="receipt.toml")], store.INVALID),
-                    ("other-machine-store", [dict(init, members=other_machine), render, pack],
+                     [init, render, *pack, dict(receipt, receipt_path="receipt.toml")], store.INVALID),
+                    ("other-machine-store", [dict(init, members=other_machine), render, *pack],
                      store.INVALID),
                     # render-views writes exactly the declared views, at the frozen store
-                    ("other-render-store", [init, pack, dict(render, store_root="other-product")],
+                    ("other-render-store", [init, *pack, dict(render, store_root="other-product")],
                      store.CANNOT_EVALUATE),
-                    ("render-missing-view", [init, pack, dict(render, members=render["members"][1:])],
+                    ("render-missing-view", [init, *pack, dict(render, members=render["members"][1:])],
                      store.CANNOT_EVALUATE),
                     # the required program (spec 14): a store that does not resolve is scaffolded, and
                     # its declared views are rendered
-                    ("no-init-store", [render, pack], store.CANNOT_EVALUATE),
-                    ("no-render-views", [init, pack], store.CANNOT_EVALUATE),
+                    ("no-init-store", [render, *pack], store.CANNOT_EVALUATE),
+                    ("no-render-views", [init, *pack], store.CANNOT_EVALUATE),
                     # an enforcement member no op installs
                     ("enforcement-uninstalled", [init, render], store.INVALID)):
                 with self.subTest(label):
@@ -1621,23 +1598,31 @@ def self_test():
 
         def test_hook_replacement_binds_observed_bytes(self):
             # A deny hook merged into an existing registration is a replacement tied to its enforcement
-            # member, and its old digest must be the observed bytes.
+            # member, and its old digest must be the observed bytes: an observed settings file takes the
+            # enable-hook row registering the fixed command, an absent one takes the template plant, and
+            # each row over the other state refuses.
+            member = self.bindings["enforcement"][2]["members"][0]
+            observed = _digest(b"{}\n")
+            ops = self.base_ops()[:2] + schema.enforcement_install_ops(self.bindings["enforcement"], observed)
+            hook = [row for row in ops if row["op"] == "enable-hook"]
+            self.assertEqual(hook, [{"op": "enable-hook", "registration_path": ".claude/settings.json",
+                                     "plugin_entry": schema.HOOK_COMMAND, "old_digest": observed,
+                                     "new_digest": member["digest"]}])
+            with self.subTest("absent-registration-enable-hook"):
+                self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
             (self.root / ".claude").mkdir()
             (self.root / ".claude/settings.json").write_bytes(b"{}\n")
-            member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
-            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
-                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
-                    "new_digest": member["digest"]}
-            ops = self.base_ops()[:2] + [schema.enforcement_install_op(others)]
-            result = self.make_plan(ops=ops + [hook])
+            result = self.make_plan(ops=ops)
             self.assertEqual(result.status, store.VALID, result.findings)
-            replacements = tomllib.loads(result.plan.decode())["effects"]["replacements"]
-            self.assertEqual([row for row in replacements if row["path"] == ".claude/settings.json"], [
-                {"path": ".claude/settings.json", "old_digest": hook["old_digest"],
-                 "new_digest": member["digest"]}])
-            for label, ops in (("stale-old-digest", ops + [dict(hook, old_digest=_digest(b"x"))]),
-                               ("planted-over-existing", self.base_ops())):
+            p = tomllib.loads(result.plan.decode())
+            self.assertEqual([row for row in p["effects"]["replacements"]
+                              if row["path"] == ".claude/settings.json"], [
+                {"path": ".claude/settings.json", "old_digest": observed, "new_digest": member["digest"]}])
+            # the merge archives the observed bytes first, so that copy is a bound creation
+            self.assertIn({"path": store.retire_preimage(p["run_id"], ".claude/settings.json"),
+                           "digest": observed}, p["effects"]["creations"])
+            stale = [dict(row, old_digest=_digest(b"x")) if row["op"] == "enable-hook" else row for row in ops]
+            for label, ops in (("stale-old-digest", stale), ("planted-over-existing", self.base_ops())):
                 with self.subTest(label):
                     self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
 
@@ -1682,18 +1667,14 @@ def self_test():
             # 14.2), so no disposition lets the approved plan rewrite it: neither merging the deny hook
             # into a declared registration file nor repointing a declared consumer. Undeclared, the same
             # hook merge plans (test_hook_replacement_binds_observed_bytes).
-            member = self.bindings["enforcement"][2]["members"][0]
-            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
-            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
-                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
-                    "new_digest": member["digest"]}
             repoint = {"op": "repoint-consumer", "path": "legacy.md",
                        "old_digest": _digest(b"legacy\n"), "new_digest": _digest(b"repointed\n")}
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             for source, rewrite, ops in (
-                    ("legacy.md", "legacy.md", [init, render, pack, repoint]),
+                    ("legacy.md", "legacy.md", [init, render, *pack, repoint]),
                     (".claude", ".claude/settings.json",
-                     [init, render, schema.enforcement_install_op(others), hook])):
+                     [init, render] + schema.enforcement_install_ops(self.bindings["enforcement"],
+                                                                     _digest(b"{}\n")))):
                 if source == ".claude":
                     (self.root / ".claude").mkdir()
                     (self.root / ".claude/settings.json").write_bytes(b"{}\n")
@@ -1735,9 +1716,9 @@ def self_test():
                                  for row in p["effects"]["creations"]))
             # Scaffolded bytes other than the default manifest leave the chain underivable, so it
             # refuses.
-            init, render, pack = self.base_ops()
+            init, render, *pack = self.base_ops()
             odd = dict(init, members=[{"path": ".working/toml/manifest.toml", "digest": _digest(b"m")}])
-            self.assertEqual(self.make_plan(decisions=keeps, ops=[odd, render, pack]).status,
+            self.assertEqual(self.make_plan(decisions=keeps, ops=[odd, render, *pack]).status,
                              store.CANNOT_EVALUATE)
             # A store that already resolves: the chain starts at the observed manifest bytes.
             (self.root / ".working/toml").mkdir(parents=True)
@@ -1831,9 +1812,13 @@ def self_test():
             # A pre-existing platform file is never overwritten: planting GEMINI.md over it collides,
             # and the same row bound to an absent path beneath the walked .gemini directory plans.
             self.assertEqual(self.make_plan().status, store.CANNOT_EVALUATE)
-            gemini = [{"path": ".gemini/opf.md", "digest": _digest(b"g")}]
-            self.bindings["enforcement"][4]["members"] = gemini
-            self.assertEqual(self.make_plan().status, store.VALID)
+            # (a path outside the opf/ mirror and the destination table has no pack source of its own, so
+            # the row keeps the Gemini member as its source)
+            gemini = {"path": ".gemini/opf.md", "digest": _digest(b"g")}
+            ops = [dict(row, path=gemini["path"], content_digest=gemini["digest"])
+                   if row.get("path") == "GEMINI.md" else row for row in self.base_ops()]
+            self.bindings["enforcement"][4]["members"] = [gemini]
+            self.assertEqual(self.make_plan(ops=ops).status, store.VALID)
 
         def test_ancestry_marks_re_adoption(self):
             def ancestry():
@@ -1855,18 +1840,18 @@ def self_test():
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
                              ("re-adoption", [".working/toml/manifest.toml"]))
 
-        def test_ancestry_store_debris_is_re_adoption(self):
+        def test_ancestry_ignores_manifestless_reserved_content(self):
             import shutil
 
             def ancestry():
                 return tomllib.loads(self.observation().observation.decode())["ancestry"]
-            # Oracle derived from the store constants, not from this module's own set. The
-            # journals control subtree is tested separately below: the retained adoption
-            # journal of a refused or reversed run is recovery state, never ancestry.
-            journals = store.WORKING_DIRNAME + "/" + store.JOURNALS_DIRNAME
+            # Oracle derived from the store constants, not from a set of this module's own.
+            # With no pointer and no resolved manifest, content at a reserved .working name is
+            # ordinary foreign content for a first adoption, exactly as a tree whose refused
+            # manifest the operator moved aside by hand (spec 4.5/9.2); the two are
+            # indistinguishable, so neither reads as ancestry.
             reserved = [store.WORKING_DIRNAME + "/" + name for name in
-                        (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS
-                        if store.WORKING_DIRNAME + "/" + name != journals]
+                        (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS]
             run = ".working/imports/imp-20260102T030405Z-0123456789abcdef"
             cases = [(".working/toml", [".working/toml/counters.toml"], [".working/toml/records"]),
                      (".working/imports", [run + "/run.toml"], [])]
@@ -1882,10 +1867,10 @@ def self_test():
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                                         ("re-adoption", [name]))
+                                         ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
-            # Reserved files, even empty ones, and empty reserved directories are ancestry.
+            # Reserved files, even empty ones, and empty reserved directories are foreign too.
             name = ".working/toml"
             for kind, content in (("file", b""), ("file", b"[x]\n"), ("directory", None)):
                 with self.subTest(reserved=name, kind=kind, content=content):
@@ -1897,36 +1882,62 @@ def self_test():
                             (self.root / name).mkdir()
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                                         ("re-adoption", [name]))
+                                         ("first-adoption", []))
                     finally:
                         shutil.rmtree(self.root / ".working")
-            # The journals control subtree alone is NOT ancestry: a refused or reversed first
+            # The retained adoption journal alone is NOT ancestry: a refused or reversed first
             # adoption retains .working holding only the adoption journal (no counter ever
             # published), and a fresh run plans that posture as a first adoption again, never
             # as a re-adoption demanding an ancestral seed that never existed (spec 14.2).
-            txn = journals + "/adoption/journal/adopt-20260102T030405Z-0123456789abcdef"
+            txn = (store.journal_root("adoption")
+                   + "/adopt-20260102T030405Z-0123456789abcdef")
             (self.root / txn).mkdir(parents=True)
             (self.root / txn / "frames.log").write_bytes(b"{}\n")
             doc = tomllib.loads(self.observation().observation.decode())
             self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
             self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
                              ("first-adoption", []))
-            # Beside another reserved name the journal still never appears among the traces.
-            (self.root / ".working/staging").mkdir()
-            (self.root / ".working/staging/leftover.toml").write_bytes(b"[x]\n")
-            doc = tomllib.loads(self.observation().observation.decode())
-            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
-                             ("re-adoption", [".working/staging"]))
             shutil.rmtree(self.root / ".working")
             # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
             (self.root / ".working/notes").mkdir(parents=True)
             (self.root / ".working/notes/toml").write_bytes(b"notes")
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
-            # A pointer and debris are both traces, pointer first.
+            # A pointer beside manifestless reserved content is ancestry through the pointer alone.
             (self.root / ".working/toml").mkdir()
             (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
             (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
-            self.assertEqual(ancestry()["traces"], [".opf.toml", ".working/toml"])
+            self.assertEqual(ancestry()["traces"], [".opf.toml"])
+
+        def test_refused_older_manifest_and_hand_step(self):
+            # A resolved manifest declaring a below-supported spec_version refuses investigation
+            # with the finding that names the manifest's own path, states that no store upgrade
+            # reaches spec_version 2.0.0, and states the operator hand step (spec 4.5/9.2); a
+            # refusal that falls back to "the store manifest" or offers an upgrade is red.
+            import _opf_init
+            (self.root / ".working/toml").mkdir(parents=True)
+            old_manifest = _opf_init.build_manifest().replace(
+                'spec_version = "' + store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+            self.assertIn('spec_version = "1.1.0"', old_manifest)
+            (self.root / ".working/toml/manifest.toml").write_text(old_manifest, encoding="utf-8")
+            (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
+            refused = investigate(self.root, sources=self.sources)
+            self.assertEqual(refused.status, store.CANNOT_EVALUATE)
+            self.assertEqual(list(refused.findings), [
+                "resolved manifest is not valid: '.working/toml/manifest.toml' declares "
+                "[opf].spec_version '1.1.0', older than the {0} this tooling implements; "
+                "no store upgrade reaches spec_version 2.0.0, so the store is refused; "
+                "to adopt this tree instead, first move '.working/toml/manifest.toml' "
+                "aside by hand: its files are then ordinary foreign content for a first "
+                "adoption (spec 9.2; fail-closed)".format(store.SUPPORTED_SPEC_VERSION)])
+            # The hand step, as the refusal words it: the operator moves the manifest aside, a
+            # step no OPF command performs. The remaining files, the reserved-name counters
+            # included, are then ordinary foreign content for a first adoption.
+            (self.root / ".working/toml/manifest.toml").rename(
+                self.root / "manifest.toml.moved-aside")
+            doc = tomllib.loads(self.observation().observation.decode())
+            self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+            self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                             ("first-adoption", []))
 
         def test_unreadable_declared_source(self):
             with mock.patch.object(sys.modules[__name__], "_read",
