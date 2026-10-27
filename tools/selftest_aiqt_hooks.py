@@ -3517,6 +3517,7 @@ _DEADLINE_SHAPES = {
     "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
     "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
     "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
+    "fg_heredocs_plain": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na b\nE\n", n)}),
     "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
     "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
     # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
@@ -3595,8 +3596,9 @@ _DEADLINE_CASES = {
 # from the orchestration repository: the truncation guard scans a foreground command there too, for its
 # out-of-scope detach note.
 _DEADLINE_PLAIN_CASES = {
-    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredoc_ops_open",
-                              "fg_subshells", "fg_nested_glued_substs", "fg_setsid_options"),
+    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredocs_plain",
+                              "fg_heredoc_ops_open", "fg_subshells", "fg_nested_glued_substs",
+                              "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
@@ -3606,22 +3608,25 @@ _DEADLINE_DENY_CASES = frozenset((
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
-# a detach or detacher (fg_detach_after, fg_setsid_options), or a construct left open at the end of the
+# a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
 # scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
-# unreadable instead of a silent allow.
+# unreadable instead of a silent allow, and the `&` in a body under an unquoted delimiter
+# (fg_heredocs_amp), which the in-scope detector reads as a bare detach (an accepted over-note).
 _DEADLINE_NOTE_CASES = frozenset((
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
-    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open")))
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
+    ("orch_truncation_guard", "fg_heredocs_amp")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
-# bound: the plain-delimiter heredoc bodies (their `&`
-# and apostrophe are skipped data and every body is closed; a quoted delimiter would note, and its early
+# bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
+# `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
+# a quoted delimiter would note, and its early
 # note would also cut the
 # timing short), the balanced subshells and the nested glued command
 # substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
 # mistook one for a detach.
 _DEADLINE_ALLOW_CASES = frozenset((
-    ("orch_truncation_guard", "fg_heredocs_amp"),
+    ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
@@ -22384,6 +22389,20 @@ def _main_isolated(monitor):
                             "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
                             "tool_input, a non-string command, a non-boolean run_in_background); got {}"
                             .format(_f18_oos_badinput))
+        # (noask-trunc-oos-reader-notes) with NO orchestration registry, a foreground command the in-scope
+        # detector cannot read to its end (an open quote) draws that detector's note, and a detacher word it
+        # does not read (setsid) draws the note scan's note: one probe per note site, each an allow WITH A
+        # NOTE, never ask, deny or the silent allow.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_readers = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": _f18_cmd, "run_in_background": False}, "cwd": str(_f18_plain)})
+                for _f18_cmd in ("echo 'oops & bg", "setsid long_job")]
+        if _f18_oos_readers != ["allow-note"] * 2:
+            failures.append("(noask-trunc-oos-reader-notes) orch_truncation_guard must ALLOW WITH A NOTE an "
+                            "out-of-scope foreground command it cannot read to its end and one running "
+                            "setsid; got {}".format(_f18_oos_readers))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
