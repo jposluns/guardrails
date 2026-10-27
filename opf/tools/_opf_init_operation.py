@@ -47,8 +47,8 @@ The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), 
   5. Plan and provenance. The provenance source_digest is sha256 over the canonical JSON of the
      sorted (path, content-digest) roster EXCLUDING init.toml; init.toml is TOML through
      _opf_emit.emit_checked; the plan_digest is sha256 over the canonical JSON of the plan WITHOUT
-     its plan_digest member. The base spec_version bump, init.toml's C-CONTAINMENT membership, and the
-     `opf upgrade` route live in _opf_store, _opf_check, and opf.py. A completed adoption is
+     its plan_digest member. The base spec_version bump and init.toml's C-CONTAINMENT membership live
+     in _opf_store and _opf_check; this tooling defines no store upgrade. A completed adoption is
      re-validated for HEALTH (it may carry legitimate later edits); a partial operation is held to
      BYTE-EXACT dedupe against its immutable plan.
   6. Newest ancestral counters. The reader consumes ONE pinned evidence commit, which must lie on
@@ -90,9 +90,13 @@ ALREADY-INITIALIZED are library milestones and never map to coupled-init exit 0;
 for a fully evaluated, NON-mutating assessment that reports findings; every REFUSED, FAILED, or
 CANNOT-EVALUATE result maps to exit 2.
 
-DISCLOSED RESIDUALS: the git ignore-eligibility preflight D2a runs is not repeated here (it is a
-staging precondition, PR5); the adoption observer that distinguishes a first adoption from a
-committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
+DISCLOSED RESIDUALS: the git ignore-eligibility preflight is the one shared check plain `opf init` runs
+(_opf_write_guard.init_ignore_refusal), applied here by _refuse_ignored_destinations under the held
+mutex on both the fresh path (before the plan is persisted) and the resume path (once the recorded plan
+validates), so its own disclosed residual holds here too (an ignore input git cannot read is read as
+no rule, as git add reads it, and is not refused); the adoption observer that distinguishes a first
+adoption from a committed deletion is not part of this layer, so this layer refuses an existing store it did
+not itself record; a
 same-uid writer racing the held mutex can still change a destination between the final check and a
 later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
 foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly

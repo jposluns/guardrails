@@ -179,7 +179,7 @@ def _roster_checks():
             ("roster/prefixed-invalid-suite-refused", local,
              add_local('\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-core --extra\n'),
              "unparseable suite invocation:"),
-            # codex qa10 MAJOR-1: Path.read_text() translated a planted
+            # Byte-level reader: Path.read_text() translated a planted
             # carriage return into a newline BEFORE any screen ran, so a
             # \r-hidden gate line in a REAL runner file on disk read as a
             # clean extra gate and the roster stayed green. Every fixture
@@ -1928,6 +1928,16 @@ def _member_bound_checks(roster):
     adopt_observe = ("opf/tools/_opf_adopt_observe.py", "--self-test")
     release_delta = ("tools/check_release_delta.py", "--self-test")
     opf_init = ("opf/tools/check_opf_init.py", "--self-test")
+    closure_a = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
+                 "opf-closure-a")
+    closure_b = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
+                 "opf-closure-b")
+    closure_c = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
+                 "opf-closure-c")
+    closure_d = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
+                 "opf-closure-d")
+    closure_e = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
+                 "opf-closure-e")
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -1945,8 +1955,8 @@ def _member_bound_checks(roster):
     check("config/member-roster-figures",
           (problems, len(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, len(SIZING_MEASURED),
            len(SIZING_MALFORMED_MEASURED), hashlib.sha256(frozen.encode("utf-8")).hexdigest()),
-          ([], 101, 89, 11, 10,
-           "bcddd3095821382d212e55807556964425b56e99600eff248aa87ee4b3fd0902"))
+          ([], 100, 88, 10, 9,
+           "7e2bb7449914bbeb00a01c96d7d680cf24ddf57755bd2b56306815577e37b94d"))
     # The oracle recomputes every live figure from the roster and the frozen constants, so an
     # expectation no longer inherits a drifted figure through the baseline above. It is not an
     # independent derivation: every expression but members mirrors _roster_figures's, so an
@@ -2077,7 +2087,8 @@ def _member_bound_checks(roster):
            ["malformed-lane measurement outside SIZING_MEASURED: {!r}".format(secrets)]])
 
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
-                 opf_init: 1800}
+                 opf_init: 1800, closure_a: 3600, closure_b: 3600, closure_c: 3600,
+                 closure_d: 3600, closure_e: 3600}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -2097,13 +2108,15 @@ def _member_bound_checks(roster):
     # _run_config_member resolves _run_bounded in the engine module's namespace, so the stub
     # is patched there, not into this runner.
     with patch.object(_gfe, "_run_bounded", recording):
-        for member in (record, opf_selftest, adopt_observe, release_delta, opf_init,
-                       ("opf/tools/opf.py",)):
+        for member in (record, opf_selftest, adopt_observe, release_delta, opf_init, closure_a,
+                       closure_b, closure_c, closure_d, closure_e, ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
            (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
-           (" ".join(opf_init), 1800), ("opf/tools/opf.py", 1200)])
+           (" ".join(opf_init), 1800), (" ".join(closure_a), 3600), (" ".join(closure_b), 3600),
+           (" ".join(closure_c), 3600), (" ".join(closure_d), 3600), (" ".join(closure_e), 3600),
+           ("opf/tools/opf.py", 1200)])
 
 
 _MEMBER_TIMEOUT_EXPECTED = [
@@ -2518,8 +2531,6 @@ def _core_lanes(base):
              ("scrub_git_environment",)),
             ("route/check-release-delta", "tools/check_release_delta.py",
              ("scrub_git_environment",)),
-            ("route/check-opf-upgrade", "opf/tools/check_opf_upgrade.py",
-             ("_scrubbed_env",)),
             ("route/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py",
              ("scrub_git_environment",)),
     ):

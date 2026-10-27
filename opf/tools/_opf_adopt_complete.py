@@ -49,8 +49,8 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     refuses by), it records the approval itself, each receipt file row names a plan source with its
     disposition and before_digest, the live preimages of the sources the plan leaves live and no other
     check owns (keep, and non-occupying migrate) still equal their plan digests, and every planned
-    destination apply has already written and no other check owns (init-store and non-CI install-pack
-    members, create-file and plant-governance paths, enable-hook registrations, and the registration
+    destination apply has already written and no other check owns (init-store members, non-CI create-file
+    and plant-governance paths, enable-hook registrations, and the registration
     chain's final manifest) holds exactly its planned bytes. The retire-disposed live files are check 6's,
     so an edited retire source flips check 6 only; the non-occupying move sources are check 3's; the
     rendered views, CI members and consumer repointings are check 4's; a move-file destination is written
@@ -257,8 +257,9 @@ def _planned_destinations(ev):
     wanted = {}
     for op in plan["ops"]:
         if op["op"] in ("create-file", "plant-governance"):
-            wanted[op["path"]] = op["content_digest"]
-        elif op["op"] in ("init-store", "install-pack"):
+            if op["path"] not in ci:
+                wanted[op["path"]] = op["content_digest"]
+        elif op["op"] == "init-store":
             member_root = op[schema._MEMBER_ROOTS[op["op"]]]
             for member in op["members"]:
                 dest = schema._compose(member_root, member["path"])
@@ -782,9 +783,10 @@ WIRING_PROBES = (("store-write", "denied", "direct", "a direct store write"),
 # The file name the archive-write probe names under this run's adoption archive (a probe asks the surface
 # for its decision; nothing is written there).
 _ARCHIVE_PROBE = "opf-wiring-probe.md"
-# Spec 14.1 check 5 requires the installed pack probed on the live tree. The shipped pack carries no deny
-# program (opf/enforcement holds the CI floor only) and no live probe adapter for any platform; both are the
-# deferred enforcement pack (PR6). This is the one switch for it: while it is False, check 5 is
+# Spec 14.1 check 5 requires the installed pack probed on the live tree. The shipped pack carries deny
+# programs (opf/enforcement holds the Claude Code deny hook and the staged pre-commit check beside the CI
+# floor) but no live probe adapter for any platform; the adapters are the deferred enforcement pack (PR6),
+# so no shipped program is probed yet. This is the one switch for it: while it is False, check 5 is
 # CANNOT-EVALUATE naming PR6 once every other check-5 condition holds, so no prober (a fixture included)
 # makes it VALID. Set it True only in the release that ships PR6's deny programs and probe adapters.
 PR6_DENY_PROBES_SHIPPED = False
@@ -961,7 +963,7 @@ _EXTRA_ENTRIES = ()
 _EXTRA_EMPTY = ()
 _ENTRY_EDITS = ()
 # Extra (platform, path, bytes) enforcement members a vector appends after that platform's canonical members;
-# the fixture plants them and its plan records them (the install-pack op included), so they are digest-bound.
+# the fixture plants them and its plan records them (each by its plant row), so they are digest-bound.
 _EXTRA_MEMBERS = ()
 # A function a vector applies to the whole observation (its lists edited in place) before the fixture seals it.
 _OBSERVATION_EDIT = None
@@ -974,14 +976,21 @@ _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
 _CONSUMER = "consumer/USES.md"
 _CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
-# The enforcement members install-pack plants beside the CI floor: the pre-commit launchers and the tool entry
-# point both launcher rows bind under the opf/ mirror (_opf_adopt.canonical_plan_bindings), the deny hook and
-# the instruction files. Check 1's destination sweep owns each but the tool entry point, a CI member too.
+# The enforcement members the plant rows plant beside the CI floor: the pre-commit launchers and the tool entry
+# point with the rest of its tool tree, which both launcher rows bind under the opf/ mirror
+# (_opf_adopt.canonical_plan_bindings), the registration file and the deny hook it runs, and the instruction
+# files. Check 1's destination sweep owns each but the tool tree, whose files are CI members too.
 _PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
          "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
          "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
+         schema.HOOK_MEMBER: b"deny hook\n",
          "AGENTS.md": b"agents instructions\n", "GEMINI.md": b"gemini instructions\n",
          ".cursor/rules/opf.mdc": b"cursor instructions\n"}
+
+
+def _pack():
+    """_PACK with every other file of the tool tree (_opf_adopt.tool_tree), each planted as one short line."""
+    return dict([(path, b"tool module\n") for path in schema.tool_tree()] + list(_PACK.items()))
 _HOOK = "opf/enforcement/precommit/pre-commit"   # the pre-commit row's first member
 _LIVE = {"legacy/RULES.md": b"old rules\n", "notes/old.md": b"old notes\n", ".working/TODO.md": b"old todo\n",
          "adopter/MOVE.md": b"move me\n"}
@@ -1051,6 +1060,17 @@ def _sealed(doc, field):
     return dict(body, **dict([(field, _digest(_emit(body)))]))
 
 
+def _install_rows(enforcement):
+    """The rows planting every enforcement member (_opf_adopt.enforcement_install_ops). A vector that moves the
+    CI workflow off its destination (_CI_PATH patched) still plants it from the workflow template, a path the
+    plan leaves unconstrained, so the plan carries the moved path."""
+    canonical = schema.ENFORCEMENT_LAUNCHERS[0][2]
+    rows = schema.enforcement_install_ops([dict(row, members=[
+        dict(m, path=canonical if m["path"] == _CI_PATH else m["path"]) for m in row["members"]])
+        for row in enforcement])
+    return [dict(row, path=_CI_PATH) if row.get("path") == canonical else row for row in rows]
+
+
 def _fixture(root):
     """A post-apply product tree for one run: a retired non-occupying source frozen live, a migrate source
     frozen live, a non-occupying move source frozen live (its relocation waits for green, spec 14.2), an
@@ -1070,13 +1090,14 @@ def _fixture(root):
     sources.sort(key=lambda row: row["path"])
     bindings = schema.canonical_plan_bindings()
     workflow, recipe = _ci_floor()
+    pack = _pack()
     for row in bindings["enforcement"]:
         if row["platform"] == "ci":
             row["members"] = [dict(path=_CI_PATH, digest=_digest(workflow)),
                               dict(path=_CI_RECIPE_REL, digest=_digest(recipe))] + [
-                dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"] if m["path"] in _PACK]
+                dict(path=m["path"], digest=_digest(pack[m["path"]])) for m in row["members"] if m["path"] in pack]
         else:
-            row["members"] = [dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"]]
+            row["members"] = [dict(path=m["path"], digest=_digest(pack[m["path"]])) for m in row["members"]]
             row["members"] += [dict(path=path, digest=_digest(data))
                                for platform, path, data in _EXTRA_MEMBERS if platform == row["platform"]]
     init = schema.canonical_op("init-store")
@@ -1089,7 +1110,7 @@ def _fixture(root):
                  source_digest=_digest(_LIVE["adopter/MOVE.md"])),
             dict(op="repoint-consumer", path=_CONSUMER, old_digest=_digest(_CONSUMER_OLD),
                  new_digest=_digest(_CONSUMER_NEW)),
-            init, render, schema.enforcement_install_op(bindings["enforcement"])]
+            init, render] + _install_rows(bindings["enforcement"])
     # The entries as _inventory records them: each live file, the machine store a recorded exclusion the walk
     # of .working meets (recorded excluded, never read), every directory enumerated on the way to them, and
     # every other scope path outside the exclusions absent. The consumer's exclusion lies under no walked
@@ -1163,7 +1184,7 @@ def _fixture(root):
     _put(root, ".working/toml/manifest.toml", manifest)
     _put(root, _CI_PATH, workflow)
     _put(root, _CI_RECIPE_REL, recipe)
-    for rel, data in _PACK.items():
+    for rel, data in pack.items():
         _put(root, rel, data)
     for _platform, rel, data in _EXTRA_MEMBERS:
         _put(root, rel, data)
@@ -1723,8 +1744,8 @@ def self_test():
                       and _says(got, WIRING, "claude-code enforcement surface (deny-hook) is not installed")
                       and sorted(set(p for p, _probe in watched.calls)) == ["pre-commit"])
             # Every member of a probed row is checked, not only the first: the pre-commit row binds the hook,
-            # its installer and the tool entry point (_opf_adopt.enforcement_launch_members), so with all three
-            # planted the surface is green, and the hook or the installer absent, or the installer drifted, reds
+            # its installer and the tool tree with its entry point (_opf_adopt.enforcement_launch_members), so
+            # with all of them planted the surface is green, and the hook or the installer absent, or the installer drifted, reds
             # checks 1 and 5 and leaves the pre-commit row unprobed. A loop over the first member alone (or the
             # last alone) passes one of these vectors and fails another.
             second = "opf/enforcement/precommit/install.sh"

@@ -681,9 +681,9 @@ def _self_test_checks():
         rows = [dict(op="init-store", store_root=".", members=[dict(
                     path=mrel + "/manifest.toml", digest=digest(manifest_text.encode("utf-8")))]),
                 dict(op="render-views", store_root=".",
-                     members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
-                schema.enforcement_install_op(bindings["enforcement"])]
-        # The opf/ mirror the pack row plants lies outside every walked root, so its absence is a declared
+                     members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views])]
+        rows += schema.enforcement_install_ops(bindings["enforcement"])
+        # The opf/ mirror the plant rows fill lies outside every walked root, so its absence is a declared
         # target beside each explicit move destination.
         sheet = dict(sources=sorted(srcs), targets=[schema.PACK_MIRROR_ROOT] + sorted(dests.values()),
                      product="opf",
