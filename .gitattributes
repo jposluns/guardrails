@@ -613,7 +613,6 @@ opf/tools/check_opf_init_p0.py text eol=lf
 opf/tools/check_opf_init_qa.py text eol=lf
 opf/tools/check_opf_prompt_pack.py text eol=lf
 opf/tools/check_opf_record.py text eol=lf
-opf/tools/check_opf_upgrade.py text eol=lf
 opf/tools/opf.py text eol=lf
 opf/tools/run_all_checks.sh text eol=lf
 opf/tools/selftest_commonmark_conformance.py text eol=lf
