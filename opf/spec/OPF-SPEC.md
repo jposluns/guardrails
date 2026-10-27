@@ -1195,7 +1195,9 @@ linking back (section 8.6). Its subcommands:
   then appends the `supersedes` link (section 8.5) to the record's `links`. Before anything is
   written, the superseded record MUST be another pending_decision at unqualified `decided`,
   schema-valid, and the head of its chain (no pending_decision already links `supersedes` to it),
-  and its own chain MUST NOT lead back to the superseding record. These target checks MUST read the
+  and its own chain MUST NOT lead back to the superseding record. A `supersedes` link from an
+  importer-authored pending_decision does not make its target a non-head: such a record discharges
+  no supersession and confers nothing now (section 8.6). These target checks MUST read the
   same records as the chain rule below, the active index together with every archived record
   (section 12), so a decided, schema-valid chain head rotated to the archive can be superseded, and
   an archived pending_decision that already supersedes the target or leads back to the superseding
