@@ -5369,8 +5369,8 @@ _GIT_BUILT_WORD_FIX = (
 # construct's own body, a comment, a redirect target or quoted text. The re-lex alone decides only where its ground
 # is proven (the construct measured with no backslash escape met, no git word inside the measured construct's own
 # text, a resume at a command separator, and every git word of the re-lexed text read as a word of a recovered
-# command): there a git word the re-lex proves to be quoted text ('cat <<<x; echo "run git"', a pull-request or
-# issue body naming git) allows, while a plain git word any command carries as a word of its own
+# command, none beside a '$' or backquote in its word): there a git word the re-lex proves to be quoted text
+# ('cat <<<x; echo "run git"', a pull-request or issue body naming git) allows, while a plain git word any command carries as a word of its own
 # ('cat <<<x; flock /tmp/l git -C "a b" $X l') is still walked (_segment_union_words) and denies where its region
 # runs open or holds a word built at run time. A literal region read in full keeps its decision either way.
 # Disclosed over-refusal (the safe direction): a word naming git that is the last word read before such a construct
@@ -5643,7 +5643,8 @@ def _git_alias_unread(command, stops):
     with no backslash escape met, no git word inside the measured construct's own text (a process substitution's
     body and a here-string's word are run or expanded, so a git region there keeps the raw reading), a resume at a
     command separator, and every git word of the re-lexed text read as a word of a recovered command (one in a
-    comment or a redirect target is not); only there does a git word the re-lex proves to be quoted text allow.
+    comment or a redirect target is not), none beside a '$' or backquote in its word (a substitution the lex keeps
+    opaque, _segment_union_words); only there does a git word the re-lex proves to be quoted text allow.
     Where a construct cannot be measured (an unquoted heredoc, a '{fd}' redirect, an unbalanced quote, or no
     recovered position), the union is taken with the de-quoted reading beside the every-git-word reading, so a git
     command past such a construct never goes unread."""
@@ -5672,7 +5673,10 @@ def _git_alias_unread(command, stops):
         # The re-lex ground (docstring above): any failed condition keeps the every-git-word union below. The
         # accounting compares the raw git words of the re-lexed span (up to the next stop, where the loop takes
         # over) against those the recovered words carry, so one in a comment or a redirect target, which no argv
-        # holds, falls back to the raw reading instead of going unread.
+        # holds, falls back to the raw reading instead of going unread. The measure honours backslash escapes, so
+        # one met in a process substitution's body does not misplace the construct's end; the escape term is
+        # defence in depth, keeping the raw reading past such a body, where a git word in quoted text or in an
+        # sh -c body still denies.
         raw_limit = min((start for start, _words in rstops.seen), default=len(rest))
         unproven = (escape[0]
                     or bool(_GIT_WORD_RE.search(command, pos, end))

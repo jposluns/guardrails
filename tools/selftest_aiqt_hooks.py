@@ -12624,6 +12624,15 @@ def _main_isolated(monitor):
         # measure; wrapper-flock and wrapper-ionice deny through the plain git word a command off the wrapper
         # list carries; hash-resume denies where a '#' right after the measured construct hides the rest from
         # the re-lex; procsub-body denies through the git region inside the measured construct's own text.
+        # redirect-* deny where the git command stands in a redirect target, which no recovered word holds (red
+        # where the git-word accounting of the re-lexed text is off); dq-* and assign-subst deny where it stands
+        # in a substitution inside a double-quoted word (red where a git word beside a '$' or backquote no longer
+        # keeps the raw reading); herestring-subst denies where it stands in the here-string's own word (red
+        # where a git word inside the measured construct no longer keeps it); split-bashc-* deny where a
+        # here-string splits a wrapper's words ahead of an sh -c body, which no recovered command runs as git
+        # (red where the resume test alone is reverted: a git command the wrapper runs directly past the split
+        # is a plain word the union view walks, so split-nice and split-env stay green there); procsub-esc-bashc
+        # denies past a process substitution whose body met a backslash escape (red where the escape term is off).
         # gku2c-<form>-<guard>: a literal region the lexer read in full, or that the reading past the stop reads
         # in full, keeps its allow; the nongit-* controls carry git only as quoted text or a pre-stop operand
         # (grep), so the scoping and the proven-quoted narrowing keep them allowed; esc-literal and
@@ -12643,7 +12652,18 @@ def _main_isolated(monitor):
             ("wrapper-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l'),
             ("wrapper-ionice", 'cat <<<x; ionice -c3 git -C "a b" $X l'),
             ("hash-resume", 'cat <(a)#; git -C "a b" $X l'),
-            ("procsub-body", 'cat <(git -C "a b" $X l); true'))
+            ("procsub-body", 'cat <(git -C "a b" $X l); true'),
+            ("redirect-subst", "cat <<<x; echo hi >\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("redirect-backquote", "cat <<<x; echo hi 2>`git -C 'a b' $X c --no-verify -m y`"),
+            ("dq-subst", "cat <<<x; echo \"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("dq-backquote", "cat <<<x; echo \"`git -C 'a b' $X c --no-verify -m y`\""),
+            ("assign-subst", "cat <<<x; y=\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("herestring-subst", "cat <<<\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("split-bashc-nice", "nice <<<x -n 5 bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-env", "env <<<x -u V bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-timeout", "timeout <<<x 5 bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-sudo", "sudo <<<x -u u bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("procsub-esc-bashc", "cat <(echo \\(); bash -c 'git <<<y -C a c --no-verify -m y'"))
         _gku2_controls = (
             ("trail", "git log --oneline <<<x"), ("past-literal", "cat <<<x; git status"),
             ("past-quoted", 'cat <<<x; git log "$a"'), ("procsub", "diff <(git show HEAD:f) f"),
@@ -12753,6 +12773,9 @@ def _main_isolated(monitor):
             if _gku2_got is not _gku2_want:
                 failures.append("({}) _git_alias_unread_everyword({!r}, {}): expected {}, got {}".format(
                     _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want, _gku2_got))
+        # The reading past the stop on its own. esc-quoted: past a process substitution whose body met a
+        # backslash escape, the raw reading is kept, so a quoted git word there denies (a disclosed over-refusal,
+        # red where the escape term is off); plain-quoted is the same text with no escape, which allows.
         for _gku2_label, _gku2_cmd, _gku2_want in (
                 ("gku2-unread-lead", 'git <<<x -C "a b" $X l', True),
                 ("gku2-unread-past", 'cat <<<x; git -C "a b" $X l', True),
@@ -12765,6 +12788,8 @@ def _main_isolated(monitor):
                 ("gku2-unread-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l', True),
                 ("gku2-unread-body", 'cat <(git -C "a b" $X l); true', True),
                 ("gku2-unread-esc-literal", 'cat <(echo \\(); git status', False),
+                ("gku2-unread-esc-quoted", "cat <(echo \\(); echo 'git <<<y c --no-verify -m y'", True),
+                ("gku2-unread-plain-quoted", "cat <(echo a); echo 'git <<<y c --no-verify -m y'", False),
                 ("gku2-unread-heredoc-literal", "cat <<EOF\nx\nEOF\ngit status", False)):
             with aiqt_hooks._LexStops() as _gku2_stops:
                 aiqt_hooks._lex_command(_gku2_cmd, partial=True)
