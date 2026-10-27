@@ -7793,8 +7793,10 @@ def self_test():
     # The jobs the reduction removed are no longer heavy: each id put back
     # with the pinned if: is a lane finding, so a '3.14' copy of the OPF
     # tooling shards or of a git-fixture-env config lane cannot return under
-    # its former id without a reviewed change to HEAVY_JOBS. Before the change
-    # each id was heavy and its fixture passed with exit 0.
+    # its former id without a reviewed change to HEAVY_JOBS. With HEAVY_JOBS
+    # reverted to hold these ids, each fixture declares the id twice (the
+    # renamed job and lane_ci's own heavy job), so each row stays red through
+    # the duplicate-job cannot-evaluate (exit 2) rather than passing.
     for removed_job in ("opf", "opf-adopt", "opf-init",
                         "git-fixture-env-config-combined",
                         "git-fixture-env-config-malformed",
@@ -7994,6 +7996,23 @@ def self_test():
             failures.append("40 fixture {}: unexpected fault(s) {!r}".format(label, faults))
         if want is not None and not any(want in fault for fault in faults):
             failures.append("40 fixture {} not named: {!r}".format(label, faults))
+    # A job id under a top-level key other than jobs: is no job: the passing
+    # fixture with its jobs: line renamed in place (the line numbers kept)
+    # places the whole self-test in job None, not in the heavy OPF tooling
+    # job above it. The extractor already refuses that file (unknown-top-key),
+    # so the placement is read over the unedited fixture's extraction.
+    count += 1
+    placed_text = lane_ci(opf_commands=(whole_member,))
+    unplaced_text = placed_text.replace("\njobs:\n", "\nworkflow-jobs:\n", 1)
+    unplaced_jobs = {}
+    faults = _opf_group_wiring_faults(
+        fixture_groups, fixture_local_lines,
+        _opf_group_lines(unplaced_text, extract_ci(placed_text), unplaced_jobs),
+        ci_jobs=unplaced_jobs)
+    if (unplaced_text == placed_text
+            or not any("in job None, not a HEAVY_JOBS job" in fault for fault in faults)):
+        failures.append("40 a job under a top-level key other than jobs: was placed: {!r}".format(
+            faults))
     # The line read-back counts repeats: a group on two lines of a runner
     # and of quality.yml maps to two line numbers on each side, which the
     # member set alone cannot show.

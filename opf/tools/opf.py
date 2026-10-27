@@ -2,7 +2,7 @@
 """opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
-  opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; the CI shards)
+  opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; local runner)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
@@ -23886,10 +23886,10 @@ def _self_tests():
 )
 
 
-# The named groups of the registry above, each run alone by `opf.py --self-test-group NAME`, so CI can run the
-# self-test as parallel shards. Every registered label sits in exactly one group, and a group runs its labels in
+# The named groups of the registry above, each run alone by `opf.py --self-test-group NAME`, a local runner
+# split; CI runs the whole self-test once. Every registered label sits in exactly one group, and a group runs its labels in
 # registry order. _self_test_group_faults names a label left out, doubled or unknown, and the selector runs
-# nothing while it names one, so a shard can never silently drop a leg. The selector is its own flag, not an
+# nothing while it names one, so a group can never silently drop a leg. The selector is its own flag, not an
 # argument after --self-test: a command carrying --self-test is a registered self-test that the git-fixture-env
 # config lanes rerun, and the whole run stays registered (the host-patch CI job and opf/tools/run_all_checks.sh
 # still run it), so those lanes run each leg once and no group command a second time.
