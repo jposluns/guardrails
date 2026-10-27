@@ -15854,7 +15854,7 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
-def _orch_foreground_detach_lexed(command):
+def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
     where it can (_lex_command, skip_empty NOT passed: the segment after `(job)` that carries the `&` has no
@@ -15881,7 +15881,20 @@ def _orch_foreground_detach_lexed(command):
     ("unbalanced", an apostrophe in a quoted here-document's body included); and a command the lexer reads
     in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
     where it places an `&` inside one of the three shapes but bash reads that `&` as an operator, the detach
-    is allowed (the disclosed lexer-path false-allow residual)."""
+    is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
+    appends True to where that narrowing reads the scan's "detach" as None, so a caller that must know
+    whether it did reads the list instead of running the scan again.
+
+    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
+    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
+    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
+    gives None from both scan rules (they return anything else only at one of those four characters, or
+    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
+    either way."""
+    if "&" not in command:
+        if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        return _orch_foreground_detach_kind(command)
     try:
         segments = _lex_command(command)
     except ValueError:
@@ -15894,6 +15907,8 @@ def _orch_foreground_detach_lexed(command):
     amps = _orch_foreground_amps(command)
     places = _orch_lexed_amp_places(command, amps) if amps else None
     if places is not None and all(place in _ORCH_AMP_PLACES for place in places):
+        if lifts is not None:
+            lifts.append(True)
         return None
     return kind
 
@@ -17455,7 +17470,8 @@ def orch_truncation_guard(data):
             return _orch_oos_unreadable_input_note(
                 "its run_in_background is {}, not a boolean, so whether this is a foreground call "
                 "cannot be read".format(_orch_json_kind(out_rib)))
-        detach_kind = _orch_foreground_detach_lexed(out_command)
+        lifts = []
+        detach_kind = _orch_foreground_detach_lexed(out_command, lifts)
         if detach_kind == "unbalanced":
             return _allow_note(
                 "AIQT rule trkasy (track-launched-work): this guard could not read this foreground command "
@@ -17481,10 +17497,11 @@ def orch_truncation_guard(data):
                 "whose delimiter is unquoted, or one inside a substitution in a double-quoted string), quote "
                 "the here-document delimiter (<<'EOF') where its body needs no expansion, or write the text "
                 "to a file and pass the file instead.")
-        if _orch_foreground_detach_kind(out_command) == "detach":
-            # The detector read no detach although its raw scan did: it lifted every bare '&' that scan
-            # reads (the shared lexer places each in a quoted here-document body, a quoted string or a
-            # comment), so the command is no detach and the lift's own shapes draw no note; but the lift
+        if lifts:
+            # The detector read no detach although its raw scan did (lifts records that, so the scan is not
+            # run a second time): it lifted every bare '&' that scan reads (the shared lexer places each in
+            # a quoted here-document body, a quoted string or a comment), so the command is no detach and
+            # the lift's own shapes draw no note; but the lift
             # vouches ONLY for those shapes, so the note scan runs again in lifted mode, reading them as
             # data, and every note ANOTHER cause draws is kept (a setsid, nohup or disown anywhere, a
             # line continuation or unclosed expansion after a body included): the single note is the

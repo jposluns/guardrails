@@ -3329,6 +3329,13 @@ _DEADLINE_SHAPES = {
     # running-index-walk row does.
     "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
                                                         + ")" * (n // 5 - 1)}),
+    # A here-document under a quoted delimiter whose body is a run of lines each holding a bare `&`: the raw
+    # scan reads each `&` as a detach and the shared lexer places each in the body, so the detector lifts
+    # every one (_orch_foreground_detach_lexed), the only shape here that reads every `&` under both scan
+    # rules and places each through the lexer's spans, and the note scan then skips the body as data in its
+    # lifted mode.
+    "fg_quoted_heredoc_amps": lambda n, base: ("Bash", {"command": "cat > f <<'E'\n" + _repeat(
+        "a & b\n", n - 14, "E\n")}),
     "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
@@ -3396,7 +3403,7 @@ _DEADLINE_CASES = {
 _DEADLINE_PLAIN_CASES = {
     "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredocs_plain",
                               "fg_heredoc_ops_open", "fg_subshells", "fg_nested_glued_substs",
-                              "fg_setsid_options"),
+                              "fg_quoted_heredoc_amps", "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
@@ -3421,12 +3428,14 @@ _DEADLINE_NOTE_CASES = frozenset((
 # note would also cut the
 # timing short), the balanced subshells and the nested glued command
 # substitutions are all skipped, provably closed or carry no outer
-# detach, so none draws a note. Pinning the outcome keeps these timing shapes from passing a scanner that
-# mistook one for a detach.
+# detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
+# the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
+# timing shapes from passing a scanner that mistook one for a detach.
 _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),
-    ("orch_truncation_guard", "fg_nested_glued_substs")))
+    ("orch_truncation_guard", "fg_nested_glued_substs"),
+    ("orch_truncation_guard", "fg_quoted_heredoc_amps")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
