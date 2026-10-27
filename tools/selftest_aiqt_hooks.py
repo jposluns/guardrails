@@ -15705,6 +15705,17 @@ def _main_isolated(monitor):
         # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
         # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
         # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
+        # What else a timed call is charged for was measured on Python 3.14.4 with the whole suite running:
+        # no cyclic collection ran inside any timed call (the dequoted-word scan makes no lasting
+        # collector-tracked allocation, so none starts there even with the collector's count at its
+        # threshold), and every row's ratio stayed between 1.93 and 2.09 with the collector left on and with
+        # it disabled around each call. The one cost that grew faster than the input was the kernel's work
+        # on the page faults that first touch the memory a scan allocates (about 2.5 times the faults per
+        # doubling), under a tenth of t_2n there. A ratio above 3 that a CI runner measured for gw-lin-dq-off
+        # was not reproduced that way, nor with other processes loading the same CPU, so its cause is not
+        # known. A failing row therefore reports what the process used across each of its two timed calls,
+        # read outside the timed region: user and system CPU time, minor page faults, involuntary context
+        # switches and cyclic collections.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -15731,35 +15742,48 @@ def _main_isolated(monitor):
         # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
         # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
+        import gc as _gc_lin
+        import resource as _resource_lin
         import time as _time_lin
 
         _gw_floor = 0.1
         _gw_sizes = 9
 
+        def _gw_usage():
+            # (user CPU s, system CPU s, minor page faults, involuntary context switches, cyclic collections)
+            # this process has used so far
+            _r = _resource_lin.getrusage(_resource_lin.RUSAGE_SELF)
+            return (_r.ru_utime, _r.ru_stime, _r.ru_minflt, _r.ru_nivcsw,
+                    sum(_s["collections"] for _s in _gc_lin.get_stats()))
+
         def _gw_scan_once(cmd, scan):
-            # (CPU seconds, decision) for one scan of cmd
+            # (CPU seconds, decision, usage) for one scan of cmd; usage is what _gw_usage grew by across the
+            # call, read outside the timed region
+            _u0 = _gw_usage()
             _t0 = _time_lin.process_time()
             decision = scan(cmd)
-            return _time_lin.process_time() - _t0, decision
+            _t = _time_lin.process_time() - _t0
+            return _t, decision, tuple(b - a for a, b in zip(_u0, _gw_usage()))
 
         def _gw_scan_ratio(unit, prefix, suffix, scan):
             # Double n (from 4000, at most _gw_sizes sizes) until t_n clears the _gw_floor floor, then
-            # compare t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions), or (None, t_n, None, length,
-            # decisions) when the floor was never cleared in the bound, so the caller fails 'linearity not
-            # evaluated'; decisions lists every timed scan's decision, in order. The input is a command string
-            # for the whole-command scan or a word list for the dequoted-word scan.
+            # compare t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions, (usage_n, usage_2n)), or
+            # (None, t_n, None, length, decisions, None) when the floor was never cleared in the bound, so the
+            # caller fails 'linearity not evaluated'; decisions lists every timed scan's decision, in order.
+            # The input is a command string for the whole-command scan or a word list for the dequoted-word
+            # scan.
             reps = 4000
             decisions = []
             for _ in range(_gw_sizes):
-                t_n, decision = _gw_scan_once(prefix + unit * reps + suffix, scan)
+                t_n, decision, use_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
                 decisions.append(decision)
                 if t_n > _gw_floor:
                     cmd_2n = prefix + unit * (reps * 2) + suffix
-                    t_2n, decision = _gw_scan_once(cmd_2n, scan)
+                    t_2n, decision, use_2n = _gw_scan_once(cmd_2n, scan)
                     decisions.append(decision)
-                    return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions
+                    return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n)
                 reps *= 2
-            return None, t_n, None, len(prefix + unit * reps + suffix), decisions
+            return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None
 
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
@@ -15779,7 +15803,8 @@ def _main_isolated(monitor):
             ("gw-lin-unread-roster", " g'i't push", "echo", " -n", _gw_unread_scan, None),
         )
         for _gw_lbl, _gw_unit, _gw_pre, _gw_suf, _gw_scan, _gw_want in _gw_lin_cases:
-            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n, _gw_got = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf, _gw_scan)
+            _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n, _gw_got, _gw_use = _gw_scan_ratio(_gw_unit, _gw_pre, _gw_suf,
+                                                                                   _gw_scan)
             _gw_wrong = [got for got in _gw_got if got != _gw_want]
             if _gw_wrong:
                 failures.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
@@ -15789,8 +15814,11 @@ def _main_isolated(monitor):
                                 "{} sizes (last {:.4f}s)".format(_gw_lbl, _gw_floor, _gw_sizes, _gw_tn))
             elif _gw_ratio > 3.0:
                 failures.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                                "{:.3f}s then {:.3f}s for an input of length {}"
-                                .format(_gw_lbl, _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n))
+                                "{:.3f}s then {:.3f}s for an input of length {} (user CPU {:.3f}s then {:.3f}s, "
+                                "system CPU {:.3f}s then {:.3f}s, minor page faults {} then {}, involuntary "
+                                "context switches {} then {}, cyclic collections {} then {})"
+                                .format(_gw_lbl, _gw_ratio, _gw_tn, _gw_t2n, _gw_b2n,
+                                        *[v for pair in zip(*_gw_use) for v in pair]))
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
