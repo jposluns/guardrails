@@ -6068,25 +6068,22 @@ def self_test():
     # One reader for the whole class: every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
     # This structural vector parses this file,
-    # tools/selftest_git_fixture_env.py and its four registered suite
-    # runners and pins EVERY read_text or
-    # splitlines attribute and every text-mode open() call, as spelled, to
-    # an exact per-function site count, so a new, moved or removed read
-    # written through those APIs turns this vector red and forces review
-    # against the reader. Every pinned site reads no runner or workflow
-    # text under the parity guarantee: the sites parse Python sources for
-    # ast (the git auto-maintenance pin scan included), read harness, stub
-    # call and Trace2 event logs (the auto-maintenance probe), write the
-    # selftest report, read the config-member timeout control's pid file
-    # and /proc stat, split the timeout controls' captured diagnostics,
-    # split an in-memory citation string from an in-module table,
-    # or split text the reader or a screen has already
-    # validated. A read
-    # spelled another way (getattr, an alias) is outside this tripwire, as
-    # the module docstring discloses. This vector fails without the
-    # change: the former Path.read_text() calls on the runners and the
-    # workflow (vector 26, _registered_selftests, _roster_checks) are not
-    # in this allowlist.
+    # tools/selftest_git_fixture_env.py and its four registered suite runners
+    # and pins EVERY read_text or splitlines attribute and every text-mode
+    # open() call, as spelled, to an exact per-function site count, so a new,
+    # moved or removed read written through those APIs turns this vector red
+    # and forces review against the reader. Every pinned site reads no runner
+    # or workflow text under the parity guarantee: the sites parse Python
+    # sources for ast (the git auto-maintenance pin scan included), read
+    # harness and stub call logs, write the selftest report, read the
+    # config-member timeout control's pid file and /proc stat, split the
+    # timeout controls' captured diagnostics, split an in-memory citation
+    # string from an in-module table, or split text the reader or a screen
+    # has already validated. A read spelled another way (getattr, an alias)
+    # is outside this tripwire, as the module docstring discloses. This
+    # vector fails without the change: the former Path.read_text() calls on
+    # the runners and the workflow (vector 26, _registered_selftests,
+    # _roster_checks) are not in this allowlist.
     count += 1
     import ast
     def _read_api_sites(tree):
@@ -6142,8 +6139,6 @@ def self_test():
         },
         "tools/selftest_git_fixture_env.py": {
             ("_archive_reads_use_caller_env", "read_text"): 1,
-            ("_auto_maintenance_children", "read_text"): 1,
-            ("_auto_maintenance_children", "splitlines"): 1,
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,

@@ -1297,6 +1297,10 @@ CONFIG_MEMBER_REAP_SECONDS = 5
 CONFIG_MEMBER_EMPTY_SECONDS = 5
 # The corpus leak lanes' bound (_run_corpus, _run_corpus_imported).
 CORPUS_BOUND = 300
+# The maintenance probe's polling deadline for an unterminated final trace2 event to be completed
+# by the process still appending to the file; a read finishing at or past it fails the probe, even
+# one that found the event complete (_trace2_maintenance_children).
+TRACE2_TAIL_SECONDS = 10
 # Linux's PIDFD_SIGNAL_PROCESS_GROUP (include/uapi/linux/pidfd.h, Linux 6.9 and later): a
 # pidfd_send_signal flag that signals the process group the pidfd's process leads.
 PIDFD_SIGNAL_PROCESS_GROUP = getattr(signal, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 2)
@@ -4306,8 +4310,8 @@ def _auto_maintenance_children(workdir, env):
     red leg demonstrates that child LAUNCHING, this single-file seed staying under the
     automatic-work thresholds, and once those thresholds are met the child can repack or prune
     the fixture's .git/objects after the commit returned, racing a later copytree/rmtree/read
-    of that repository). A launch failure or an unreadable trace is a loud string, never a
-    silent pass."""
+    of that repository). A launch failure or an unreadable, empty or malformed trace is a loud
+    string, never a silent pass."""
     workdir.mkdir()
     trace = workdir / "trace2-events.jsonl"
     repo = workdir / "repo"
@@ -4323,17 +4327,66 @@ def _auto_maintenance_children(workdir, env):
              "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
              "commit", "-q", "-m", "seed"],
             check=True, capture_output=True, timeout=60, env=env)
-        lines = trace.read_text(encoding="utf-8").splitlines()
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         return "maintenance probe failed: %s" % (exc,)
-    children = []
-    for line in lines:
+    return _trace2_maintenance_children(trace)
+
+
+def _trace2_maintenance_children(trace, bound=TRACE2_TAIL_SECONDS, clock=time.monotonic,
+                                 sleep=time.sleep):
+    """The argv of every maintenance/gc child_start event in the trace2 event file trace. The
+    DETACHED child an unpinned commit launches inherits GIT_TRACE2_EVENT and keeps appending
+    events after the commit returned, so a read can land while it is mid-write and see an
+    unterminated final event. The file is then read again until it ends at a newline. The bound
+    is a polling deadline, bound seconds by clock after the first clock reading: clock is read
+    after EVERY read, and a read whose reading is at or past the deadline fails the probe loudly
+    whether or not that read ended at a newline (a tail completed only after the bound is a
+    failure, never accepted; an event still unterminated there is reported as such), so the
+    probe can overrun the bound by one sleep and one read but never accepts a read it cannot
+    place before the deadline. Only newline-terminated events are parsed, split at LF alone
+    (JSON escapes every LF inside a string, while str.splitlines would also cut an event at a
+    raw U+2028, U+2029 or U+0085, which JSON allows unescaped inside a string); a malformed
+    event (bad JSON or UTF-8, nesting too deep to parse, not an object, an object without a
+    string event (a child_start whose tag was lost would otherwise hide its child), a child_start
+    argv that is missing or not a list of strings) and an empty file (no event recorded, so no
+    evidence either way) are loud strings.
+    The red leg's evidence, the commit's own child_start event, is complete before the commit
+    exits; the wait only covers events the detached child is still writing. Residuals: a writer
+    that leaves the tail unterminated past the bound (a stalled or killed child) fails the probe
+    loudly rather than passing it, and events appended after the final read are not seen."""
+    deadline = clock() + bound
+    while True:
         try:
-            event = json.loads(line)
-        except ValueError as exc:
+            data = trace.read_bytes()
+        except OSError as exc:
+            return "maintenance probe failed: %s" % (exc,)
+        late = clock() >= deadline
+        if not data:
+            return "empty trace2 event file: no event recorded"
+        if data.endswith(b"\n"):
+            if late:
+                return "trace2 tail completed only after the %s s bound" % (bound,)
+            break
+        if late:
+            return "unterminated trace2 event after %s s: %r" % (
+                bound, data[data.rfind(b"\n") + 1:][:80])
+        sleep(0.05)
+    children = []
+    for line in data.split(b"\n")[:-1]:
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (ValueError, RecursionError) as exc:
             return "unparseable trace2 event: %s" % (exc,)
-        if event.get("event") == "child_start":
-            argv = event.get("argv") or []
+        if not isinstance(event, dict):
+            return "unparseable trace2 event: not a JSON object: %r" % (line[:80],)
+        kind = event.get("event")
+        if not isinstance(kind, str):
+            return "unparseable trace2 event: event is not a string: %r" % (line[:80],)
+        if kind == "child_start":
+            argv = event.get("argv")
+            if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+                return ("unparseable trace2 event: child_start argv is not a list of strings: %r"
+                        % (line[:80],))
             if set(("maintenance", "gc")) & set(argv):
                 children.append(argv)
     return children
