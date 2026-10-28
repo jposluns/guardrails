@@ -9,11 +9,14 @@ canonical guard is opf/tools/_child_status.py (a disposition read, then a fork-a
 with exit 2). This gate holds where it runs:
 
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
-  2. copies: the inline copies in opf/tools/opf.py, tools/check_selftest_execution.py,
-     opf/tools/_opf_declaration.py and tools/check_opf_declaration.py (the constant and both functions) and in
-     the hooks dispatcher and its generated plugin copy (the constant and the probe) are each bound exactly once
-     at module scope, by one top-level definition (an undecorated one for a function), and AST-identical
-     (ast.dump, docstrings included) to the canonical text. The binding count (_bindings) is a static walk of
+  2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
+     opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
+     tools/check_gitleaks_pin.py and tools/check_must_deliver.py), in opf/tools/_opf_declaration.py and
+     tools/check_opf_declaration.py (the constant and both functions) and in the hooks dispatcher and its
+     generated plugin copy (the constant and the probe) are each bound exactly once at module scope, by one
+     top-level definition (an undecorated one for a function), and AST-identical (ast.dump, docstrings
+     included) to the canonical text, so a call by that name reaches the copy. The binding count (_bindings) is
+     the one binding counter of legs 2 and 3; it is a static walk of
      every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
      list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
      (a star import counts), del, and a global declaration of the name in any function. Every attribute or
@@ -22,14 +25,20 @@ with exit 2). This gate holds where it runs:
      the function. A rebinding made by a call (setattr, globals().update), by a store inside a function body
      other than through a global declaration, or from another module is not seen.
   3. entries: each CLI copy's __main__ body is exactly sys.exit(_child_status_refusal_exit("<basename>") or
-     main()), the canonical file's entry ends in that line, each SELF_TEST_FIRST_COPIES file
-     (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical --self-test statement and
-     then that line (a direct --self-test launch of it is unguarded; the self-test runs that launch under a
-     process-creation audit hook and fails on any launch), each ENTRY_COPIES file (tools/check_opf_declaration.py,
-     whose entry raises its own exit rather than calling sys.exit) has the __main__ body exactly the single call
-     _entry(), and _entry bound exactly once at module scope (the same count), by one undecorated top-level def
-     with no parameters whose first statement is exactly _child_status_refusal_exit("<basename>"), and each
-     dispatcher's main() holds HOOK_BLOCK as the statements right after its is_fail_open assignment.
+     main()), except that of each SELF_TEST_COPIES entry (the three opf/tools self_test modules above), which
+     is exactly opf.py's canonical --self-test statement (SELF_TEST_ENTRY, held to opf.py's own
+     _ENTRY_STATEMENT) then that line, with self_test bound once at module scope (the same count), by one
+     undecorated top-level def whose first statement after the docstring is the guard call
+     _child_status_refusal_exit("<basename>"); the canonical file's entry ends in that line, each
+     SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical
+     --self-test statement and then that line (a direct --self-test launch of it is unguarded; the self-test runs
+     that launch under a process-creation audit hook and fails on any launch), each ENTRY_COPIES file
+     (tools/check_opf_declaration.py, whose entry raises its own exit rather than calling sys.exit) has the
+     __main__ body exactly the single call _entry(), and _entry bound exactly once at module scope (the same
+     count), by one undecorated top-level def with no parameters whose first statement is exactly
+     _child_status_refusal_exit("<basename>"), and each dispatcher's main() holds HOOK_BLOCK as the statements
+     right after its is_fail_open assignment. main() is not pinned: the entry line calls the guard before it
+     calls main(), so whatever main names runs after the guard.
   4. launchers: the first run_gate line of tools/run_all_checks.sh and of opf/tools/run_all_checks.sh is the
      probe, and no line above it names Python (read in line order through check_ci_parity.read_runner_text).
      A line names Python when, unless it is a whole-line comment, it holds an interpreter word (python with
@@ -105,8 +114,10 @@ walked; an unresolved dynamic load), the live refusal, or usage. There is no war
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
-only at entry, so the in-situ checks in opf/tools/_opf_emit.py stay the only later defence and they read the
-disposition only; R2 a child that ignores SIGCHLD itself loses its own children's statuses (opf.py's own
+only where a guard is called: at entry and, in opf.py's opf-adopt-state leg, mid-process (that leg calls
+opf/tools/_opf_adopt_state.py's self_test() in process); after that, the in-situ checks in opf/tools/_opf_emit.py
+stay the only later defence and they read the disposition only; R2 a child that ignores SIGCHLD itself loses
+its own children's statuses (opf.py's own
 self-test does this in process for fixtures that test the refusal), which no parent guard sees and this gate
 does not police; R3 non-Python tools (gh, gitleaks, jq, curl, tar, sha256sum) were not tested under an
 inherited ignore, and their statuses are read by bash or by guarded gates; R4 a refusal is an exit status, so a
@@ -116,7 +127,8 @@ other kernels (macOS) is not established, and the fork probe covers it only at t
 platform without SIGCHLD or fork the guard refuses nothing; R7 a direct launch of a LAUNCHER or RESIDUAL entry
 is unguarded until the floor prelude refuses (DIRECT_LAUNCH_RESIDUAL); R8 tools/run_all_checks.sh continues
 after the probe fails, so later gates may print PASS lines in a run that ends RESULT: FAIL; R9 a fork in a
-multi-threaded process warns, so every guard runs at entry or at the top of the dispatcher's main; R10 the
+multi-threaded process warns, so every guard runs at entry or at the top of the dispatcher's main, except the
+mid-process call in R1, which runs after opf.py's earlier self-test legs; R10 the
 static scan over-approximates through whole-closure imports, and it does not see a spawn reached (a) inside a
 module it does not read, the standard library or a third-party package (platform.architecture and
 ctypes.util.find_library each start a child through subprocess), (b) through getattr, sys.modules.get, a
@@ -135,9 +147,12 @@ workflow value or runner line that starts Python through a variable ($PY, ${{ en
 (pip, pytest) or any other name the interpreter pattern does not match is not seen as naming Python; R15 the
 workflow grammar is this gate's own reading of a YAML subset, held to the self-test's cases and the current
 workflows and not compared with the parser GitHub runs, so a file inside it that GitHub reads another way is
-not seen. Whether a real launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job
-share one disposition, are not established: each job's probe step reads the disposition of its own step only,
-so it cannot show what the job's other steps inherit.
+not seen; R16 the binding count of legs 2 and 3 (_bindings) reads the module's own binding statements, so a
+rebinding through a computed name made by a call (setattr on the module, globals().update) or inside a function
+body (a globals() or sys.modules[__name__] store there) is not seen. Whether a real
+launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are
+not established: each job's probe step reads the disposition of its own step only, so it cannot show what the
+job's other steps inherit.
 """
 import sys
 
@@ -178,7 +193,12 @@ CANONICAL_REL = "opf/tools/_child_status.py"
 COVERAGE_REL = "tools/" + Path(__file__).name
 CANONICAL_NAMES = ("_CHILD_STATUS_PROBE_CODE", "_child_status_refusal", "_child_status_refusal_exit")
 HOOK_NAMES = CANONICAL_NAMES[:2]
-CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.py", "check_selftest_execution.py"))
+CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.py", "check_selftest_execution.py"),
+              ("opf/tools/_opf_adopt_complete.py", "_opf_adopt_complete.py"),
+              ("opf/tools/_opf_adopt_state.py", "_opf_adopt_state.py"),
+              ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
+              ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
+              ("tools/check_must_deliver.py", "check_must_deliver.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -201,6 +221,17 @@ SELF_ENTRIES = frozenset((CANONICAL_REL, COVERAGE_REL)
                          + tuple(rel for rel, _name in CLI_COPIES + ENTRY_COPIES + SELF_TEST_FIRST_COPIES)
                          + HOOK_COPIES)
 CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
+# The CLI copies that are opf/tools self_test modules: opf.py's aggregator requires their __main__ block to start
+# with its canonical --self-test statement (SELF_TEST_ENTRY, opf.py's _ENTRY_STATEMENT), so their __main__ body is
+# exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
+# self_test() after its docstring, so the --self-test path refuses too.
+SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
+                    "opf/tools/_opf_import_complete.py")
+SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
+SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
+# The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
+# that parses to the statement SELF_TEST_ENTRY parses to (entry_statement_finding), so the two cannot drift apart.
+ENTRY_STATEMENT_REL = "opf/tools/opf.py"
 HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS"
 HOOK_BLOCK = """unobservable = _child_status_refusal()
 if unobservable is not None:
@@ -304,18 +335,15 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
     "opf/tools/_opf_adopt_apply.py",
-    "opf/tools/_opf_adopt_complete.py",
     "opf/tools/_opf_adopt_discover.py",
     "opf/tools/_opf_adopt_hook.py",
     "opf/tools/_opf_adopt_observe.py",
     "opf/tools/_opf_adopt_plan.py",
-    "opf/tools/_opf_adopt_state.py",
     "opf/tools/_opf_changelog.py",
     "opf/tools/_opf_check.py",
     "opf/tools/_opf_emit.py",
     "opf/tools/_opf_fuzz.py",
     "opf/tools/_opf_import_batch.py",
-    "opf/tools/_opf_import_complete.py",
     "opf/tools/_opf_init.py",
     "opf/tools/_opf_init_operation.py",
     "opf/tools/_opf_init_substrate.py",
@@ -355,7 +383,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_entry_guard.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
-    "tools/check_gitleaks_pin.py",
     "tools/check_hooks_preview.py",
     "tools/check_instruction_budget.py",
     "tools/check_internal_names.py",
@@ -364,7 +391,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_mappings.py",
     "tools/check_mistakes_register.py",
     "tools/check_msg_leaks.py",
-    "tools/check_must_deliver.py",
     "tools/check_newtab.py",
     "tools/check_no_dashes.py",
     "tools/check_opf_standalone_closure.py",
@@ -653,6 +679,61 @@ def self_test_first_finding(rel, tree, name):
         return "{}: its __main__ entry is not exactly the --self-test statement and then {}".format(
             rel, CLI_ENTRY.format(name))
     return None
+
+
+def self_test_entry_finding(rel, tree, name):
+    """None when the module's __main__ body is exactly SELF_TEST_ENTRY then the CLI entry line, self_test is bound
+    once at module scope (_bindings), by one undecorated top-level def, so the self_test() the entry calls is
+    that def, and that def starts, after any docstring, with the guard call naming it."""
+    block = tree.body[-1] if tree.body and check_entry_guard._is_guard(tree.body[-1]) else None
+    want = [ast.dump(statement) for statement in ast.parse(SELF_TEST_ENTRY + CLI_ENTRY.format(name)).body]
+    if block is None or [ast.dump(statement) for statement in block.body] != want:
+        return "{}: its __main__ entry is not exactly the --self-test statement then {}".format(
+            rel, CLI_ENTRY.format(name))
+    tests = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "self_test"]
+    if len(tests) != 1 or tests[0].decorator_list or len(_bindings(tree, "self_test")) != 1:
+        return ("{}: self_test is not bound once, by one undecorated top-level def, so the self_test() its entry "
+                "calls may not start with {}".format(rel, SELF_TEST_GUARD.format(name)))
+    body = tests[0].body
+    if ast.get_docstring(tests[0], clean=False) is not None:
+        body = body[1:]
+    guard = ast.dump(ast.parse(SELF_TEST_GUARD.format(name)).body[0])
+    if not body or ast.dump(body[0]) != guard:
+        return "{}: its self_test() does not start with {}".format(rel, SELF_TEST_GUARD.format(name))
+    return None
+
+
+def entry_statement_finding(rel, tree):
+    """None when the module binds _ENTRY_STATEMENT once at module scope (_bindings), at the top level, to a string
+    that parses to the statement SELF_TEST_ENTRY parses to."""
+    nodes = _top_definitions(tree, "_ENTRY_STATEMENT")
+    value = (nodes[0].value if len(nodes) == 1 and isinstance(nodes[0], (ast.Assign, ast.AnnAssign))
+             and len(_bindings(tree, "_ENTRY_STATEMENT")) == 1 else None)
+    try:
+        same = (isinstance(value, ast.Constant) and type(value.value) is str
+                and ast.dump(ast.parse(value.value)) == ast.dump(ast.parse(SELF_TEST_ENTRY)))
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        same = False
+    if not same:
+        return "{}: its _ENTRY_STATEMENT is not one top-level string that parses to SELF_TEST_ENTRY {!r}".format(
+            rel, SELF_TEST_ENTRY)
+    return None
+
+
+def cli_copy_findings(load, tmpl):
+    """Legs 2 and 3 for every CLI_COPIES entry, each read through load(rel) as a parsed tree: its copy, its entry
+    (self_test_entry_finding for a SELF_TEST_COPIES entry, cli_entry_finding for any other) and, for
+    ENTRY_STATEMENT_REL, the pin of SELF_TEST_ENTRY to its _ENTRY_STATEMENT."""
+    findings = []
+    for rel, name in CLI_COPIES:
+        tree = load(rel)
+        findings.extend(copy_findings(rel, tree, tmpl, CANONICAL_NAMES))
+        finding = (self_test_entry_finding(rel, tree, name) if rel in SELF_TEST_COPIES
+                   else cli_entry_finding(rel, tree, name))
+        findings.extend([finding] if finding else [])
+        finding = entry_statement_finding(rel, tree) if rel == ENTRY_STATEMENT_REL else None
+        findings.extend([finding] if finding else [])
+    return findings
 
 
 def hook_block_finding(rel, tree):
@@ -1224,11 +1305,7 @@ def evaluate(root, residual=None, direct_check=None):
     tmpl = template(canonical)
     finding = cli_entry_finding(CANONICAL_REL, canonical, Path(CANONICAL_REL).name, exact=False)
     findings.extend([finding] if finding else [])
-    for rel, name in CLI_COPIES:
-        tree = _parse(_read(root, rel), rel)
-        findings.extend(copy_findings(rel, tree, tmpl, CANONICAL_NAMES))
-        finding = cli_entry_finding(rel, tree, name)
-        findings.extend([finding] if finding else [])
+    findings.extend(cli_copy_findings(lambda rel: _parse(_read(root, rel), rel), tmpl))
     for rel, name in ENTRY_COPIES:
         tree = _parse(_read(root, rel), rel)
         findings.extend(copy_findings(rel, tree, tmpl, CANONICAL_NAMES))
@@ -1511,6 +1588,29 @@ def _inputs():
                 "\n" + statement.format(name) + '\nif __name__ == "__main__":\n'))
     for key, old, new in DECORATED:
         trees[key + "-rebound-decorated"] = ast.parse(_swap(declaration, old, new))
+    # A self_test module whose __main__ block starts with the CLI entry line (no canonical --self-test statement
+    # first), and one whose self_test() lost its guard call.
+    state_rel = "opf/tools/_opf_adopt_state.py"
+    state, state_guard = real[state_rel], "    " + SELF_TEST_GUARD.format("_opf_adopt_state.py") + "\n"
+    trees.update((rel, ast.parse(real[rel])) for rel, _name in CLI_COPIES)
+    trees["state-entry-bare"] = ast.parse(_swap(state, "    " + SELF_TEST_ENTRY.replace("\n    ", "\n        "), ""))
+    trees["state-guard-gone"] = ast.parse(_swap(state, state_guard, ""))
+    # A self_test() the entry calls that is not the def starting with the guard: the def decorated, or the name
+    # bound again after it by an assignment, a lambda or an import; a CLI copy whose guard name an import binds
+    # again after its copy; a plain CLI copy with a bare entry; and opf.py's _ENTRY_STATEMENT drifted.
+    main_line = '\nif __name__ == "__main__":\n'
+    trees["state-decorated"] = ast.parse(_swap(state, "\ndef self_test():\n", "\n@_wrapped\ndef self_test():\n"))
+    for key, binding in (("state-rebound-assign", "self_test = main\n"),
+                         ("state-rebound-lambda", "self_test = lambda: 0\n"),
+                         ("state-rebound-import", "from _opf_adopt_apply import self_test\n")):
+        trees[key] = ast.parse(_swap(state, main_line, "\n" + binding + main_line))
+    trees["selftest-guard-import"] = ast.parse(_swap(
+        selftest, main_line, "\nfrom operator import not_ as _child_status_refusal_exit\n" + main_line))
+    trees["gitleaks-entry-bare"] = ast.parse(_swap(real["tools/check_gitleaks_pin.py"],
+                                                   CLI_ENTRY.format("check_gitleaks_pin.py"), "sys.exit(main())"))
+    trees["opf-entry-statement-drift"] = ast.parse(_swap(
+        opf, "_ENTRY_STATEMENT = 'if sys.argv[1:] == [\"--self-test\"]:",
+        "_ENTRY_STATEMENT = 'if sys.argv[1:] == [\"--selftest\"]:"))
     probe_line = RUNNER_PROBES[0][1] + "\n"
     opf_probe = 'run_gate "child-status"                python3 -I -B "$here/_child_status.py"\n'
     quality = real[WORKFLOWS_REL + "/quality.yml"]
@@ -1696,6 +1796,12 @@ def _vectors(module, trees, texts, canonical_tree):
     def copies(key, names):
         return m.copy_findings(key, trees[key], tmpl(), names)
 
+    state_rel, gitleaks_rel = "opf/tools/_opf_adopt_state.py", "tools/check_gitleaks_pin.py"
+
+    def cli_copies(rel, key):
+        """The CLI copies' leg 2 and 3 findings, every copy read from its real tree except rel, read from key's."""
+        return m.cli_copy_findings(lambda each: trees[key] if each == rel else trees[each], tmpl())
+
     def raises(thunk):
         """True when thunk is cannot-evaluate; any other exception propagates, so the vector is not ok."""
         try:
@@ -1750,9 +1856,32 @@ def _vectors(module, trees, texts, canonical_tree):
                                                        for finding in copies("selftest-missing", m.CANONICAL_NAMES))),
         ("copies/hook-drift-is-finding", lambda: any("_CHILD_STATUS_PROBE_CODE differs" in finding
                                                      for finding in copies("hook-drift", m.HOOK_NAMES))),
+        ("copies/rebound-guard-is-finding", lambda: any("_child_status_refusal_exit is bound 2 times" in finding
+                                                        for finding in copies("selftest-guard-import",
+                                                                              m.CANONICAL_NAMES))),
         ("entries/real-entries-pass", lambda: m.cli_entry_finding("opf", trees["opf"], "opf.py") is None
          and m.cli_entry_finding("canonical", canonical_tree, "_child_status.py", exact=False) is None
-         and m.hook_block_finding("hook", trees["hook"]) is None),
+         and m.hook_block_finding("hook", trees["hook"]) is None
+         and all(m.self_test_entry_finding(rel, trees[rel], Path(rel).name) is None for rel in m.SELF_TEST_COPIES)
+         and not m.cli_copy_findings(trees.__getitem__, tmpl())),
+        ("entries/self-test-entry-shape", lambda: m.self_test_entry_finding(
+            "state", trees["state-entry-bare"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-guard-missing", lambda: m.self_test_entry_finding(
+            "state", trees["state-guard-gone"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-decorated", lambda: m.self_test_entry_finding(
+            "state", trees["state-decorated"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-rebound-assign", lambda: m.self_test_entry_finding(
+            "state", trees["state-rebound-assign"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-rebound-lambda", lambda: m.self_test_entry_finding(
+            "state", trees["state-rebound-lambda"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-rebound-import", lambda: m.self_test_entry_finding(
+            "state", trees["state-rebound-import"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-entry-checked", lambda: cli_copies(state_rel, "state-guard-gone") == [
+            state_rel + ": its self_test() does not start with " + m.SELF_TEST_GUARD.format("_opf_adopt_state.py")]),
+        ("entries/cli-entry-checked", lambda: cli_copies(gitleaks_rel, "gitleaks-entry-bare") == [
+            gitleaks_rel + ": its __main__ entry is not exactly " + m.CLI_ENTRY.format("check_gitleaks_pin.py")]),
+        ("entries/self-test-entry-pinned", lambda: [finding.split(": ", 1)[0] for finding in cli_copies(
+            m.ENTRY_STATEMENT_REL, "opf-entry-statement-drift")] == [m.ENTRY_STATEMENT_REL]),
         ("entries/cli-line-shape", lambda: m.cli_entry_finding("opf", trees["opf-entry-bare"], "opf.py") is not None),
         ("entries/cli-extra-statement",
          lambda: m.cli_entry_finding("opf", trees["opf-entry-extra"], "opf.py") is not None),
@@ -2014,6 +2143,28 @@ MUTANTS = (
      "if block is None or [ast.dump(statement) for statement in block.body] != expected:",
      "if block is None or [ast.dump(statement) for statement in block.body[:1] + block.body[-1:]] != expected:",
      "entries/self-test-first-extra-statement"),
+    ("self-test-entry", "if block is None or [ast.dump(statement) for statement in block.body] != want:",
+     "if block is None:", "entries/self-test-entry-shape"),
+    ("self-test-guard", "    if not body or ast.dump(body[0]) != guard:\n", "    if not body:\n",
+     "entries/self-test-guard-missing"),
+    ("self-test-decorated", " or tests[0].decorator_list", "", "entries/self-test-decorated"),
+    ("self-test-bound-once", ' or len(_bindings(tree, "self_test")) != 1', "",
+     "entries/self-test-rebound-lambda"),
+    ("binding-name-store", "        stored = node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))\n",
+     "        stored = False\n", "entries/self-test-rebound-assign"),
+    ("binding-from-import-self-test", "                if (alias.asname or alias.name) in (name, \"*\")]",
+     "                if False]", "entries/self-test-rebound-import"),
+    ("copy-bindings", "        if len(bindings) != 1 or len(nodes) != 1:\n", "        if len(nodes) != 1:\n",
+     "copies/rebound-guard-is-finding"),
+    ("copy-loop-self-test-entry", "finding = (self_test_entry_finding(rel, tree, name) if rel in SELF_TEST_COPIES",
+     "finding = (None if rel in SELF_TEST_COPIES", "entries/self-test-entry-checked"),
+    ("copy-loop-cli-entry", "                   else cli_entry_finding(rel, tree, name))", "                   else None)",
+     "entries/cli-entry-checked"),
+    ("entry-statement-call", "finding = entry_statement_finding(rel, tree) if rel == ENTRY_STATEMENT_REL else None",
+     "finding = None", "entries/self-test-entry-pinned"),
+    ("entry-statement-compare",
+     "\n                and ast.dump(ast.parse(value.value)) == ast.dump(ast.parse(SELF_TEST_ENTRY)))", ")",
+     "entries/self-test-entry-pinned"),
     ("hook-block-compare", "    if got != want:\n", "    if False:\n", "entries/hook-block-shape"),
     ("runner-first", "if line.split() != probe_line.split():", "if False:", "launchers/runner-first-gate"),
     ("runner-prelude", "        if _names_python(line):\n            return", "        if False:\n            return",
@@ -2209,6 +2360,20 @@ def _behaviour(probe, base):
                                 ("behaviour/declaration-gate-refuses", "tools/check_opf_declaration.py",
                                  "check_opf_declaration.py")):
         out.append((check_id, refused(results[rel][0], name), results[rel][0]))
+    # The other CLI copies under an inherited ignore, each read by its refusal line, not its exit status alone: each
+    # refuses at its entry line, and each opf/tools self_test module on its --self-test path too, there at the first
+    # statement of self_test().
+    for check_id, rel, args in (
+            ("behaviour/adopt-complete-refuses", "opf/tools/_opf_adopt_complete.py", ()),
+            ("behaviour/adopt-complete-self-test-refuses", "opf/tools/_opf_adopt_complete.py", ("--self-test",)),
+            ("behaviour/adopt-state-refuses", "opf/tools/_opf_adopt_state.py", ()),
+            ("behaviour/adopt-state-self-test-refuses", "opf/tools/_opf_adopt_state.py", ("--self-test",)),
+            ("behaviour/import-complete-refuses", "opf/tools/_opf_import_complete.py", ()),
+            ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
+            ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
+            ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ())):
+        got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
+        out.append((check_id, refused(got, Path(rel).name), got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
                                   ("control/launcher-cli-default-runs", "tools/check_selftest_execution.py",
                                    "usage: check_selftest_execution.py"),
@@ -2358,7 +2523,13 @@ def self_test(lane, report_path=None):
         vectors = _vectors(this, trees, texts, canonical_tree)
         for check_id, _kind in (("copies/real-copies-identical", 0), ("copies/drift-is-finding", 0),
                                 ("copies/missing-copy-is-finding", 0), ("copies/hook-drift-is-finding", 0),
-                                ("entries/real-entries-pass", 0), ("entries/cli-line-shape", 0),
+                                ("copies/rebound-guard-is-finding", 0),
+                                ("entries/real-entries-pass", 0), ("entries/self-test-entry-shape", 0),
+                                ("entries/self-test-guard-missing", 0), ("entries/self-test-decorated", 0),
+                                ("entries/self-test-rebound-assign", 0), ("entries/self-test-rebound-lambda", 0),
+                                ("entries/self-test-rebound-import", 0), ("entries/self-test-entry-checked", 0),
+                                ("entries/cli-entry-checked", 0), ("entries/self-test-entry-pinned", 0),
+                                ("entries/cli-line-shape", 0),
                                 ("entries/cli-extra-statement", 0), ("entries/hook-block-shape", 0),
                                 ("entries/hook-block-missing", 0), ("entries/entry-function-real-pass", 0),
                                 ("entries/entry-function-guard-missing", 0),
@@ -2463,7 +2634,13 @@ def self_test(lane, report_path=None):
             check("mutant/every-vector-discriminates", not never, never)
             behaviour = dict((check_id, (ok, detail)) for check_id, ok, detail in _behaviour(probe, base))
         for check_id, _kind in (("behaviour/opf-cli-refuses", 0), ("behaviour/launcher-cli-refuses", 0),
-                                ("behaviour/coverage-gate-refuses", 0), ("control/opf-cli-default-runs", 0),
+                                ("behaviour/coverage-gate-refuses", 0), ("behaviour/adopt-complete-refuses", 0),
+                                ("behaviour/adopt-complete-self-test-refuses", 0),
+                                ("behaviour/adopt-state-refuses", 0), ("behaviour/adopt-state-self-test-refuses", 0),
+                                ("behaviour/import-complete-refuses", 0),
+                                ("behaviour/import-complete-self-test-refuses", 0),
+                                ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
+                                ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),
                                 ("behaviour/opf-declaration-cli-refuses", 0), ("behaviour/declaration-gate-refuses", 0),
                                 ("control/opf-declaration-cli-default-runs", 0),
