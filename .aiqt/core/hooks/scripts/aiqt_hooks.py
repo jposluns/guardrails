@@ -2347,7 +2347,7 @@ def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
     lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
     readings = _with_command_readings(
         _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
-        skip_empty)
+        skip_empty, "`" in command)
     return ([seg for segs, _complete, _open in readings for seg in segs],
             all(done for _segs, done, _open in readings), readings[-1][2])
 
@@ -2392,7 +2392,7 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     reading of each reading it changes follows the list, on both exits (_with_command_readings)."""
     if _SubstHeredocs.main_lex:
         return _with_command_readings([_main_reading(command, partial, locale, skip_empty)], partial, locale,
-                                      skip_empty)
+                                      skip_empty, "`" in command)
     readings = []
     misread = False
     pending = [({}, None)]
@@ -2422,7 +2422,7 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
             misread = misread or body
     return _with_command_readings(
         _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings, partial,
-        locale, skip_empty)
+        locale, skip_empty, "`" in command)
 
 
 def _hash_reading_with(reading, at, comment):
@@ -3165,7 +3165,7 @@ def _backquote_runs(text, at):
     return runs
 
 
-def _read_segments(segments, locale=False, skip_empty=False, origins=None):
+def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks=True):
     """The command reading of one reading of a command (A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS, above
     _COMMAND_LEAD_WORDS): segments, that reading's _Segment records in order, each read from its command word
     (_read_past), with the commands of each backquote substitution the reading's text holds (_backquote_bodies,
@@ -3182,9 +3182,12 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None):
     break. Inside _CommandReading a text already scanned is not scanned again (_CommandReading.scans). Returns
     segments itself, the same list, when the reading changes nothing, so a caller can tell (is) that it adds
     nothing; locale and skip_empty are passed to the lex of each body. origins, when a list, gets one (index,
-    body) pair per segment returned when the reading changes something (_CommandReading)."""
+    body) pair per segment returned when the reading changes something (_CommandReading). ticks False says the
+    text the records were lexed from holds no backquote, so no record's raw text, a slice of that text, holds
+    one, and the records are not searched for one. Past the last record that opens a body only the records
+    with a word are visited, so a long run of separators costs one pass over its records per reading."""
     bodies = ()
-    if any("`" in seg.raw for seg in segments):
+    if ticks and any("`" in seg.raw for seg in segments):
         text = "".join([seg.raw + (seg.sep_after or "\n") for seg in segments])
         scans = _CommandReading.scans
         bodies = None if scans is None else scans.get(text)
@@ -3197,7 +3200,10 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None):
     changed = False
     at = 0
     index = 0
-    for number, seg in enumerate(segments):
+    number = 0
+    # The records are walked one by one only up to the one that opens the last body, to place each body.
+    while index < len(bodies) and number < len(segments):
+        seg = segments[number]
         end = at + len(seg.raw)
         while index < len(bodies) and bodies[index][0] < end:
             commands = _read_commands(bodies[index][1], locale, skip_empty)
@@ -3210,10 +3216,21 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None):
         pairs.append((number, False))
         changed = changed or read is not seg
         at = end + len(seg.sep_after or "\n")
-    if not changed:
+        number += 1
+    # Past it no body opens, so a record is read anew only where a word stands before its command word
+    # (_command_start): a record with no word, as each of a long run of separators is, is passed over, and
+    # each of the readings of an uncertain '#', which share such a run, adds no call per record of it.
+    rest = segments[number:] if number else segments
+    past = [at for at, seg in enumerate(rest, number) if seg.argv and _command_start(seg.argv)]
+    if not changed and not past:
         return segments
+    shift = len(out) - number
+    out.extend(rest)
+    for at in past:
+        out[at + shift] = _read_past(segments[at])
     if origins is not None:
         origins.extend(pairs)
+        origins.extend([(at, False) for at in range(number, len(segments))])
     return out
 
 
@@ -3275,7 +3292,7 @@ def _read_commands(body, locale=False, skip_empty=False):
     return out
 
 
-def _with_command_readings(readings, partial, locale=False, skip_empty=False):
+def _with_command_readings(readings, partial, locale=False, skip_empty=False, ticks=True):
     """readings, the list of one lex's readings of a command as _lex_readings returns it (one entry per reading:
     its segments, or in partial mode its (segments, complete, in_progress)), followed inside _CommandReading by
     the command reading of each reading it changes (_read_segments), and readings itself outside it. An added
@@ -3284,7 +3301,9 @@ def _with_command_readings(readings, partial, locale=False, skip_empty=False):
     reading, and the complete and in_progress flags _lex_command returns are the ones it returns without the
     command reading. The segments added are counted in _CommandReading.added, and where the context keeps
     origins each added segment's (index, body) pair is put there, its index counted in the segments of the
-    readings joined in order, as _lex_command returns them."""
+    readings joined in order, as _lex_command returns them. ticks False says the command the readings were
+    lexed from holds no backquote (_read_segments), so the readings of its uncertain '#' are not searched for
+    one each."""
     if not _CommandReading.on:
         return readings
     added = []
@@ -3294,7 +3313,7 @@ def _with_command_readings(readings, partial, locale=False, skip_empty=False):
     for reading in readings:
         segments = reading[0] if partial else reading
         found = [] if origins is not None else None
-        read = _read_segments(segments, locale, skip_empty, found)
+        read = _read_segments(segments, locale, skip_empty, found, ticks)
         if read is not segments:
             added.append((read,) + tuple(reading[1:]) if partial else read)
             if found is not None:
@@ -4403,7 +4422,7 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
-    own = segments[:len(segments) - reading.added]
+    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
     # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
     # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
     possibles = [(index, seg) for index, seg in enumerate(segments)

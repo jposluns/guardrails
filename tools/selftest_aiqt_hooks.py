@@ -2818,6 +2818,55 @@ def _procsubst_taken_failures():
     return out
 
 
+def _read_visit_count(command, cwd, read_segments=None):
+    """The _command_start calls one diff_source_pretool call makes on command (with read_segments in place of
+    aiqt_hooks._read_segments when given), and the number of the lexer's own records that hold a word."""
+    calls = [0]
+    start = aiqt_hooks._command_start
+    real = aiqt_hooks._read_segments
+
+    def counted(argv):
+        calls[0] += 1
+        return start(argv)
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
+    aiqt_hooks._command_start = counted
+    if read_segments is not None:
+        aiqt_hooks._read_segments = read_segments
+    try:
+        aiqt_hooks.HANDLERS["diff_source_pretool"](data)
+    finally:
+        aiqt_hooks._command_start = start
+        aiqt_hooks._read_segments = real
+    return calls[0], sum(1 for seg in aiqt_hooks._lex_command(command) if seg.argv)
+
+
+def _read_visit_failures(cwd, size=65536):
+    """(dl-read-visits) The command reading passes over a record with no word without a call per record: on
+    the seps_hash_lines shape at 64 KB (sixteen readings of one long run of separators, each a record with no
+    word) diff_source_pretool calls _command_start no more often than the lexer's own records hold a word. A
+    reading that visits each record through it, about sixteen calls per separator, fails here on any runner,
+    where the CPU bound of the dl-shape rows sees it only on a runner slow enough (at 1 MB such a reading took
+    about 3.5 times main's CPU time on one host, and the 7 s bound failed only on a runner about 2.3 times
+    slower). A reading that calls it on every record must be caught by the same count (dl-read-visits-red)."""
+    command = _DEADLINE_SHAPES["seps_hash_lines"](size, cwd)[1]["command"]
+    out = []
+    calls, worded = _read_visit_count(command, cwd)
+    if calls > worded:
+        out.append("(dl-read-visits) diff_source_pretool called _command_start {} times on a {}-character command "
+                   "of one run of separators whose lexer records hold {} with a word".format(
+                       calls, len(command), worded))
+    real = aiqt_hooks._read_segments
+
+    def every_record(segments, *args):
+        for seg in segments:
+            aiqt_hooks._command_start(seg.argv)
+        return real(segments, *args)
+    if _read_visit_count(command, cwd, every_record)[0] <= worded:
+        out.append("(dl-read-visits-red) a reading that calls _command_start on every record passes the count")
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -6375,6 +6424,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_mirror_failures())
     failures.extend(_procsubst_skip_failures())
     failures.extend(_procsubst_taken_failures())
+    failures.extend(_read_visit_failures(str(tmp)))
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
