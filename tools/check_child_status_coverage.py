@@ -1468,6 +1468,16 @@ def _vectors(module, trees, texts, canonical_tree):
     def quality_workflow(key):
         return m.workflow_findings(m.HOST_PATCH_WORKFLOW, texts[key])
 
+    # The five host-patch job ids, written out so that an id added to or dropped from HOST_PATCH_JOBS turns a
+    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only.
+    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
+                 "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+
+    def host_job_held(job):
+        text = texts["host-pin-before-probe"].replace("opf-host-patch", job, 1)
+        return (not m.workflow_findings(m.HOST_PATCH_WORKFLOW, text)
+                and m.workflow_findings("w", text) == [not_probe_in("w", job)])
+
     vectors = (
         ("copies/real-copies-identical", lambda: not copies("opf", m.CANONICAL_NAMES)
          and not copies("selftest", m.CANONICAL_NAMES) and not copies("hook", m.HOOK_NAMES)),
@@ -1527,6 +1537,12 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-old-probe-name", lambda: quality_workflow("host-pin-old-probe")
          == [not_probe_in(m.HOST_PATCH_WORKFLOW, "opf-host-patch", "the Python host pin step")]),
         ("launchers/workflow-host-probe-ahead-of-pin", lambda: not quality_workflow("host-probe-ahead")),
+        ("launchers/workflow-host-pin-jobs-exact", lambda: sorted(m.HOST_PATCH_JOBS) == sorted(host_jobs)),
+        ("launchers/workflow-host-pin-job-opf", lambda: host_job_held(host_jobs[0])),
+        ("launchers/workflow-host-pin-job-core", lambda: host_job_held(host_jobs[1])),
+        ("launchers/workflow-host-pin-job-config-combined", lambda: host_job_held(host_jobs[2])),
+        ("launchers/workflow-host-pin-job-config-malformed", lambda: host_job_held(host_jobs[3])),
+        ("launchers/workflow-host-pin-job-config-system", lambda: host_job_held(host_jobs[4])),
         ("launchers/workflow-block-hash-line", lambda: workflow("block-hash-line")
          == ["w:9: job lone: names Python before the child-status probe step"]),
         ("launchers/workflow-defaults-after-steps", lambda: workflow("defaults-after-steps") == ["w:14: " + outside]),
@@ -1654,6 +1670,16 @@ MUTANTS = (
      "launchers/workflow-host-pin-old-probe-name"),
     ("workflow-host-pin-early", "if position < probe and position != pin:", "if position < probe:",
      "launchers/workflow-host-pin-before-probe"),
+    ("host-patch-job-extra", '("opf-host-patch", ', '("opf-host-patch", "git-fixture-env-host-patch", ',
+     "launchers/workflow-host-pin-jobs-exact"),
+    ("host-patch-job-opf", '("opf-host-patch", ', "(", "launchers/workflow-host-pin-job-opf"),
+    ("host-patch-job-core", '"git-fixture-env-core-host-patch", ', "", "launchers/workflow-host-pin-job-core"),
+    ("host-patch-job-config-combined", '"git-fixture-env-config-combined-host-patch",', "",
+     "launchers/workflow-host-pin-job-config-combined"),
+    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed-host-patch", ', "",
+     "launchers/workflow-host-pin-job-config-malformed"),
+    ("host-patch-job-config-system", ', "git-fixture-env-config-system-host-patch")', ")",
+     "launchers/workflow-host-pin-job-config-system"),
     ("workflow-setup", "        if len(setups) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
     ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))",
      "return bool(PYTHON_WORD_RE.search(text))", "launchers/workflow-names-py-file"),
@@ -1938,6 +1964,12 @@ def self_test(lane, report_path=None):
                                 ("launchers/workflow-host-pin-prefix-step", 0),
                                 ("launchers/workflow-host-pin-old-probe-name", 0),
                                 ("launchers/workflow-host-probe-ahead-of-pin", 0),
+                                ("launchers/workflow-host-pin-jobs-exact", 0),
+                                ("launchers/workflow-host-pin-job-opf", 0),
+                                ("launchers/workflow-host-pin-job-core", 0),
+                                ("launchers/workflow-host-pin-job-config-combined", 0),
+                                ("launchers/workflow-host-pin-job-config-malformed", 0),
+                                ("launchers/workflow-host-pin-job-config-system", 0),
                                 ("launchers/workflow-block-hash-line", 0),
                                 ("launchers/workflow-defaults-after-steps", 0),
                                 ("launchers/workflow-python-outside-run-step", 0),
