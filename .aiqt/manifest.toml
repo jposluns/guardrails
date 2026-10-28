@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e7f05cddaf2aa5726b4624a892f7c85b1b6507d9b4f8893a05a8c40950380b84"
+tree-sha256 = "731054fccd3d05d196d4e968d17d92f280a51ddda933b471d426063d9399040d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 481516
-sha256 = "797cd6fc4349fea5e669a4c014718e45b7fd14442ee4a092fb8cc97784bdf03d"
+bytes = 482648
+sha256 = "5c12cd590d671c223fef6a40403c2cd18fd0ede3dd23a0c9243f79a38b918db3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2636,8 +2636,8 @@ sha256 = "2872be6033032cf0248cced15310d22b01e90ee1711a5662d2e10b46e6959e27"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
-bytes = 296403
-sha256 = "fa352b0e94e2077a62e82dd112e1c5e05605ce52b48cc4dcaac0e6ab5bcc8727"
+bytes = 297327
+sha256 = "930aa68d00f040a5fbd6468c7f4bf8969e93ea15ffc907d9ca0ada1bc7f7da8a"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
@@ -2656,8 +2656,8 @@ sha256 = "8155bc040585bfc0211905c344fdec997e4c67805598486816fcd0de407b18a7"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 185148
-sha256 = "cfe3e99fe8cd70d196ce8c13c446f3bc8ec6405755b4036b54a313734be41c05"
+bytes = 186003
+sha256 = "bcb2a4a27f8882f804c047e2589017434c407a3d885f3dbd81d8534374ee194c"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2811,8 +2811,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 317443
-sha256 = "e0b05186cda8ff984f15194989d1cadc8871e7bd5667e4fe84b0102cc40ec8ad"
+bytes = 341464
+sha256 = "d230ede7704a754e45d773b5362f5e99702e4b33c92633d14bbd43a39303129e"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -3016,8 +3016,8 @@ sha256 = "150620e6013e9cc95cc0b2a6c1ffc3e38dce3bd3c851cb4802c742413faf6153"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 695324
-sha256 = "c2ac2b7ef0c54d166f42f47dda8863ba4a5d485b4044f050f06778b2009ecacf"
+bytes = 696216
+sha256 = "bcb221067af7ac2529b9efbabfee11ad767b168ffa696b562415e9698e91bc6a"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
@@ -3051,13 +3051,13 @@ sha256 = "b089b183c86fb696cb9b967efd7409c925204a1b2860c22ad9914e3b1c54db7e"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 596317
-sha256 = "b58b9400670b8139dca1dd7b89809143e441b257dce3c468f2a1adc026197603"
+bytes = 620476
+sha256 = "531392e4d39ad61b419abcfbc3f45ed14e9fa227b31731c3cfac20237ed2c9f1"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1307178
-sha256 = "8a3f18d080e156f88510d9acec981bb19a747d0cbd7495cd6be9b33b6beeb2ed"
+bytes = 1307881
+sha256 = "0f192ddbbaee39e0e19eb6fca9255f5cff54511c616593c8af72c6696fc156ec"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"

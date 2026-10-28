@@ -1232,6 +1232,15 @@ linking back (section 8.6). Its subcommands:
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
   lands `done/proposed`; no receipt exists until a maintainer ratifies.
+- `receipt-repair`: maintainer-only, with a recorded reason. It is the reviewed repair of a backlog
+  item that stands at unqualified `done` without a clean receipt authored by a non-importer actor
+  (sections 8.5 and 8.6), such as an item a reviewed hand edit put at `done`: in one act it creates
+  the missing `done` receipt linked `receipt_of`, and it changes no status and no other record. It
+  MUST refuse, with nothing written, unless the item is at unqualified `done` and its current row is
+  exactly the row the prior commit holds, and it MUST refuse an item that already holds such a
+  receipt in the active index or the archive (section 12). Its new ID MUST be claimed through the
+  irrevocable reservation of section 8.2. A repaired receipt is linked one-to-one to its item, so it
+  is not a standalone receipt (section 8.1).
 - `worklog-append`: one entry appended to the unreleased tail of `worklog.toml`, status `recorded`,
   never `/proposed` whatever the actor (sections 6.2 and 8.4). An entry that would fall inside a
   released span MUST be refused.
@@ -1246,11 +1255,12 @@ linking back (section 8.6). Its subcommands:
   retire source (section 14.2) MUST NOT be written, and doctor grades it under the section 11
   bounded treatment, never as an obstacle to VALID.
 
-`create`, `transition`, and `done-with-receipt` MUST each append their own worklog entry, one entry
-per change (section 6.2), in the same journaled transaction as the change. Its `detail` MUST open
-with a lifecycle line naming the record and its status change (`opf-record create <ID> <status>`, or
-`opf-record transition <ID> <from> -> <to>`); a rejection's entry MUST also record its reason.
-`worklog-append` MUST refuse a `detail` that opens with that lifecycle grammar.
+`create`, `transition`, `done-with-receipt`, and `receipt-repair` MUST each append their own worklog
+entry, one entry per change (section 6.2), in the same journaled transaction as the change. Its
+`detail` MUST open with a lifecycle line naming the record and its status change
+(`opf-record create <ID> <status>`, or `opf-record transition <ID> <from> -> <to>`); a rejection's
+entry MUST also record its reason. `worklog-append` MUST refuse a `detail` that opens with that
+lifecycle grammar.
 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:

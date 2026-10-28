@@ -6,13 +6,14 @@
   opf record transition ID STATE --actor KIND[:ID] [--reason S] [--decision S --decided-by S]
                     [--supersedes PD-ID] [--channel S --delivery-ref S] [--receipt-ref S] [--root DIR]
   opf record done-with-receipt BI-ID --actor maintainer[:ID] [--summary S] [--root DIR]
+  opf record receipt-repair BI-ID --actor maintainer[:ID] --reason S [--summary S] [--root DIR]
   opf record worklog-append --kind K --summary S --actor KIND[:ID] [--detail S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--root DIR]
   _opf_record.py --self-test         the unit leg (also registered in opf.py --self-test)
 
-`create`, `transition`, and `done-with-receipt` each append their own worklog entry (spec 6.2: one entry
-per change) in the SAME journaled transaction as the change. The entry's `detail` opens with a fixed
-lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): an informational
+`create`, `transition`, `done-with-receipt`, and `receipt-repair` each append their own worklog entry (spec
+6.2: one entry per change) in the SAME journaled transaction as the change. The entry's `detail` opens with a
+fixed lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): an informational
 record of the lifecycle (spec 8.3), never rejection evidence. `transition` takes the target STATE only: an
 assistant or automation author landing a terminal or gated state gets `/proposed` (spec 8.4), and the verb
 then writes the state the record held at that moment into the record's own `proposed_from` field (spec
@@ -61,6 +62,21 @@ proposal wrote, and its rejection back to `sent` removes those two keys again.
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
 `done`, so no ratified item can exist without its receipt.
+`receipt-repair` is the maintainer's reviewed repair of a backlog item that is nonetheless at unqualified
+`done` with no clean receipt authored by a non-importer actor (a reviewed hand edit put it there, or its
+only receipts are importer-authored, spec 8.6): maintainer-only and requiring --reason, both refused
+before the store is touched, it mints the missing `done` receipt, linked `receipt_of`, and its own
+worklog entry in one publication, rewriting counters.toml, done.index.toml and worklog.toml only; the
+backlog index is read, never rewritten, and no status changes (spec 8.8). Its new id is claimed through
+the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has, so on a homes-1 store
+it refuses with nothing written (_require_reservation_home); while SUPPORTED_HOMES is 1 (below) that is
+every store this build writes, so the shipped verb refuses it until activation. The item must be seated
+once in the active backlog index at unqualified `done`, schema-valid and authored by a clean-series
+author, and its row must be exactly the row the prior commit (HEAD) holds, read through the doctor's own
+prior-snapshot reader (_require_committed_item): the final doctor accepts no pending status change for
+this subcommand, so the reviewed edit is committed first. A clean receipt authored by a non-importer actor that already names
+the item, in the active done index or the archive (read through the doctor's own archive walk), refuses
+(_require_unreceipted), and an archive the walk does not pass refuses too, never skipped.
 
 Every subcommand runs ONE shared operation sequence (_run_operation), the in-place writer shell applied to
 record authoring (spec 8.8 is normative):
@@ -316,7 +332,7 @@ EXIT_OK = 0
 EXIT_MALFORMED = 2
 
 VERB = "record"
-SUBCOMMANDS = ("create", "transition", "done-with-receipt", "worklog-append")
+SUBCOMMANDS = ("create", "transition", "done-with-receipt", "receipt-repair", "worklog-append")
 # The HOMES-1 journal root, at the STORE root and outside `.working/`, so it is never a store operand
 # and never enters the containment walk (the .aiqt/import/journal precedent). Homes 2 keeps its record
 # journal in the typed capability home instead (_record_journal_rel; spec 4.2/8.8).
@@ -336,13 +352,15 @@ _OPTIONS = {
     "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by", "--supersedes", "--channel",
                    "--delivery-ref", "--receipt-ref"),
     "done-with-receipt": ("--root", "--actor", "--summary"),
+    "receipt-repair": ("--root", "--actor", "--reason", "--summary"),
     "worklog-append": ("--root", "--kind", "--summary", "--actor", "--detail", "--link", "--ref"),
 }
 _REQUIRED = {"create": ("--type", "--title", "--actor"), "transition": ("--actor",),
-             "done-with-receipt": ("--actor",), "worklog-append": ("--kind", "--summary", "--actor")}
+             "done-with-receipt": ("--actor",), "receipt-repair": ("--actor", "--reason"),
+             "worklog-append": ("--kind", "--summary", "--actor")}
 _REPEATED = frozenset(("--link", "--ref", "--field", "--scope"))
 # The leading positional operands, named for the usage refusal.
-_POSITIONALS = {"transition": ("ID", "STATE"), "done-with-receipt": ("BI-ID",)}
+_POSITIONALS = {"transition": ("ID", "STATE"), "done-with-receipt": ("BI-ID",), "receipt-repair": ("BI-ID",)}
 _ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
 BACKLOG = "backlog_item"
 # The first line of every auto-appended worklog entry's `detail`: a fixed grammar recording the change,
@@ -431,6 +449,15 @@ def _require_maintainer(actor):
                           "ratifies".format(actor["kind"]))
 
 
+def _require_repair_maintainer(actor):
+    """receipt-repair is maintainer-only: it is the maintainer's reviewed repair (spec 8.8), never an
+    assistant or automation act, so any other actor refuses before the store is touched."""
+    if actor["kind"] != "maintainer":
+        raise RecordError("receipt-repair is maintainer-only (spec 8.8): it records the maintainer's reviewed "
+                          "repair of a ratified backlog item that holds no receipt; an {} cannot run "
+                          "it".format(actor["kind"]))
+
+
 def _require_decision_pair(seen):
     """--decision and --decided-by come together (the resolution bundle, spec 8.5), never one without the
     other: a usage refusal, before any store is touched."""
@@ -450,8 +477,9 @@ def parse_request(argv):
     """Parse `opf record <subcommand> ...` into a Request, or raise RecordError (a usage refusal, exit 2).
     Every option value must be present, non-empty, and must not start with `--` (so a swallowed next
     option is refused rather than read as a value); a single-valued option given twice refuses. The
-    positional operands of `transition` and `done-with-receipt` come first and are grammar-checked here,
-    and a non-maintainer `done-with-receipt` refuses here, all before any store is touched."""
+    positional operands of `transition`, `done-with-receipt` and `receipt-repair` come first and are
+    grammar-checked here, and a non-maintainer `done-with-receipt` or `receipt-repair` refuses here, all
+    before any store is touched."""
     if not argv:
         raise RecordError("a subcommand is required: one of {}".format(", ".join(SUBCOMMANDS)))
     sub = argv[0]
@@ -510,6 +538,10 @@ def parse_request(argv):
         _require_maintainer(req.actor)
         if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
             raise RecordError("done-with-receipt: {} is not a backlog item id".format(req.positionals[0]))
+    if sub == "receipt-repair":
+        _require_repair_maintainer(req.actor)
+        if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
+            raise RecordError("receipt-repair: {} is not a backlog item id".format(req.positionals[0]))
     return req
 
 
@@ -592,7 +624,8 @@ def _require_within_read_cap(rel, data):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "import_status", "counters", "version", "worklog", "done_index", "journal_rel", "demand", "claims")
+                 "import_status", "counters", "version", "worklog", "done_index", "backlog", "journal_rel", "demand",
+                 "claims")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -608,7 +641,8 @@ class Context:
         self.counters = None
         self.version = None
         self.worklog = None        # the worklog operand: every subcommand appends one entry
-        self.done_index = None     # the done index operand, read by done-with-receipt only
+        self.done_index = None     # the done index operand, read by done-with-receipt and receipt-repair
+        self.backlog = None        # the backlog index receipt-repair reads, never rewrites
         self.demand = None         # the one claim of this operation (set by _claim): its namespaces,
         self.claims = None         # and at homes 2 the claimed high per namespace (_reserve_claim reads both)
 
@@ -976,11 +1010,14 @@ def _require_create_type(rtype, ctx):
 
 def _check_request(req, ctx):
     """The request checks that need the manifest but must precede every operand read: the index path is
-    built from `create --type` or from a `transition` id's namespace."""
+    built from `create --type` or from a `transition` id's namespace, and a `receipt-repair` refuses a
+    store with no reservation home."""
     if req.subcommand == "create":
         _require_create_type(req.values["--type"], ctx)
     elif req.subcommand == "transition":
         _operand_rel(req, ctx)
+    elif req.subcommand == "receipt-repair":
+        _require_reservation_home(ctx)
 
 
 def _current_handoffs(ctx, rows, verb="create handoff"):
@@ -1623,8 +1660,138 @@ def _plan_done_with_receipt(req, ctx, operand, now):
                 transition=(rid, current, "done"))
 
 
+def _require_reservation_home(ctx):
+    """receipt-repair claims its receipt's id only through the run's irrevocable id reservation (spec
+    8.2), and only a homes-2 store has a reservation home, so any other generation refuses before any
+    operand is read, with nothing written, never claiming through the homes-1 counters path. The
+    comparison is type-exact: a bool or float never reads as a generation."""
+    if not (type(ctx.homes) is int and ctx.homes == 2):
+        raise RecordError("receipt-repair claims its receipt's id through an irrevocable id reservation (spec "
+                          "8.2), which only a homes-2 store has; this store is homes {}, so the repair is "
+                          "refused; nothing written (fail-closed)".format(_opf_store._safe_display(ctx.homes)))
+
+
+def _require_done_item(row, rid):
+    """A receipt repair acts only on a backlog item at unqualified `done`: an item still open, active or
+    dropped is owed no receipt, and one at `done/proposed` is ratified with its receipt by
+    done-with-receipt, never repaired. Refused with every byte untouched."""
+    current = row.get("status")
+    if row.get("type") != BACKLOG or current != "done":
+        raise RecordError("receipt-repair adds the missing receipt of a backlog item at unqualified done; {} is "
+                          "{}{} (fail-closed)".format(
+                              rid, _opf_store._safe_display(current),
+                              "; a done/proposed item is ratified with its receipt by opf record "
+                              "done-with-receipt" if current == "done/proposed" else ""))
+
+
+def _committed_prior(ctx):
+    """The prior committed snapshot (HEAD), read through the doctor's own prior-snapshot reader
+    (_opf_observe.gather, the observations the final doctor grades the store against), or a refusal when
+    it cannot be read: whether the reviewed edit is committed then cannot be told."""
+    try:
+        observations, notes = _opf_observe.gather(ctx.res)
+    except Exception as exc:  # noqa: BLE001  an observation escape is cannot-evaluate, never a pass
+        raise RecordError("receipt-repair cannot read the prior committed snapshot ({!r}), so whether the "
+                          "reviewed edit is committed cannot be told; nothing written (fail-closed)".format(exc))
+    prior = observations.get("prior")
+    if not isinstance(prior, dict):
+        raise RecordError("receipt-repair cannot read the prior committed snapshot ({}), so whether the "
+                          "reviewed edit is committed cannot be told; nothing written (fail-closed)".format(
+                              "; ".join(notes) or "no snapshot was observed"))
+    return prior
+
+
+def _require_committed_item(ctx, row, rid):
+    """The reviewed edit that put the item at `done` must be committed: the item's current row must be
+    exactly the row the prior commit (HEAD) holds, at `done`, by the doctor's own body digest. This
+    subcommand changes no status, so its final doctor accepts no pending snapshot comparison
+    (_snapshot_pending), and an uncommitted status change would otherwise fail only after publication.
+    Refused with every byte untouched."""
+    prior = _committed_prior(ctx)
+    records = prior.get("records") if isinstance(prior.get("records"), dict) else {}
+    digests = prior.get("digests") if isinstance(prior.get("digests"), dict) else {}
+    try:
+        same = _opf_check._record_digest_matches(row, digests.get(rid))
+    except _opf_emit.EmitError as exc:
+        raise RecordError("receipt-repair cannot compute the body digest of {} ({}); nothing written "
+                          "(fail-closed)".format(rid, exc))
+    if records.get(rid) != (BACKLOG, "done") or not same:
+        raise RecordError("receipt-repair refused (uncommitted-item): {} in {} is not exactly the row the prior "
+                          "commit (HEAD) holds at done; commit the reviewed edit first, then repair its "
+                          "receipt (this subcommand changes no status, so its final doctor accepts no "
+                          "pending status change); nothing written (fail-closed)".format(rid, ctx.backlog.rel))
+
+
+def _receipt_records(ctx, rows):
+    """The done records the doctor's C-RECEIPTS join reads, in its order: the active done index (`rows`,
+    as _opf_check._make_rec views), then every archived record through the doctor's own archive walk
+    (_opf_check.archived_records). An archive input the walk finds missing, unreadable or malformed
+    refuses before anything is written, never skipped: a receipt rotated to the archive still counts
+    toward the one-to-one rule (spec 8.5, 12)."""
+    archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
+                                                     ctx.import_status, homes=ctx.homes)
+    if problems:
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this "
+                          "receipt-repair is refused: the one-to-one receipt rule (spec 8.5) reads the "
+                          "records the doctor reads, every archived record included. Nothing written; "
+                          "fail-closed".format("; ".join(problems)))
+    return [_opf_check._make_rec(r, "done", "active") for r in rows if isinstance(r, dict)] + archived
+
+
+def _require_unreceipted(ctx, operand, rid):
+    """The item must hold no clean receipt authored by a non-importer actor, in the active done index or
+    the archive: the doctor's own predicate (_opf_check._check_receipts counts a clean `done` whose actor
+    kind is not exactly `importer`, an unreadable kind included, fail-closed), so a repair never stands a
+    second receipt beside one. An importer-authored receipt is not counted (spec 8.6: it never satisfies a
+    non-importer item), so the item whose only receipts are importer-authored is repaired."""
+    held = [rec.id for rec in _receipt_records(ctx, _index_rows(operand))
+            if rec.rtype == "done" and rec.location != "imported" and rec.actor_kind != "importer"
+            and ("receipt_of", rid) in rec.links]
+    if held:
+        raise RecordError("receipt-repair refused: {} already holds the clean done receipt {} (in {} or the "
+                          "archive); the receipt is one-to-one (spec 8.5), so there is nothing to repair; "
+                          "nothing written (fail-closed)".format(
+                              rid, ", ".join(_opf_store._safe_display(h) for h in held), operand.rel))
+
+
+def _plan_receipt_repair(req, ctx, operand, now):
+    """`receipt-repair BI-ID --reason S` (maintainer-only, checked by the parser and again here): the
+    missing one-to-one `done` receipt of a backlog item already at unqualified `done`, linked
+    `receipt_of`, and its own worklog entry, in one publication; `operand` is the done index. The item is
+    read from the backlog index (ctx.backlog), never rewritten: it must be seated once, at unqualified
+    `done`, schema-valid, clean-authored, committed as it stands (_require_committed_item), and hold no
+    clean receipt (_require_unreceipted). The claim runs only at homes 2 (_require_reservation_home)."""
+    (rid,) = req.positionals
+    _require_repair_maintainer(req.actor)
+    _require_reservation_home(ctx)
+    row = _locate(ctx.backlog, rid)
+    _require_done_item(row, rid)
+    _require_valid_current(row, BACKLOG, ctx, rid, ctx.backlog.rel)
+    _require_clean_author(row, rid, ctx.backlog.rel, "receipt-repair")
+    _require_committed_item(ctx, row, rid)
+    _require_unreceipted(ctx, operand, rid)
+    ts = _rfc3339(now)
+    did, wid = _claim(ctx, [_opf_store.BASELINE_TYPES["done"], _opf_release.WL_NAMESPACE])
+    _require_unseated(_index_rows(operand), did, operand.rel)
+    receipt = {"id": did, "type": "done", "status": "recorded", "title": row.get("title"), "created_at": ts,
+               "updated_at": ts, "actor": dict(req.actor), "links": [{"rel": "receipt_of", "id": rid}]}
+    if "--summary" in req.values:
+        receipt["summary"] = req.values["--summary"]
+    _validated(receipt, "done", ctx)
+    entry = _lifecycle_entry(ctx, wid, now, req.actor, "changed",
+                             "repaired {} with receipt {}".format(rid, did),
+                             "opf-record create {} recorded\nreceipt_of: {}\nreason: {}".format(
+                                 did, rid, req.values["--reason"]),
+                             [{"rel": "relates", "id": rid}, {"rel": "relates", "id": did}])
+    operand.new_model = copy.deepcopy(operand.model)
+    operand.new_model["record"] = list(operand.new_model.get("record", [])) + [receipt]
+    _append_worklog(ctx, entry)
+    return Plan([ctx.counters, operand, ctx.worklog], [did, wid])
+
+
 _PLANNERS = {"create": _plan_create, "transition": _plan_transition,
-             "done-with-receipt": _plan_done_with_receipt, "worklog-append": _plan_worklog_append}
+             "done-with-receipt": _plan_done_with_receipt, "receipt-repair": _plan_receipt_repair,
+             "worklog-append": _plan_worklog_append}
 
 
 def _postcondition_failed(what):
@@ -1641,7 +1808,8 @@ def _reparse(raw, rel):
 
 def _expected_rels(req, ctx):
     """The operand set the request implies, in journal order: counters first, the worklog last, and between
-    them the record index a create or a status change rewrites (plus done.index.toml for a receipt)."""
+    them the record index a create or a status change rewrites (plus done.index.toml for a receipt), or
+    done.index.toml alone for a receipt repair, which never rewrites the backlog index."""
     worklog = ctx.rel(_opf_check.WORKLOG_NAME)
     if req.subcommand == "worklog-append":
         return [ctx.counters.rel, worklog]
@@ -1687,7 +1855,7 @@ def _expected_delta(req, ctx, raws, now):
         rtype = req.values["--type"]
         spec = _opf_schema.BASELINE_SPECS[rtype]
         demand = [spec.namespace, wl]
-    elif sub == "done-with-receipt":
+    elif sub in ("done-with-receipt", "receipt-repair"):
         demand = [_opf_store.BASELINE_TYPES["done"], wl]
     else:
         demand = [wl]
@@ -1845,6 +2013,25 @@ def _expected_delta(req, ctx, raws, now):
                                 "{} {} from {} to {}".format(verb, rid, current, to_status), detail,
                                 [rid] + ([superseded] if superseded is not None else []))
         transition = (rid, current, to_status)
+    elif sub == "receipt-repair":
+        # The receipt repair (spec 8.8), derived here on its own, apart from the planner: exactly one
+        # receipt appended to the done index, its title the item's own, read from the bytes the plan read
+        # the backlog index from (an input the plan never rewrites), and one entry whose lifecycle line
+        # records the receipt's creation; the backlog index is no operand and no status changes. Whether
+        # the repair is legal (the item's state, the committed row, an existing receipt) is the planner's
+        # refusal and is not judged again here.
+        (rid,) = req.positionals
+        did = ids[0]
+        item = _prior_row(_reparse(ctx.backlog.raw, ctx.backlog.rel), rid, ctx.backlog.rel)
+        receipt = {"id": did, "type": "done", "status": "recorded", "title": item.get("title"),
+                   "created_at": ts, "updated_at": ts, "actor": dict(req.actor),
+                   "links": [{"rel": "receipt_of", "id": rid}]}
+        if "--summary" in req.values:
+            receipt["summary"] = req.values["--summary"]
+        docs[rels[1]]["record"] = list(docs[rels[1]].get("record", [])) + [receipt]
+        entry = _expected_entry(wid, ts, req.actor, "changed", "repaired {} with receipt {}".format(rid, did),
+                                "opf-record create {} recorded\nreceipt_of: {}\nreason: {}".format(
+                                    did, rid, req.values["--reason"]), [rid, did])
     else:
         (rid,) = req.positionals
         did = ids[0]
@@ -3243,13 +3430,16 @@ def _conclude(ctx, lease, report, released):
 
 def _operand_rel(req, ctx):
     """The primary operand: the type index a record is created in or transitioned in (the type named by
-    the id's namespace), the backlog index for a receipt, or the worklog itself."""
+    the id's namespace), the backlog index for a receipt, the done index for a receipt repair, or the
+    worklog itself."""
     if req.subcommand == "worklog-append":
         return ctx.rel(_opf_check.WORKLOG_NAME)
     if req.subcommand == "create":
         return ctx.rel(req.values["--type"] + _opf_check.INDEX_SUFFIX)
     if req.subcommand == "done-with-receipt":
         return ctx.rel(BACKLOG + _opf_check.INDEX_SUFFIX)
+    if req.subcommand == "receipt-repair":
+        return ctx.rel("done" + _opf_check.INDEX_SUFFIX)
     ns = _ID_RE.match(req.positionals[0]).group(1)
     owners = [t for t, n in ctx.types.items() if n == ns]
     if len(owners) != 1 or owners[0] not in _opf_schema.BASELINE_SPECS:
@@ -3300,6 +3490,10 @@ def _run_operation(req):
         operand = ctx.worklog if rel == ctx.worklog.rel else _read_operand(root_fd, rel)
         if req.subcommand == "done-with-receipt":
             ctx.done_index = _read_operand(root_fd, ctx.rel("done" + _opf_check.INDEX_SUFFIX))
+        elif req.subcommand == "receipt-repair":
+            # The repair rewrites the done index (its operand) and only reads the backlog index.
+            ctx.done_index = operand
+            ctx.backlog = _read_operand(root_fd, ctx.rel(BACKLOG + _opf_check.INDEX_SUFFIX))
         # 3. PRECONDITION: every file this operation rewrites is canonical (byte reproduction).
         for op in (ctx.counters, operand, ctx.worklog, ctx.done_index):
             if op is not None:
@@ -3331,8 +3525,9 @@ def _run_operation(req):
         lease = _acquire_guard(ctx)
         try:
             # Under the held lease, the operands must still hold the exact bytes planned from (the
-            # journal's capture pin re-checks the same bytes under its own lock).
-            for op in plan.operands:
+            # journal's capture pin re-checks the same bytes under its own lock), and so must a file
+            # the plan only read (a receipt repair's backlog index).
+            for op in list(plan.operands) + ([ctx.backlog] if ctx.backlog is not None else []):
                 if _read_operand(root_fd, op.rel).raw != op.raw:
                     raise RecordError("{} changed after it was read; nothing written (fail-closed)".format(op.rel))
             # 7. at homes 2 the run's irrevocable id reservation FIRST (_reserve_claim, under the
@@ -3407,11 +3602,11 @@ def cli(argv):
 
 def self_test():
     """Unit vectors over synthetic models: the argument grammar, the allocation seam (homes 1 live, homes 2
-    deriving over the reservation scan, spec 8.2), the counters completeness proof, the four planners
+    deriving over the reservation scan, spec 8.2), the counters completeness proof, the five planners
     (the derived `/proposed`, the recorded
-    pre-proposal state and --reason of a rejection, the one-to-one receipt), the released-span check, the
-    byte-reproduction precondition, and the allowed-delta postcondition. Judged on returned
-    values and refusals, never by grepping output. Returns 0 clean, 1 on a failure, 2 on a harness error."""
+    pre-proposal state and --reason of a rejection, the one-to-one receipt, the receipt repair), the
+    released-span check, the byte-reproduction precondition, and the allowed-delta postcondition. Judged on
+    returned values and refusals, never by grepping output. Returns 0 clean, 1 on a failure, 2 on a harness error."""
     failures = []
     checked = [0]
 
@@ -3433,7 +3628,7 @@ def self_test():
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
           "transitions, resolution bundle, supersession, handoff posting, receipts, importer-authored operands, "
-          "released span, precondition, postcondition)".format(checked[0]))
+          "receipt repairs, released span, precondition, postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -3475,6 +3670,19 @@ def _self_test_units(check):
                         (["done-with-receipt", "BI-1", "--actor", "assistant:c"], "maintainer-only"),
                         (["done-with-receipt", "BI-1", "--actor", "automation"], "maintainer-only"),
                         (["done-with-receipt", "FN-1", "--actor", "maintainer"], "not a backlog item"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer"], "missing required"),
+                        (["receipt-repair", "BI-1", "--reason", "r"], "missing required"),
+                        (["receipt-repair", "--actor", "maintainer", "--reason", "r"], "requires the operand"),
+                        (["receipt-repair", "BI-1", "--actor", "assistant:c", "--reason", "r"], "maintainer-only"),
+                        (["receipt-repair", "BI-1", "--actor", "automation", "--reason", "r"], "maintainer-only"),
+                        (["receipt-repair", "FN-1", "--actor", "maintainer", "--reason", "r"], "not a backlog item"),
+                        (["receipt-repair", "imported:BI-1", "--actor", "maintainer", "--reason", "r"],
+                         "not a record id"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "a", "--reason", "b"],
+                         "more than once"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", ""], "requires"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "r", "--link",
+                          "relates=BI-2"], "unrecognized argument"),
                         (["create", "--type", "backlog_item", "--title", "t"], "missing required"),
                         (["create", "--type", "a", "--type", "b", "--title", "t", "--actor", "maintainer"],
                          "more than once"),
@@ -3492,6 +3700,9 @@ def _self_test_units(check):
           and req.actor == {"kind": "assistant"})
     req = parse_request(["done-with-receipt", "BI-3", "--actor", "maintainer:j"])
     check("parse done-with-receipt", req.positionals == ["BI-3"] and req.actor == {"kind": "maintainer", "id": "j"})
+    req = parse_request(["receipt-repair", "BI-3", "--actor", "maintainer:j", "--reason", "r", "--summary", "s"])
+    check("parse receipt-repair", req.positionals == ["BI-3"] and req.actor == {"kind": "maintainer", "id": "j"}
+          and req.values == {"--reason": "r", "--summary": "s"})
 
     # -- the allocation seam and the completeness proof ----------------------------------------------------
     ids, high = claim_ids(1, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True)
@@ -3877,6 +4088,128 @@ def _self_test_planners(check, ctx_of, full, now):
     check("the postcondition refuses a plan missing the counters operand",
           _refuses(lambda: post(p, c, argv), "operand set"))
     _self_test_transitions(check, plan, post, full, now)
+    _self_test_receipt_repair(check, ctx_of, full, now)
+
+
+def _self_test_receipt_repair(check, ctx_of, full, now):
+    """receipt-repair over synthetic models (spec 8.8): the missing receipt of an item at unqualified `done`
+    and its own entry, the backlog index read and never rewritten, no status change, homes 2 only; the
+    importer-only receipt case repaired; each refusal (homes 1, the item's state, its validity and author,
+    an uncommitted row, an active or archived clean receipt, an archive the walk does not pass); and the
+    independent oracle refusing a drifted plan. The committed snapshot reader and the archive walk are
+    replaced for the planner, so no git or archive tree is read here."""
+    earlier = "2026-09-26T00:00:00Z"
+    counters = dict(full, BI=1, WL=1)
+    item = {"id": "BI-1", "type": BACKLOG, "status": "done", "title": "t", "created_at": earlier,
+            "updated_at": earlier, "actor": {"kind": "maintainer"}}
+    argv = ["receipt-repair", "BI-1", "--actor", "maintainer:j", "--reason", "ratified in review"]
+    held = {"id": "DN-1", "type": "done", "status": "recorded", "title": "t", "created_at": earlier,
+            "updated_at": earlier, "actor": {"kind": "maintainer"}, "links": [{"rel": "receipt_of", "id": "BI-1"}]}
+    seams = globals()
+    real_prior, real_archive = seams["_committed_prior"], _opf_check.archived_records
+
+    def snapshot_of(rows):
+        return {"records": {r["id"]: (BACKLOG, r["status"]) for r in rows},
+                "digests": {r["id"]: _opf_check._record_digest(r) for r in rows}}
+
+    def plan(args=argv, items=(item,), dones=(), homes=2, prior=None, archived=([], []), dn=0):
+        c = ctx_of(dict(counters, DN=dn))
+        c.homes = homes
+        c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX),
+                                   {"schema": 1, "record": copy.deepcopy(list(items))})
+        c.done_index = _model_operand(c.done_index.rel, {"schema": 1, "record": copy.deepcopy(list(dones))})
+        r = parse_request(list(args))
+        snap = snapshot_of(items) if prior is None else prior
+        seams["_committed_prior"] = lambda ctx: snap
+        _opf_check.archived_records = lambda *a, **k: archived
+        try:
+            return _PLANNERS[r.subcommand](r, c, c.done_index, now), c
+        finally:
+            seams["_committed_prior"] = real_prior
+            _opf_check.archived_records = real_archive
+
+    def post(p, c, args=argv):
+        for o in p.operands:
+            o.new_raw = _emit_bytes(o.new_model)
+        return _postcondition(p, parse_request(list(args)), c, now)
+
+    p, c = plan()
+    receipt = c.done_index.new_model["record"][-1]
+    entry = c.worklog.new_model["entry"][-1]
+    check("receipt-repair appends one receipt_of receipt and its entry, rewriting no backlog row",
+          p.ids == ["DN-1", "WL-2"] and p.transition is None
+          and [o.rel for o in p.operands] == [c.counters.rel, c.done_index.rel, c.worklog.rel]
+          and c.backlog.new_model is None
+          and receipt == {"id": "DN-1", "type": "done", "status": "recorded", "title": "t",
+                          "created_at": "2026-09-27T01:02:03Z", "updated_at": "2026-09-27T01:02:03Z",
+                          "actor": {"kind": "maintainer", "id": "j"},
+                          "links": [{"rel": "receipt_of", "id": "BI-1"}]}
+          and entry["detail"] == "opf-record create DN-1 recorded\nreceipt_of: BI-1\nreason: ratified in review"
+          and entry["kind"] == "changed" and entry["summary"] == "repaired BI-1 with receipt DN-1"
+          and entry["links"] == [{"rel": "relates", "id": "BI-1"}, {"rel": "relates", "id": "DN-1"}]
+          and c.counters.new_model["counters"] == dict(counters, DN=1, WL=2)
+          and post(p, c) is None)
+    importer_held = dict(held, actor={"kind": "importer"})
+    p, c = plan(dones=[importer_held], dn=1)
+    check("receipt-repair adds the clean receipt beside an importer-authored one (spec 8.6)",
+          p.ids == ["DN-2", "WL-2"] and c.done_index.new_model["record"][0] == importer_held and post(p, c) is None)
+    archived_held = _opf_check._make_rec(held, "done", "archive/2026")
+    for label, kw, needle in (
+            ("a homes-1 store", {"homes": 1}, "only a homes-2 store has"),
+            ("an unknown generation", {"homes": True}, "only a homes-2 store has"),
+            ("an absent item", {"items": [dict(item, id="BI-2")]}, "is not a record in"),
+            ("an item seated twice", {"items": [item, item]}, "seated 2 times"),
+            ("an active item", {"items": [dict(item, status="active")]}, "at unqualified done"),
+            ("an open item", {"items": [dict(item, status="open")]}, "at unqualified done"),
+            ("a dropped item", {"items": [dict(item, status="dropped")]}, "at unqualified done"),
+            ("a done/proposed item", {"items": [dict(item, status="done/proposed", proposed_from="active")]},
+             "ratified with its receipt by opf record done-with-receipt"),
+            ("a schema-invalid item", {"items": [dict(item, proposed_from="active")]}, "not schema-valid"),
+            ("an importer-authored item", {"items": [dict(item, actor={"kind": "importer"})]},
+             "importer-authored-operand"),
+            ("an item uncommitted at done", {"prior": snapshot_of([dict(item, status="active")])},
+             "uncommitted-item"),
+            ("an item whose committed row differs", {"prior": snapshot_of([dict(item, title="other")])},
+             "uncommitted-item"),
+            ("an item the prior commit never held", {"prior": snapshot_of([])}, "uncommitted-item"),
+            ("an active clean receipt", {"dones": [held], "dn": 1}, "already holds the clean done receipt 'DN-1'"),
+            ("a receipt of unreadable provenance", {"dones": [dict(held, actor={})], "dn": 1},
+             "already holds the clean done receipt 'DN-1'"),
+            ("an archived clean receipt", {"archived": ([archived_held], []), "dn": 1},
+             "already holds the clean done receipt 'DN-1'"),
+            ("an archive the walk does not pass", {"archived": ([], ["C-ARCHIVE-ENUM: unreadable bucket"])},
+             "doctor's own archive walk")):
+        check("receipt-repair refuses {}".format(label),
+              _refuses(lambda kw=kw: plan(**kw), needle))
+    assistant = parse_request(["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "r"])
+    assistant.actor = {"kind": "assistant"}
+    c = ctx_of(counters)
+    c.homes = 2
+    c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX), {"schema": 1, "record": [dict(item)]})
+    check("the receipt-repair planner refuses a non-maintainer again",
+          _refuses(lambda: _plan_receipt_repair(assistant, c, c.done_index, now), "maintainer-only"))
+    from types import SimpleNamespace
+    check("an unreadable prior committed snapshot refuses the repair",
+          _refuses(lambda: _committed_prior(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1)),
+                   "cannot read the prior committed snapshot"))
+    for label, mutate in (
+            ("a repaired receipt with another title",
+             lambda p, c: c.done_index.new_model["record"][-1].__setitem__("title", "x")),
+            ("a repaired receipt linked to another item",
+             lambda p, c: c.done_index.new_model["record"][-1].__setitem__("links", [{"rel": "receipt_of",
+                                                                                      "id": "BI-2"}])),
+            ("a second repaired receipt", lambda p, c: c.done_index.new_model["record"].append(
+                dict(c.done_index.new_model["record"][-1], id="DN-2"))),
+            ("a repair counter over-advanced", lambda p, c: c.counters.new_model["counters"].__setitem__("DN", 2)),
+            ("a repair entry without its reason", lambda p, c: c.worklog.new_model["entry"][-1].__setitem__(
+                "detail", "opf-record create DN-1 recorded\nreceipt_of: BI-1")),
+            ("a repair that also rewrites the backlog row", lambda p, c: (
+                c.backlog.__setattr__("new_model", dict(c.backlog.model, record=[dict(item, updated_at=earlier)])),
+                p.operands.insert(1, c.backlog))),
+            ("a repair reporting a status change", lambda p, c: setattr(p, "transition", ("BI-1", "done", "done")))):
+        p, c = plan()
+        mutate(p, c)
+        check("the postcondition refuses {}".format(label), _refuses(lambda: post(p, c), "postcondition failed"))
 
 
 def _self_test_transitions(check, plan, post, full, now):
