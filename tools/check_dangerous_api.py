@@ -435,6 +435,12 @@ ALLOWLIST = (
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_child_status_coverage.py", "_canonical_module", "code", 1,
+     "authority loader: exec_module of the repository's own opf/tools/_child_status.py under ROOT,"
+     " the equivalent of an import; no external input"),
+    ("tools/check_child_status_coverage.py", "_load_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
     ("tools/check_rule_placement.py", "_load_probe_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of the repository's own _standards.py with one"
      " reviewed literal substitution from the self-test's fixed mutant table; no external input"),
