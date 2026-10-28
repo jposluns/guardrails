@@ -34,9 +34,14 @@ starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 le
 git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
-`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
-author one change (with its own worklog entry, and for done-with-receipt the one-to-one done receipt)
-through one journaled publication, then render and require doctor VALID, leaving the change uncommitted.
+`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, `receipt-repair`, and
+`worklog-append` author one change (with its own worklog entry, and for done-with-receipt the one-to-one done
+receipt) through one journaled publication, then render and require doctor VALID, leaving the change
+uncommitted. `receipt-repair BI-ID --actor maintainer[:ID] --reason S` adds the missing receipt of an item a
+committed reviewed edit put at done, claiming its id through a homes-2 id reservation; it refuses at homes 1,
+so while this build activates homes 1 only it refuses on every store (exit 2, recording nothing; like every
+subcommand, on a homes-1 store it first reconciles any interrupted earlier run, and that recovery, where one
+is needed, writes the store before the run refuses).
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.
@@ -19070,10 +19075,10 @@ def _import_namespace_findings(func):
 
 def _cmd_record(rest):
     """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create`, `transition`,
-    `done-with-receipt`, and `worklog-append` run the shared journaled operation sequence in _opf_record
-    (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta postcondition,
-    cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease release before
-    the report). The final doctor's one exception is a status change (transition or done-with-receipt),
+    `done-with-receipt`, `receipt-repair`, and `worklog-append` run the shared journaled operation sequence
+    in _opf_record (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta
+    postcondition, cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease
+    release before the report). The final doctor's one exception is a status change (transition or done-with-receipt),
     which may leave only doctor's cannot-evaluate for exactly that record and from/to pair, never a finding;
     doctor keeps reporting it until the change is committed. Exit 0 recorded (left uncommitted), exit 2
     every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe siblings a
@@ -19769,6 +19774,10 @@ def _cli_self_test():
                EXIT_MALFORMED)                                   # --supersedes takes a record id
         expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
         expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # maintainer-only, refused before the store
+        expect(["record", "receipt-repair", "BI-1", "--actor", "maintainer"],
+               EXIT_MALFORMED)                                   # missing --reason
+        expect(["record", "receipt-repair", "BI-1", "--actor", "assistant", "--reason", "r"],
                EXIT_MALFORMED)                                   # maintainer-only, refused before the store
         expect(["record", "create"], EXIT_MALFORMED)             # missing --type/--title/--actor
         expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
