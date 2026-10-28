@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T114)
+  check_opf_record.py --self-test                    the fixture suite (T1-T115)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -655,7 +655,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       item already holding its clean receipt (flip: the receipt check dropped); a done row naming the item
       whose links the doctor's receipt join cannot interpret, which leaves that join not evaluated (flip:
       the active done rows' interpretation check dropped, so a second receipt publishes and fails the final
-      doctor); an item whose receipt sits in the archive, and an archive the doctor's walk does not pass
+      doctor); a backlog row beside the item whose status the doctor's receipt join cannot interpret, which
+      leaves that join not evaluated too (flip: the active backlog rows' interpretation check dropped, so
+      the receipt publishes and is refused only after publication); an item whose receipt sits in the
+      archive, and an archive the doctor's walk does not pass
       (flip, for both: the active-only read, under which a second receipt publishes and fails the final
       doctor), each with every byte untouched
   T113 a peer reservation of the receipt's number landing between planning and the held capability refuses
@@ -666,6 +669,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T114 the reviewed edit uncommitted, or committed and then edited again, refuses exit 2 naming the commit,
       every byte untouched (flip: the committed-row check dropped, so the repair publishes and its final
       doctor fails after publication)
+  T115 HEAD moved between planning and the held lease, to a commit not holding the item at all and to the
+      one holding it at active, refuses exit 2 at the committed-row check read again under the held lease,
+      every byte untouched, no reservation and no transaction (flip: the held re-check dropped, so the
+      repair publishes over a prior commit that does not hold the item and records exit 0)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -10596,7 +10603,43 @@ def t112_repair_uninterpreted_receipt(fx):
 
 
 def flip_t112_uninterpreted():
-    return patch.object(record, "_require_interpreted_receipts", lambda rows, rel, rid: None)
+    real = record._require_interpreted_rows
+
+    def backlog_rows_only(rows, rtype, rel, rid):
+        if rtype != "done":
+            real(rows, rtype, rel, rid)
+    return patch.object(record, "_require_interpreted_rows", backlog_rows_only)
+
+
+def t112_repair_uninterpreted_backlog(fx):
+    """A committed BI-2 beside BI-1 whose status the doctor cannot interpret, which leaves the receipt join
+    not evaluated (C-RECEIPTS CANNOT-EVALUATE) just as an uninterpreted done row does, is refused naming
+    the backlog row and the cause, every byte untouched (flip: the active backlog rows' interpretation
+    check dropped, so the repair publishes and is refused only after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t112-uninterpreted-backlog")
+    items = model(base, BI_INDEX)
+    items["record"].append(dict(items["record"][0], id="BI-2", title="unread", status="bogus"))
+    write_commit(env, base, BI_INDEX, emit.emit_checked(items).encode("utf-8"), "a backlog row with a bad status")
+    counters = model(base, COUNTERS)
+    counters["counters"]["BI"] += 1
+    write_commit(env, base, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc != 0 and "the receipt join is not evaluated over a partial set" in out + err, (
+        "T112 the uninterpreted backlog row leaves the receipt join not evaluated at rest", rc, out[-1600:],
+        err[-800:])
+    with _self_test_homes2_active(base):
+        refused_untouched(env, fx.case("t112-uninterpreted-backlog-repair", base), REPAIR,
+                          "backlog_item record row {}#2 has status that cannot be interpreted".format(BI_INDEX))
+
+
+def flip_t112_backlog():
+    real = record._require_interpreted_rows
+
+    def done_rows_only(rows, rtype, rel, rid):
+        if rtype != "backlog_item":
+            real(rows, rtype, rel, rid)
+    return patch.object(record, "_require_interpreted_rows", done_rows_only)
 
 
 def _archived_receipt(fx, name):
@@ -10720,6 +10763,42 @@ def t114_repair_uncommitted_edit(fx):
 
 def flip_t114():
     return patch.object(record, "_require_committed_item", lambda ctx, row, rid: None)
+
+
+def t115_repair_head_moved(fx):
+    """HEAD moved between planning and the held lease (git reset --soft, as another shell would run it,
+    made just before the lease is taken, after planning read the prior commit) to the first commit, which
+    does not hold BI-1 at all, and to the commit holding BI-1 at active, each refuse at the committed-row
+    check read again under the held lease: exit 2 naming it, every byte untouched, no reservation and no
+    transaction (flip: the held re-check dropped, so the repair publishes over a prior commit that does
+    not hold the item, and, the doctor's history check never reaching an item the prior commit does not
+    hold, records exit 0)."""
+    env = fx.env
+    base = _repair_store(fx, "t115-base")
+    with _self_test_homes2_active(base):
+        for label, target in (("absent", None), ("active", "HEAD~1")):
+            root = fx.case("t115-head-moved-" + label, base)
+            if target is None:
+                (target,) = env.git(root, "rev-list", "--max-parents=0", "HEAD").split()
+            target = env.git(root, "rev-parse", "--verify", target).strip()
+            acquire = record._acquire_guard
+
+            def moved_first(ctx, root=root, target=target, acquire=acquire):
+                env.git(root, "reset", "-q", "--soft", target)
+                return acquire(ctx)
+            before = snapshot(root)
+            with patch.object(record, "_acquire_guard", moved_first), ticking():
+                result = record_cli(env, root, REPAIR)
+            assert snapshot(root) == before, ("T115 bytes untouched", label, result[0], result[2][-1600:])
+            assert _reservations(root) == [], ("T115 no reservation", label, _reservations(root))
+            assert journal_states(root, TYPED_JOURNAL) == {}, ("T115 no transaction is opened", label)
+            assert env.git(root, "rev-parse", "HEAD").strip() == target, ("T115 HEAD was moved", label)
+            refused(result, "under the held lease, immediately before publication, the prior commit (HEAD) "
+                            "was read again: receipt-repair refused (uncommitted-item): BI-1")
+
+
+def flip_t115():
+    return patch.object(record, "_require_committed_held", lambda ctx, req: None)
 
 
 TESTS = (
@@ -10918,11 +10997,13 @@ TESTS = (
     ("T112-receipt-repair-state-guard", t112_repair_state_guard, flip_t112_state),
     ("T112-receipt-repair-existing-receipt", t112_repair_existing_receipt, flip_t112_receipt),
     ("T112-receipt-repair-uninterpreted-receipt", t112_repair_uninterpreted_receipt, flip_t112_uninterpreted),
+    ("T112-receipt-repair-uninterpreted-backlog", t112_repair_uninterpreted_backlog, flip_t112_backlog),
     ("T112-receipt-repair-archived-receipt", t112_repair_archived_receipt, flip_t112_archive),
     ("T112-receipt-repair-unreadable-archive", t112_repair_unreadable_archive, flip_t112_archive),
     ("T113-receipt-repair-peer-reservation", t113_repair_peer_reservation, flip_t80_no_recheck),
     ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
+    ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
 )
 
 

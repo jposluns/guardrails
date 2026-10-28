@@ -968,7 +968,9 @@ conformance claim (checklist item 19) until the maintainer rules.
     reservation of section 8.2 and creates only the missing receipt and its worklog entry, so its
     content derives from the request, the item and the schema rules as item 4 requires. It also
     serves an item whose only receipts are importer-authored (section 8.6). The reference tooling
-    runs it only where a reservation home exists and refuses it, with nothing written, elsewhere.
+    runs it only where a reservation home exists and refuses it elsewhere, recording nothing (like
+    every subcommand, it first reconciles any interrupted earlier run, and that recovery, where one
+    is needed, writes the store before the run refuses).
     No general operation that adds a record from a reviewed edit is defined, so step 14 still
     reports any other repair class that needs a new ID as not run until an operation for it is
     added.

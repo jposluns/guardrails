@@ -845,8 +845,10 @@ numbers, doctor-VALID), adds the clean receipt beside an importer-only one, reco
 step of its publication to exactly the prestate or the poststate, and refuses with every byte untouched at
 homes 1 before any operand is read, for a non-maintainer, for an item not at done, an item already holding a
 clean receipt, active or archived, a done row naming the item whose links the doctor's receipt join cannot
-interpret, an archive the doctor's walk does not pass, a peer reservation landing before its own, a backlog
-index edited between planning and the held lease, and a reviewed edit not committed, each in its own test.
+interpret, a backlog row beside the item whose status that join cannot interpret, an archive the doctor's
+walk does not pass, a peer reservation landing before its own, a backlog index edited between planning and
+the held lease, a reviewed edit not committed, and HEAD moved between planning and the held lease to a
+commit not holding the item at done, each in its own test.
 Under
 --red-on-revert each test's flip (the byte-reproduction precondition, emit_checked, the allowed-delta
 postcondition, the known-complete proof, the in-transaction counters operand, the derived '/proposed'
@@ -877,8 +879,9 @@ refuses; and the planner's record validation replaced by a pass-through, publish
 ruling), and the receipt-repair flips (no reservation published, the homes guard, the request check's
 homes refusal, the importer-receipt firewall in the writer's join, the done index written outside the
 journaled transaction in the killed child, the maintainer check, the state guard, the receipt check, the
-active done rows' interpretation check, the archive read, the planned claims at the held reservation step,
-the held re-read of the backlog index, and the committed-row check, each dropped))
+active done rows' interpretation check, the active backlog rows' interpretation check, the archive read,
+the planned claims at the held reservation step, the held re-read of the backlog index, the committed-row
+check, and its re-run under the held lease, each dropped))
 is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
