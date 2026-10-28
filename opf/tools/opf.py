@@ -23610,11 +23610,11 @@ def _main_exit_findings():
     must escape unchanged. Then each _MAIN_EXIT_CASES script must exit exactly EXIT_MALFORMED printing
     exactly its lines. With _main_exit's SystemExit raises reverted to sys.exit, the sys.exit script
     exits 0 (or prints the entry's line after its own) and fails; with the
-    entry ending at main()'s own return (sys.exit(main()) or raise SystemExit(main())), the None script exits
-    0 and fails; with _main_exit's bare arm removed, its two mro() cases escape and fail, and with its
-    interrupt test reverted to isinstance, the __class__ case escapes and fails; with its broader arm
-    deciding the interrupt from sys.exception(), the replaced-sys.exception script whose verb raises
-    SystemExit(0) exits 0 and fails, and with its bare arm re-raising the interrupt sys.exception() reports,
+    entry ending at main()'s own return (sys.exit(main()) or raise SystemExit(main()), the child-status guard
+    first or not), the None script exits 0 and fails; with _main_exit's bare arm removed, its two mro() cases
+    escape and fail, and with its interrupt test reverted to isinstance, the __class__ case escapes and fails;
+    with its broader arm deciding the interrupt from sys.exception(), the replaced-sys.exception script whose
+    verb raises SystemExit(0) exits 0 and fails, and with its bare arm re-raising the interrupt sys.exception() reports,
     the one whose verb raises an mro() exit exits 0 and fails; with the guard around its line removed, both
     stream cases end at the stream's exception and fail, and with that guard reverted to `except
     BaseException`, the mro() stream case does; with _bootstrap's bare arm removed, the two mro() scripts
@@ -23729,6 +23729,65 @@ def _main_exit_findings():
     return failures
 
 
-# _main_exit ends the process by raising SystemExit itself: code main() loads can replace sys.exit.
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. It runs at the entry line, not inside
+# main(), because the CLI self-test calls main() in process many times and some of its fixtures set
+# SIGCHLD to SIG_IGN in process on purpose; it covers every verb, the CLI self-test, opf-ci.sh and the
+# pre-commit hook, which all start this file.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+
+# _main_exit ends the process by raising SystemExit itself: code main() loads can replace sys.exit. The
+# child-status guard runs first, inside it, and a refusal ends the process at once with its own line and
+# status (os._exit(2)), before main() runs.
 if __name__ == "__main__":
-    _main_exit(main)
+    _main_exit(lambda: _child_status_refusal_exit("opf.py") or main())

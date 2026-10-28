@@ -138,8 +138,9 @@ or unreadable one is cannot-evaluate (exit 2), never an empty side. The
 job-set, step-shell, result-masking and aggregator rules above apply to each
 file on its own, so the one-job msg-leaks.yml is its own status; that branch
 protection requires it beside Quality gates is not checked here. msg-leaks.yml
-may run only that scan
-and its self-test (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
+may run only that scan,
+its self-test and the child-status probe (CHILD_STATUS_PROBE, the first step of
+every job that runs Python) (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
 relocation finding (exit 1), because a gate moved from quality.yml into
 msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
 on every PR metadata edit.
@@ -267,6 +268,10 @@ invocations cannot be detected if nobody runs the remaining file manually. The r
 contracts (REPO_GATES) and the cited-standards contract's --self-test are
 MANDATORY_MEMBERS, so removing one of them from both runners together is a
 missing-mandatory finding, not a silent pass. The
+child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
+the same reason: removing either from both runners together is a missing-mandatory
+finding. Where the probe sits in a roster (first) is held by
+tools/check_child_status_coverage.py, not here. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
@@ -640,12 +645,16 @@ OPF_GROUP_COMMAND = "opf/tools/opf.py --self-test-group "
 OPF_WHOLE_COMMAND = "opf/tools/opf.py --self-test"
 
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
-# The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
-# scan's self-test. Any other member there is a relocation finding, because that workflow's status
-# is separate from the aggregated Quality gates and re-runs on every PR metadata edit, so a gate
-# moved into it would leave the aggregated required check silently.
+# The child-status probe: the first step of every CI job that runs Python, msg-leaks.yml's one job
+# included, so that workflow admits it beside its own scan.
+CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
+CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+# The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
+# scan's self-test and the child-status probe. Any other member there is a relocation finding,
+# because that workflow's status is separate from the aggregated Quality gates and re-runs on every
+# PR metadata edit, so a gate moved into it would leave the aggregated required check silently.
 MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
-    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test"))
+    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test", CHILD_STATUS_PROBE))
 EDIT_EVENTS = ("pull_request", "pull_request_target")
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
@@ -807,6 +816,10 @@ MANDATORY_MEMBERS = frozenset({
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
     "tools/check_git_option_table.py --self-test",
+    # The child-status probe and its coverage gate: removing either from both rosters together would
+    # leave every gate reading a lost child exit status as a pass, unseen.
+    CHILD_STATUS_PROBE,
+    CHILD_STATUS_COVERAGE,
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -4346,6 +4359,9 @@ def self_test():
         "python3 -I -B .github/check_cited_standards_contract.py --self-test",
         "python3 -I -B .github/check_cited_standards_contract.py",
         "python3 -I -B .github/check_newtab_contract.py",
+        # The child-status probe and its coverage gate, mandatory as the contracts are.
+        "python3 -I -B opf/tools/_child_status.py",
+        "python3 -I -B tools/check_child_status_coverage.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -4519,16 +4535,20 @@ def self_test():
     # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
     # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
     # the contracts out of that set turns these vectors red instead of silently skipping.
+    # The child-status probe and its coverage gate are held the same way: either one
+    # removed from both runners together is a missing-mandatory finding.
     for member in (
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
-            ".github/check_newtab_contract.py"):
+            ".github/check_newtab_contract.py",
+            "opf/tools/_child_status.py",
+            "tools/check_child_status_coverage.py"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(
                 "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
-                "repository contract would be undetected again".format(member))
-        case("01h repository contract removed from both runners: " + member,
+                "mandatory member would be undetected again".format(member))
+        case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
              1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"
@@ -6048,25 +6068,22 @@ def self_test():
     # One reader for the whole class: every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
     # This structural vector parses this file,
-    # tools/selftest_git_fixture_env.py and its four registered suite
-    # runners and pins EVERY read_text or
-    # splitlines attribute and every text-mode open() call, as spelled, to
-    # an exact per-function site count, so a new, moved or removed read
-    # written through those APIs turns this vector red and forces review
-    # against the reader. Every pinned site reads no runner or workflow
-    # text under the parity guarantee: the sites parse Python sources for
-    # ast (the git auto-maintenance pin scan included), read harness, stub
-    # call and Trace2 event logs (the auto-maintenance probe), write the
-    # selftest report, read the config-member timeout control's pid file
-    # and /proc stat, split the timeout controls' captured diagnostics,
-    # split an in-memory citation string from an in-module table,
-    # or split text the reader or a screen has already
-    # validated. A read
-    # spelled another way (getattr, an alias) is outside this tripwire, as
-    # the module docstring discloses. This vector fails without the
-    # change: the former Path.read_text() calls on the runners and the
-    # workflow (vector 26, _registered_selftests, _roster_checks) are not
-    # in this allowlist.
+    # tools/selftest_git_fixture_env.py and its four registered suite runners
+    # and pins EVERY read_text or splitlines attribute and every text-mode
+    # open() call, as spelled, to an exact per-function site count, so a new,
+    # moved or removed read written through those APIs turns this vector red
+    # and forces review against the reader. Every pinned site reads no runner
+    # or workflow text under the parity guarantee: the sites parse Python
+    # sources for ast (the git auto-maintenance pin scan included), read
+    # harness and stub call logs, write the selftest report, read the
+    # config-member timeout control's pid file and /proc stat, split the
+    # timeout controls' captured diagnostics, split an in-memory citation
+    # string from an in-module table, or split text the reader or a screen
+    # has already validated. A read spelled another way (getattr, an alias)
+    # is outside this tripwire, as the module docstring discloses. This
+    # vector fails without the change: the former Path.read_text() calls on
+    # the runners and the workflow (vector 26, _registered_selftests,
+    # _roster_checks) are not in this allowlist.
     count += 1
     import ast
     def _read_api_sites(tree):
@@ -6122,8 +6139,6 @@ def self_test():
         },
         "tools/selftest_git_fixture_env.py": {
             ("_archive_reads_use_caller_env", "read_text"): 1,
-            ("_auto_maintenance_children", "read_text"): 1,
-            ("_auto_maintenance_children", "splitlines"): 1,
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
