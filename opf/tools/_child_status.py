@@ -19,7 +19,9 @@ job of the three workflows, as this file's own launch; in the five host-patch jo
 after the Python host pin step, which tools/check_python_host_pin.py holds as the step right after
 setup-python there. opf/tools/opf.py, tools/check_selftest_execution.py and
 the hooks dispatcher (.aiqt/core/hooks/scripts/aiqt_hooks.py and its generated plugin copy) carry inline
-copies, because each is a single-file unit that cannot import a sibling; tools/check_child_status_coverage.py
+copies, because each is a single-file unit that cannot import a sibling; opf/tools/_opf_adopt_complete.py,
+opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py, tools/check_gitleaks_pin.py and
+tools/check_must_deliver.py carry the same inline copy at their entry lines. tools/check_child_status_coverage.py
 pins every copy to this text by AST and enumerates every entry point.
 
 A refusal is itself a child exit status, so it reaches a verdict only through a reader that can still see
@@ -34,10 +36,13 @@ reads it as 0. That is why every Python launcher carries its own copy.
 Exit: 0 observable (or a passing self-test); 1 a failing self-test; 2 the refusal (cannot evaluate) or usage.
 
 Disclosed residuals: an ignore or SA_NOCLDWAIT set below Python after interpreter start (a native extension,
-ctypes or an embedding host) is not seen by the disposition read, and the fork probe runs only at entry; a
-child that ignores SIGCHLD itself loses its own children's statuses, which the parent's guard cannot see; on
-a kernel other than the one the plan measured, whether SA_NOCLDWAIT loses statuses is not established; a
-fork in a multi-threaded process warns on Python 3.12 and later, so the guard runs at entry, before threads.
+ctypes or an embedding host) is not seen by the disposition read, and the fork probe runs only where a guard
+is called: at entry and, in opf.py's opf-adopt-state leg, mid-process (that leg calls
+opf/tools/_opf_adopt_state.py's self_test() in process, and the guard is its first statement); a child that
+ignores SIGCHLD itself loses its own children's statuses, which the parent's guard cannot see; on a kernel
+other than the one the plan measured, whether SA_NOCLDWAIT loses statuses is not established; a fork in a
+multi-threaded process warns on Python 3.12 and later, so the guard runs at entry, before threads, except in
+that mid-process call, which runs after opf.py's earlier self-test legs.
 """
 import sys
 
