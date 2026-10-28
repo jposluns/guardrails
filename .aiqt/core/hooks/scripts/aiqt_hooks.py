@@ -31185,6 +31185,44 @@ def _dispatcher_fail_open_warn(handler_name, detail):
     return 0
 
 
+# The child-status guard: an inline copy of the canonical constant and probe in
+# opf/tools/_child_status.py, which tools/check_child_status_coverage.py pins this copy to by AST. main()
+# runs it right after it decides the mode's error posture (see the block there).
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+
 def _stderr_note(line):
     """Best-effort stderr diagnostic: write the line and flush, swallowing every failure (a closed
     descriptor 2 leaves sys.stderr None; a full device or a broken pipe raises OSError), so the EXIT
@@ -31231,6 +31269,28 @@ def main(argv):
         return 2
     handler_name = mode
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
+    # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
+    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture). A fail-open mode must not
+    # exit 2 and must still run its handler (a stop guard's deliberate deny included), so it restores
+    # SIG_DFL for this one short-lived hook process, re-probes, and notes the restore; SIG_DFL is
+    # SIGCHLD's normal disposition, signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open
+    # handlers reach waits for its child. If the re-probe still fails, it warns without running the
+    # handler.
+    unobservable = _child_status_refusal()
+    if unobservable is not None:
+        if not is_fail_open:
+            _stderr_note("aiqt_hooks: {}: {}, so a failed child would read as a success; failing closed"
+                         .format(handler_name, unobservable))
+            return 2
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        restored = _child_status_refusal()
+        if restored is not None:
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "child exit status unobservable: " + restored)
+            except BaseException:
+                return 0
+        _stderr_note("aiqt_hooks: {}: {}; SIGCHLD restored to SIG_DFL for this hook process and the probe "
+                     "then read its child's status".format(handler_name, unobservable))
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:

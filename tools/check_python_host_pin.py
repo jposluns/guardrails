@@ -446,6 +446,11 @@ GATE_PATH = "tools/check_python_host_pin.py"
 # The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
 # not run the host patch.
 GATE_RUN = "python3 -I -B " + GATE_PATH
+# The child-status probe (opf/tools/_child_status.py). In each host-patch job the probe step runs right
+# after the Python host pin step: tools/check_child_status_coverage.py accepts the gate ahead of its probe
+# in those jobs only, so the gate-step rule holds the gate as the step right after setup-python with no
+# step between. The committed-line controls and the order vectors read this text.
+PROBE_RUN = "python3 -I -B opf/tools/_child_status.py"
 # The runner image of each host-patch job. The setup-python versions manifest lists a patch release's Linux
 # builds by Ubuntu version (on 2026-10-12, x64 builds of 3.14.4 for 22.04 and 24.04 only), so ubuntu-latest
 # would fail the jobs once it moves to an image the host patch has no build for.
@@ -533,8 +538,8 @@ JOBS_ONLY_STEM = "--jobs-o"
 # set refuses each of them by the character it must spell. An eval needs no refused character, so
 # the grammar does not refuse one spelled only in safe characters: its line is read by the deletion
 # read like any other. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). The committed host-patch jobs carry eleven run: lines with
-# seven distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
+# (_run_line_tokens runs before this scan). The committed host-patch jobs carry sixteen run: lines with
+# eight distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
 # passes this grammar unchanged. A line the grammar admits is still cannot-evaluate (exit 2, the
 # assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
 # shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
@@ -2115,6 +2120,8 @@ def _job_cases():
     second = "  second:\n    runs-on: ubuntu-latest\n    steps:\n"
     decoy = ("  decoy:\n    runs-on: ubuntu-latest\n    steps:\n"
              "      - name: Decoy judge\n        run: " + JOBS_ONLY_RUN + "\n        if: false\n")
+    probe = ("      - name: Child exit status observable (after the host pin gate)\n" + SHELL_LINE
+             + "        run: " + PROBE_RUN + "\n\n")
     # A job-level env: (BASH_ENV) placed in every host-patch job, which in CI silences every step of them.
     every_env = tuple((job, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs) for job in HOST_JOBS)
     return (
@@ -2167,6 +2174,11 @@ def _job_cases():
          "is not the Python host pin step", "gate-step"),
         ("jobs/step-before-gate-finding",
          ((GFE, GATE_STEP, "      - run: pip install other-python\n\n" + GATE_STEP),), (),
+         "is not the Python host pin step", "gate-step"),
+        # The child-status probe step belongs right after the gate step: a probe step between the
+        # setup-python step and the gate step, like any other step there, leaves the gate step out of
+        # its place.
+        ("jobs/probe-step-before-gate-finding", ((GFE, GATE_STEP, probe + GATE_STEP),), (),
          "is not the Python host pin step", "gate-step"),
         ("jobs/opf-suite-removed-finding", ((OPF, suite[OPF], ""),), (),
          "opf-host-patch does not run its suite", "suite-step"),
@@ -2564,6 +2576,22 @@ def _self_test_cases(base):
             ("pins/trailing-comment-passes", "'3.14.4'  # the host patch")):
         check(check_id, evaluate(_fixture(base, workflow=_workflow(((OPF, PIN, "python-version: " + pin),))),
                                  HOST)[0], 0)
+    # The committed order: the gate step right after the setup-python step and the child-status probe step
+    # right after the gate, in every host-patch job, as quality.yml carries it. The probe step is an extra
+    # step this gate does not hold, so the tree passes; a copy whose gate-step rule reads the step after
+    # that one instead (a gate that wants a step between setup-python and itself) refuses this order and
+    # accepts the probe ahead of the gate, so each order is red under exactly one of the two.
+    probe = ("      - name: Child exit status observable (after the host pin gate)\n" + SHELL_LINE
+             + "        run: " + PROBE_RUN + "\n\n")
+    gate_line = "    gate = steps[after] if after < " + "len(steps) else {}\n"
+    shifted_gate = _mutant(base, "python_host_pin_gate_shifted", _read_text(Path(__file__).resolve()),
+                           ((gate_line, "    after += 1\n" + gate_line),))
+    ordered = _fixture(base, workflow=_workflow(tuple((job, GATE_STEP, GATE_STEP + probe) for job in HOST_JOBS)))
+    swapped = _fixture(base, workflow=_workflow(tuple((job, GATE_STEP, probe + GATE_STEP) for job in HOST_JOBS)))
+    check("jobs/gate-then-probe-passes",
+          (evaluate(ordered, HOST)[0], shifted_gate.evaluate(ordered, HOST)[0]), (0, 1))
+    check("jobs/probe-ahead-of-gate-mutant-red",
+          (evaluate(swapped, HOST)[0], shifted_gate.evaluate(swapped, HOST)[0]), (1, 0))
     # The pinned concurrency: block (a whole-line comment inside it dropped) and the pinned if: line on
     # every host-patch job pass; the clean fixture carries each. Before the lane change each was a
     # workflow-keys or job-keys finding.
@@ -3151,20 +3179,21 @@ def _self_test_cases(base):
     check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
 
     # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
-    # module constants: its five host-patch jobs carry eleven run: lines with seven distinct texts (the
-    # gate line in each job, the gate self-test line, the OPF suite line and the four git-fixture-env
-    # suite lines, one in each git-fixture-env job), and each of them passes the closed grammar and the
-    # assignment refusal unchanged. Each check holds its texts: how many committed lines carry each, and
-    # what each refusal returns for it.
+    # module constants: its five host-patch jobs carry sixteen run: lines with eight distinct texts (the
+    # child-status probe line and the gate line in each job, the gate self-test line, the OPF suite line
+    # and the four git-fixture-env suite lines, one in each git-fixture-env job), and each of them passes
+    # the closed grammar and the assignment refusal unchanged. Each check holds its texts: how many
+    # committed lines carry each, and what each refusal returns for it.
     committed = _committed_host_runs()
     for check_id, texts, count in (
+            ("jobs/host-job-committed-probe-line-grammar-passes", (PROBE_RUN,), 5),
             ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 5),
             ("jobs/host-job-committed-selftest-line-grammar-passes", (GATE_RUN + " --self-test",), 1),
             ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
             ("jobs/host-job-committed-gfe-suite-line-grammar-passes", GFE_RUNS, 1)):
         check(check_id, [(committed.count(text), _refused_run_char(text), _leading_assignment(text))
                          for text in texts], [(count, None, None)] * len(texts))
-    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (11, 7))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (16, 8))
 
     # The step shape (RUN_KEYS, STEP_SHELL_LINE): the Python host pin step, each suite step and the
     # --jobs-only judge step carry exactly name, run and shell, the shell: written as the exact line
