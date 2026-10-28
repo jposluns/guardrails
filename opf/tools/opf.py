@@ -424,7 +424,13 @@ def _bootstrap_exit_findings(bootstrap=None):
     with any arm reverted to describing its cause in its one unguarded print, that arm's __str__ cases
     escape the call and fail; with the broader arm's interrupt test reverted to isinstance, its two __class__
     cases escape the call and fail, and an isinstance interrupt test put first in the ImportError or OSError
-    arm makes that arm's two fail the same way."""
+    arm makes that arm's two fail the same way. The replaced-issubclass SystemExit(0) case pins the exit-2
+    outcome under a replaced issubclass, and no revert of an interrupt arm or test turns it red: the
+    replacement answers otherwise than the real issubclass only when asked whether a KeyboardInterrupt class
+    is one, and SystemExit is not, so an interrupt test that asks about the caught type reads the same with
+    it or without it. With an `except SystemExit: raise` arm put ahead of the broader arm, that case escapes
+    the call and fails, as does every other case that raises a SystemExit at import (an mro() that keeps
+    SystemExit included)."""
     import builtins
     import contextlib
     import io
@@ -19032,11 +19038,13 @@ def _cmd_init(rest):
     within the residual _bootstrap states for code opf loads; that interrupt, or
     any interrupt before or during dispatch, surfaces as
     Python's own traceback or signal); and an interrupt
-    AFTER this function returns, in the dispatcher's own return and sys.exit
-    statements, escapes as Python's traceback of those dispatcher lines (that
-    traceback shows the dispatcher's source lines and the interrupt type; by
-    then no exception is being handled, so it interpolates no init value: this
-    qualifier holds for this post-return window only). What a static scan
+    AFTER this function returns, in the dispatcher's own return statement or in
+    _main_exit, the entry's wrapper, which re-raises an interrupt and ends the
+    process by raising SystemExit itself (main() calls no sys.exit), escapes as
+    Python's traceback of those lines (that traceback shows their source lines
+    and the interrupt type; by then no exception is being handled, so it
+    interpolates no init value: this qualifier holds for this post-return
+    window only). What a static scan
     still cannot prove is stated in _init_echo's docstring (its RESIDUAL paragraph)."""
     try:
         return _init_main(rest)
@@ -21989,8 +21997,12 @@ def _cli_self_test():
               "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
               "the unlanded ops or an approval for another plan, each mutating nothing; an "
               "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2; a helper "
-              "faulting while being imported -> 2 naming the helper and the cause; the script entry -> 2 when "
-              "main() raises or returns anything but 0, 1 or 2, sys.exit replaced or not)")
+              "faulting while being imported -> 2 naming the helper and the cause, only the cause's type where "
+              "describing the cause fails, or neither where its type cannot be named or its class's "
+              "metaclass's mro() leaves out BaseException, an interrupt it raises escaping unchanged; the "
+              "script entry -> 2 when main() raises anything but an interrupt or returns anything but 0, 1 or "
+              "2, sys.exit replaced or not, and an interrupt main() raises ends the run as an uncaught "
+              "interrupt does (SIGINT, return code -2))")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
@@ -23675,8 +23687,10 @@ def _main_exit_findings():
     printing a traceback and no line that starts with opf. With _main_exit's SystemExit raises reverted to
     sys.exit, the sys.exit script exits 0 (or prints the entry's line after its own) and fails; with the
     entry ending at main()'s own return (sys.exit(main()) or raise SystemExit(main()), the child-status guard
-    first or not), the None script exits 0 and fails; with _main_exit's bare arm removed, its two mro() cases
-    that leave out KeyboardInterrupt escape and fail; with its `except KeyboardInterrupt` arm removed, the
+    first or not), the None script and the three scripts whose verb raises SystemExit(0) or an mro() exit
+    after a helper replaced sys.exception or issubclass exit 0 and fail; with _main_exit's bare arm removed,
+    its two mro() cases that leave out KeyboardInterrupt escape and fail; with its `except KeyboardInterrupt`
+    arm removed, the
     in-process mro() case naming KeyboardInterrupt ends at EXIT_MALFORMED from the bare arm, and the two
     scripts that raise that class and the replaced-issubclass script whose verb raises a KeyboardInterrupt
     print the entry's line and exit EXIT_MALFORMED, and each fails; with _bootstrap's `except
@@ -23690,7 +23704,12 @@ def _main_exit_findings():
     BaseException`, the mro() stream case does; with _bootstrap's bare arm removed, the two mro() scripts
     print the entry's line in place of the bootstrap lines and fail, and with _bootstrap's broader arm
     deciding the interrupt from sys.exception(), the replaced-sys.exception script that raises at import
-    does the same."""
+    does the same. The replaced-issubclass script whose verb raises SystemExit(0) pins the exit-2 outcome
+    under a replaced issubclass, and no revert of an interrupt test or arm turns it red: the replacement
+    answers otherwise than the real issubclass only when asked whether a KeyboardInterrupt class is one, and
+    SystemExit is not. Besides the entry revert above, an `except SystemExit: raise` arm put ahead of
+    _main_exit's broader arm makes it exit 0 and fail, as the in-process SystemExit(0) case then ends at
+    SystemExit(0) and fails."""
     import ast
     import contextlib
     import inspect
