@@ -11919,6 +11919,10 @@ def _main_isolated(report_path=None):
         # whole, so the sink denies as the bare pipe does; with no pipe in the body the note stands.
         check("crd/trunc-backquote-sink", _verdict(bg("x=`make | head`")), "deny")
         check("crd/trunc-backquote-control", _verdict(bg("x=`make`")), "warn")
+        # Backquote bodies that spend the command reading's budget deny, with a reason that names the budget
+        # rather than a '#' the command does not hold.
+        _crd_over = bg("make" + "".join(" `: {}`".format(_crd_n) for _crd_n in range(7506)))
+        check("crd/trunc-backquote-limit", (_verdict(_crd_over), "budget" in str(_crd_over[1])), ("deny", True))
         # ROUND-7 (codex finding 5): the sink is resolved THROUGH shell command-modifier wrappers
         # (command/env/nice/stdbuf/... with their own option/assignment args), so a truncating sink hidden
         # behind a wrapper is still caught; a genuine NON-truncating wrapped command still allows-with-note.

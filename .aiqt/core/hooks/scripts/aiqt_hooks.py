@@ -368,7 +368,7 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -2826,16 +2826,25 @@ def _segments(command, locale=False, skip_empty=False):
 # place where the scan cannot tell how bash quotes the text after it every run of text between two backquotes
 # is read as a possible body (_backquote_bodies, _backquote_runs), and the bodies of one segment's
 # substitutions, and the readings of a body's uncertain '#', are read together in the one added reading, so a
-# guard that reads segments in order can read a sequence no single reading of the body holds.
+# guard that reads segments in order can read a sequence no single reading of the body holds. So the text after
+# a here-document operator is read too, a quoted here-document's body included ('gh pr create --body "$(cat
+# <<'EOF' ... `git diff` ... EOF)"' reads git diff as a command, where bash runs only cat), and a body's
+# commands stand between the record that opens it and the record before that one, so a pipe from that record
+# reads as feeding the body's first command (_read_segments).
 #
 # COST. Inside one _CommandReading context each distinct text is scanned for backquotes once and each distinct
 # body is lexed once at each depth, and every later reading that holds it reuses the result (_CommandReading.scans
 # and .reads), so the readings of an uncertain '#', which hold the same backquotes, lex a body once between
 # them. Each body lexed charges its length and _READ_BODY_COST to the context's budget of _READ_BODY_LIMIT for
 # each reading its lex returns, and each body read again from .reads charges 1, so the budget bounds both the
-# body text lexed and the bodies visited; a read that would spend more raises _ReadingLimitError, an
-# _UncertainHashError, so each guard takes the path it takes for a command the lexer cannot judge, never the
-# allow it would give a command with no added reading.
+# body text lexed and the bodies visited; a read that would spend more raises _ReadingLimitError. That error is
+# an _UncertainHashError, so a ValueError, and the path a guard takes for a command the lexer cannot judge (a
+# raw fallback, or a partial lex that raises it again) can allow a command that main's reading denies, so each
+# guard that asks for the command reading catches it before any other lex error and gives the strictest
+# decision it gives a Bash command: a deny (_reading_limit_deny), or the note of git_stash_ref, which never
+# denies one. A command whose bodies spend the budget so never gets a decision looser than main's, whatever it
+# runs; the cost is a disclosed over-deny of such a command (about 7,500 short distinct bodies, or 512 KiB of
+# body text) where nothing in it is a guard's subject.
 #
 # The words _command_start passes over at the head of a segment: the reserved words that can stand right before
 # a command word. 'time' (with its -p and a '--'), 'coproc' (with the NAME of a named coprocess), 'function NAME'
@@ -2869,9 +2878,29 @@ _READ_BODY_COST = 64
 class _ReadingLimitError(_UncertainHashError):
     """Raised inside _CommandReading when lexing one more backquote body would spend more than the context's
     body budget (_READ_BODY_LIMIT, COST above _COMMAND_LEAD_WORDS). It is an _UncertainHashError with no '#'
-    (at is None), so every guard takes the path it takes for a command the lexer cannot judge; a partial lex
-    raises it too, rather than resuming (_lex_command), and the body reader never reads it as a body that does
-    not lex (_read_commands)."""
+    (at is None), and every guard that asks for the command reading catches it before its other lex errors and
+    denies (_reading_limit_deny), or gives its note where it never denies, rather than take the path it takes
+    for a command the lexer cannot judge, which can allow; a partial lex raises it too, rather than resuming
+    (_lex_command), and the body reader never reads it as a body that does not lex (_read_commands)."""
+
+
+def _reading_limit_texts(rule, subject):
+    """The (reason, banner) of the deny a guard gives when the command reading spends its body budget
+    (_ReadingLimitError, COST above _COMMAND_LEAD_WORDS): rule names the rule, subject what the guard cannot
+    rule out in the bodies left unread; the banner names the rule's id."""
+    return ("AIQT rule {}: this command holds more backquote substitution text than the shared lexer's command "
+            "reading reads within its budget ({} characters of body text, each body counted with {} more), so "
+            "this guard cannot rule out {} in the bodies left unread, and the fallback it takes for a command it "
+            "cannot read could allow what a full reading denies; it is denied rather than allowed unread "
+            "(check-fails-closed-on-unreadable). Use fewer backquote substitutions, write long text to a file and "
+            "pass the file, or split the command.".format(rule, _READ_BODY_LIMIT, _READ_BODY_COST, subject),
+            "AIQT guardrail: denied a command whose backquote substitutions are past the command reading's budget "
+            "(rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
+def _reading_limit_deny(rule, subject):
+    """The deny of _reading_limit_texts(rule, subject)."""
+    return _deny(*_reading_limit_texts(rule, subject))
 
 
 class _CommandReading:
@@ -3140,8 +3169,12 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None):
     """The command reading of one reading of a command (A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS, above
     _COMMAND_LEAD_WORDS): segments, that reading's _Segment records in order, each read from its command word
     (_read_past), with the commands of each backquote substitution the reading's text holds (_backquote_bodies,
-    read by _read_commands) inserted before the record that opens it, so a pipe or separator between that
-    record and its neighbours keeps its place. The text is rebuilt from the records' raw text and separators
+    read by _read_commands) inserted before the record that opens it. Every record keeps its own separator, so
+    the record before the opener now has the body's commands as its next records: a pipe that record ends with
+    is read, in this added reading, as feeding the body's first command rather than the opener ('git diff |
+    less -p "`head -1 f`"' reads git diff piped into head), an over-read in the safe direction, since the lexer's
+    own segments are judged first and unchanged (OVER-READ, above _COMMAND_LEAD_WORDS). The text is rebuilt
+    from the records' raw text and separators
     rather than taken from the command, so it is this reading's text: the body of a quoted here-document,
     which no record holds, is not in it, and a body the lexer split at a separator inside it ('x=`make | head`')
     is read whole. A record that ends at a newline or at the end of the text has no separator, so a newline
@@ -4349,6 +4382,11 @@ def diff_source_pretool(data):
         # added one was read from, for the destination of the compound around it (_diff_compound_console).
         with _CommandReading(origins=True) as reading:
             segments = _lex_command(command)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the fallback below can note or allow a dump that main's
+        # reading denies, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that dumps a patch to "
+                                   "the console")
     except _UncertainHashError:
         # The fallback would only note an apparent producer; one behind a '#' whose comment reading the
         # lexer could not judge under both readings is treated as the confirmed console dump it may be, and
@@ -4955,7 +4993,8 @@ def find_ai_authorship(command):
     line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
     nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
     command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
-    fallback."""
+    fallback. Raises _ReadingLimitError when the command reading of the command or of any run line spends its
+    body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it."""
     if len(command) > _CMTIDN_READ_LIMIT:
         raise ValueError(_CMTIDN_TOO_LONG)
     bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
@@ -4963,6 +5002,8 @@ def find_ai_authorship(command):
     try:
         hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
                               {})
+    except _ReadingLimitError:
+        raise
     except ValueError:
         if not unread[0]:
             raise
@@ -5008,6 +5049,8 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
             # command word and the commands of each backquote substitution, so a git command behind 'for NAME
             # do', which the finder below does not pass over, or inside backquotes is read too.
             segments = _segments_read(command, locale=locale, skip_empty=True)
+        except _ReadingLimitError:
+            raise  # the command reading spent its budget: the handler denies, never a line left unread
         except ValueError as exc:
             error = error or exc
             continue
@@ -5189,6 +5232,12 @@ def commit_identity(data):
     reads = _SubstHeredocs.reads
     try:
         hit = find_ai_authorship(command)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the raw fallback below can allow an identity that main's
+        # reading finds, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("cmtidn (commit-identity)", "a git command recording an AI identity (a "
+                                   "co-author trailer, an --author value, a git identity variable or a "
+                                   "user.name or user.email value)")
     except _UncertainHashError as exc:
         # A '#' the lexer could not judge under both readings, in the command itself under each locale
         # reading: the raw scan also reads the text with its backslash-newlines, quote characters and
@@ -7176,6 +7225,12 @@ def git_explicit_binding(data):
         # command word, past a compound command's reserved words, with the commands of each backquote
         # substitution, so a breadth stage and a push inside a compound or a substitution are read in order.
         readings = _lex_readings_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the fallback below can note a publish that main's reading
+        # denies, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree breadth stage "
+                                   "(git add -A, git commit -a) followed by a git push that publishes whatever "
+                                   "the tree holds")
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -7285,7 +7340,7 @@ def git_stash_ref(data):
     bare pop/apply there warns as a bare one does. Still not read: a `$(...)` inside a double-quoted
     string, a command an eval word or an `sh -c` string holds, and a backquote body nested more than
     _SUBSTITUTION_DEPTH (16) deep; a command whose backquote bodies spend the command reading's body
-    budget takes the uncertain-'#' path below (_ReadingLimitError).
+    budget gets the note, whatever its text names (_ReadingLimitError).
     Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
     value-taking option can make its value look like an operand and falsely allow; re-validate on a
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
@@ -7327,6 +7382,15 @@ def git_stash_ref(data):
         # from its command word, past a compound command's reserved words, and the commands of each backquote
         # substitution, so '{ git stash pop; }' and 'if git stash pop; then :; fi' are read as git commands.
         segments = _segments_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: a bare pop/apply in the bodies left unread cannot be ruled
+        # out, so the note stands, this guard's strictest decision (COST above _COMMAND_LEAD_WORDS).
+        return _allow_note(
+            "AIQT expbnd (explicit-binding-over-ambient-context): this command holds more backquote substitution "
+            "text than the shared lexer's command reading reads within its budget, so a bare git stash pop/apply "
+            "in it cannot be ruled out; one acts on the top of the stash stack, ambient shared state that may not "
+            "be the entry you mean. Run 'git stash list', then name the entry explicitly, for example "
+            "\"git stash apply 'stash@{2}'\".")
     except _UncertainHashError:
         # A stash verb behind a '#' whose comment reading the lexer could not judge under both readings keeps
         # the note it would earn, and so does a command whose quoting the fallback text does not decode,
@@ -13182,6 +13246,12 @@ _BRNROT_BUILT = (
     "fail-safe. " + _GIT_BUILT_WORD_FIX + " The CI branch-root gate remains the authoritative backstop.",
     "AIQT guardrail: denied a git command whose options hold a word built at run time, which may create a branch "
     "from an unchecked start (rule brnrot); quote the expansion or spell the option literally.")
+# A command whose backquote bodies spend the command reading's body budget (_ReadingLimitError), on any of the
+# three lexes branch_root makes: the partial recovery and its open-grammar allow could pass a creation that
+# main's reading denies.
+_BRNROT_READ_LIMIT = _reading_limit_texts(
+    "brnrot (branch-rooted-on-live-main)", "a git command that creates a branch from an orphaned or unchecked "
+    "start")
 
 
 def branch_root(data):
@@ -13192,7 +13262,9 @@ def branch_root(data):
     fail-safe, naming the reachable correct action. A creation behind the reserved words of a compound command
     ('if git switch --orphan x', '{ git checkout --orphan x; }', 'for y do git switch --orphan x') or inside a
     backquote substitution is read as its own command too (the command reading, _CommandReading), after the
-    lexer's own segments and with their spelling records. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
+    lexer's own segments and with their spelling records, and a command whose backquote bodies spend that
+    reading's body budget DENIES on any of its lexes (_ReadingLimitError), never the partial recovery's
+    open-grammar allow. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
     command-local '-C <dir>'/'--work-tree' redirect that RESOLVES to a concrete directory has its ancestry
     checked THERE (the -C fleet convention is honoured, not blocked): a rooted start ALLOWS, while a target
     that is not a rooted repository DENIES fail-safe via the ancestry-unknown path ('-C $VAR', '-C
@@ -13250,6 +13322,8 @@ def branch_root(data):
         # reserved words, its spelling records kept, and the commands of each backquote substitution.
         with _WordSpellings():
             segments = _segments_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        return _deny(*_BRNROT_READ_LIMIT)
     except ValueError as exc:
         # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
         # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
@@ -13281,6 +13355,8 @@ def branch_root(data):
             with _WordSpellings(), _LexStops() as stops:
                 segments = [(seg.argv, seg.sep_after)
                             for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
+        except _ReadingLimitError:
+            return _deny(*_BRNROT_READ_LIMIT)  # not the open-grammar allow below
         except ValueError:
             if named:
                 return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
@@ -13291,9 +13367,12 @@ def branch_root(data):
     if _SubstHeredocs.reads != reads:
         # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
         # segments main's partial lex recovers, past the body, are judged too.
-        with _SubstHeredocFloor(), _WordSpellings():
-            segments = segments + [(seg.argv, seg.sep_after)
-                                   for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
+        try:
+            with _SubstHeredocFloor(), _WordSpellings():
+                segments = segments + [(seg.argv, seg.sep_after)
+                                       for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
+        except _ReadingLimitError:
+            return _deny(*_BRNROT_READ_LIMIT)
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
@@ -16609,6 +16688,11 @@ def commit_msg_subst(data):
         # adds each segment read from its command word, past a compound command's reserved words, and the
         # commands of each backquote substitution, so a commit inside 'if ...; then' or backquotes is read.
         segments = _lex_command_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the raw fallback below can allow a substitution that
+        # main's reading denies, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("sectvl (tool-argument-validation)", "a backtick or $( command substitution in "
+                                   "a git commit argument, which the shell runs before git sees the argument")
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -21599,6 +21683,12 @@ def orch_truncation_guard(data):
     # which the lexer splits at the '|' into words that keep the backquotes) is read as a pipe too.
     try:
         _segs = _segments_read(command)
+    except _ReadingLimitError:
+        # The command reading spent its body budget (COST above _COMMAND_LEAD_WORDS): it denies as at a '#'
+        # below, with a reason that names the budget rather than a '#' the command need not hold.
+        return _reading_limit_deny("trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness)", "a "
+                                   "producer piped into a truncating sink (head/tail) that would discard its "
+                                   "output and exit status")
     except _UncertainHashError:
         return _deny(
             "AIQT rules trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness): this "

@@ -20599,7 +20599,9 @@ def _main_isolated(monitor):
                                     .format(crd_name, crd_guard, crd_shape, crd_command, crd_want, crd_got))
         # A compound's output goes where its closing word sends it, so diff_source_pretool notes a producer in
         # one redirected to a file or piped into a pager, as for any compound; one reaching the console, or
-        # captured by a backquote substitution or a coprocess as by '$(...)', denies.
+        # captured by a backquote substitution or a coprocess as by '$(...)', denies. Each compound has its own
+        # destination: a second one reaching the console denies though the first is redirected, a deny that
+        # only a read segment gives (main notes that command).
         crd_destinations = (
             ("{ git diff; } > out.txt", "allow-note"), ("if true; then git diff; fi > out.txt", "allow-note"),
             ("for i in 1; do git diff; done > out.txt", "allow-note"),
@@ -20607,7 +20609,7 @@ def _main_isolated(monitor):
             ("{ git diff; } | less", "allow-note"), ("while true; do git diff; break; done | less", "allow-note"),
             ("{ if true; then git diff; fi; } > out.txt", "allow-note"), ("{ git diff; } | cat", "deny"),
             ("function f { git diff; }; f", "deny"), ("x=`git diff`", "deny"), ("coproc git diff", "deny"),
-            ("{ git diff; } > out.txt; git diff", "deny"))
+            ("{ git diff; } > out.txt; { git diff; }", "deny"))
         for crd_command, crd_want in crd_destinations:
             crd_got = _decision(aiqt_hooks.diff_source_pretool, crd_command)
             if crd_got != crd_want:
@@ -20619,6 +20621,98 @@ def _main_isolated(monitor):
         if crd_got != "deny":
             failures.append("(crd-partial-body) branch_root on a body ending in a here-string: expected deny, "
                             "got {}".format(crd_got))
+        # The closed proofs read the lexer's own segments (own), as main does: this command is the redirect proof
+        # there and allows, where the proof read over the added segments too (the body's 'true') would fail and
+        # the command would take the note.
+        crd_got = _decision(aiqt_hooks.diff_source_pretool, "git diff 2> `true` > out.txt")
+        if crd_got != "allow":
+            failures.append("(crd-own-proofs) diff_source_pretool 'git diff 2> `true` > out.txt': expected allow, "
+                            "got {}".format(crd_got))
+
+        # The command reading's body budget (COST above _COMMAND_LEAD_WORDS): every guard that asks for the reading
+        # catches _ReadingLimitError before its other lex errors and gives its strictest decision, so a command
+        # whose bodies spend the budget is never allowed where main's reading denies it.
+        def crd_bodies_text(crd_count):
+            return "".join(" `: {}`".format(crd_number) for crd_number in range(crd_count))
+
+        def crd_raises(crd_command, crd_partial=False):
+            try:
+                aiqt_hooks._lex_command_read(crd_command, partial=crd_partial)
+            except aiqt_hooks._ReadingLimitError:
+                return True
+            return False
+
+        crd_over = "echo" + crd_bodies_text(7506)
+        # branch_root's partial recovery, reached past a construct the full lex does not read, spent the budget
+        # and took its open-grammar allow on these, where main denies them (bash creates the orphan branch).
+        crd_limit_shapes = (
+            "git checkout --orphan nb; echo" + crd_bodies_text(7506) + "; cat <<<y",
+            "git switch --orphan nb; echo" + crd_bodies_text(7506) + "; cat <(true)",
+            "git checkout --orphan nb; git commit -m \"$(cat <<'EOF'\nDon't\nEOF\n)\"; echo" + crd_bodies_text(9000),
+            "git checkout --orphan nb; echo \"$(cat <<'EOF'\n'\nEOF\n)\"" + crd_bodies_text(9000))
+        for crd_command in crd_limit_shapes:
+            crd_got = _decision(aiqt_hooks.branch_root, crd_command)
+            if crd_got != "deny":
+                failures.append("(crd-limit-branch-root) an orphan creation in {} characters past the reading "
+                                "budget: expected deny, got {}".format(len(crd_command), crd_got))
+        # Each guard's own catch, on commands that name none of its subjects: the fallback each took before
+        # allowed them (git_stash_ref, which never denies, notes). commit_identity's run line is one git builds
+        # from an operand, read at depth 1, alone and after a run line left unread.
+        crd_limit_sites = (
+            ("diff_source_pretool", crd_over, "deny"), ("commit_identity", crd_over, "deny"),
+            ("commit_identity", "git rebase --exec 'echo" + crd_bodies_text(7506) + "' main", "deny"),
+            ("commit_identity", "git rebase --exec 'cat <<<x' --exec 'echo" + crd_bodies_text(7506) + "' main",
+             "deny"),
+            ("git_explicit_binding", crd_over, "deny"), ("git_stash_ref", crd_over, "allow-note"),
+            ("branch_root", crd_over, "deny"), ("commit_msg_subst", crd_over, "deny"))
+        for crd_guard, crd_command, crd_want in crd_limit_sites:
+            crd_got = _decision(getattr(aiqt_hooks, crd_guard), crd_command)
+            if crd_got != crd_want:
+                failures.append("(crd-limit-site) {} on {} characters past the reading budget: expected {}, got {}"
+                                .format(crd_guard, len(crd_command), crd_want, crd_got))
+        # branch_root's third lex, of main's reading past a here-document body (_SubstHeredocFloor), reads the
+        # backquotes its first lex reads, so no command spends the budget there alone: the budget is set to 0
+        # inside that floor only, and the guard denies rather than raise.
+        crd_floor = aiqt_hooks._SubstHeredocFloor
+
+        class crd_zero_floor(crd_floor):
+            def __enter__(self):
+                self.crd_limit = aiqt_hooks._READ_BODY_LIMIT
+                aiqt_hooks._READ_BODY_LIMIT = 0
+                return super().__enter__()
+
+            def __exit__(self, *crd_exc_info):
+                aiqt_hooks._READ_BODY_LIMIT = self.crd_limit
+                return super().__exit__(*crd_exc_info)
+
+        aiqt_hooks._SubstHeredocFloor = crd_zero_floor
+        try:
+            crd_got = _decision(aiqt_hooks.branch_root, "git commit -m \"$(cat <<'EOF'\nit's `x`\nEOF\n)\"")
+        except aiqt_hooks._ReadingLimitError as crd_exc:
+            crd_got = "raised {!r}".format(crd_exc)
+        finally:
+            aiqt_hooks._SubstHeredocFloor = crd_floor
+        if crd_got != "deny":
+            failures.append("(crd-limit-floor) branch_root with the budget spent in main's floor reading: expected "
+                            "deny, got {}".format(crd_got))
+        # The budget's three ends: bodies ':NNNNN' charge 70 each, so 7488 of them and one of 64 + d characters
+        # charge _READ_BODY_LIMIT + d, and only d = 1 raises.
+        crd_ends = [crd_raises("echo" + "".join(" `:{:05d}`".format(crd_number) for crd_number in range(7488))
+                               + " `:" + "x" * (63 + crd_delta) + "`") for crd_delta in (-1, 0, 1)]
+        if (aiqt_hooks._READ_BODY_LIMIT, aiqt_hooks._READ_BODY_COST, crd_ends) != (1 << 19, 64, [False, False, True]):
+            failures.append("(crd-limit-ends) budget {} and body cost {}: raised at one under, at and one over the "
+                            "budget {!r}, expected 524288, 64 and [False, False, True]".format(
+                                aiqt_hooks._READ_BODY_LIMIT, aiqt_hooks._READ_BODY_COST, crd_ends))
+        # A partial lex raises at the budget rather than resume: resumed, it recovers only the text before the
+        # uncertain '#', which holds no body, and returns.
+        if not crd_raises("true $( #a\n) | cat; echo" + crd_bodies_text(7506), crd_partial=True):
+            failures.append("(crd-limit-partial) a partial lex past the reading budget returned rather than raise")
+        # A body read again charges 1, not a lex: 9000 copies of one body fit the budget, where 9000 lexes would
+        # not, so branch_root allows this as main does.
+        crd_got = _decision(aiqt_hooks.branch_root, "git status; echo" + " `:`" * 9000)
+        if crd_got != "allow":
+            failures.append("(crd-limit-reuse) branch_root on 9000 copies of one body: expected allow, got {}"
+                            .format(crd_got))
 
         def crd_pairs(crd_list):
             return [(list(crd_seg.argv), crd_seg.sep_after) for crd_seg in crd_list]
@@ -20689,7 +20783,10 @@ def _main_isolated(monitor):
                 failures.append("(crd-off-full) {!r}: outside _CommandReading the lex must hold only the lexer's own "
                                 "segments, the read lex them first: own {!r}, read {!r}".format(
                                     crd_command, crd_own, crd_read))
-        for crd_command in ("if git diff; then cat <<<x", "{ git stash pop; } && cat <<<x; ls"):
+        # The last holds two readings of its '#', the first changed by the command reading and the last not, so
+        # the flags stay the lexer's only where the last reading follows the added one again.
+        for crd_command in ("if git diff; then cat <<<x", "{ git stash pop; } && cat <<<x; ls",
+                            "x=$(echo #'\n); if true; then :; fi"):
             crd_own = aiqt_hooks._lex_command(crd_command, partial=True)
             crd_read = aiqt_hooks._lex_command_read(crd_command, partial=True)
             if not (crd_read[1:] == crd_own[1:] and len(crd_read[0]) > len(crd_own[0])):

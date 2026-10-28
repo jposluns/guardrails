@@ -666,6 +666,7 @@ expected-check-ids = [
   "trunc/brace-tail-denies",
   "crd/trunc-backquote-sink",
   "crd/trunc-backquote-control",
+  "crd/trunc-backquote-limit",
   "trunc/wrap-command-head-denies",
   "trunc/wrap-env-head-denies",
   "trunc/wrap-env-assign-tail-denies",
