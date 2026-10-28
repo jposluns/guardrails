@@ -2313,11 +2313,25 @@ def _validate_base(base, findings, manifest_rel=None):
     # value is a fail-closed finding. Absence means generation 1 and is not a finding: the key becomes
     # REQUIRED only when homes 2 activates (L4). This validates the DECLARATION; homes_generation()
     # decides ACTIVATION and does not activate while SUPPORTED_HOMES == 1.
+    # homes = 2 is a valid declaration only inside the homes-2 declaration pair, spec_version
+    # HOMES2_SPEC_VERSION with homes = 2 (spec 4.2 / 9.2), so homes = 2 beside any other spec_version,
+    # an absent or unparseable one included, is a fail-closed finding for every caller of
+    # validate_manifest, not only for the record verb's journal-home probe. The check keys on the
+    # declared pair alone, never on SUPPORTED_SPEC_VERSION or SUPPORTED_HOMES. A malformed homes value
+    # keeps its own finding and never reaches the pair check. Both findings share this ONE censused
+    # emission site, as the spec_version mismatch findings above do.
     if "homes" in base:
         homes = base["homes"]
+        homes_finding = None
         if type(homes) is not int or homes not in (1, 2):
-            findings.append("[opf].homes {} is not an integer generation (1 or 2)".format(
-                _safe_display(homes)))
+            homes_finding = "[opf].homes {} is not an integer generation (1 or 2)".format(
+                _safe_display(homes))
+        elif homes == 2 and sv != HOMES2_SPEC_VERSION:
+            homes_finding = ("[opf].homes = 2 is declared with spec_version {}, but homes 2 is "
+                             "declared only by spec_version {} with homes = 2 (spec 4.2 / 9.2; "
+                             "fail-closed)".format(_safe_display(sv), HOMES2_SPEC_VERSION))
+        if homes_finding is not None:
+            findings.append(homes_finding)
     return spec_tuple
 
 
@@ -3105,7 +3119,8 @@ def self_test():
               validate_manifest(_t.loads(above_pair)).status == INVALID)
 
         # 10h: [opf].homes is an optional, validated integer generation declaration.
-        # Recognition does not activate homes 2 or require a declaration in legacy manifests.
+        # Recognition does not activate homes 2 or require a declaration in legacy manifests, and
+        # homes = 2 is valid only inside the homes-2 declaration pair (spec 4.2 / 9.2).
         homes_manifest_text = manifest_text(spec_version=SUPPORTED_SPEC_VERSION)
         homes_anchor = 'import_status = "none"'
         check("homes-fixture-anchor", homes_manifest_text.count(homes_anchor) == 1)
@@ -3119,16 +3134,35 @@ def self_test():
         check("homes-absent-legacy-generation",
               homes_generation(m_homes_absent) == 1)
 
-        for generation in (1, 2):
-            m_homes = _t.loads(homes_manifest_text.replace(
-                homes_anchor, homes_anchor + "\nhomes = {}".format(generation)))
-            mv_homes = validate_manifest(m_homes)
-            check("homes-{}-valid".format(generation),
-                  type(m_homes["opf"].get("homes")) is int
-                  and m_homes["opf"]["homes"] == generation
-                  and mv_homes.status == VALID
-                  and not any("unknown key" in f or "[opf].homes" in f
-                              for f in mv_homes.findings))
+        m_homes = _t.loads(homes_manifest_text.replace(homes_anchor, homes_anchor + "\nhomes = 1"))
+        mv_homes = validate_manifest(m_homes)
+        check("homes-1-valid",
+              type(m_homes["opf"].get("homes")) is int
+              and m_homes["opf"]["homes"] == 1
+              and mv_homes.status == VALID
+              and not any("unknown key" in f or "[opf].homes" in f
+                          for f in mv_homes.findings))
+
+        # homes = 2 outside the declaration pair is INVALID with exactly one named finding: at this
+        # tooling's spec_version, below it, above it, unparseable, and with spec_version absent. The
+        # versions are literals, never SUPPORTED_SPEC_VERSION, so each stays off the pair whatever that
+        # constant becomes. Each vector rebuilds only the [opf] table of the manifest parsed above.
+        for label, version in (("base", "1.2.0"), ("older", "1.0.0"), ("above", "1.3.0"),
+                               ("unparseable", "bad"), ("absent", None)):
+            opf_off_pair = dict(m_homes["opf"], homes=2, spec_version=version)
+            if version is None:
+                del opf_off_pair["spec_version"]
+            mv_off_pair = validate_manifest(dict(m_homes, opf=opf_off_pair))
+            check("homes-2-off-pair-{}-invalid-named".format(label),
+                  mv_off_pair.status == INVALID
+                  and sum("[opf].homes = 2 is declared with spec_version" in f
+                          and HOMES2_SPEC_VERSION in f for f in mv_off_pair.findings) == 1)
+        # The pair itself stays VALID (spec-version-ceiling-homes2-pair-recognized, above) and carries
+        # no homes finding.
+        check("homes-2-pair-no-homes-finding",
+              not any("[opf].homes" in f for f in validate_manifest(
+                  dict(m_homes, opf=dict(m_homes["opf"], homes=2,
+                                         spec_version=HOMES2_SPEC_VERSION))).findings))
 
         for label, rhs in (
                 ("zero", "0"),

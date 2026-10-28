@@ -39,8 +39,9 @@ wrapper form that hides a real `git reset --hard` while the raw scan still sees 
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
 wrappers sudo/nice/timeout/nohup/sh -c/bash -c/...) now ASKS (pristine-* cases); a wrapper that ALSO
 fragments the command word `git` or the verb with quotes or a backslash is in scope through the de-quoted
-reading (gd-dequoted-* cases), while a word no raw, joined or de-quoted reading assembles (an escape decoded
-inside $'...', a parameter expansion) is a DISCLOSED best-effort residual, silently ALLOWED
+reading (gd-dequoted-* cases), while a subcommand word no raw, joined or de-quoted reading assembles now
+denies as a git alias where an unquoted parameter expansion or an ANSI-C quote builds it, and is a DISCLOSED
+best-effort residual, silently ALLOWED, only where a double-quoted expansion builds it
 (gd-dequoted-residual-* cases); the de-quoted reading also reads quoted prose, a DISCLOSED over-refusal (an
 echo or printf of fragmented work-losing prose is in scope and the closed allowlist grammar denies it:
 gd-dequote-prose-* cases). It also proves the four accuracy fixes: (1) a config-forced probe defeats
@@ -2491,8 +2492,9 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_DIFF_PRODUCER_RE",),
      r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b"),
     (("_RAW_EXPBND_MUTATE_RE",),
-     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b"),
+     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|"
+     r"notes|pull|push|rebase|refs(?!/)|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
+     r"worktree)\b"),
     (("_RAW_EXPBND_PRUNING_FETCH_RE",), r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)"),
     (("_RAW_EXPBND_ADD_BREADTH_RE", "_RAW_EXPBND_COMMIT_BREADTH_RE"),
      r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
@@ -2517,7 +2519,8 @@ _RAW_SEQUENCE_WORDS = (
     "merge", "pull", "rebase", "add", "fetch", "diff", "show", "ſhow", "log", "range-diff", "worKtree",
     "-A", "-a", "-xA", "-xa", "a-a", "--all", "--allx", "--prune", "--prune-tags", "--prunex", "-p", "-xp", "-P",
     "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")", "stash", "stashx", "checkout", "switch",
-    "branch", "$G", "`", "g*t", "g?t", "[g]", "{g,}", "@(g)", "+(g)", "!(g)", "@", "+", "!", "(", "~", "~+", "a~")
+    "branch", "history", "refs", "repack", "$G", "`", "g*t", "g?t", "[g]", "{g,}", "@(g)", "+(g)", "!(g)", "@", "+",
+    "!", "(", "~", "~+", "a~")
 _RAW_SEQUENCE_JOINERS = (" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
 # Half the corpus is drawn from the words the three-step probes need, so their orderings are well covered.
 _RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "push", "-p", "-xp", "-A", "-a", "-xa",
@@ -6743,7 +6746,7 @@ def _main_isolated(monitor):
         go = str(go_repo)
         _go_sep = ("-C " + go, "-c x.y=z", "--git-dir " + go + "/.git", "--work-tree " + go, "--namespace ns",
                    "--exec-path /nonexistent-exec", "--super-prefix sp/", "--config-env x.y=HOME",
-                   "--attr-source HEAD")
+                   "--attr-source HEAD", "--shallow-file x")
         if {_g.split(" ", 1)[0] for _g in _go_sep} != set(aiqt_hooks._GIT_ARG_OPTS):
             failures.append("(go-argopts-covered) the separated global option vectors must cover exactly "
                             "_GIT_ARG_OPTS, got {} against {}".format(sorted(_g.split(" ", 1)[0] for _g in _go_sep),
@@ -10355,6 +10358,25 @@ def _main_isolated(monitor):
             failures.append("(g423-p4-other) a -C stash removal must preserve NO new stash ref in S")
         _g423_unchanged("(g423-p4-other-state)", g423_S, g423_S_pre, "S")
 
+        # A separated --shallow-file is a value-taking global option, so git_discard reads the discard behind it
+        # exactly as behind --attr-source: the global-option branch snapshots the session repository, then
+        # decides. Before --shallow-file joined _GIT_ARG_OPTS its value read as an unrecognized subcommand and
+        # the two verdicts differed (deny against allow-note). The recovery ref is the safety property kept.
+        gsf_repo = _init_repo(tmp / "gsf-discard")
+        (gsf_repo / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _gsf_ref_count = len(_recovery_refs(gsf_repo))
+        _gsf_attr = _decision(aiqt_hooks.git_discard, "git --attr-source HEAD reset --hard", cwd=str(gsf_repo))
+        _gsf_after_attr = len(_recovery_refs(gsf_repo))
+        _gsf_shallow = _decision(aiqt_hooks.git_discard, "git --shallow-file x reset --hard", cwd=str(gsf_repo))
+        if _gsf_shallow != _gsf_attr:
+            failures.append("(gsf-discard-parity) git_discard must judge 'git --shallow-file x reset --hard' as "
+                            "it judges 'git --attr-source HEAD reset --hard': got {} against {}"
+                            .format(_gsf_shallow, _gsf_attr))
+        if not (_gsf_after_attr > _gsf_ref_count and len(_recovery_refs(gsf_repo)) > _gsf_after_attr):
+            failures.append("(gsf-discard-snapshot) each global-option reset --hard on a dirty tree must write a "
+                            "recovery ref before deciding (counts {} -> {} -> {})".format(
+                                _gsf_ref_count, _gsf_after_attr, len(_recovery_refs(gsf_repo))))
+
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
 
@@ -12069,21 +12091,25 @@ def _main_isolated(monitor):
         # denies too: the plain vectors assert those actual outcomes (the backstop's reason first now) and
         # that the de-quoted reading does not pair the feature push. The -iso vectors stand that one
         # commit-proof check down so the push layers alone decide: there the protected push was a silent
-        # allow at the pin and now denies via the backstop, and the feature-branch control allows.
+        # allow at the pin and now denies via the backstop, and the feature-branch control allows. Where the
+        # $-quote spells the subcommand word itself (dollar-push, dollar-push-dq), that word came through an
+        # ANSI-C or locale quote between the git word and its subcommand, so the git alias reading (HOW A WORD IS
+        # SPELLED) denies the feature-branch control first, the quote check stood down or not: those -ctl and
+        # -ctl-iso vectors allowed or denied for the quoting before and now deny naming the git alias.
         _orig_quote_bytes_known = aiqt_hooks._commit_quote_bytes_known
-        for _r9n, _r9m, _r9f in (
+        for _r9n, _r9m, _r9f, _r9alias in (
                 ('dollar-push', "git status; env git pu$''sh --force origin main",
-                 "git status; env git pu$''sh --force origin feature"),
+                 "git status; env git pu$''sh --force origin feature", True),
                 ('dollar-push-dq', 'git status; env git pu$""sh --force origin main',
-                 'git status; env git pu$""sh --force origin feature'),
+                 'git status; env git pu$""sh --force origin feature', True),
                 ('dollar-force', "git status; env git push --$''force origin main",
-                 "git status; env git push --$''force origin feature"),
+                 "git status; env git push --$''force origin feature", False),
                 ('dollar-force-short', "git status; env git push -$''f origin main",
-                 "git status; env git push -$''f origin feature"),
+                 "git status; env git push -$''f origin feature", False),
                 ('dollar-name', "git status; env git push --force origin ma$''in",
-                 "git status; env git push --force origin fea$''ture"),
+                 "git status; env git push --force origin fea$''ture", False),
                 ('dollar-name-dq', 'git status; env git push --force origin ma$""in',
-                 'git status; env git push --force origin fea$""ture'),
+                 'git status; env git push --force origin fea$""ture', False),
         ):
             for _r9s, _r9c in (('', _r9m), ('-ctl', _r9f)):
                 if aiqt_hooks._lex_uncertain_causes(_r9c) != ():
@@ -12094,14 +12120,25 @@ def _main_isolated(monitor):
                                 'force-push with a protected name'.format(_r9n))
             pexpect('(pl-dequote-word-{}) end to end the backstop denies the $-quote-fragmented protected push first'
                     .format(_r9n), _r9m, 'deny', cwd=plr, detail='raw command text pairs a git push')
-            pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the commit-proof quote '
-                    'check, not the backstop'.format(_r9n), _r9f, 'deny', cwd=plr, detail='ANSI-C or locale quoting')
+            if _r9alias:
+                pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the git alias '
+                        'reading of its $-quoted subcommand word, a word built at run time, not the backstop'
+                        .format(_r9n), _r9f, 'deny', cwd=plr, detail='builds at run time')
+            else:
+                pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the commit-proof '
+                        'quote check, not the backstop'.format(_r9n), _r9f, 'deny', cwd=plr,
+                        detail='ANSI-C or locale quoting')
             aiqt_hooks._commit_quote_bytes_known = lambda raw: True
             try:
                 pexpect('(pl-dequote-word-{}-iso) with the commit-proof quote check stood down the backstop denies'
                         .format(_r9n), _r9m, 'deny', cwd=plr, detail='raw command text pairs a git push')
-                pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the feature-branch '
-                        'control allows'.format(_r9n), _r9f, 'allow', cwd=plr)
+                if _r9alias:
+                    pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the git alias '
+                            'reading still denies the feature-branch control'.format(_r9n), _r9f, 'deny', cwd=plr,
+                            detail='builds at run time')
+                else:
+                    pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the '
+                            'feature-branch control allows'.format(_r9n), _r9f, 'allow', cwd=plr)
             finally:
                 aiqt_hooks._commit_quote_bytes_known = _orig_quote_bytes_known
 
@@ -12294,6 +12331,1170 @@ def _main_isolated(monitor):
                 "git push -f --push-opt marker origin", "deny", cwd=plr)
         pexpect("(f117r9-e) a genuine separated --push-option value is still skipped (plain push allows)",
                 "git push --push-option marker origin main", "allow", cwd=plr)
+        # A separated --shallow-file global option consumes the next word as its value (git 2.53.0 and 2.56.0
+        # both run 'git --shallow-file /dev/null version'), so that word is never the subcommand. Each vector
+        # below read the value as the subcommand before --shallow-file joined _GIT_ARG_OPTS: the refspec-less
+        # and HEAD forms (no protected name for the raw backstop to pair) allowed, as did the parsed layer.
+        pexpect("(gsf-a) --shallow-file does not mask a refspec-less force-push from a protected HEAD",
+                "git --shallow-file status push --force origin", "deny", cwd=plr)
+        pexpect("(gsf-b) --shallow-file does not mask a forced HEAD refspec from a protected HEAD",
+                "git --shallow-file x push origin +HEAD", "deny", cwd=plr)
+        pexpect_layer("(gsf-c) with the backstop stood down the parsed classifier denies behind --shallow-file",
+                      "git --shallow-file status push --force origin main", "deny", cwd=plr,
+                      detail="force-pushes the protected branch 'main'")
+        # The other guards that read the git subcommand judge the command behind --shallow-file as they judge
+        # the bare form (each allowed, or lost its note, while the value was read as the subcommand).
+        for _gsf_label, _gsf_handler, _gsf_cmd, _gsf_want in (
+                ("gsf-d", aiqt_hooks.commit_identity,
+                 'git --shallow-file x commit --author="Claude <noreply@anthropic.com>" -m y', "deny"),
+                ("gsf-e", aiqt_hooks.gate_weakening, "git --shallow-file x commit --no-verify -m y", "deny"),
+                ("gsf-f", aiqt_hooks.gate_weakening, "git --shallow-file x push --no-verify origin feat", "deny"),
+                ("gsf-g", aiqt_hooks.diff_source_pretool, "git --shallow-file x diff", "deny"),
+                ("gsf-h", aiqt_hooks.git_explicit_binding, "cd /abs/repo && git --shallow-file x commit -m y",
+                 "allow-note"),
+                ("gsf-i", aiqt_hooks.git_stash_ref, "git --shallow-file x stash pop", "allow-note")):
+            _gsf_got = _decision(_gsf_handler, _gsf_cmd)
+            if _gsf_got != _gsf_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _gsf_label, _gsf_handler.__name__, _gsf_cmd, _gsf_want, _gsf_got))
+        # The parse at the option's edges, through both subcommand readers: the exact separated spelling skips
+        # its value (gsf-j, red on revert); the '=' form carries the value in its own word (gsf-k); an
+        # abbreviation is not the option (gsf-l: git rejects '--shallow-fil' as unknown and runs nothing); a
+        # trailing option with no value leaves no subcommand (gsf-m).
+        for _gsf_label, _gsf_tokens, _gsf_want in (
+                ("gsf-j", ["git", "--shallow-file", "status", "push", "--force"], ("push", ["--force"])),
+                ("gsf-k", ["git", "--shallow-file=status", "push", "--force"], ("push", ["--force"])),
+                ("gsf-l", ["git", "--shallow-fil", "status", "push"], ("status", ["push"])),
+                ("gsf-m", ["git", "--shallow-file"], (None, []))):
+            for _gsf_fn in (aiqt_hooks._git_subcommand_rest, aiqt_hooks._git_sub_and_args):
+                _gsf_got = _gsf_fn(_gsf_tokens)
+                if _gsf_got != _gsf_want:
+                    failures.append("({}) {}({!r}): expected {!r}, got {!r}".format(
+                        _gsf_label, _gsf_fn.__name__, _gsf_tokens, _gsf_want, _gsf_got))
+        # The commit-identity finder reads the subcommand word itself: behind --shallow-file it is 'commit'.
+        _gsf_toks = ["git", "--shallow-file", "x", "commit", "-m", "y"]
+        _gsf_idx = list(aiqt_hooks._cmtidn_git_commands(_gsf_toks))
+        if _gsf_idx != [3]:
+            failures.append("(gsf-n) _cmtidn_git_commands({!r}): expected [3] (the commit word), got {!r}"
+                            .format(_gsf_toks, _gsf_idx))
+        # A git alias the command defines (_git_local_alias: a -c or --config-env alias, include or includeIf
+        # key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one) runs a subcommand the
+        # readers cannot see, so each treats it as unknown and possibly mutating. The handler vectors gla-a to
+        # gla-o each read the alias name as the subcommand and allowed before that reading (gla-g read the
+        # command as outside the commit grammar): the refspec-less force-push from a protected HEAD names no
+        # push and no protected branch, so neither the raw backstop nor the push classifier saw it. gla-p (a
+        # non-alias -c control) and gla-q (a -c alias the raw lossy-verb scan already denied) are regression
+        # locks, and gla-r to gla-za pin the definition forms the shared reading accepts and refuses.
+        pexpect("(gla-a) a -c alias hiding a refspec-less force-push from a protected HEAD denies",
+                "git -c alias.p=push p --force origin", "deny", cwd=plr, detail="defines a git alias for itself")
+        pexpect("(gla-b) an attached --config-env alias, whose value this guard cannot read, denies",
+                "git --config-env=alias.p=PUSHCMD p --force origin", "deny", cwd=plr)
+        pexpect("(gla-c) an alias passed by GIT_CONFIG_KEY_<n> assignments denies",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p --force origin",
+                "deny", cwd=plr)
+        pexpect("(gla-d) an include whose file can define the alias denies",
+                "git -c include.path=/abs/aliases.cfg p --force origin", "deny", cwd=plr)
+        pexpect("(gla-e) the alias denies on a feature HEAD too (its push or commit target is unknown)",
+                "git -c alias.p=push p --force origin", "deny", cwd=plf)
+        pexpect("(gla-f) GIT_CONFIG_PARAMETERS naming an alias denies",
+                "GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\" git p --force origin", "deny", cwd=plr)
+        # The commit recognizer reads the same segment as an apparent commit, so every reading of the command
+        # (main's reading of a floor included) is unverifiable rather than outside the commit grammar.
+        _gla_syntax = aiqt_hooks._commit_command_syntax("git --config-env=alias.c=COMMITCMD c -m y").status
+        if _gla_syntax != "unverifiable":
+            failures.append("(gla-g) _commit_command_syntax must read a --config-env alias as an apparent commit "
+                            "(unverifiable), got {!r}".format(_gla_syntax))
+        _gla_discard = _init_repo(tmp / "gla-discard")
+        (_gla_discard / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _gla_branch = _init_repo(tmp / "gla-branch")
+        for _gla_label, _gla_handler, _gla_cmd, _gla_cwd, _gla_want in (
+                ("gla-h", aiqt_hooks.gate_weakening, "git -c alias.c=commit c --no-verify -m y", None, "deny"),
+                ("gla-i", aiqt_hooks.gate_weakening, "git --config-env alias.c=COMMITCMD c -m y", None, "deny"),
+                ("gla-j", aiqt_hooks.git_discard, "git --config-env alias.r=RESETCMD r --hard", str(_gla_discard),
+                 "deny"),
+                ("gla-k", aiqt_hooks.git_discard, "git -c include.path=/abs/aliases.cfg r --hard",
+                 str(_gla_discard), "deny"),
+                ("gla-l", aiqt_hooks.branch_root, "git -c alias.co=checkout co -b gla-new", str(_gla_branch),
+                 "deny"),
+                ("gla-m", aiqt_hooks.commit_identity,
+                 'git -c alias.c=commit c --author="Claude <noreply@anthropic.com>" -m y', None, "deny"),
+                ("gla-n", aiqt_hooks.commit_identity,
+                 'env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=commit git c '
+                 '--author="Claude <noreply@anthropic.com>" -m y', None, "deny"),
+                ("gla-o", aiqt_hooks.commit_msg_subst, 'git -c alias.c=commit c -m "$(date)"', None, "deny"),
+                ("gla-p", aiqt_hooks.gate_weakening, "git -c core.editor=true commit -m y", None, "allow"),
+                ("gla-q", aiqt_hooks.git_discard, "git -c alias.r=reset r --hard", str(_gla_discard), "deny")):
+            _gla_got = _decision(_gla_handler, _gla_cmd, cwd=_gla_cwd)
+            if _gla_got != _gla_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _gla_label, _gla_handler.__name__, _gla_cmd, _gla_want, _gla_got))
+        # The definition forms at their edges (gla-p above is the non-alias -c control: it keeps the bare
+        # reading). The attached -c<key> form is no definition: git 2.53.0 rejects '-calias.x=y' as an unknown
+        # option and runs nothing. A value-taking global option consumes the word after it, and the walk stops
+        # at the subcommand, as _git_sub_and_args reads them.
+        for _gla_label, _gla_tokens, _gla_want in (
+                ("gla-r", ["git", "-c", "Alias.X=log", "x"], True),
+                ("gla-s", ["git", "--config-env", "alias.x=ENVVAR", "x"], True),
+                ("gla-t", ["git", "-c", "includeIf.gitdir:/abs/.path=/abs/x.cfg", "x"], True),
+                ("gla-u", ["GIT_CONFIG_KEY_3=ALIAS.x", "git", "x"], True),
+                ("gla-v", ["git", "-C", "/abs", "-c", "alias.x=log", "x"], True),
+                ("gla-w", ["git", "-c", "aliases.x=log", "x"], False),
+                ("gla-x", ["git", "-calias.x=log", "x"], False),
+                ("gla-y", ["GIT_CONFIG_KEY_0=remote.origin.mirror", "git", "push"], False),
+                ("gla-z", ["git", "log", "-c", "alias.x=y"], False),
+                ("gla-za", ["git", "--shallow-file", "-c", "alias.x=y"], False)):
+            _gla_got = aiqt_hooks._git_local_alias(_gla_tokens)
+            if _gla_got is not _gla_want:
+                failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
+                    _gla_label, _gla_tokens, _gla_want, _gla_got))
+        # A git alias defined outside the git command's own segment: when the command's text names
+        # GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere, whatever form sets it, every git
+        # command of it runs under an alias the command may define (_git_alias_named); so does every git segment
+        # when a variable in the hook's own environment names one (_git_alias_inherited). Before the export reading
+        # every glx-<guard>-<form> vector allowed: the alias name was read as the subcommand and the defining
+        # segment as no git command; before the text rule the set-a, allexport, nameref and reserved-word forms
+        # still allowed (each defined the alias on git 2.53.0). The git_discard alias values are built at run time
+        # ($GLX_CMD), so its raw lossy-verb scan names no work-losing verb either.
+        _glx_forms = (
+            ("count", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.{n} GIT_CONFIG_VALUE_0={v}; {cmd}"),
+            ("count-and", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.{n} GIT_CONFIG_VALUE_0={v} && {cmd}"),
+            ("params", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("params-and", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\" && {cmd}"),
+            ("declare", "declare -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("typeset", "typeset -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("readonly", "readonly -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("export-name", "GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; export GIT_CONFIG_PARAMETERS; {cmd}"),
+            ("local", "f() {{ local -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}; }}; f"),
+            ("include", "export GIT_CONFIG_PARAMETERS=\"'include.path'='/abs/aliases.cfg'\"; {cmd}"),
+            ("run-time", "export GIT_CONFIG_PARAMETERS=\"$GLX_PARAMS\"; {cmd}"),
+            ("set-a-read", "set -a; read -r GIT_CONFIG_PARAMETERS <<< \"'alias.{n}'='{v}'\"; {cmd}"),
+            ("allexport-printf", "set -o allexport; printf -v GIT_CONFIG_PARAMETERS %s \"'alias.{n}'='{v}'\"; {cmd}"),
+            ("set-a-for", "set -a; for GIT_CONFIG_PARAMETERS in \"'alias.{n}'='{v}'\"; do {cmd}; done"),
+            ("set-a-default", "set -a; : \"${{GIT_CONFIG_PARAMETERS:='alias.{n}'='{v}'}}\"; {cmd}"),
+            ("nameref", "declare -n r=GIT_CONFIG_PARAMETERS; r=\"'alias.{n}'='{v}'\"; export r; {cmd}"),
+            ("set-a-key-read", "set -a; GIT_CONFIG_COUNT=1; read -r GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 <<< "
+                               "'alias.{n} {v}'; {cmd}"),
+            ("if-export", "if export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; then {cmd}; fi"),
+            ("then-body", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; if true; then {cmd}; fi"),
+            ("while-export", "while export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; do {cmd}; break; done"))
+        _glx_dirty = _init_repo(tmp / "glx-discard")
+        (_glx_dirty / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _glx_branch = _init_repo(tmp / "glx-branch")
+        _glx_author = 'git c --author="Claude <noreply@anthropic.com>" -m y'
+        for _glx_handler, _glx_n, _glx_v, _glx_cmd, _glx_cwd in (
+                (aiqt_hooks.protected_line, "p", "push", "git p --force origin", plr),
+                (aiqt_hooks.gate_weakening, "c", "commit", "git c --no-verify -m y", None),
+                (aiqt_hooks.branch_root, "co", "checkout", "git co -b glx-new", str(_glx_branch)),
+                (aiqt_hooks.git_discard, "r", "$GLX_CMD", "git r --hard", str(_glx_dirty)),
+                (aiqt_hooks.commit_identity, "c", "commit", _glx_author, None),
+                (aiqt_hooks.commit_msg_subst, "c", "commit", 'git c -m "$(date)"', None)):
+            for _glx_form, _glx_template in _glx_forms:
+                _glx_full = _glx_template.format(n=_glx_n, v=_glx_v, cmd=_glx_cmd)
+                _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+                if _glx_got != "deny":
+                    failures.append("(glx-{}-{}) {} on {!r}: expected deny, got {}".format(
+                        _glx_handler.__name__, _glx_form, _glx_handler.__name__, _glx_full, _glx_got))
+        # glx-feat: the exported alias denies on a feature HEAD too. glx-o1 to glx-o3: the disclosed over-refusal, a
+        # mention that defines no alias (an unrelated value, an echo, a comment) denies, since neither the form
+        # nor the value is read. glx-c1 to glx-c9: a command naming no such variable keeps the verdict each guard
+        # gave before. glx-u1 to glx-u4 and glx-u7: on an unparseable command a git command that runs under an
+        # alias denies (_git_alias_recovered), as the residues state; glx-u5 and glx-u6 keep a plain unparseable
+        # git command's allow. glx-u7 is commit_msg_subst's fallback, which read no alias before the text rule.
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-feat", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\"; git p --force origin", plf, "deny"),
+                ("glx-o1", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat; git status", plr,
+                 "deny"),
+                ("glx-o2", aiqt_hooks.protected_line, "echo GIT_CONFIG_COUNT; git status", plr, "deny"),
+                ("glx-o3", aiqt_hooks.gate_weakening, "git status # GIT_CONFIG_PARAMETERS", None, "deny"),
+                ("glx-c1", aiqt_hooks.protected_line, "export X=1; git push --force origin", plr, "deny"),
+                ("glx-c2", aiqt_hooks.protected_line, "export X=1; git p --force origin", plr, "allow"),
+                ("glx-c3", aiqt_hooks.gate_weakening, "export X=1; git c --no-verify -m y", None, "allow"),
+                ("glx-c4", aiqt_hooks.branch_root, "export X=1; git co -b glx-new", str(_glx_branch), "allow"),
+                ("glx-c5", aiqt_hooks.git_discard, "export X=1; git r --hard", str(_glx_dirty), "allow"),
+                ("glx-c6", aiqt_hooks.commit_identity, "export X=1; " + _glx_author, None, "allow"),
+                ("glx-c7", aiqt_hooks.commit_msg_subst, 'export X=1; git c -m "$(date)"', None, "allow"),
+                ("glx-c8", aiqt_hooks.protected_line, 'set -a; read -r X <<< "v"; git p --force origin', plr, "allow"),
+                ("glx-c9", aiqt_hooks.gate_weakening, "if export X=1; then git c --no-verify -m y; fi", None, "allow"),
+                ("glx-u1", aiqt_hooks.git_discard, 'git --config-env alias.r=RCMD r --hard "', str(_glx_dirty),
+                 "deny"),
+                ("glx-u2", aiqt_hooks.git_discard, 'export GIT_CONFIG_PARAMETERS="$GLX_PARAMS"; git r --hard "',
+                 str(_glx_dirty), "deny"),
+                ("glx-u3", aiqt_hooks.gate_weakening, 'git --config-env alias.c=CCMD c -m y "', None, "deny"),
+                ("glx-u4", aiqt_hooks.gate_weakening, 'export GIT_CONFIG_PARAMETERS="$GLX_PARAMS"; git c -m y "', None,
+                 "deny"),
+                ("glx-u5", aiqt_hooks.git_discard, 'git status "', str(_glx_dirty), "allow"),
+                ("glx-u6", aiqt_hooks.gate_weakening, 'git status "', None, "allow"),
+                ("glx-u7", aiqt_hooks.commit_msg_subst, 'git --config-env alias.c=CCMD c -m "$(date)"\necho "', None,
+                 "deny")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
+        # The hook's own environment, which the Bash tool's shell inherits: a GIT_CONFIG_PARAMETERS or
+        # GIT_CONFIG_KEY_<n> there naming an alias makes every git command run under it (glx-e1 to glx-e6, each
+        # allowed before), and one carrying only unrelated configuration is not refused (glx-e7). Each case sets
+        # only its own variables, and every one is restored after.
+        _glx_names = ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+        _glx_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glx_label, _glx_env, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                    ("glx-e1", {"GIT_CONFIG_PARAMETERS": "'alias.p'='push'"}, aiqt_hooks.protected_line,
+                     "git p --force origin", plr, "deny"),
+                    ("glx-e2", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.c", "GIT_CONFIG_VALUE_0": "commit"},
+                     aiqt_hooks.gate_weakening, "git c --no-verify -m y", None, "deny"),
+                    ("glx-e3", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, aiqt_hooks.branch_root,
+                     "git co -b glx-new", str(_glx_branch), "deny"),
+                    ("glx-e4", {"GIT_CONFIG_PARAMETERS": "'alias.r'='reset'"}, aiqt_hooks.git_discard, "git r --hard",
+                     str(_glx_dirty), "deny"),
+                    ("glx-e5", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.commit_identity,
+                     _glx_author, None, "deny"),
+                    ("glx-e6", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.commit_msg_subst,
+                     'git c -m "$(date)"', None, "deny"),
+                    ("glx-e7", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"},
+                     aiqt_hooks.protected_line, "git p --force origin", plr, "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glx_env)
+                _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+                if _glx_got != _glx_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glx_label, _glx_handler.__name__, _glx_full, _glx_env, _glx_want, _glx_got))
+        finally:
+            for _glx_name, _glx_value in _glx_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # git behind a reserved word, a '{' group, time, '!' or a wrapper word runs a git alias as a git command word
+        # does (on git 2.53.0 with bash 5.3 a 'log' alias ran behind each). An alias the hook's environment carries
+        # counts as a text naming a git configuration variable, so every git word of the command runs under it
+        # (glx-we-<guard>-<form>), and a definition among the git global options after any git word of a segment
+        # defines one for that git command (glx-wl-<guard>-<form>). Before this reading each allowed, except the
+        # commit_msg_subst time, '!' and env forms, which its own modifier reading already denied (kept as locks).
+        # The local protected_line and git_discard forms use --config-env, so no push or work-losing verb is named.
+        _glw_forms = (("if", "if true; then {c}; fi"), ("brace", "{{ {c}; }}"), ("time", "time {c}"),
+                      ("bang", "! {c}"), ("while", "while {c}; do break; done"), ("env", "env {c}"))
+        _glw_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glx_name in _glx_names:
+                os.environ.pop(_glx_name, None)
+            for _glw_kind, _glw_env, _glw_handler, _glw_cmd, _glw_cwd in (
+                    ("we", "'alias.p'='push'", aiqt_hooks.protected_line, "git p --force origin", plr),
+                    ("we", "'alias.c'='commit'", aiqt_hooks.gate_weakening, "git c --no-verify -m y", None),
+                    ("we", "'alias.co'='checkout'", aiqt_hooks.branch_root, "git co -b glx-new", str(_glx_branch)),
+                    ("we", "'alias.r'='reset'", aiqt_hooks.git_discard, "git r --hard", str(_glx_dirty)),
+                    ("we", "'alias.c'='commit'", aiqt_hooks.commit_msg_subst, 'git c -m "$(date)"', None),
+                    ("wl", None, aiqt_hooks.protected_line, "git --config-env alias.p=PCMD p --force origin", plr),
+                    ("wl", None, aiqt_hooks.gate_weakening, "git -c alias.c=commit c --no-verify -m y", None),
+                    ("wl", None, aiqt_hooks.branch_root, "git -c alias.co=checkout co -b glx-new", str(_glx_branch)),
+                    ("wl", None, aiqt_hooks.git_discard, "git --config-env alias.r=RCMD r --hard", str(_glx_dirty)),
+                    ("wl", None, aiqt_hooks.commit_msg_subst, 'git -c alias.c=commit c -m "$(date)"', None)):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                for _glw_form, _glw_template in _glw_forms:
+                    _glw_full = _glw_template.format(c=_glw_cmd)
+                    _glw_got = _decision(_glw_handler, _glw_full, cwd=_glw_cwd)
+                    if _glw_got != "deny":
+                        failures.append("(glx-{}-{}-{}) {} on {!r} with {!r} in the environment: expected deny, got {}"
+                                        .format(_glw_kind, _glw_handler.__name__, _glw_form, _glw_handler.__name__,
+                                                _glw_full, _glw_env, _glw_got))
+            # glx-wx-1 to glx-wx-4: git_explicit_binding reads an aliased git command behind a reserved word, a group
+            # or time as a breadth stage and a publish (each allowed before). glx-wx-5 to glx-wx-7: the commit
+            # recognizer reads a git word behind 'then' under an environment alias, with a --config-env alias, or in a
+            # command whose text names a git configuration variable as an apparent commit, so the command is
+            # unverifiable rather than outside the commit grammar (glx-wx-5 was outside before; glx-wx-6 and glx-wx-7
+            # pin the segment reading the guards' own text-rule denies stand in front of). glx-wc-1 to glx-wc-3 keep
+            # a verdict: the same wrapped forms with no alias, or with
+            # only unrelated configuration in the environment, and a -c after the subcommand, which defines nothing.
+            # glx-wc-4 is the disclosed over-refusal (a git word with an alias definition after it in an echo) and
+            # glx-wc-5 the disclosed residual (a definition inside an sh -c body, one word here).
+            for _glw_label, _glw_env, _glw_full in (
+                    ("glx-wx-1", "'alias.p'='push'", "if true; then git add -A; git p; fi"),
+                    ("glx-wx-2", "'alias.p'='push'", "{ git add -A; }; time git p"),
+                    ("glx-wx-3", None, "if true; then git -c alias.a=add a -A; git -c alias.p=push p; fi"),
+                    ("glx-wx-4", None, "{ git -c alias.a=add a -A; }; time git -c alias.p=push p")):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                _glw_got = _decision(aiqt_hooks.git_explicit_binding, _glw_full, cwd=plr)
+                if _glw_got != "deny":
+                    failures.append("({}) git_explicit_binding on {!r} with {!r} in the environment: expected deny, "
+                                    "got {}".format(_glw_label, _glw_full, _glw_env, _glw_got))
+            for _glw_label, _glw_env, _glw_full in (
+                    ("glx-wx-5", "'alias.c'='commit'", "if true; then git c -m y; fi"),
+                    ("glx-wx-6", None, "if true; then git --config-env alias.c=CCMD c -m y; fi"),
+                    ("glx-wx-7", None, "export GIT_CONFIG_PARAMETERS=x; if true; then git c -m y; fi")):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                _glw_status = aiqt_hooks._commit_command_syntax(_glw_full).status
+                if _glw_status != "unverifiable":
+                    failures.append("({}) _commit_command_syntax({!r}) with {!r} in the environment: expected "
+                                    "unverifiable, got {!r}".format(_glw_label, _glw_full, _glw_env, _glw_status))
+            for _glw_label, _glw_env, _glw_handler, _glw_full, _glw_cwd, _glw_want in (
+                    ("glx-wc-1", {}, aiqt_hooks.protected_line, "if true; then git p --force origin; fi", plr, "allow"),
+                    ("glx-wc-2", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"},
+                     aiqt_hooks.gate_weakening, "{ git c --no-verify -m y; }", None, "allow"),
+                    ("glx-wc-3", {}, aiqt_hooks.gate_weakening, "time git log -c alias.x=y", None, "allow"),
+                    ("glx-wc-4", {}, aiqt_hooks.gate_weakening, "echo git -c alias.x=y", None, "deny"),
+                    ("glx-wc-5", {}, aiqt_hooks.gate_weakening, "sh -c 'git -c alias.c=commit c --no-verify -m y'", None,
+                     "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glw_env)
+                _glw_got = _decision(_glw_handler, _glw_full, cwd=_glw_cwd)
+                if _glw_got != _glw_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glw_label, _glw_handler.__name__, _glw_full, _glw_env, _glw_want, _glw_got))
+        finally:
+            for _glx_name, _glx_value in _glw_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # How a git alias key is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): a -c or --config-env key
+        # part spelled through a parameter or command expansion, an ANSI-C or locale quote, or a brace expansion,
+        # and a brace word with a comma between a git word and its subcommand, define a git alias whatever they
+        # decode to. Every alias here maps to log. gks-<form>-<guard>: each guard denies the parsed form (each
+        # allowed before; protected_line already denied the ANSI-C and locale forms for their quoting, so its rows
+        # also require the alias reason). gku-<form>-<guard>: the same definition behind a here-string, where only
+        # the de-quoted reading of an unparseable command sees it (_git_alias_spelled; each allowed before, and the
+        # locale form, which the de-quoted text already decoded, and protected_line's ANSI-C form, which its
+        # commit recognizer already denied, are left out). gkc-<form>-<guard> and gkcu-<form>-<guard>: a value spelled
+        # so behind a literal key, parsed and unparseable. On a parsed command a value whose expansion stands inside
+        # double quotes (param, subst) and a brace value keep the allow each guard gave before, except in
+        # gate_weakening, whose closed literal grammar denies all three (_gks_gw_grammar); a value through an
+        # ANSI-C or locale quote now denies naming the git alias under the region rule (HOW A WORD IS SPELLED; each
+        # allowed before, except in protected_line, which denied both for their quoting). On an unparseable command
+        # the de-quoted words cannot tell a quoted '$' from an unquoted one, so the param, subst, ansi and locale
+        # values now deny (each allowed before, except protected_line's ansi and locale), the disclosed
+        # over-refusal, and so does the brace value, since the leading here-string stops the lexer before the
+        # region, which is then unread (A GIT REGION THE LEXER DID NOT READ, above _git_region_open; it allowed before).
+        _gks_forms = (
+            ("param", 'git -c "${A:-alias}.l"=log l'),
+            ("subst", 'git -c "$(echo alias.l)"=log l'),
+            ("ansi", "git -c $'\\x61lias.l'=log l"),
+            ("locale", 'git -c $"alias".l=log l'),
+            ("brace-key", "git -c {alias,x}.l=log l"),
+            ("brace-word", "git {-c,alias.l=log} l"))
+        _gks_controls = (
+            ("param", 'git -c core.pager="${P:-cat}" log', "allow", "deny"),
+            ("subst", 'git -c core.pager="$(echo cat)" log', "allow", "deny"),
+            ("ansi", "git -c core.pager=$'cat' log", "deny", "deny"),
+            ("locale", 'git -c core.pager=$"cat" log', "deny", "deny"),
+            ("brace", "git -c core.pager={less,cat} log", "allow", "deny"))
+        _gks_guards = ((aiqt_hooks.protected_line, plr), (aiqt_hooks.gate_weakening, None),
+                       (aiqt_hooks.git_discard, str(_glx_dirty)), (aiqt_hooks.branch_root, str(_glx_branch)))
+        # The control rows (<label>-<form>) that gate_weakening denies under its closed literal grammar, which reads
+        # the raw text and refuses a git command whose global options or subcommand word hold an expansion, a brace
+        # or a backslash, quoted or not, and a git word in quoted text whose walk finds no subcommand: each such row
+        # denies there with the grammar's reason, while the other three guards keep the allow.
+        _gks_gw_grammar = frozenset((
+            "gkc-param", "gkc-subst", "gkc-brace",
+            "gkq-opt-word", "gkq-opt-value", "gkq-sub-word", "gkq-ansi-word",
+            "gklc-star", "gklc-arr-star", "gklc-length", "gklc-element", "gklc-names-star", "gklc-ind-star",
+            "gklc-keys-star", "gklc-ind-sub-star", "gklc-ind-count", "gklc-pattern",
+            "gku2c-nongit-echo", "gku2c-nongit-grep", "gku2c-nongit-gh"))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gks_form, _gks_cmd in _gks_forms:
+                for _gks_label, _gks_full in (("gks", _gks_cmd), ("gku", _gks_cmd.replace("git ", "git <<<x ", 1))):
+                    if _gks_label == "gku" and (_gks_form == "locale" or (
+                            _gks_name == "protected_line" and _gks_form == "ansi")):
+                        continue
+                    _gks_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gks_full}, "cwd": _gks_cwd}
+                    _gks_code, _gks_out, _gks_err = _gks_handler(_gks_data)
+                    _gks_got = _reduce_result(_gks_code, _gks_out)
+                    _gks_reason = ((_gks_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gks_got != "deny" or (_gks_label == "gks" and "git alias" not in _gks_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected a deny naming the git alias, got {} {!r}"
+                                        .format(_gks_label, _gks_form, _gks_name, _gks_name, _gks_full, _gks_got,
+                                                _gks_reason))
+            for _gks_form, _gks_cmd, _gks_want_parsed, _gks_want_unparsed in _gks_controls:
+                for _gks_label, _gks_full, _gks_want in (
+                        ("gkc", _gks_cmd, _gks_want_parsed),
+                        ("gkcu", _gks_cmd.replace("git ", "git <<<x ", 1), _gks_want_unparsed)):
+                    _gks_grammar = (_gks_name == "gate_weakening"
+                                    and "{}-{}".format(_gks_label, _gks_form) in _gks_gw_grammar)
+                    if _gks_grammar:
+                        _gks_want = "deny"
+                    _gks_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gks_full}, "cwd": _gks_cwd}
+                    _gks_code, _gks_out, _gks_err = _gks_handler(_gks_data)
+                    _gks_got = _reduce_result(_gks_code, _gks_out)
+                    _gks_reason = ((_gks_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    # A parsed deny names the git alias, which protected_line's earlier quoting deny did not; a deny
+                    # under gate_weakening's closed literal grammar names that grammar instead.
+                    if _gks_got != _gks_want or (_gks_grammar and "closed literal grammar" not in _gks_reason) or (
+                            not _gks_grammar and _gks_label == "gkc" and _gks_want == "deny"
+                            and "git alias" not in _gks_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {} {!r}".format(
+                            _gks_label, _gks_form, _gks_name, _gks_name, _gks_full, _gks_want, _gks_got,
+                            _gks_reason))
+        # The shared readers at their edges, on words lexed inside _WordSpellings (gkr-*): an attached or separated
+        # --config-env key spelled through an expansion or an ANSI-C quote, a '${X,,}' key, a key literal in effect
+        # but spelled through an ANSI-C quote (the disclosed over-refusal), a brace word as a -C value or read as
+        # the subcommand define one; a value whose expansion stands inside double quotes behind a literal key, a
+        # brace in a -c value, a brace word or a spelled definition after the subcommand do not; words lexed
+        # outside _WordSpellings carry no record, so the decoded key alone is read there, as before. gkr-j (an
+        # unquoted '${D:-/abs}' as the -C value) and gkr-n and gkr-o (an ANSI-C quote in a -c value) pinned no
+        # alias before and now define one under the region rule (HOW A WORD IS SPELLED). gkr-m, gkr-m2 and gkr-o2
+        # hold the key part's end on a lex (a part not spelled as plain literal text starting on the key's last
+        # character, inside, or just after its first '=', outside; the double-quoted '$' of gkr-m2 and gkr-o2 is no
+        # unquoted expansion, so the key part alone decides), and gkr-key-* hold it at the reader itself, where the
+        # part starts one before, at and one after the first '='.
+        for _gks_label, _gks_cmd, _gks_want, _gks_on in (
+                ("gkr-a", 'git --config-env="${A:-alias}.l"=LCMD l', True, True),
+                ("gkr-b", "git --config-env $'\\x61lias.l'=LCMD l", True, True),
+                ("gkr-c", "git -c ${K,,}=log l", True, True),
+                ("gkr-d", "git -c $'core.pager'=cat log", True, True),
+                ("gkr-e", "git -C {/abs,-c,alias.l=log} l", True, True),
+                ("gkr-f", "git -C /abs {-c,alias.l=log} l", True, True),
+                ("gkr-g", 'git --config-env=core.pager="${P:-PAGER}" log', False, True),
+                ("gkr-h", "git -c core.pager={less,cat} log", False, True),
+                ("gkr-i", "git log {a,b} -c $'\\x61lias.l'=x", False, True),
+                ("gkr-j", "git -C ${D:-/abs} log", True, True),
+                ("gkr-k", 'git -c "${A:-alias}.l"=log l', False, False),
+                ("gkr-l", "git {-c,alias.l=log} l", False, False),
+                # The key part's end: a part not spelled as plain literal text that starts on the key's last
+                # character (inside) or just after its first '=' (outside); an ANSI-C quote anywhere in the word now
+                # defines one (gkr-n, gkr-o), so the double-quoted rows hold the key part's end on a lex.
+                ("gkr-m", "git -c core.page$'r'=cat log", True, True),
+                ("gkr-n", "git -c core.pager$'='cat log", True, True),
+                ("gkr-o", "git -c core.pager=$'c'at log", True, True),
+                ("gkr-m2", 'git -c core.pager"$"=cat log', True, True),
+                ("gkr-o2", 'git -c core.pager="$"cat log', False, True)):
+            if _gks_on:
+                with aiqt_hooks._WordSpellings():
+                    _gks_segs = aiqt_hooks._lex_command(_gks_cmd)
+            else:
+                _gks_segs = aiqt_hooks._lex_command(_gks_cmd)
+            _gks_got = any(aiqt_hooks._git_local_alias(_gks_seg.argv) for _gks_seg in _gks_segs)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_local_alias on the lex of {!r} (spelling recorded: {}): expected {}, got {}"
+                                .format(_gks_label, _gks_cmd, _gks_on, _gks_want, _gks_got))
+        for _gks_label, _gks_literal, _gks_want in (("gkr-key-inside", 9, True), ("gkr-key-at", 10, False),
+                                                    ("gkr-key-outside", 11, False)):
+            _gks_got = aiqt_hooks._git_key_spelled("core.pager=cat", _gks_literal, 0)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_key_spelled('core.pager=cat', {}, 0): expected {}, got {}".format(
+                    _gks_label, _gks_literal, _gks_want, _gks_got))
+        # The unparseable reading at its edges (gkr-u*): the same reader over the de-quoted commands, past a
+        # here-string and an IO-number redirect inside the region; a spelled definition after the subcommand and a
+        # brace word in another command define nothing. gkr-u6, a value whose expansion stands inside double quotes
+        # behind a literal key, pinned no alias before; the de-quoted words cannot tell that '$' from an unquoted
+        # one, so it now defines one (the disclosed over-refusal of the region rule there).
+        for _gks_label, _gks_cmd, _gks_want in (
+                ("gkr-u1", 'git <<<x -c "${A:-alias}.l"=log l', True),
+                ("gkr-u2", "git <<<x 2>/dev/null {-c,alias.l=log} l", True),
+                ("gkr-u3", "git <<<x --config-env=`echo alias.l`=LCMD l", True),
+                ("gkr-u4", 'git <<<x log -c "$K"=v', False),
+                ("gkr-u5", "echo {a,b} <<<x; git log", False),
+                ("gkr-u6", 'git <<<x -c core.pager="$P" log', True)):
+            _gks_got = aiqt_hooks._git_alias_spelled(_gks_cmd)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_alias_spelled({!r}): expected {}, got {}".format(
+                    _gks_label, _gks_cmd, _gks_want, _gks_got))
+        # The record leaves the decoded words unchanged (gkw-*): every lex of each command, full and partial, returns
+        # the same segments inside _WordSpellings as outside it, argv compared as plain lists; inside it each argv is
+        # a _SpelledWords with one record per word, outside it a plain list; the word reader returns the same tuple
+        # with a record asked for; and the switch is off again after each use, an exception included. Each lex and
+        # each word read runs with the locale reading off and on, since a locale quote sets the unquoted flag on a
+        # branch of its own, and the last corpus command holds every part that sets it.
+        _gks_corpus = (
+            'git -c "${A:-alias}.l"=log l; echo $"x" a{b,c} ${X,,} ~/p \\$q',
+            "git -c $'\\x61lias.l'=log l | grep -c x",
+            "x=$(true)#y; git {-c,alias.l=log} l",
+            "(true)#x\ngit -c \"$K\"=v log",
+            "a=`echo {a,b}` b=$(echo 'c') git -C {/r,s} log",
+            "x=\"$(cat <<'EOF'\n# Don't stop\nEOF\n)\"; git status",
+            'git status "unterminated',
+            "git <<<x -c a.b=c l",
+            "cat {fd}>out",
+            "((((;;;; git log",
+            "git$IFS-c -C $D `echo x` $'-\\x63' ${X:-a b} $\"l\" \"$Y\" x$ $(true)y l")
+        for _gks_index, _gks_cmd in enumerate(_gks_corpus):
+            for _gks_partial, _gks_locale in ((False, False), (True, False), (False, True), (True, True)):
+                _gks_runs = []
+                for _gks_on in (False, True):
+                    try:
+                        if _gks_on:
+                            with aiqt_hooks._WordSpellings():
+                                _gks_result = aiqt_hooks._lex_command(_gks_cmd, partial=_gks_partial,
+                                                                      locale=_gks_locale)
+                        else:
+                            _gks_result = aiqt_hooks._lex_command(_gks_cmd, partial=_gks_partial, locale=_gks_locale)
+                    except ValueError as _gks_exc:
+                        _gks_runs.append(("raised", type(_gks_exc).__name__, str(_gks_exc)))
+                        continue
+                    _gks_segs = _gks_result[0] if _gks_partial else _gks_result
+                    _gks_flags = tuple(_gks_result[1:]) if _gks_partial else ()
+                    for _gks_seg in _gks_segs:
+                        _gks_spelling = getattr(_gks_seg.argv, "spelling", None)
+                        if _gks_on and _gks_seg.argv and (not isinstance(_gks_seg.argv, aiqt_hooks._SpelledWords)
+                                                          or len(_gks_spelling) != len(_gks_seg.argv)):
+                            failures.append("(gkw-{}) a lex of {!r} inside _WordSpellings returned an argv with no "
+                                            "record per word: {!r}".format(_gks_index, _gks_cmd, _gks_seg.argv))
+                        if not _gks_on and type(_gks_seg.argv) is not list:
+                            failures.append("(gkw-{}) a lex of {!r} outside _WordSpellings returned a {} argv".format(
+                                _gks_index, _gks_cmd, type(_gks_seg.argv).__name__))
+                    _gks_runs.append(([(list(_gks_seg.argv),) + tuple(_gks_seg[1:]) for _gks_seg in _gks_segs],
+                                      _gks_flags))
+                if _gks_runs[0] != _gks_runs[1]:
+                    failures.append("(gkw-{}) the lex of {!r} (partial {}, locale {}) differs inside _WordSpellings: "
+                                    "{!r} against {!r}".format(_gks_index, _gks_cmd, _gks_partial, _gks_locale,
+                                                               _gks_runs[1], _gks_runs[0]))
+                if aiqt_hooks._WordSpellings.on:
+                    failures.append("(gkw-{}) _WordSpellings stayed on after a lex of {!r}".format(_gks_index, _gks_cmd))
+            for _gks_at in range(len(_gks_cmd)):
+                if _gks_cmd[_gks_at] in " \t\n;&|<>()#":
+                    continue
+                for _gks_locale in (False, True):
+                    _gks_holder = [None]
+                    try:
+                        _gks_plain = aiqt_hooks._read_word(_gks_cmd, _gks_at, len(_gks_cmd), [], locale=_gks_locale)
+                        _gks_rec = aiqt_hooks._read_word(_gks_cmd, _gks_at, len(_gks_cmd), [], locale=_gks_locale,
+                                                         spelling=_gks_holder)
+                    except ValueError:
+                        continue
+                    if _gks_plain != _gks_rec or not isinstance(_gks_holder[0], aiqt_hooks._WordSpelling) or not (
+                            0 <= _gks_holder[0].literal <= len(_gks_plain[0])) or not isinstance(
+                                getattr(_gks_holder[0], "unquoted", None), bool):
+                        failures.append("(gkw-read-{}-{}) _read_word on {!r} at {} (locale {}): {!r} with a record "
+                                        "asked for, {!r} without, record {!r}".format(
+                                            _gks_index, _gks_at, _gks_cmd, _gks_at, _gks_locale, _gks_rec, _gks_plain,
+                                            _gks_holder[0]))
+        try:
+            with aiqt_hooks._WordSpellings():
+                aiqt_hooks._lex_command('git status "unterminated')
+        except ValueError:
+            pass
+        if aiqt_hooks._WordSpellings.on:
+            failures.append("(gkw-raise) _WordSpellings stayed on after a lex inside it raised")
+        # The rule closed over the whole region after a git word through its subcommand word (HOW A WORD IS SPELLED,
+        # above _GIT_ALIAS_KEY_RE): a word there that carries an unquoted parameter or command expansion, which bash
+        # may split into several words, or came through an ANSI-C or locale quote, defines a git alias whatever its
+        # position. Every alias here maps to log. gke-<form>-<guard>: each guard denies, naming the git alias, an
+        # unquoted expansion in an option word (opt-word), as an option's value (opt-value) and as the subcommand
+        # word (sub-word), and an option word spelled through an ANSI-C quote that decodes to -c (ansi-word); each
+        # allowed before, except protected_line's ansi-word, which it denied for its quoting without naming an alias.
+        # gkeu-<form>-<guard>: the same behind a leading here-string, where only the de-quoted reading of the
+        # unparseable command sees it (_git_alias_spelled), naming the git alias except in protected_line, whose
+        # commit recognizer denies it as an unverifiable commit; each allowed before, and protected_line's ansi-word,
+        # which that recognizer denied for its quoting, is left out here and held by gkep. gkep-<form>-<guard>: the
+        # same with a trailing here-string, past the region, where the partial lex records each word's spelling, each
+        # deny naming the git alias (each allowed before or, in protected_line's ansi-word, denied without naming
+        # one). gkq-<form>-<guard>: the same expansion fully double-quoted, which bash does not split, keeps the
+        # allow each guard gave before, as does the option word double-quoted in place of the ANSI-C quote; the
+        # opt-word row also witnesses the disclosed residual of that decision, a double-quoted word naming -c at run
+        # time before a literal definition. gate_weakening denies each gkq row under its closed literal grammar
+        # (_gks_gw_grammar).
+        # gkqu-<form>-<guard>: on the unparseable path the de-quoted words cannot tell a double-quoted '$' from an
+        # unquoted one, so the double-quoted expansions deny there (the disclosed over-refusal; each allowed before),
+        # and so does the double-quoted option word, which holds no '$', since the leading here-string leaves the
+        # region unread (A GIT REGION THE LEXER DID NOT READ, above _git_region_open; it allowed before).
+        _gke_forms = (
+            ("opt-word", "git -$C alias.l=log l", 'git -"$C" alias.l=log l'),
+            ("opt-value", "git -C $D l", 'git -C "$D" l'),
+            ("sub-word", "git $A l", 'git "$A" l'),
+            ("ansi-word", "git $'-\\x63' alias.l=log l", 'git "-\\x63" alias.l=log l'))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gke_form, _gke_cmd, _gke_quoted in _gke_forms:
+                for _gke_label, _gke_full, _gke_want, _gke_named in (
+                        ("gke", _gke_cmd, "deny", True),
+                        ("gkeu", _gke_cmd.replace("git ", "git <<<x ", 1), "deny", _gks_name != "protected_line"),
+                        ("gkep", _gke_cmd + " <<<x", "deny", True),
+                        ("gkq", _gke_quoted, "allow", False),
+                        ("gkqu", _gke_quoted.replace("git ", "git <<<x ", 1), "deny", False)):
+                    if _gke_label == "gkeu" and _gks_name == "protected_line" and _gke_form == "ansi-word":
+                        continue
+                    _gke_grammar = (_gks_name == "gate_weakening"
+                                    and "{}-{}".format(_gke_label, _gke_form) in _gks_gw_grammar)
+                    if _gke_grammar:
+                        _gke_want = "deny"
+                    _gke_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gke_full}, "cwd": _gks_cwd}
+                    _gke_code, _gke_out, _gke_err = _gks_handler(_gke_data)
+                    _gke_got = _reduce_result(_gke_code, _gke_out)
+                    _gke_reason = ((_gke_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gke_got != _gke_want or (_gke_named and "git alias" not in _gke_reason) or (
+                            _gke_grammar and "closed literal grammar" not in _gke_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}{}, got {} {!r}".format(
+                            _gke_label, _gke_form, _gks_name, _gks_name, _gke_full, _gke_want,
+                            " naming the git alias" if _gke_named else
+                            " naming the closed literal grammar" if _gke_grammar else "", _gke_got, _gke_reason))
+        # The region at its edges, on words lexed inside _WordSpellings (gkv-*): a backquote, a '$(...)' and an open
+        # '${...}' in the region, an unquoted expansion in a -c value behind a literal key, a locale quote as the
+        # subcommand and a '$' bash reads literally each define one, as do the disclosed over-refusals: an unquoted
+        # variable after another word the readers take for a git word (gkv-i) and a git command inside a backquote
+        # substitution whose closing backquote the lexer reads into its subcommand word (gkv-s). The same expansion
+        # double-quoted, escaped or single-quoted, an unquoted expansion past the subcommand word or in an assignment
+        # before the command word, a leading tilde, and words lexed outside _WordSpellings define none. The git word
+        # itself is read by its decoded text alone: an opening backquote or an ANSI-C quoted sh -c body read into it
+        # defines nothing (gkv-t, gkv-u), and so, the disclosed residual, does an unquoted expansion or a brace word
+        # that bash splits into the git word and a definition (gkv-a, gkv-v; bash 5.3 printed git -c alias.l=log l
+        # for each) and one that names git at run time (gkv-h). The other disclosed residuals, witnessed: a word in
+        # the region bash builds by filename expansion or by a brace sequence expression (gkv-w, gkv-x; bash 5.3
+        # printed -c for '-[c]' where a file named -c existed, and for '-{c..c}').
+        for _gkv_label, _gkv_cmd, _gkv_want, _gkv_on in (
+                ("gkv-a", "git$IFS-c$IFS'alias.l=log' l", False, True),
+                ("gkv-b", "git `echo -c alias.l=log` l", True, True),
+                ("gkv-c", "git $(echo -c alias.l=log) l", True, True),
+                ("gkv-d", "git ${X:-a b} l", True, True),
+                ("gkv-e", "git -c core.pager=$P log", True, True),
+                ("gkv-f", 'git $"log"', True, True),
+                ("gkv-g", "git -C x$ log", True, True),
+                ("gkv-h", "$HOME/bin/git log", False, True),
+                ("gkv-i", "grep -r git $D", True, True),
+                ("gkv-s", "echo `git status`", True, True),
+                ("gkv-t", "cd `git rev-parse --show-toplevel`", False, True),
+                ("gkv-u", "bash -c $'git status'", False, True),
+                ("gkv-v", "{git,-c,alias.l=log} l", False, True),
+                ("gkv-w", "git -[c] alias.l=log l", False, True),
+                ("gkv-x", "git -{c..c} alias.l=log l", False, True),
+                ("gkv-j", '"$HOME"/bin/git log', False, True),
+                ("gkv-k", 'git "$(echo log)"', False, True),
+                ("gkv-l", 'git -c core.pager="$P" log', False, True),
+                ("gkv-m", "git -C \\$D log", False, True),
+                ("gkv-n", "git -C '$D' log", False, True),
+                ("gkv-o", "git log $X", False, True),
+                ("gkv-p", "X=$Y git log", False, True),
+                ("gkv-q", "git -C ~/repo log", False, True),
+                ("gkv-r", "git -C $D l", False, False)):
+            if _gkv_on:
+                with aiqt_hooks._WordSpellings():
+                    _gkv_segs = aiqt_hooks._lex_command(_gkv_cmd)
+            else:
+                _gkv_segs = aiqt_hooks._lex_command(_gkv_cmd)
+            _gkv_got = any(aiqt_hooks._git_local_alias(_gkv_seg.argv) for _gkv_seg in _gkv_segs)
+            if _gkv_got is not _gkv_want:
+                failures.append("({}) _git_local_alias on the lex of {!r} (spelling recorded: {}): expected {}, got {}"
+                                .format(_gkv_label, _gkv_cmd, _gkv_on, _gkv_want, _gkv_got))
+        # The same edges on the unparseable reading (gkv-u*): the de-quoted words of each command, where any '$' or
+        # backquote in the region counts, a single-quoted one too (the disclosed over-refusal), but one past the
+        # subcommand word does not.
+        for _gkv_label, _gkv_cmd, _gkv_want in (
+                ("gkv-u1", "git <<<x `echo $O` l", True),
+                ("gkv-u2", "git <<<x $(echo $O) l", True),
+                ("gkv-u3", "git <<<x -C '$D' log", True),
+                ("gkv-u4", 'git <<<x log "$X"', False)):
+            _gkv_got = aiqt_hooks._git_alias_spelled(_gkv_cmd)
+            if _gkv_got is not _gkv_want:
+                failures.append("({}) _git_alias_spelled({!r}): expected {}, got {}".format(
+                    _gkv_label, _gkv_cmd, _gkv_want, _gkv_got))
+        # The partial lex of _git_alias_recovered records each word's spelling (_WordSpellings): the only reading
+        # there that sees a definition where a quoted blank moves the de-quoted reading's subcommand word ('git -C
+        # "a b" $X' reads there as git -C a with the subcommand b, so $X stands past it). gkt-r1 and gkt-r2 hold the
+        # opt-in at the reader, the de-quoted reading alone finding no alias in either, and gkt-g*, gkt-d* and gkt-m1
+        # hold it through gate_weakening, git_discard and commit_msg_subst's unparseable fallback; each is red where
+        # that lex runs outside _WordSpellings. gkt-r2, gkt-g2 and gkt-d2 hold the key-part rule through the opt-in,
+        # the others the region rule.
+        for _gkt_label, _gkt_cmd in (("gkt-r1", 'git -C "a b" $X <<<x'), ("gkt-r2", 'git -C "a b" -c "$K"=v l <<<x')):
+            _gkt_spelled = aiqt_hooks._git_alias_spelled(_gkt_cmd)
+            _gkt_recovered = aiqt_hooks._git_alias_recovered(_gkt_cmd)
+            if _gkt_spelled or not _gkt_recovered:
+                failures.append("({}) on {!r}: expected the de-quoted reading to find no alias and the partial lex "
+                                "one, got _git_alias_spelled {} and _git_alias_recovered {}".format(
+                                    _gkt_label, _gkt_cmd, _gkt_spelled, _gkt_recovered))
+        for _gkt_label, _gkt_handler, _gkt_cmd, _gkt_cwd in (
+                ("gkt-g1", aiqt_hooks.gate_weakening, 'git -C "a b" $X <<<x', None),
+                ("gkt-g2", aiqt_hooks.gate_weakening, 'git -C "a b" -c "$K"=v l <<<x', None),
+                ("gkt-d1", aiqt_hooks.git_discard, 'git -C "a b" $X <<<x', str(_glx_dirty)),
+                ("gkt-d2", aiqt_hooks.git_discard, 'git -C "a b" -c "$K"=v l <<<x', str(_glx_dirty)),
+                ("gkt-m1", aiqt_hooks.commit_msg_subst, 'git -C "a b" $X -m "$(date)" <<<x', None)):
+            _gkt_got = _decision(_gkt_handler, _gkt_cmd, cwd=_gkt_cwd)
+            if _gkt_got != "deny":
+                failures.append("({}) {} on {!r}: expected deny, got {}".format(
+                    _gkt_label, _gkt_handler.__name__, _gkt_cmd, _gkt_got))
+        # A word reads as one word to bash only when no part of it can expand to several (_DQ_LIST_EXPANSION_RE): a
+        # double-quoted expansion of the positional list or of an array subscripted with @, in any parameter-expansion
+        # form, expands to one word per element, and so does an indirect expansion whose reference (a variable, an
+        # array element read through a subscript of its own, a positional parameter or $*) holds a list reference
+        # (bash 5.3 printed <-c><alias.qx=version> for each form here), so the reader marks it as a word bash may
+        # split. gkl-<form>-<guard>: each guard denies it in the region, naming a word built at run time (each allowed
+        # before). gklc-<form>-<guard>: a double-quoted expansion that expands to one word (a '*' list, a length, one
+        # element, the '*' key list, a prefix-names star, an indirect one through the argument count, a pattern
+        # holding '@') keeps the allow, except in gate_weakening, whose closed literal grammar denies each
+        # (_gks_gw_grammar). gkl-read-*: the record at the reader, each red where the double-quoted '$@' or
+        # '${...[@]}' branch stops setting the flag.
+        _gkl_forms = (
+            ("at", 'git "$@" l'), ("at-brace", 'git "${@:1}" l'), ("arr", 'git "${A[@]}" l'),
+            ("arr-op", 'git "${A[@]:0}" l'), ("keys", 'git "${!A[@]}" l'), ("names", 'git "${!pre@}" l'),
+            ("ind", 'git "${!R}" l'), ("ind-op", 'git "${!R:-x}" l'), ("ind-value", 'git -C "${!R}" l'),
+            ("ind-sub", 'git "${!A[0]}" l'), ("ind-sub-op", 'git "${!A[0]:-x}" l'),
+            ("ind-sub-var", 'git "${!A[$i]}" l'), ("ind-sub-value", 'git -C "${!A[0]}" l'),
+            ("ind-star-op", 'git "${!A[*]:-x}" l'), ("ind-pos", 'git "${!1}" l'), ("ind-args", 'git "${!*}" l'),
+            ("nested", 'git "${x:-$@}" l'), ("value", 'git -C "${A[@]}" l'))
+        _gkl_controls = (
+            ("star", 'git "$*" log'), ("arr-star", 'git "${A[*]}" log'), ("length", 'git -C "${#A[@]}" log'),
+            ("element", 'git -C "${A[0]}" log'), ("names-star", 'git "${!pre*}" log'),
+            ("ind-star", 'git "${!R*}" log'), ("keys-star", 'git -C "${!A[*]}" log'),
+            ("ind-sub-star", 'git -C "${!A[0]*}" log'), ("ind-count", 'git -C "${!#}" log'),
+            ("pattern", 'git -c user.email="${EMAIL%@*}" log'))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gkl_label, _gkl_rows, _gkl_want in (("gkl", _gkl_forms, "deny"), ("gklc", _gkl_controls, "allow")):
+                for _gkl_form, _gkl_cmd in _gkl_rows:
+                    _gkl_grammar = (_gks_name == "gate_weakening"
+                                    and "{}-{}".format(_gkl_label, _gkl_form) in _gks_gw_grammar)
+                    _gkl_row_want = "deny" if _gkl_grammar else _gkl_want
+                    _gkl_code, _gkl_out, _gkl_err = _gks_handler({
+                        "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": _gkl_cmd},
+                        "cwd": _gks_cwd})
+                    _gkl_got = _reduce_result(_gkl_code, _gkl_out)
+                    _gkl_reason = ((_gkl_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gkl_got != _gkl_row_want or (
+                            "closed literal grammar" not in _gkl_reason if _gkl_grammar
+                            else _gkl_want == "deny" and "builds at run time" not in _gkl_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {} {!r}".format(
+                            _gkl_label, _gkl_form, _gks_name, _gks_name, _gkl_cmd, _gkl_row_want, _gkl_got,
+                            _gkl_reason))
+        for _gkl_label, _gkl_word, _gkl_want, _gkl_locale in (
+                ("gkl-read-at", '"$@"', True, False), ("gkl-read-arr", '"${A[@]}"', True, False),
+                ("gkl-read-names", '"${!p@}"', True, False), ("gkl-read-star", '"$*"', False, False),
+                # An indirect expansion expands to a list when its reference holds a list reference, a subscript of
+                # its own or a positional parameter included (bash 5.3: with R, A[0], H[k], $0 or $1 set to B[@],
+                # "${!R}", "${!R:-x}", "${!A[0]}", "${!A[$i]}", "${!H[k]}", "${!A[*]:-x}", "${!1}", "${!0}" and
+                # "${!*}" expanded the list), so its word is marked as one bash may split; the prefix-names-star
+                # "${!R*}" and "${!A[0]*}", the '*' key list "${!A[*]}" and "${!#}", through the argument count, each
+                # stay one word.
+                ("gkl-read-ind", '"${!R}"', True, False), ("gkl-read-ind-op", '"${!R:-x}"', True, False),
+                ("gkl-read-ind-star", '"${!R*}"', False, False), ("gkl-read-ind-sub", '"${!A[0]}"', True, False),
+                ("gkl-read-ind-sub-op", '"${!A[0]:-x}"', True, False),
+                ("gkl-read-ind-sub-var", '"${!A[$i]}"', True, False), ("gkl-read-ind-assoc", '"${!H[k]}"', True, False),
+                ("gkl-read-ind-star-op", '"${!A[*]:-x}"', True, False), ("gkl-read-ind-pos", '"${!1}"', True, False),
+                ("gkl-read-ind-zero", '"${!0}"', True, False), ("gkl-read-ind-args", '"${!*}"', True, False),
+                ("gkl-read-ind-nested", '"${x:-${!A[0]}}"', True, False),
+                ("gkl-read-keys-star", '"${!A[*]}"', False, False),
+                ("gkl-read-ind-sub-star", '"${!A[0]*}"', False, False), ("gkl-read-ind-count", '"${!#}"', False, False),
+                ("gkl-read-element", '"${A[0]}"', False, False), ("gkl-read-length-elem", '"${#A[0]}"', False, False),
+                ("gkl-read-arr-star", '"${A[*]}"', False, False), ("gkl-read-length", '"${#A[@]}"', False, False),
+                ("gkl-read-scalar", '"$x"', False, False), ("gkl-read-transform", '"${x@Q}"', False, False),
+                # The locale-quote branch records its word as built at run time: with the locale reading on, $"x"
+                # reads as the double-quoted x, and only that branch sets the flag (red where it stops).
+                ("gkl-read-locale", '$"x"', True, True)):
+            _gkl_holder = [None]
+            aiqt_hooks._read_word(_gkl_word, 0, len(_gkl_word), [], locale=_gkl_locale, spelling=_gkl_holder)
+            if _gkl_holder[0].unquoted is not _gkl_want:
+                failures.append("({}) _read_word on {!r} (locale {}): expected unquoted {}, got {!r}".format(
+                    _gkl_label, _gkl_word, _gkl_locale, _gkl_want, _gkl_holder[0]))
+        with aiqt_hooks._WordSpellings():
+            _gkl_segs = aiqt_hooks._lex_command('git -C $"x" l', locale=True)
+        if not any(aiqt_hooks._git_local_alias(_gkl_seg.argv) for _gkl_seg in _gkl_segs):
+            failures.append("(gkl-locale-lex) _git_local_alias on the locale lex of 'git -C $\"x\" l': expected a "
+                            "word built at run time in the region, got none")
+        # A git region the lexer did not read (A GIT REGION THE LEXER DID NOT READ, above _git_region_open): on an
+        # unparseable command, a git command whose option region the partial lexer stopped before (a leading
+        # here-string) or never reached (past the stop) denies fail closed, where the de-quoted reading, which a
+        # quoted blank or separator shifts, allowed each before. gku2-<form>-<guard>: each guard denies, gate_weakening,
+        # git_discard and branch_root naming a word built at run time (protected_line's commit recognizer denies it as
+        # an unverifiable commit). open-log is the disclosed over-refusal of an open region with a literal subcommand.
+        # The reading past the stop is the union of the measured re-lex and the every-git-word reading (A GIT
+        # REGION THE LEXER DID NOT READ): past-echo reaches the real git command past a quoted git word that the
+        # old reading mis-read as the command; heredoc and fd deny through the unmeasured-construct union (red
+        # where that fallback returns False); split-* deny where a here-string splits a resolved wrapper's words
+        # (the resume is not at a separator); procsub-esc denies with the escaped parenthesis honoured in the
+        # measure; wrapper-flock and wrapper-ionice deny through the plain git word a command off the wrapper
+        # list carries; hash-resume denies where a '#' right after the measured construct hides the rest from
+        # the re-lex; procsub-body denies through the git region inside the measured construct's own text.
+        # redirect-* deny where the git command stands in a redirect target, which no recovered word holds (red
+        # where the git-word accounting of the re-lexed text is off); dq-* and assign-subst deny where it stands
+        # in a substitution inside a double-quoted word (red where a git word beside a '$' or backquote no longer
+        # keeps the raw reading); herestring-subst denies where it stands in the here-string's own word (red
+        # where a git word inside the measured construct no longer keeps it); split-bashc-* deny where a
+        # here-string splits a wrapper's words ahead of an sh -c body, which no recovered command runs as git
+        # (red where the resume test alone is reverted: a git command the wrapper runs directly past the split
+        # is a plain word the union view walks, so split-nice and split-env stay green there); procsub-esc-bashc
+        # denies past a process substitution whose body met a backslash escape (red where the escape term is off).
+        # gku2c-<form>-<guard>: a literal region the lexer read in full, or that the reading past the stop reads
+        # in full, keeps its allow; the nongit-* controls carry git only as quoted text or a pre-stop operand
+        # (grep), so the scoping and the proven-quoted narrowing keep them allowed, except in gate_weakening, whose
+        # closed literal grammar denies each (_gks_gw_grammar); esc-literal and
+        # heredoc-literal keep a literal closed region allowed past an escaped parenthesis or a heredoc.
+        _gku2_forms = (
+            ("qblank", 'git <<<x -C "a b" $X l'), ("squote", "git <<<x -C 'a b' $X l"),
+            ("qsep", 'git <<<x -C "a;b" $X l'), ("key", 'git <<<x -C "a b" -c "$K"=v l'),
+            ("lead", '<<<x git -C "a b" $X l'), ("past", 'cat <<<x; git -C "a b" $X l'),
+            ("past-echo", 'cat <<<x; echo "git log"; git -C "a b" $X l'),
+            ("open-log", "git <<<x log"),
+            ("heredoc", 'cat <<EOF\nx\nEOF\ngit -C "a b" $X l'),
+            ("fd", 'exec {fd}>/dev/null; git -C "a b" $X l'),
+            ("fd-lead", 'exec {fd}>/dev/null; git <<<y -C "a b" $X l'),
+            ("split-nice", 'nice <<<x -n 5 git -C "a b" $X l'),
+            ("split-env", 'env <<<x -u V git -C "a b" $X l'),
+            ("procsub-esc", 'cat <(echo \\(); git -C "a b" $X l; case a in a) true;; esac'),
+            ("wrapper-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l'),
+            ("wrapper-ionice", 'cat <<<x; ionice -c3 git -C "a b" $X l'),
+            ("hash-resume", 'cat <(a)#; git -C "a b" $X l'),
+            ("procsub-body", 'cat <(git -C "a b" $X l); true'),
+            ("redirect-subst", "cat <<<x; echo hi >\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("redirect-backquote", "cat <<<x; echo hi 2>`git -C 'a b' $X c --no-verify -m y`"),
+            ("dq-subst", "cat <<<x; echo \"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("dq-backquote", "cat <<<x; echo \"`git -C 'a b' $X c --no-verify -m y`\""),
+            ("assign-subst", "cat <<<x; y=\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("herestring-subst", "cat <<<\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("split-bashc-nice", "nice <<<x -n 5 bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-env", "env <<<x -u V bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-timeout", "timeout <<<x 5 bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-sudo", "sudo <<<x -u u bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("procsub-esc-bashc", "cat <(echo \\(); bash -c 'git <<<y -C a c --no-verify -m y'"))
+        _gku2_controls = (
+            ("trail", "git log --oneline <<<x"), ("past-literal", "cat <<<x; git status"),
+            ("past-quoted", 'cat <<<x; git log "$a"'), ("procsub", "diff <(git show HEAD:f) f"),
+            ("nongit-echo", 'cat <<<x; echo "run git"'), ("nongit-grep", 'grep -c git <<<"$s"'),
+            ("nongit-gh", 'cat <<<x; gh pr create --body "mentions git here"'),
+            ("esc-literal", 'cat <(echo \\(); git status'),
+            ("heredoc-literal", "cat <<EOF\nx\nEOF\ngit status"))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gku2_label, _gku2_rows, _gku2_want in (("gku2", _gku2_forms, "deny"),
+                                                        ("gku2c", _gku2_controls, "allow")):
+                for _gku2_form, _gku2_cmd in _gku2_rows:
+                    _gku2_grammar = (_gks_name == "gate_weakening"
+                                     and "{}-{}".format(_gku2_label, _gku2_form) in _gks_gw_grammar)
+                    _gku2_row_want = "deny" if _gku2_grammar else _gku2_want
+                    _gku2_code, _gku2_out, _gku2_err = _gks_handler({
+                        "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": _gku2_cmd},
+                        "cwd": _gks_cwd})
+                    _gku2_got = _reduce_result(_gku2_code, _gku2_out)
+                    _gku2_reason = ((_gku2_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gku2_got != _gku2_row_want or (
+                            "closed literal grammar" not in _gku2_reason if _gku2_grammar
+                            else _gku2_want == "deny" and _gks_name != "protected_line"
+                            and "builds at run time" not in _gku2_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {} {!r}".format(
+                            _gku2_label, _gku2_form, _gks_name, _gks_name, _gku2_cmd, _gku2_row_want, _gku2_got,
+                            _gku2_reason))
+        # The readers at their edges. gku2-open-*: a region whose walk ends exactly at the last word read is open,
+        # one that reads one word more is not, and a value-taking option as the last word is open. gku2-read-*: the
+        # region read from a git word stops at its subcommand word, a separator or a comment, reads past a redirect
+        # and its target, and is unread (None) at a here-string, a process substitution, a '{fd}' redirect or an
+        # unterminated quote before the subcommand word.
+        for _gku2_label, _gku2_tokens, _gku2_want in (
+                ("gku2-open-git", ["git"], True), ("gku2-open-value", ["git", "-C"], True),
+                ("gku2-open-at", ["git", "-C", "x"], True), ("gku2-open-past", ["git", "-C", "x", "l"], False),
+                ("gku2-open-other", ["grep", "-c", "git"], True), ("gku2-open-none", ["cat", "x"], False)):
+            _gku2_got = aiqt_hooks._git_region_open(_gku2_tokens)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_region_open({!r}): expected {}, got {}".format(
+                    _gku2_label, _gku2_tokens, _gku2_want, _gku2_got))
+        for _gku2_label, _gku2_cmd, _gku2_want in (
+                ("gku2-read-sub", 'git -C "a b" $X l', ["git", "-C", "a b", "$X"]),
+                ("gku2-read-sep", "git -C a; $X l", ["git", "-C", "a"]),
+                ("gku2-read-comment", "git -C a #x\n$X", ["git", "-C", "a"]),
+                ("gku2-read-redirect", "git 2>/dev/null -C a l", ["git", "-C", "a", "l"]),
+                ("gku2-read-herestring", "git <<<x l", None), ("gku2-read-procsub", "git -C <(x) l", None),
+                ("gku2-read-fd", "git {fd}>x l", None), ("gku2-read-quote", 'git -C "a l', None)):
+            _gku2_region = aiqt_hooks._git_region_read(_gku2_cmd, 0)
+            _gku2_got = None if _gku2_region is None else list(_gku2_region[0])
+            if _gku2_got != _gku2_want:
+                failures.append("({}) _git_region_read({!r}, 0): expected {!r}, got {!r}".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_got))
+        # The construct measure at its edges (gku2-measure-*): an escaped parenthesis opens and closes nothing,
+        # so the measure ends at the real ')' and records the escape it met; an unescaped extra '(' leaves the
+        # body unterminated (None); a here-string's measure ends just past its target word; a heredoc and a
+        # '{fd}' redirect stay unmeasured (None).
+        for _gku2_label, _gku2_cmd, _gku2_want, _gku2_esc_want in (
+                ("gku2-measure-esc", 'cat <(echo \\(); true', 14, True),
+                ("gku2-measure-esc-close", 'cat <(echo \\)); true', 14, True),
+                ("gku2-measure-plain", "cat <(true); true", 11, False),
+                ("gku2-measure-unbalanced", "cat <(echo (; true", None, False),
+                ("gku2-measure-herestring", "cat <<<x; true", 8, False),
+                ("gku2-measure-heredoc", "cat <<EOF\nx\nEOF\ntrue", None, False),
+                ("gku2-measure-fd", "exec {fd}>/dev/null; true", None, False)):
+            _gku2_esc = [False]
+            _gku2_got = aiqt_hooks._construct_end(_gku2_cmd, 4, _gku2_esc)
+            if _gku2_got != _gku2_want or _gku2_esc[0] is not _gku2_esc_want:
+                failures.append("({}) _construct_end({!r}, 4): expected ({!r}, escape {}), got ({!r}, {})".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_esc_want, _gku2_got, _gku2_esc[0]))
+        # The resume test at its boundary: a separator right after the construct (or nothing but blanks) is a
+        # command position; the first word character, redirect or '#' is not, however many blanks precede it.
+        for _gku2_label, _gku2_rest, _gku2_want in (
+                ("gku2-resume-empty", "", True), ("gku2-resume-blanks", "  \t", True),
+                ("gku2-resume-semi", " ; git", True), ("gku2-resume-newline", "\ngit", True),
+                ("gku2-resume-amp", " && git", True), ("gku2-resume-pipe", " | git", True),
+                ("gku2-resume-word", " -n 5 git", False), ("gku2-resume-hash", " #x\ngit", False),
+                ("gku2-resume-redirect", " >f; git", False)):
+            _gku2_got = aiqt_hooks._resumes_at_separator(_gku2_rest)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _resumes_at_separator({!r}): expected {}, got {}".format(
+                    _gku2_label, _gku2_rest, _gku2_want, _gku2_got))
+        # The union view of a recovered segment: a plain git word any command carries keeps the walk (flock),
+        # a git word proven quoted text is neutralized (echo "run git" has no walkable git word), and one beside
+        # a '$' or backquote defers to the raw reading (expansion True).
+        with aiqt_hooks._WordSpellings():
+            _gku2_flock = aiqt_hooks._lex_command('flock /tmp/l git -C "a b" $X l')[0][0]
+            _gku2_quoted = aiqt_hooks._lex_command('echo "run git"')[0][0]
+            _gku2_subst = aiqt_hooks._lex_command('echo "$(git log)"')[0][0]
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_flock)
+        if (_gku2_union is None or _gku2_exp
+                or not (aiqt_hooks._git_region_open(_gku2_union) or aiqt_hooks._git_local_alias(_gku2_union))):
+            failures.append("(gku2-union-flock) _segment_union_words kept no walkable git word for the flock "
+                            "carrier, or its walk read no run-time word: got ({!r}, {})".format(
+                                _gku2_union, _gku2_exp))
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_quoted)
+        if _gku2_union is not None or _gku2_exp:
+            failures.append("(gku2-union-quoted) _segment_union_words on a quoted git word: expected "
+                            "(None, False), got ({!r}, {})".format(_gku2_union, _gku2_exp))
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_subst)
+        if _gku2_exp is not True:
+            failures.append("(gku2-union-subst) _segment_union_words on a substitution carrying git: expected "
+                            "expansion True, got ({!r}, {})".format(_gku2_union, _gku2_exp))
+        # The every-git-word reading on raw text: a region holding a run-time word or stopped by a construct
+        # denies, a closed literal region does not, and reading starts at pos (a git word before it is skipped).
+        for _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want in (
+                ("gku2-raw-runtime", '<<EOF\ngit -C "a b" $X l', 0, True),
+                ("gku2-raw-construct", "<<<x; foo git <<<y -C a l", 0, True),
+                ("gku2-raw-literal", "<<<x; git status", 0, False),
+                ("gku2-raw-before-pos", 'git -C "a b" $X l; true', 18, False)):
+            _gku2_got = aiqt_hooks._git_alias_unread_everyword(_gku2_cmd, _gku2_pos)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_alias_unread_everyword({!r}, {}): expected {}, got {}".format(
+                    _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want, _gku2_got))
+        # The reading past the stop on its own. esc-quoted: past a process substitution whose body met a
+        # backslash escape, the raw reading is kept, so a quoted git word there denies (a disclosed over-refusal,
+        # red where the escape term is off); plain-quoted is the same text with no escape, which allows.
+        for _gku2_label, _gku2_cmd, _gku2_want in (
+                ("gku2-unread-lead", 'git <<<x -C "a b" $X l', True),
+                ("gku2-unread-past", 'cat <<<x; git -C "a b" $X l', True),
+                ("gku2-unread-trail", 'git -C "a b" log <<<x', False),
+                ("gku2-unread-literal", "cat <<<x; git status", False),
+                ("gku2-unread-heredoc", 'cat <<EOF\nx\nEOF\ngit -C "a b" $X l', True),
+                ("gku2-unread-fd", 'exec {fd}>/dev/null; git -C "a b" $X l', True),
+                ("gku2-unread-split", 'nice <<<x -n 5 git -C "a b" $X l', True),
+                ("gku2-unread-escparen", 'cat <(echo \\(); git -C "a b" $X l; case a in a) true;; esac', True),
+                ("gku2-unread-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l', True),
+                ("gku2-unread-body", 'cat <(git -C "a b" $X l); true', True),
+                ("gku2-unread-esc-literal", 'cat <(echo \\(); git status', False),
+                ("gku2-unread-esc-quoted", "cat <(echo \\(); echo 'git <<<y c --no-verify -m y'", True),
+                ("gku2-unread-plain-quoted", "cat <(echo a); echo 'git <<<y c --no-verify -m y'", False),
+                ("gku2-unread-heredoc-literal", "cat <<EOF\nx\nEOF\ngit status", False)):
+            with aiqt_hooks._LexStops() as _gku2_stops:
+                aiqt_hooks._lex_command(_gku2_cmd, partial=True)
+            _gku2_got = aiqt_hooks._git_alias_unread(_gku2_cmd, _gku2_stops.seen)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_alias_unread({!r}): expected {}, got {} (stops {!r})".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_got, _gku2_stops.seen))
+        if aiqt_hooks._LexStops.at is not None:
+            failures.append("(gku2-stops-off) _LexStops kept recording after its context closed")
+        # The deny reason (gkm-<kind>-<guard>): a word the shell builds at run time in a git command's options is
+        # named as such, with the quoting fix, and not as an alias the command defines; an actual alias definition
+        # keeps the alias wording. Each built row named only an alias before.
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            _gkm_alias_texts = ("defines a git alias for itself", "a git alias the command defines or runs under")
+            for _gkm_label, _gkm_cmd, _gkm_has, _gkm_lacks in (
+                    ("gkm-built", "git -C $D l", ("builds at run time", "Quote the expansion"), _gkm_alias_texts),
+                    ("gkm-list", 'git "$@" l', ("builds at run time", "Quote the expansion"), _gkm_alias_texts),
+                    ("gkm-alias", "git -c alias.l=log l", ("git alias",), ("builds at run time",))):
+                _gkm_code, _gkm_out, _gkm_err = _gks_handler({
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": _gkm_cmd},
+                    "cwd": _gks_cwd})
+                _gkm_reason = ((_gkm_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                if (_reduce_result(_gkm_code, _gkm_out) != "deny" or any(_h not in _gkm_reason for _h in _gkm_has)
+                        or any(_l in _gkm_reason for _l in _gkm_lacks)):
+                    failures.append("({}-{}) {} on {!r}: expected a deny holding {!r} and not {!r}, got {!r}".format(
+                        _gkm_label, _gks_name, _gks_name, _gkm_cmd, _gkm_has, _gkm_lacks, _gkm_reason))
+        # git_discard denies a hook input whose command is missing or not a string, as the other git guards do for
+        # unreadable input (gkd-*; each allowed before).
+        for _gkd_label, _gkd_input in (("gkd-no-command", {}), ("gkd-int", {"command": 5}),
+                                       ("gkd-none", {"command": None}), ("gkd-no-input", None),
+                                       ("gkd-list-input", ["git reset --hard"])):
+            _gkd_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(_glx_dirty)}
+            if _gkd_input is not None:
+                _gkd_data["tool_input"] = _gkd_input
+            _gkd_code, _gkd_out, _gkd_err = aiqt_hooks.git_discard(_gkd_data)
+            if _reduce_result(_gkd_code, _gkd_out) != "deny":
+                failures.append("({}) git_discard on tool_input {!r}: expected deny, got {}".format(
+                    _gkd_label, _gkd_input, _reduce_result(_gkd_code, _gkd_out)))
+        # The shared local-alias reading at its edges (_git_local_alias): a definition after a git word behind a
+        # reserved word, a group, time or a wrapper carrying an assignment counts (glw-a to glw-d), as does an
+        # assignment before the command word when a later word of the segment is git (glw-g) and a definition after
+        # a git word that is another git word's option value (glw-i); a -c after the subcommand (glw-e), an
+        # assignment with no git word in its segment (glw-f), a definition inside another word's text (glw-h, the
+        # disclosed residual) and a -c that is the value of -C (glw-j: git 2.53.0 takes it as the directory) do
+        # not. Each of glw-a to glw-d was False before, when only the command word was read, and glw-f was True, read
+        # by callers only behind a git command word.
+        for _glw_label, _glw_tokens, _glw_want in (
+                ("glw-a", ["then", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-b", ["{", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-c", ["time", "git", "--config-env", "alias.x=E", "x"], True),
+                ("glw-d", ["env", "FOO=1", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-e", ["then", "git", "log", "-c", "alias.x=y"], False),
+                ("glw-f", ["GIT_CONFIG_KEY_0=alias.x"], False),
+                ("glw-g", ["GIT_CONFIG_KEY_0=alias.x", "env", "git", "x"], True),
+                ("glw-h", ["sh", "-c", "git -c alias.x=log x"], False),
+                ("glw-i", ["git", "-C", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-j", ["then", "git", "-C", "-c", "alias.x=log", "x"], False)):
+            _glw_got = aiqt_hooks._git_local_alias(_glw_tokens)
+            if _glw_got is not _glw_want:
+                failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
+                    _glw_label, _glw_tokens, _glw_want, _glw_got))
+        # branch_root's last fallback, reached when even the partial lex fails (forced here by a lexer that always
+        # raises): a git command under a git alias the command's text or the hook's environment may define denies
+        # (glx-lf-1, glx-lf-2), and one under none keeps the open-grammar allow (glx-lf-3).
+        def _glx_lex_fail(*_args, **_kwargs):
+            raise ValueError("forced lex failure")
+
+        _glx_lex = aiqt_hooks._lex_command
+        _glw_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        aiqt_hooks._lex_command = _glx_lex_fail
+        try:
+            for _glw_label, _glw_env, _glw_full, _glw_want in (
+                    ("glx-lf-1", {}, "export GIT_CONFIG_PARAMETERS=x; git co -b glx-new", "deny"),
+                    ("glx-lf-2", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, "git co -b glx-new", "deny"),
+                    ("glx-lf-3", {}, "git co -b glx-new", "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glw_env)
+                _glw_got = _decision(aiqt_hooks.branch_root, _glw_full, cwd=str(_glx_branch))
+                if _glw_got != _glw_want:
+                    failures.append("({}) branch_root on {!r} with {!r} in the environment and a failing lexer: "
+                                    "expected {}, got {}".format(_glw_label, _glw_full, _glw_env, _glw_want, _glw_got))
+        finally:
+            aiqt_hooks._lex_command = _glx_lex
+            for _glx_name, _glx_value in _glw_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # An info flag (-h, --help) exempts a git command from gate_weakening's and branch_root's reading of its
+        # subcommand only when it runs under no git alias: git runs an alias with the flag passed on to it (on git
+        # 2.53.0 a shell alias ran under 'c -h', 'c x -h' and 'c x --help', one of them committing past a refusing
+        # pre-commit hook). glx-h1 to glx-h8 each allowed before: an alias the git command defines for itself with -c,
+        # --config-env or include.path, the flag after the alias name or after an operand. glx-h9 to glx-h12 keep their
+        # deny: the same command behind 'then' or time, and an alias the hook's environment carries. glx-h13 to
+        # glx-h19 keep the allow of a help invocation under no alias, with a -c that defines none or an environment
+        # carrying only unrelated configuration too. glx-h20, a --no-verify after the flag (git 2.53.0 printed the
+        # usage and committed nothing), denies: the closed literal grammar's raw bypass scan reads that --no-verify.
+        _glh_gate = "git -c 'alias.c=!git commit --no-verify -m y #' c"
+        _glh_branch = "git -c 'alias.co=!git checkout -b glx-new #' co"
+        _glh_unrelated = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"}
+        _glh_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glh_label, _glh_env, _glh_handler, _glh_full, _glh_want in (
+                    ("glx-h1", {}, aiqt_hooks.gate_weakening, _glh_gate + " -h", "deny"),
+                    ("glx-h2", {}, aiqt_hooks.gate_weakening, _glh_gate + " x --help", "deny"),
+                    ("glx-h3", {}, aiqt_hooks.gate_weakening, _glh_gate + " x -h", "deny"),
+                    ("glx-h4", {}, aiqt_hooks.gate_weakening, "git --config-env alias.c=CCMD c -h", "deny"),
+                    ("glx-h5", {}, aiqt_hooks.gate_weakening, "git -c include.path=/abs/aliases.cfg c -h", "deny"),
+                    ("glx-h6", {}, aiqt_hooks.branch_root, _glh_branch + " -h", "deny"),
+                    ("glx-h7", {}, aiqt_hooks.branch_root, "git --config-env alias.co=CCMD co -h", "deny"),
+                    ("glx-h8", {}, aiqt_hooks.branch_root, "git --config-env=alias.co=CCMD co x --help", "deny"),
+                    ("glx-h9", {}, aiqt_hooks.gate_weakening, "if true; then " + _glh_gate + " -h; fi", "deny"),
+                    ("glx-h10", {}, aiqt_hooks.branch_root, "time " + _glh_branch + " -h", "deny"),
+                    ("glx-h11", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.gate_weakening, "git c -h",
+                     "deny"),
+                    ("glx-h12", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, aiqt_hooks.branch_root, "git co -h",
+                     "deny"),
+                    ("glx-h13", {}, aiqt_hooks.gate_weakening, "git commit -h", "allow"),
+                    ("glx-h14", {}, aiqt_hooks.gate_weakening, "git commit --help", "allow"),
+                    ("glx-h15", {}, aiqt_hooks.gate_weakening, "git -c user.name=x commit -h", "allow"),
+                    ("glx-h16", _glh_unrelated, aiqt_hooks.gate_weakening, "git commit -h", "allow"),
+                    ("glx-h17", {}, aiqt_hooks.branch_root, "git checkout -b glx-new -h", "allow"),
+                    ("glx-h18", {}, aiqt_hooks.branch_root, "git switch --help", "allow"),
+                    ("glx-h19", {}, aiqt_hooks.branch_root, "git -c user.name=x checkout -h", "allow"),
+                    ("glx-h20", {}, aiqt_hooks.gate_weakening, "git commit -h --no-verify -m y", "deny")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glh_env)
+                _glh_cwd = str(_glx_branch) if _glh_handler is aiqt_hooks.branch_root else None
+                _glh_got = _decision(_glh_handler, _glh_full, cwd=_glh_cwd)
+                if _glh_got != _glh_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glh_label, _glh_handler.__name__, _glh_full, _glh_env, _glh_want, _glh_got))
+        finally:
+            for _glx_name, _glx_value in _glh_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # A git alias definition after a construct the lexer stops at (a here-string, an unquoted heredoc, a '{fd}'
+        # redirect) is in no segment the partial lex recovers, so the parse-error reading reads the text for one
+        # (_git_alias_spelled): glx-p-<guard>-<shape> denies under each of the four guards, and glx-p-msg under
+        # commit_msg_subst's fallback; each allowed before (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an
+        # alias FILE defined). glx-pc1 to glx-pc4 keep the deny of a definition the lexer reads (no construct, or the
+        # construct after it). glx-pc5 to glx-pc8 keep the allow of an unparseable git command that defines no alias
+        # and whose region the lexer read. glx-pc9, a -c with a key outside the alias, include and includeIf sections
+        # behind a leading here-string, now denies: the lexer stops before that region, so it is unread (A GIT REGION
+        # THE LEXER DID NOT READ, above _git_region_open; it allowed before). glx-po1 is the disclosed over-refusal: a
+        # definition spelling in any word of an unparseable command that names git counts.
+        for _glp_shape, _glp_full in (
+                ("herestring", "git <<<x -c include.path=/abs/aliases.cfg c"),
+                ("config-env", "git <<<x --config-env alias.c=CCMD c"),
+                ("heredoc", "git <<EOF -c include.path=/abs/aliases.cfg c\nbody\nEOF"),
+                ("fdvar", "git {fd}>/dev/null -c include.path=/abs/aliases.cfg c")):
+            for _glp_handler, _glp_cwd in ((aiqt_hooks.gate_weakening, None), (aiqt_hooks.protected_line, plr),
+                                           (aiqt_hooks.git_discard, str(_glx_dirty)),
+                                           (aiqt_hooks.branch_root, str(_glx_branch))):
+                _glp_got = _decision(_glp_handler, _glp_full, cwd=_glp_cwd)
+                if _glp_got != "deny":
+                    failures.append("(glx-p-{}-{}) {} on {!r}: expected deny, got {}".format(
+                        _glp_handler.__name__, _glp_shape, _glp_handler.__name__, _glp_full, _glp_got))
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-p-msg", aiqt_hooks.commit_msg_subst, 'git <<<x --config-env alias.c=CCMD c -m "$(date)"', None,
+                 "deny"),
+                ("glx-pc1", aiqt_hooks.protected_line, "git -c include.path=/abs/aliases.cfg c", plr, "deny"),
+                ("glx-pc2", aiqt_hooks.gate_weakening, "git --config-env alias.c=CCMD c", None, "deny"),
+                ("glx-pc3", aiqt_hooks.git_discard, "git -c include.path=/abs/aliases.cfg c <<<x", str(_glx_dirty),
+                 "deny"),
+                ("glx-pc4", aiqt_hooks.branch_root, "git -c include.path=/abs/aliases.cfg c <<<x", str(_glx_branch),
+                 "deny"),
+                ("glx-pc5", aiqt_hooks.gate_weakening, "git status <<<x", None, "allow"),
+                ("glx-pc6", aiqt_hooks.protected_line, "git log <<EOF\nbody\nEOF", plr, "allow"),
+                ("glx-pc7", aiqt_hooks.git_discard, "git status {fd}>/dev/null", str(_glx_dirty), "allow"),
+                ("glx-pc8", aiqt_hooks.branch_root, "git status <<<x", str(_glx_branch), "allow"),
+                ("glx-pc9", aiqt_hooks.gate_weakening, "git <<<x -c core.pager=cat log", None, "deny"),
+                ("glx-po1", aiqt_hooks.gate_weakening, "echo -c alias.x=y; git status <<<x", None, "deny")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
+        # The text rule at its edges (_git_config_env_named): the name in a word (glx-t1), in quotes (glx-t2), in a
+        # here-string (glx-t3), split across lines by a continuation (glx-t4) or on a line before the git command
+        # (glx-t5), escaped (glx-t6), in an unparseable command (glx-t7), and a git command inside an eval word
+        # (glx-t8) each deny; each allowed before the text rule, and each defined the alias on git 2.53.0. A name
+        # built at run time (glx-r1) or by a brace expansion (glx-r2), and one set in a sourced file (glx-r3), stay
+        # the disclosed residual and allow.
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-t1", aiqt_hooks.protected_line,
+                 'set -a; printf -v GIT_CONFIG_PARAMETERS %s "$V"; git p --force origin', plr, "deny"),
+                ("glx-t2", aiqt_hooks.gate_weakening,
+                 'declare -n r="GIT_CONFIG_PARAMETERS"; r="$V"; export r; git c -m y', None, "deny"),
+                ("glx-t3", aiqt_hooks.git_discard,
+                 'read -r N <<< "GIT_CONFIG_PARAMETERS"; export "$N=$V"; git r --hard', str(_glx_dirty), "deny"),
+                ("glx-t4", aiqt_hooks.branch_root,
+                 'set -a; printf -v GIT_CONFIG_\\\nPARAMETERS %s "$V"; git co -b glx-new', str(_glx_branch), "deny"),
+                ("glx-t5", aiqt_hooks.protected_line,
+                 'set -a\nread -r GIT_CONFIG_PARAMETERS <<< "$V"\ngit p --force origin', plr, "deny"),
+                ("glx-t6", aiqt_hooks.protected_line,
+                 'set -a; printf -v G\\IT_CONFIG_PARAMETERS %s "$V"; git p --force origin', plr, "deny"),
+                ("glx-t7", aiqt_hooks.commit_msg_subst,
+                 'if export GIT_CONFIG_PARAMETERS="$V"; then git c -m "$(date)"; fi\necho "', None, "deny"),
+                ("glx-t8", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_PARAMETERS=\"$V\"; eval 'git p --force origin'", plr, "deny"),
+                ("glx-r1", aiqt_hooks.protected_line,
+                 'set -a; printf -v "GIT_CONFIG_$X" %s "$V"; git p --force origin', plr, "allow"),
+                ("glx-r2", aiqt_hooks.protected_line,
+                 'export GIT_CONFIG_{PARAMETERS,X}="$V"; git p --force origin', plr, "allow"),
+                ("glx-r3", aiqt_hooks.protected_line, "source ./cfg.sh; git p --force origin", plr, "allow")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
         # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
         # DE-QUOTED text, where -'f' is the -f bash passes, so this force-push to main is caught (a
         # closed residual, not an over-refusal). The raw-text backstop reads each segment
@@ -14075,24 +15276,25 @@ def _main_isolated(monitor):
         # no snapshot at the pin and at the previous reading (nothing made the lex uncertain, the wrapper hid
         # the verb from the parsed scan, and the raw and joined text held no contiguous verb). In scope, the
         # closed allowlist grammar DENIES each (a wrapper word, a double quote, a concatenated quote, a
-        # backslash or a '$' is outside it), and the denied command takes no recovery snapshot.
-        for _g8n, _g8c in (
-                ("dq-reset", 'git status; env git re""set --hard'),
-                ("sq-reset", "env git re'set' --hard"),
-                ("cmdword", 'command g""it reset --hard'),
-                ("dq-checkout", 'git status; env git check""out -- file.txt'),
-                ("esc-reset", "git status; env git re" + chr(92) + "set --hard"),
-                ("dollar-reset", "git status; env git re$''set --hard"),
+        # backslash or a '$' is outside it), and the denied command takes no recovery snapshot. dollar-reset spells
+        # the subcommand word through an ANSI-C quote, so the git alias reading (HOW A WORD IS SPELLED) denies it
+        # first, naming the git alias (the closed allowlist grammar denied it before), with no snapshot either.
+        for _g8n, _g8c, _g8why in (
+                ("dq-reset", 'git status; env git re""set --hard', "closed allowlist grammar"),
+                ("sq-reset", "env git re'set' --hard", "closed allowlist grammar"),
+                ("cmdword", 'command g""it reset --hard', "closed allowlist grammar"),
+                ("dq-checkout", 'git status; env git check""out -- file.txt', "closed allowlist grammar"),
+                ("esc-reset", "git status; env git re" + chr(92) + "set --hard", "closed allowlist grammar"),
+                ("dollar-reset", "git status; env git re$''set --hard", "builds at run time"),
         ):
             if aiqt_hooks._lex_uncertain_causes(_g8c) != ():
                 failures.append("(gd-dequoted-{}-certain) the vector must read as a certain lex; got {!r}"
                                 .format(_g8n, aiqt_hooks._lex_uncertain_causes(_g8c)))
             _g8 = _gd6_outcome(_g8c)
             _g8reason = ((_g8[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-            if _g8[1] != "deny" or "closed allowlist grammar" not in _g8reason or _g8[3]:
+            if _g8[1] != "deny" or _g8why not in _g8reason or _g8[3]:
                 failures.append("(gd-dequoted-{}) a fragmented wrapped work-losing verb on a certain lex must be in "
-                                "scope and denied by the closed allowlist grammar with no new recovery ref; got "
-                                "{!r}".format(_g8n, _g8))
+                                "scope and denied ({}) with no new recovery ref; got {!r}".format(_g8n, _g8why, _g8))
         # The same scope reading feeds the unrecognized-subcommand deny: a quote-fragmented
         # 'checkout-index' (outside the recognized verb set, its sub not snapshottable) was a silent allow
         # at the pin and at the previous reading; pristine or -C redirected, it now denies like
@@ -14114,18 +15316,28 @@ def _main_isolated(monitor):
         if _g8w[1] != "deny" or "closed allowlist grammar" not in _g8wreason or _g8w[3]:
             failures.append("(gd-dequoted-wrapped-redirect) a fragmented wrapped discard with a fragmented -C redirect to "
                             "another repository must be denied by the closed allowlist grammar; got {!r}".format(_g8w))
-        # The DISCLOSED residual, witnessed: a verb no raw, joined or de-quoted reading assembles (an escape
-        # decoded inside $'...', a word a parameter expansion builds at run time) still reads as no
-        # recognized lossy verb and allows silently.
-        for _g8n, _g8c in (
-                ("residual-ansi", "env git $'" + chr(92) + "x72'eset --hard"),
-                ("residual-param", "r=re; env git ${r}set --hard"),
+        # A verb no raw, joined or de-quoted reading assembles. Built in the subcommand word by an escape decoded
+        # inside $'...' or by an unquoted parameter expansion, it now reads as a git alias (HOW A WORD IS SPELLED)
+        # and denies naming a word built at run time (residual-ansi and residual-param were silent allows, the
+        # disclosed residual, before). The DISCLOSED residual that remains, witnessed: a verb a double-quoted expansion builds reads as
+        # no recognized lossy verb and allows silently (residual-dq).
+        for _g8n, _g8c, _g8want in (
+                ("residual-ansi", "env git $'" + chr(92) + "x72'eset --hard", "deny"),
+                ("residual-param", "r=re; env git ${r}set --hard", "deny"),
+                ("residual-dq", 'r=re; env git "${r}set" --hard', "allow"),
         ):
             _g8 = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                           "tool_input": {"command": _g8c}, "cwd": gd6r})
-            if _g8 != (0, None, None):
-                failures.append("(gd-dequoted-{}) the disclosed residual changed (update the git_discard docstring and "
-                                "the manifest residue with it); got {!r}".format(_g8n, _g8))
+            _g8reason = ((_g8[1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _g8want == "allow":
+                _g8bad = _g8 != (0, None, None)
+            else:
+                _g8bad = _reduce_result(_g8[0], _g8[1]) != "deny" or "builds at run time" not in _g8reason
+            if _g8bad:
+                failures.append("(gd-dequoted-{}) expected {}{} (update the git_discard docstring and the manifest "
+                                "residue with any change); got {!r}".format(
+                                    _g8n, _g8want, " naming a word built at run time" if _g8want == "deny" else "",
+                                    _g8))
         # The DISCLOSED over-refusal of that de-quoted read, pinned. It reads quoted prose too,
         # so a command that only prints fragmented work-losing prose is in scope although bash runs only
         # echo or printf, and the closed allowlist grammar DENIES it (echo, printf, a double quote and a
@@ -14773,12 +15985,17 @@ def _main_isolated(monitor):
         _git(pl_mcfg, "config", "remote.origin.mirror", "true")  # persisted file config: NOT read
         pexpect("(gd146-m33) a PERSISTED file-config mirror mode is a disclosed residual, allows",
                 "git push origin", "allow", cwd=str(pl_mcfg))
-        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol (and the explicit-refspec ambient gap) is a "
-                "disclosed residual, allows",
+        # Re-expected from allow to deny: the command's text names GIT_CONFIG_COUNT, so every git command of it runs
+        # under an alias the command may define (_git_alias_named) and denies before the push reading; the
+        # GIT_CONFIG_* env protocol from the session environment stays the disclosed residual.
+        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol named in the command denies as a possible alias",
                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true "
-                "git push origin main", "allow", cwd=plf)
-        pexpect("(gd146-m35) an alias hiding the push (subcommand is 'p', not 'push') is a disclosed "
-                "residual, allows", "git -c alias.p='push --mirror' p origin", "allow", cwd=plf)
+                "git push origin main", "deny", cwd=plf, detail="defines a git alias for itself")
+        # Re-expected from allow to deny: a git alias the command defines makes the subcommand unknown, so
+        # protected_line denies it on any branch (the gla vectors); an alias from a configuration file stays the
+        # disclosed residual.
+        pexpect("(gd146-m35) an alias the command defines hides the push (subcommand is 'p', not 'push'), "
+                "so it denies", "git -c alias.p='push --mirror' p origin", "deny", cwd=plf)
         pexpect("(gd146-m36) a command-local remote.<name>.push refspec is a disclosed follow-on "
                 "residual, allows", "git -c remote.origin.push=:main push origin", "allow", cwd=plf)
         # (gd146-m37, round-2 QA BLOCKER) the raw fallback requires a CONTIGUOUS '.mirror', so a shell
@@ -15927,16 +17144,19 @@ def _main_isolated(monitor):
         gexpect("(gw-rt-residual-stage) words fed to $G from another stage allow (disclosed residual)",
                 "echo commit -nv | xargs $G", "allow")
         # A git builtin run by its dashed name (each git-<verb> in git's exec path links to the git binary, which
-        # runs that builtin) and a git alias defined on the command line name no roster verb any reading sees.
+        # runs that builtin) and a git alias defined on the command line of a git word built at run time name no
+        # roster verb any reading sees.
         for _gw_lbl, _gw_cmd in (
                 ("gw-rt-residual-dashed", "/usr/lib/git-core/git-commit -nv"),
                 ("gw-rt-residual-dashed-push", "/usr/lib/git-core/git-push --no-verify"),
                 ("gw-rt-residual-dashed-exec-path", "$(git --exec-path)/git-commit -nv"),
                 ("gw-rt-residual-dashed-var", "$P/git-commit --no-verify"),
-                ("gw-rt-residual-git-alias", "git -c alias.ci=commit ci -nv"),
                 ("gw-rt-residual-git-alias-var", "$G -c alias.ci=commit ci -nv")):
             gexpect("({}) a dashed git builtin or an inline git alias allows (disclosed residual)".format(_gw_lbl),
                     _gw_cmd, "allow")
+        # The same inline alias on a git word the readings see denies under the git alias rule (_gate_alias_deny).
+        gdeny_names("(gw-rt-git-alias-lit) an inline git alias on a git word denies with the git alias reason",
+                    "git -c alias.ci=commit ci -nv", "this git command defines a git alias for itself")
         # The disclosed safe-direction over-denies: any word built at run time counts, an operand or quoted text
         # included, so does a safe value built at run time after the verb, the whole text holding an extglob
         # opener is read across its separators, and behind an unjudged '#' any roster verb after such a character
@@ -16008,9 +17228,15 @@ def _main_isolated(monitor):
                 ("gw-rt-hd-ansi-gopt-cont", "cat <<'EOF' >notes.txt\nDon't\nEOF\n$G -c $\\\n'x.y=a;\\';b' commit -nv")):
             gdeny_names("({}) a body quote does not carry an ANSI-C escaped quote past the split-doubt test"
                         .format(_gw_lbl), _gw_cmd, "is built at run time")
+        # An ANSI-C quote in a git command's option region is a word the git alias rule reads as built at run time,
+        # and that rule runs first, so the carried quote stands after the roster verb here, with a quoted ';' in the
+        # option region keeping the git word and the verb in separate pieces of the first split.
         gdeny_names("(gw-rt-hd-ansi-lit) the carry before a quote-assembled git with a git operand denies too",
-                    "cat <<'EOF' >notes.txt\nDon't\nEOF\ng'i't -c $'x.y=a;\\';b' commit $O git",
+                    "cat <<'EOF' >notes.txt\nDon't\nEOF\ng'i't -C 'a;b' commit -m $'x;\\';y' $O git",
                     "a de-quoted reading of the command names git ('git'), and a later ")
+        gdeny_names("(gw-rt-hd-ansi-lit-gopt) the carried quote in a quote-assembled git's options denies under the "
+                    "git alias rule", "cat <<'EOF' >notes.txt\nDon't\nEOF\ng'i't -c $'x.y=a;\\';b' commit $O git",
+                    "in its global options or subcommand position that the shell builds at run time")
         gexpect("(gw-rt-hd-ansi-ctl) an ANSI-C escaped quote after a here-document before an ordinary command allows",
                 "cat <<'EOF' >notes.md\nDon't push it.\nEOF\nprintf $'it\\'s\\n'; git log -n 3", "allow")
         # The here-document shapes the inert-body split misreads, pinned as behaviour (disclosed residual): a stray
@@ -22132,6 +23358,89 @@ def _main_isolated(monitor):
             if _rc_got is not _rc_want:
                 failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
                                 .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
+        # history, refs and repack write refs, history or objects (observed with git 2.56.0 on scratch
+        # fixtures: history drop moved every descendant branch and the worktree, refs create, update, rename
+        # and delete wrote refs, repack --drop-filtered deleted a local object), so they class as mutating and
+        # only refs list, exists and verify read. Every M row for those three verbs read False before they
+        # joined _GIT_MUTATING_VERBS; the R rows fail if the refs read exemption is dropped. add --resolved
+        # (gv-18) and branch --delete-merged (gv-19) were already mutating (add is a mutating verb, and an
+        # unknown branch option keeps the fail-safe default), so those two are regression locks.
+        for _gv_label, _gv_sub, _gv_args, _gv_want in (
+                ("gv-1", "history", ["drop", "HEAD~1"], _M),
+                ("gv-2", "history", ["fixup", "HEAD~1"], _M),
+                ("gv-3", "history", ["reword", "HEAD~1"], _M),
+                ("gv-4", "history", ["split", "HEAD~1"], _M),
+                ("gv-5", "history", ["drop", "--dry-run", "HEAD~1"], _M),  # still writes objects: fail-safe
+                ("gv-6", "refs", ["create", "refs/heads/x", "HEAD"], _M),
+                ("gv-7", "refs", ["delete", "refs/heads/main"], _M),
+                ("gv-8", "refs", ["update", "refs/heads/main", "HEAD~1"], _M),
+                ("gv-9", "refs", ["rename", "refs/heads/main", "refs/heads/old"], _M),
+                ("gv-10", "refs", ["migrate", "--ref-format=reftable"], _M),
+                ("gv-11", "refs", ["optimize", "--all"], _M),
+                ("gv-12", "refs", [], _M),
+                ("gv-13", "repack", ["-a", "-d", "--filter=blob:limit=1", "--drop-filtered"], _M),
+                ("gv-14", "repack", ["-a", "-d"], _M),
+                ("gv-15", "refs", ["list"], _R),
+                ("gv-16", "refs", ["exists", "refs/heads/main"], _R),
+                ("gv-17", "refs", ["verify"], _R),
+                ("gv-18", "add", ["--resolved"], _M),
+                ("gv-19", "branch", ["--delete-merged", "origin/main"], _M)):
+            _gv_got = aiqt_hooks._git_is_mutating(_gv_sub, _gv_args)
+            if _gv_got is not _gv_want:
+                failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_gv_label, _gv_sub, _gv_args, _gv_want, _gv_got))
+        # End to end: a cd feeding one of them without an explicit target now carries the binding note, through
+        # the parsed reading (gv-20 to gv-22) and through the unparseable-command raw fallback (gv-25 to gv-27);
+        # each was a silent allow before. A read-only refs list (gv-23) and an explicit -C target (gv-24) stay
+        # silent.
+        ebexpect("(gv-20) a cd feeding an untargeted git history rewrite allows with a note",
+                 "cd /abs/repo && git history drop HEAD~1", "allow-note")
+        ebexpect("(gv-21) a cd feeding an untargeted git refs delete allows with a note",
+                 "cd /abs/repo && git refs delete refs/heads/x", "allow-note")
+        ebexpect("(gv-22) a cd feeding an untargeted git repack --drop-filtered allows with a note",
+                 "cd /abs/repo && git repack -a -d --filter=blob:limit=1 --drop-filtered", "allow-note")
+        ebexpect("(gv-23) a cd feeding a read-only git refs list stays a silent allow",
+                 "cd /abs/repo && git refs list", "allow")
+        ebexpect("(gv-24) an explicit -C target credits the binding for git history",
+                 "cd /abs/repo && git -C /abs/repo history drop HEAD~1", "allow")
+        ebexpect("(gv-25) the unparseable-command fallback notes a cd feeding git history",
+                 'cd /abs/repo && git history reword HEAD~1 "open', "allow-note")
+        ebexpect("(gv-26) the unparseable-command fallback notes a cd feeding git refs",
+                 'cd /abs/repo && git refs create x HEAD "open', "allow-note")
+        ebexpect("(gv-27) the unparseable-command fallback notes a cd feeding git repack",
+                 'cd /abs/repo && git repack -a -d "open', "allow-note")
+        # A git alias the command defines runs an unknown subcommand: after a cd it notes like a mutation, and
+        # beside a breadth stage or a push it counts as the other half of the breadth-then-publish deny. Each
+        # read the alias name as a read-only subcommand and allowed silently before that reading.
+        # A ref name (refs/heads/main) in an unparseable read is not the refs subcommand: the raw fallback stays
+        # silent (gv-28, a note before refs followed by '/' was excluded), while the refs subcommand itself
+        # still notes there (gv-26).
+        ebexpect("(gv-28) the unparseable-command fallback does not read a refs/ ref name as git refs",
+                 'cd /abs/repo && git log --oneline refs/heads/main "open', "allow")
+        ebexpect("(gla-eb-a) a cd feeding an untargeted command-local alias allows with a note",
+                 "cd /abs/repo && git -c alias.c=commit c -m y", "allow-note")
+        ebexpect("(gla-eb-b) a breadth stage followed by a command-local alias, which may push, denies",
+                 "git add -A && git -c alias.p=push p origin feat", "deny")
+        ebexpect("(gla-eb-c) a command-local alias, which may stage the whole tree, followed by a push denies",
+                 "git --config-env=alias.a=ADDCMD a && git push origin feat", "deny")
+        # A command whose text names a git configuration variable (_git_alias_named) counts the same way for every
+        # git command of it, behind a reserved word too (glx-eb-d) and on an unparseable command with two git
+        # words, as many as a breadth stage and a later publish need (glx-eb-e); each allowed silently before. One
+        # git word in such an unparseable command (glx-eb-f) and a command naming no such variable keep the silent
+        # allow.
+        ebexpect("(glx-eb-a) an exported alias, then a cd feeding an untargeted alias command, allows with a note",
+                 "export GIT_CONFIG_PARAMETERS=\"'alias.c'='commit'\"; cd /abs/repo && git c -m y", "allow-note")
+        ebexpect("(glx-eb-b) a breadth stage followed by a command an exported alias may make a push denies",
+                 "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push; git add -A && "
+                 "git p origin feat", "deny")
+        ebexpect("(glx-eb-c) an unrelated export keeps the silent allow",
+                 "export X=1; cd /abs/repo && git c -m y", "allow")
+        ebexpect("(glx-eb-d) a breadth stage and an aliased command in a then body deny",
+                 "if export GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\"; then git add -A; git p; fi", "deny")
+        ebexpect("(glx-eb-e) an unparseable command naming the variable and git twice denies",
+                 'set -a; read -r GIT_CONFIG_PARAMETERS <<< "$V"; git add -A && git p origin feat', "deny")
+        ebexpect("(glx-eb-f) an unparseable command naming the variable and git once keeps the silent allow",
+                 'set -a; read -r GIT_CONFIG_PARAMETERS <<< "$V"; git p origin feat', "allow")
         # A W entry and the unknown-option default give the same MUTATING verdict, so the git 2.56
         # spellings are also pinned by role: each resolves to its own entry, and a prefix git 2.56
         # rejects as ambiguous (--d, --del, --fo) resolves to None. --forked and --points-at take a value
