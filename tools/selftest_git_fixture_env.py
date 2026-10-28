@@ -4340,8 +4340,10 @@ def _trace2_maintenance_children(trace, bound=TRACE2_TAIL_SECONDS, clock=time.mo
     place before the deadline. Only newline-terminated events are parsed, split at LF alone
     (JSON escapes every LF inside a string, while str.splitlines would also cut an event at a
     raw U+2028, U+2029 or U+0085, which JSON allows unescaped inside a string); a malformed
-    event (bad JSON or UTF-8, not an object, a child_start argv that is missing or not a list of
-    strings) and an empty file (no event recorded, so no evidence either way) are loud strings.
+    event (bad JSON or UTF-8, not an object, an object without a string event (a child_start
+    whose tag was lost would otherwise hide its child), a child_start argv that is missing or not
+    a list of strings) and an empty file (no event recorded, so no evidence either way) are loud
+    strings.
     The red leg's evidence, the commit's own child_start event, is complete before the commit
     exits; the wait only covers events the detached child is still writing. Residuals: a writer
     that leaves the tail unterminated past the bound (a stalled or killed child) fails the probe
@@ -4371,7 +4373,10 @@ def _trace2_maintenance_children(trace, bound=TRACE2_TAIL_SECONDS, clock=time.mo
             return "unparseable trace2 event: %s" % (exc,)
         if not isinstance(event, dict):
             return "unparseable trace2 event: not a JSON object: %r" % (line[:80],)
-        if event.get("event") == "child_start":
+        kind = event.get("event")
+        if not isinstance(kind, str):
+            return "unparseable trace2 event: event is not a string: %r" % (line[:80],)
+        if kind == "child_start":
             argv = event.get("argv")
             if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
                 return ("unparseable trace2 event: child_start argv is not a list of strings: %r"

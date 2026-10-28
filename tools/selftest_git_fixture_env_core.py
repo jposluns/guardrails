@@ -2341,8 +2341,9 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
     fails loudly at the read whose clock is at or past the deadline, after one more wait when the
     clock after the first read is one tick inside it and with no wait when that clock is exactly
     at or one tick past it. Events are split at LF only, so a raw U+2028, U+2029 or U+0085
-    inside a string value stays in its event; a malformed complete event, a non-object event, a
-    child_start argv that is missing or not a list of strings and an empty file are each loud."""
+    inside a string value stays in its event; a malformed complete event, a non-object event, an
+    object whose event is missing or not a string, a child_start argv that is missing or not a
+    list of strings and an empty file are each loud."""
     started = json.dumps({"event": "child_start",
                           "argv": ["git", "maintenance", "run", "--auto"]}).encode("ascii") + b"\n"
     late = json.dumps({"event": "child_start", "argv": ["git", "gc", "--auto"]}).encode("ascii")
@@ -2390,13 +2391,17 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
     shape_legs = []
     for name, line in (("array", b'["child_start"]\n'),
                        ("argv-string", b'{"event":"child_start","argv":"git maintenance run"}\n'),
-                       ("argv-missing", b'{"event":"child_start"}\n')):
+                       ("argv-missing", b'{"event":"child_start"}\n'),
+                       ("event-missing", b'{"argv":["git","maintenance","run","--auto"]}\n'),
+                       ("event-not-string",
+                        b'{"event":7,"argv":["git","maintenance","run","--auto"]}\n')):
         got, sleeps = probe_trace("trace2-shape-" + name + ".jsonl", started + line, None,
                                   (0.0, 0.5))
         shape_legs.append((name, isinstance(got, str)
                            and got.startswith("unparseable trace2 event"), sleeps))
     check("env/trace2-malformed-shape-loud", shape_legs,
-          [("array", True, 0), ("argv-string", True, 0), ("argv-missing", True, 0)])
+          [("array", True, 0), ("argv-string", True, 0), ("argv-missing", True, 0),
+           ("event-missing", True, 0), ("event-not-string", True, 0)])
     check("env/trace2-empty-loud", probe_trace("trace2-empty.jsonl", b"", None, (0.0, 0.5)),
           ("empty trace2 event file: no event recorded", 0))
     separated = ["git", "gc", "a\u2028b\u2029c\x85d"]
