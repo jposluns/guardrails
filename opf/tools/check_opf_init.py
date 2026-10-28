@@ -1123,6 +1123,7 @@ def _suite_isolated(invoke):
         import tomllib
         from pathlib import PureWindowsPath
         import _opf_check
+        import _opf_init_observe
         import _opf_observe
         import _opf_oplock
         import _opf_release
@@ -2064,6 +2065,18 @@ def _suite_isolated(invoke):
                         (root / "CHANGELOG.md").rename(root / "notes.txt")
                     return result
 
+                def coupled_holder(repo, prefix=""):
+                    # The coupled init's detector (_opf_init_observe.prior_store_holder) over
+                    # the same fixture: the commit it names, None, or the code it refuses with.
+                    # Each "ancestry parity" check pins it to the verdict plain init gives here,
+                    # so a drift in either scan fails the pair.
+                    try:
+                        return _opf_init_observe.prior_store_holder(
+                            git, str(repo), pinned_head=head_of(repo), prefix=prefix,
+                            object_format="sha1")
+                    except _opf_init_observe.ObservationError as exc:
+                        return exc.code
+
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
                 # over a store git HISTORY shows existed. Reproduction: init, commit the store,
                 # raise a counter high-water and commit, `git rm -r .working .opf.toml` and
@@ -2116,6 +2129,8 @@ def _suite_isolated(invoke):
                       output == prior_store_output(ancestry, ancestry, held_commit,
                                                    [".opf.toml", ".working"], True))
                 check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
+                check("ancestry parity: the coupled init's detector names the same commit",
+                      coupled_holder(ancestry) == held_commit)
                 # The same reproduction with the starter CHANGELOG.md left in place (the file the
                 # fixture above renames away): plain init refuses that changelog at preflight,
                 # ahead of the history scan (spec 14.2), so the counters stay protected either way
@@ -2158,6 +2173,8 @@ def _suite_isolated(invoke):
                           "so the first-parent history of HEAD is truncated and a prior store, "
                           "whose counters spec 8.2 forbids restarting, cannot be ruled out; "
                           "unshallow the clone (git fetch --unshallow) and retry")))
+                check("ancestry parity: the coupled init's detector refuses the shallow clone",
+                      coupled_holder(shallow_prior) == _opf_init_observe.CANNOT_EVALUATE)
 
                 # SPEC 8.2 ancestry scope (first-parent line): a store that existed ONLY on a
                 # side branch and was deleted there before the merge never reached a
@@ -2196,6 +2213,8 @@ def _suite_isolated(invoke):
                 rc, output = run(sideline)
                 check("ancestry: side-branch-only store does not block init (first-parent scope)",
                       rc == EXIT_OK and valid_sources(sideline))
+                check("ancestry parity: the coupled init's detector finds no side-branch store",
+                      coupled_holder(sideline) is None)
                 # QA round 1: the first-parent limit is disclosed WHERE USERS SEE IT -- the
                 # successful init output -- not only in the docstring. QA round 2 MAJOR 1: in
                 # exact words, since this very fixture's store sat on a MERGED side branch.
@@ -2239,6 +2258,8 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: pointer-only refusal names the holding commit",
                       ptr_commit in output)
+                check("ancestry parity: the coupled init's detector names the pointer-only commit",
+                      coupled_holder(ptr_only) == ptr_commit)
                 # The restore command names only what that commit holds: git checkout fails
                 # outright on a pathspec the commit lacks, so a command naming .working too
                 # would restore nothing. DISCRIMINATOR: M-restore-both (every store path named
@@ -2277,6 +2298,8 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: manifest-only refusal names the holding commit",
                       mf_commit in output)
+                check("ancestry parity: the coupled init's detector names the manifest-only "
+                      "commit", coupled_holder(mf_only) == mf_commit)
                 check("ancestry: the complete manifest-only refusal text (.working alone, "
                       "its missing counters.toml named as a PARTIAL restore)",
                       output == prior_store_output(
@@ -2307,6 +2330,8 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: renamed-machine refusal names the holding commit",
                       ren_commit in output)
+                check("ancestry parity: the coupled init's detector names the renamed-machine "
+                      "commit", coupled_holder(mf_renamed) == ren_commit)
                 check("ancestry: the complete renamed-machine refusal text (its missing "
                       "counters.toml named as a PARTIAL restore)",
                       output == prior_store_output(
@@ -2353,6 +2378,8 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "grafts" in output and "cannot evaluate" in output)
                 check("ancestry: grafted re-init wrote nothing (counters never re-zeroed)",
                       _snapshot(grafted) == before)
+                check("ancestry parity: the coupled init's detector refuses the grafts entry",
+                      coupled_holder(grafted) == _opf_init_observe.CANNOT_EVALUATE)
                 # QA round 2 MINOR 3: the grafts refusal states exactly what it found, for
                 # every kind of entry, never that the entry "rewrites parent links" (an empty
                 # file or a dangling link rewrites nothing). DISCRIMINATOR: mutant
@@ -2405,6 +2432,8 @@ def _suite_isolated(invoke):
                 check("ancestry: grafts file removed, the prior store is found again",
                       rc == EXIT_ERROR and output == prior_store_output(
                           grafted, grafted, g_held, [".opf.toml", ".working"], True))
+                check("ancestry parity: grafts file removed, the coupled init's detector names "
+                      "the same commit", coupled_holder(grafted) == g_held)
 
                 # QA round 2 MINOR 4: the info/grafts PATH arms, pinned. git prints the
                 # grafts path of a separate git directory as an absolute path, so a git
@@ -6573,6 +6602,8 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: first-parent refusal names the mainline store commit",
                       fp_store in output)
+                check("ancestry parity: the coupled init's detector names the mainline store "
+                      "commit", coupled_holder(fp) == fp_store)
                 check("ancestry: the complete first-parent refusal text (its missing "
                       "counters.toml named as a PARTIAL restore)",
                       output == prior_store_output(
@@ -6602,6 +6633,10 @@ def _suite_isolated(invoke):
                 rc, output = run(bracket_init)
                 check("ancestry: metacharacter-named root unaffected by sibling weX store",
                       rc == EXIT_OK and valid_sources(bracket_init))
+                check("ancestry parity: the coupled init's detector escapes the we[X] prefix "
+                      "and still finds the weX store",
+                      coupled_holder(near, "we[X]") is None
+                      and coupled_holder(near, "weX") == head_of(near))
 
                 # The refuse-rather-than-guessing arm is LOAD-BEARING: a committed DIRECTORY
                 # named .opf.toml is a store-path change whose tree holds no store
@@ -6629,6 +6664,8 @@ def _suite_isolated(invoke):
                 check("ancestry: non-store change at a store path refuses rather than guessing",
                       rc == EXIT_ERROR and inert("refusing rather than guessing") in output
                       and "prior store exists" not in output)
+                check("ancestry parity: the coupled init's detector refuses rather than guessing",
+                      coupled_holder(guess) == _opf_init_observe.CANNOT_EVALUATE)
                 check("ancestry: the complete refuse-rather-than-guessing text",
                       output == cannot_evaluate_output(guess, (
                           "git history preflight: commit " + guess_drop + " changed a store "
@@ -6646,6 +6683,8 @@ def _suite_isolated(invoke):
                 rc, output = run(plain_history)
                 check("ancestry: committed history without a store proceeds",
                       rc == EXIT_OK and valid_sources(plain_history))
+                check("ancestry parity: the coupled init's detector finds no store either",
+                      coupled_holder(plain_history) is None)
 
                 # QA round 3 MINOR 4: the CURRENT-PATH limit, pinned. A store committed at old/
                 # on the first-parent line, deleted there, and the directory then renamed to
