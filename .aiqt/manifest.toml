@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "731054fccd3d05d196d4e968d17d92f280a51ddda933b471d426063d9399040d"
+tree-sha256 = "37914d9f2f51310a968e558e3085ff448f7ae28370ed7b0cc07e1c575e1167ae"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 482648
-sha256 = "5c12cd590d671c223fef6a40403c2cd18fd0ede3dd23a0c9243f79a38b918db3"
+bytes = 482938
+sha256 = "11d37ff0100c767f36d95396bdd1b60844993d35177cbdd4ea4eec7cdca8a799"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2636,8 +2636,8 @@ sha256 = "2872be6033032cf0248cced15310d22b01e90ee1711a5662d2e10b46e6959e27"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
-bytes = 297327
-sha256 = "930aa68d00f040a5fbd6468c7f4bf8969e93ea15ffc907d9ca0ada1bc7f7da8a"
+bytes = 297382
+sha256 = "d9975b37c75044926dd53a61b1ecd3deb71cd0b3839a9066aef7953b064344bb"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
@@ -2811,8 +2811,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 341464
-sha256 = "d230ede7704a754e45d773b5362f5e99702e4b33c92633d14bbd43a39303129e"
+bytes = 345934
+sha256 = "7c51c3e2ad9292d2d79ae711d8e0f76bc4daf07662c68873fecc3689dcdea67e"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -3051,13 +3051,13 @@ sha256 = "b089b183c86fb696cb9b967efd7409c925204a1b2860c22ad9914e3b1c54db7e"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 620476
-sha256 = "531392e4d39ad61b419abcfbc3f45ed14e9fa227b31731c3cfac20237ed2c9f1"
+bytes = 627210
+sha256 = "8f2ab92df1c20874eb68c94e46aed73f122e4efb44c4890e11d4e6db8c97c7ba"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1307881
-sha256 = "0f192ddbbaee39e0e19eb6fca9255f5cff54511c616593c8af72c6696fc156ec"
+bytes = 1308055
+sha256 = "0ab56cb8b0a9cd8ffa1d6460076745cc9e143be17c59a41f3807ea44bdd535ac"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"

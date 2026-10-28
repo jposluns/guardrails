@@ -639,22 +639,30 @@ Each case runs on its own copy of that template; the root is removed in a finall
       own worklog entry, the backlog index bytes unchanged and no status change, its run's reservation
       claiming exactly the receipt's and the entry's numbers, doctor VALID, and a second repair refuses
       (flip: no reservation published, which the publication boundary refuses); at homes 1, with no
-      reservation home, it refuses exit 2, every byte untouched (flip: the homes guard dropped); an item
-      whose only receipt is importer-authored takes the clean receipt beside it, doctor VALID (flip: the
-      writer's receipt join counting importer-authored receipts); and a kill at each apply step of its
-      three-operand publication leaves the reservation standing and reconciles to exactly the prestate or
-      the poststate, the backlog index never written, the next repair deriving above the reserved numbers
-      (flip: the done index written outside the journaled transaction, in the killed child)
+      reservation home, it refuses exit 2 before any file but the manifest is read, every byte untouched
+      (flips: the homes guard dropped; the request check's homes refusal dropped, so the planner refuses
+      only after the operand reads); an item whose only receipt is importer-authored takes the clean
+      receipt beside it, doctor VALID (flip: the writer's receipt join counting importer-authored
+      receipts); and a kill at each journal step of its three-operand publication, every hook
+      kill_points(3) names but after-lock, which a homes-2 publication never reaches (that run records),
+      leaves the reservation standing and reconciles to exactly the prestate or the poststate, the backlog
+      index never written, the next repair deriving above the reserved numbers (flip: the done index
+      written outside the journaled transaction, in the killed child)
   T111 an assistant or automation receipt-repair refuses before the store is resolved, every byte untouched
       (flip: the maintainer check dropped)
   T112 receipt-repair refuses an item at open, active, dropped or done/proposed, the last pointed to
       done-with-receipt (flip: the state guard dropped, so a later guard refuses with another message); an
-      item already holding its clean receipt (flip: the receipt check dropped); an item whose receipt sits
-      in the archive, and an archive the doctor's walk does not pass (flip, for both: the active-only read,
-      under which a second receipt publishes and fails the final doctor), each with every byte untouched
+      item already holding its clean receipt (flip: the receipt check dropped); a done row naming the item
+      whose links the doctor's receipt join cannot interpret, which leaves that join not evaluated (flip:
+      the active done rows' interpretation check dropped, so a second receipt publishes and fails the final
+      doctor); an item whose receipt sits in the archive, and an archive the doctor's walk does not pass
+      (flip, for both: the active-only read, under which a second receipt publishes and fails the final
+      doctor), each with every byte untouched
   T113 a peer reservation of the receipt's number landing between planning and the held capability refuses
       the repair at the held revalidation with nothing reserved or written; the re-run claims above it and
-      records (flip: T80's reservation step without the planned claims)
+      records (flip: T80's reservation step without the planned claims); and the backlog index, which the
+      repair only reads, edited between planning and the held lease refuses it at the held re-read with
+      nothing reserved or written (flip: the held re-read of the operands alone)
   T114 the reviewed edit uncommitted, or committed and then edited again, refuses exit 2 naming the commit,
       every byte untouched (flip: the committed-row check dropped, so the repair publishes and its final
       doctor fails after publication)
@@ -10354,16 +10362,36 @@ def t110_receipt_repair(fx):
 
 
 def t110_homes1_refused(fx):
-    """At homes 1 there is no reservation home: the repair refuses exit 2 naming it, every byte untouched
-    and no journal home created (flip: the homes guard dropped, so the repair claims through the homes-1
-    counters path and publishes)."""
+    """At homes 1 there is no reservation home: the repair refuses exit 2 naming it, before any file but the
+    manifest is read, every byte untouched and no journal home created (flips: the homes guard dropped, so
+    the repair claims through the homes-1 counters path and publishes; the request check's homes refusal
+    dropped, so only the planner's own refusal holds, after every operand is read)."""
     root = _repair_store(fx, "t110-homes1")
-    refused_untouched(fx.env, root, REPAIR, "only a homes-2 store has")
+    manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
+    reads = []
+    original_read = record._read_operand
+
+    def observing(root_fd, rel):
+        reads.append(rel)
+        return original_read(root_fd, rel)
+    with patch.object(record, "_read_operand", observing):
+        refused_untouched(fx.env, root, REPAIR, "only a homes-2 store has")
+    assert reads and set(reads) == {manifest_rel}, ("T110 refused before any operand is read", reads)
     assert not (Path(root) / ".working/journals").exists(), "T110 no reservation home is created"
 
 
 def flip_t110_homes1():
     return patch.object(record, "_require_reservation_home", lambda ctx: None)
+
+
+def flip_t110_homes1_late():
+    """The request check without its receipt-repair homes refusal: the planner's own call still refuses."""
+    check_request = record._check_request
+
+    def without_repair(req, ctx):
+        if req.subcommand != "receipt-repair":
+            check_request(req, ctx)
+    return patch.object(record, "_check_request", without_repair)
 
 
 def t110_importer_arm(fx):
@@ -10422,12 +10450,15 @@ _repair_crash_flip = [""]
 
 
 def t110_repair_crash(fx):
-    """A homes-2 receipt-repair (three operands: counters, done index, worklog) killed at each journal step of
-    its publication leaves its reservation standing and no reported id; the next run reconciles the typed
-    journal, leaving the operands exactly at the prestate or exactly at the poststate (the poststate iff
-    COMPLETE) and the backlog index untouched; after a rolled-back kill the next repair derives above the
-    reserved numbers and records, doctor VALID (flip: the done index written outside the journaled
-    transaction, applied in the killed child)."""
+    """A homes-2 receipt-repair (three operands: counters, done index, worklog) run at each of the journal
+    engine's injection hooks kill_points(3) names. At after-lock, the homes-1 journal lock's hook, the child
+    records: the homes-2 publication holds the operation capability and takes no journal lock, so that hook
+    is never reached. Killed at every other hook, the run leaves its reservation standing and no reported
+    id; the next run refuses after reclaiming the dead holder's capability records (a kill before INTENT is
+    durable, which opens no transaction) or reconciling the typed journal, leaving the operands exactly at
+    the prestate or exactly at the poststate (the poststate iff COMPLETE) and the backlog index untouched;
+    after a rolled-back kill the next repair derives above the reserved numbers and records, doctor VALID
+    (flip: the done index written outside the journaled transaction, applied in the killed child)."""
     env = fx.env
     base = _repair_store(fx, "t110-crash-base")
     with _self_test_homes2_active(base):
@@ -10437,28 +10468,39 @@ def t110_repair_crash(fx):
         assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
         post = dict((rel, read(reference, rel)) for rel in REPAIR_OPERANDS)
         rolled_back = None
-        for hook in ("after-publish-INTENT", "torn-payload:0", "after-apply-0", "torn-payload:1",
-                     "after-apply-1", "torn-payload:2", "after-apply-2", "torn:COMPLETE"):
+        points = kill_points(len(REPAIR_OPERANDS))
+        for hook in points:
             point = ("T110 repair", hook)
             root = fx.case("t110-crash-" + hook.replace(":", "-"), base)
             pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
             bi_before = read(root, BI_INDEX)
             proc = child(env, root, REPAIR, kill=hook, flip=HOMES2_CHILD_FLIP + _repair_crash_flip[0])
+            if hook == "after-lock":
+                # The homes-1 journal lock's hook: the homes-2 publication runs under the held operation
+                # capability and takes no journal lock, so the hook is never reached and the run records.
+                assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (
+                    "T110 no journal lock is taken at homes 2", point, proc.returncode, proc.stderr[-800:])
+                assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == post, ("T110 the poststate", point)
+                continue
             assert proc.returncode == 137, ("T110 the child is killed at", point, proc.stderr[-800:])
             assert RECORDED_EVENT not in proc.stdout, ("T110 a killed run reports no id", point)
             (reserved,) = _reservations(root)
             claims = model(root, record._ALLOCATIONS_REL + "/" + reserved)["claims"]
             assert claims == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, (point, claims)
-            refused(record_cli(env, root, REPAIR), "was reconciled")
+            # Before INTENT is durable the kill leaves no opened transaction, only the dead holder's
+            # capability records, which the next run reclaims; from INTENT on it reconciles the transaction.
+            opened = points.index(hook) >= points.index("after-publish-INTENT")
+            refused(record_cli(env, root, REPAIR), "was reconciled" if opened else "were reclaimed")
             states = journal_states(root, TYPED_JOURNAL)
             assert states and all(s != "open" for s in states.values()), ("T110 terminal", point, states)
+            assert opened or set(states.values()) == {"nothing-opened"}, ("T110 nothing opened", point, states)
             now = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
             complete = any(s == "complete" for s in states.values())
             assert now == (post if complete else pre), ("T110 prestate or poststate, poststate iff COMPLETE",
                                                         point, states)
             assert read(root, BI_INDEX) == bi_before, ("T110 the backlog index is never written", point)
             assert _reservations(root) == [reserved], ("T110 the reservation stands", point)
-            if not complete and rolled_back is None:
+            if "rolled-back" in states.values() and rolled_back is None:
                 rolled_back = root
         assert rolled_back is not None, "T110 some kill point rolls the repair back"
         recorded(record_cli(env, rolled_back, REPAIR))
@@ -10525,6 +10567,35 @@ def t112_repair_existing_receipt(fx):
 
 def flip_t112_receipt():
     return patch.object(record, "_require_unreceipted", lambda ctx, operand, rid: None)
+
+
+def t112_repair_uninterpreted_receipt(fx):
+    """A committed DN-1 naming BI-1 whose links value is one table rather than an array of tables, which the
+    doctor's receipt join reads as no link at all and so does not evaluate (C-RECEIPTS CANNOT-EVALUATE), is
+    refused naming the row and the cause, every byte untouched (flip: the active done rows' interpretation
+    check dropped, so the receipt join reads DN-1 as no receipt, a second receipt publishes and the final
+    doctor fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t112-uninterpreted")
+    malformed = {"id": "DN-1", "type": "done", "status": "recorded", "title": "repair me",
+                 "created_at": "2026-09-01T00:30:00Z", "updated_at": "2026-09-01T00:30:00Z",
+                 "actor": {"kind": "maintainer"}, "links": {"rel": "receipt_of", "id": "BI-1"}}
+    dones = model(base, DN_INDEX)
+    dones["record"] = dones.get("record", []) + [malformed]
+    write_commit(env, base, DN_INDEX, emit.emit_checked(dones).encode("utf-8"), "a receipt with malformed links")
+    counters = model(base, COUNTERS)
+    counters["counters"]["DN"] += 1
+    write_commit(env, base, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc != 0 and "the receipt join is not evaluated over a partial set" in out + err, (
+        "T112 the malformed receipt leaves the receipt join not evaluated at rest", rc, out[-1600:], err[-800:])
+    with _self_test_homes2_active(base):
+        refused_untouched(env, fx.case("t112-uninterpreted-repair", base), REPAIR,
+                          "done.index.toml#{} has links that cannot be interpreted".format(len(dones["record"])))
+
+
+def flip_t112_uninterpreted():
+    return patch.object(record, "_require_interpreted_receipts", lambda rows, rel, rid: None)
 
 
 def _archived_receipt(fx, name):
@@ -10596,6 +10667,37 @@ def t113_repair_peer_reservation(fx):
         assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
             "T113 the re-run claims above the peer's reservation", receipts_of(root, "BI-1"))
         doctor_valid(env, root)
+
+
+def t113_repair_backlog_changed(fx):
+    """The backlog index the repair reads and never rewrites, edited between planning and the held lease
+    (BI-1 put back at active just before the lease is taken), refuses the run at the held re-read naming
+    that index: every operand at the prestate, no reservation and no transaction (flip: the held re-read
+    of the operands alone, under which the receipt publishes for an item no longer at done and the final
+    doctor fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t113-backlog-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t113-backlog-changed", base)
+        index = model(root, BI_INDEX)
+        index["record"][0]["status"] = "active"
+        edited = emit.emit_checked(index).encode("utf-8")
+        acquire = record._acquire_guard
+
+        def edit_first(ctx):
+            (Path(root) / BI_INDEX).write_bytes(edited)
+            return acquire(ctx)
+        pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+        with patch.object(record, "_acquire_guard", edit_first), ticking():
+            result = record_cli(env, root, REPAIR)
+        assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == pre, "T113 every operand at the prestate"
+        assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
+        assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
+        refused(result, "{} changed after it was read".format(BI_INDEX))
+
+
+def flip_t113_backlog():
+    return patch.object(record, "_planned_from", lambda ctx, plan: list(plan.operands))
 
 
 def t114_repair_uncommitted_edit(fx):
@@ -10808,15 +10910,17 @@ TESTS = (
     ("T108-committed-deleted-lease-refused", t108_committed_deleted_lease, flip_t108),
     ("T109-normalizing-filter-note", t109_normalizing_filter_note, flip_t109),
     ("T110-receipt-repair-records", t110_receipt_repair, flip_t22_noreserve),
-    ("T110-receipt-repair-homes1-refused", t110_homes1_refused, flip_t110_homes1),
+    ("T110-receipt-repair-homes1-refused", t110_homes1_refused, (flip_t110_homes1, flip_t110_homes1_late)),
     ("T110-receipt-repair-importer-arm", t110_importer_arm, flip_t110_importer),
     ("T110-receipt-repair-crash", t110_repair_crash, flip_t110_crash),
     ("T111-receipt-repair-maintainer-only", t111_repair_maintainer_only, flip_t111),
     ("T112-receipt-repair-state-guard", t112_repair_state_guard, flip_t112_state),
     ("T112-receipt-repair-existing-receipt", t112_repair_existing_receipt, flip_t112_receipt),
+    ("T112-receipt-repair-uninterpreted-receipt", t112_repair_uninterpreted_receipt, flip_t112_uninterpreted),
     ("T112-receipt-repair-archived-receipt", t112_repair_archived_receipt, flip_t112_archive),
     ("T112-receipt-repair-unreadable-archive", t112_repair_unreadable_archive, flip_t112_archive),
     ("T113-receipt-repair-peer-reservation", t113_repair_peer_reservation, flip_t80_no_recheck),
+    ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
 )
 

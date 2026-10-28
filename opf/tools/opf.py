@@ -39,7 +39,9 @@ prints a changelog draft or freeze digest without writing files.
 receipt) through one journaled publication, then render and require doctor VALID, leaving the change
 uncommitted. `receipt-repair BI-ID --actor maintainer[:ID] --reason S` adds the missing receipt of an item a
 committed reviewed edit put at done, claiming its id through a homes-2 id reservation; it refuses at homes 1,
-so while this build activates homes 1 only it refuses on every store (exit 2, nothing written).
+so while this build activates homes 1 only it refuses on every store (exit 2, recording nothing; like every
+subcommand, on a homes-1 store it first reconciles any interrupted earlier run, and that recovery, where one
+is needed, writes the store before the run refuses).
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.

@@ -841,11 +841,13 @@ and then retired by the maintainer, doctor-VALID, while the same ruling filed by
 with every byte untouched in its own test; and that receipt-repair, run with homes 2 activated, adds the
 missing receipt of a backlog item a committed reviewed edit put at done (one receipt_of receipt and its
 own worklog entry, the backlog index bytes unchanged, its run's id reservation claiming exactly those
-numbers, doctor-VALID), adds the clean receipt beside an importer-only one, reconciles a kill at each apply
+numbers, doctor-VALID), adds the clean receipt beside an importer-only one, reconciles a kill at each journal
 step of its publication to exactly the prestate or the poststate, and refuses with every byte untouched at
-homes 1, for a non-maintainer, for an item not at done, an item already holding a clean receipt, active or
-archived, an archive the doctor's walk does not pass, a peer reservation landing before its own, and a
-reviewed edit not committed, each in its own test. Under
+homes 1 before any operand is read, for a non-maintainer, for an item not at done, an item already holding a
+clean receipt, active or archived, a done row naming the item whose links the doctor's receipt join cannot
+interpret, an archive the doctor's walk does not pass, a peer reservation landing before its own, a backlog
+index edited between planning and the held lease, and a reviewed edit not committed, each in its own test.
+Under
 --red-on-revert each test's flip (the byte-reproduction precondition, emit_checked, the allowed-delta
 postcondition, the known-complete proof, the in-transaction counters operand, the derived '/proposed'
 qualifier, the maintainer-only check, the done-only-through-its-receipt guard, the rejection reason the
@@ -872,10 +874,11 @@ that one publishes doctor-VALID; the chain-head check and the cycle check each d
 chain rule still refuses with every byte untouched, so those two tests assert that their own check
 refused before the chain rule ran; the planner dropping the requested links, which only the oracle
 refuses; and the planner's record validation replaced by a pass-through, publishing the assistant
-ruling), and the receipt-repair flips (no reservation published, the homes guard, the importer-receipt
-firewall in the writer's join, the done index written outside the journaled transaction in the killed
-child, the maintainer check, the state guard, the receipt check, the archive read, the planned claims at
-the held reservation step, and the committed-row check, each dropped))
+ruling), and the receipt-repair flips (no reservation published, the homes guard, the request check's
+homes refusal, the importer-receipt firewall in the writer's join, the done index written outside the
+journaled transaction in the killed child, the maintainer check, the state guard, the receipt check, the
+active done rows' interpretation check, the archive read, the planned claims at the held reservation step,
+the held re-read of the backlog index, and the committed-row check, each dropped))
 is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the

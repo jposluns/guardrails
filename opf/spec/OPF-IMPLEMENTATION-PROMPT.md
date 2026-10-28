@@ -955,8 +955,9 @@ conformance claim (checklist item 19) until the maintainer rules.
     `done/proposed`", never one already at unqualified `done`. The specification defines no
     mechanism for the store's lock, but two of its texts bear on the ruling: section 9 (The
     manifest, storage layout) says of the inline layout "One global store lock MUST serialize
-    writers", and section 8.8, item 3 says "At homes 1 the `counters.toml` advance MUST be an
-    operand of the same journaled transaction, under the held lease". This prompt's writer holds the
+    writers", and section 8.8, item 3 says "Claim each new ID as one atomic act (section 8.2): the
+    claim is an irrevocable reservation in the journal home, made before the reversible publication
+    (section 4.2)". This prompt's writer holds the
     step 7 lease, which section 5.7 requires before a run mutates the store, and open point 11 keeps
     the owned lock in the git common directory. Neither names a way for a maintainer's reviewed
     edit, made with no operation running and in no journaled transaction, to hold it. Decided, for
