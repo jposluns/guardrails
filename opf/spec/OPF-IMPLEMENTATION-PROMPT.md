@@ -41,7 +41,7 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`d6a9499e468319c4e6eba091f77bbb64034ed606` of `jposluns/guardrails`. These pins name the
+`12f3ec9ed77dca2e0d4d0edca6eb27faf743d55b` of `jposluns/guardrails`. These pins name the
 specification this prompt quotes: every quotation of OPF-SPEC.md in this prompt is taken from that
 file at that commit, whose SHA-256 the table gives. Read them from the pinned URLs, not from a
 branch, so the text cannot change under you. After downloading each file, compute its
@@ -50,22 +50,22 @@ stop and report it. Do not work from memory or from a summary, this one included
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `cfe3e99fe8cd70d196ce8c13c446f3bc8ec6405755b4036b54a313734be41c05` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `5b8eb1bd89279eeba6b1d63e73e0df62989e0897684e106150e89d0379bed3df` |
 | `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8155bc040585bfc0211905c344fdec997e4c67805598486816fcd0de407b18a7` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `dc856ac19c1f38e695163c165622c168dcf36bb6286ff17c80b12f730124a2d5` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `ab1619d41ecd16d75ab8efe89ffa4acc4b7da5fa9b88e4e94cd3430e9d139b91` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `9c22a3117b1811073a89e1de0222c0d3a149e399093986d52b5e3cf4671a4b00` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```
-https://raw.githubusercontent.com/jposluns/guardrails/d6a9499e468319c4e6eba091f77bbb64034ed606/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/12f3ec9ed77dca2e0d4d0edca6eb27faf743d55b/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/d6a9499e468319c4e6eba091f77bbb64034ed606/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/12f3ec9ed77dca2e0d4d0edca6eb27faf743d55b/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -84,7 +84,7 @@ Facts about these sources that shape the work:
   fixture that must be refused, never one that is upgraded or accepted: step 8 builds the version
   and homes refusals and an `opf upgrade` that refuses every invocation.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.5.7"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
+  `version = "0.5.9"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
   reference tooling's `opf adopt` verb; `adopt/clean-start.md`, its companion for a project with no
   prior records, whose interim route runs the reference tooling's `opf init`; and `flow/SKILL.md`,
   an operating-loop skill for an assistant. None of them is an import prompt, and this prompt runs
@@ -1189,6 +1189,23 @@ containment.
   and yields cannot-evaluate. Section 14.2 also says that a no-follow existence probe of that
   `manifest.toml`, used only by discovery (step 2) and by this rule, is not a read of a kept path.
   Your own store registers no `[unmanaged]` path, so this arises only in test stores.
+- Section 5.7 says "`opf doctor`, and the pre-commit hook that runs it, also refuses a machine-store
+  TOML file that is not in canonical form, at every run rather than only before a write: such a
+  file is a C-CONTAINMENT finding, with the same allowance for a literal U+2028 or U+2029." So the
+  validator applies the step 1 byte-reproduction test to every machine-store TOML file, the record
+  archive's bucket files included ("A bucket's `archive.toml`, `worklog.toml` and
+  `<type>.index.toml` are checked at every import status"), and reports each file that fails it as
+  a C-CONTAINMENT finding naming the file, while a file that differs from the canonical
+  serialization only by holding U+2028 or U+2029 literally inside a basic string passes. Its remedy
+  is the maintainer's reviewed edit that restores the canonical bytes (step 14, Ordering, row R22).
+  Section 5.7 lists what this check leaves out: a path under a valid `[unmanaged]` declaration, the
+  legacy import staging area, a file the validator cannot read or parse, which the check that reads
+  it grades, "except `init.toml`, which no other check reads, so an unreadable one cannot be
+  evaluated and an unparseable one is a finding", and, during a partial import backed by an active
+  import run (step B), the stray paths that the containment and archive walks triage there
+  (section 14.2). Section 5.7 also says "A hand edit or hand merge that leaves canonical bytes
+  passes both the precondition and doctor undetected", so this check does not enforce the
+  integration-base rule of step 7.
 - An `.opf.local.toml` at the product root is a finding when the snapshot that step 2 names holds
   it: the git index for a run on the working tree and for the pre-commit check, never the working
   tree itself, and the checked-out revision in CI. It is judged on that snapshot alone and never on
@@ -1265,7 +1282,11 @@ containment.
   archive `.working/archive/adoption/<run-id>/`, the Move destination `.working/archive/moved/`,
   and the evidence bundles `.working/imported/<kind>/<run-id>/`, all recognized by containment as
   OPF control area, and MUST add the four section 8.3 imported-series checks to the doctor roster
-  of every store." Build these section 4.2 checks too, on every store:
+  of every store." It also says "At homes 2 an implementation MUST register `.working/.gitignore` by
+  its exact path as a managed control file that containment recognizes as OPF control area;
+  containment never reads it for drift, and the doctor does not yet grade drift of its managed
+  block." So containment recognizes that exact path, the file step 9 writes, as OPF control area.
+  Build these section 4.2 checks too, on every store:
   - C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
     digests of every payload file under `.working/imported/` and `.working/archive/` against the
     bundle-root inventories, and schema-checks every inventory, the adoption identity table
@@ -1340,6 +1361,13 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
   view is not (open point 19). A file under `.working/journals/` or `.working/staging/`, ignored by
   the managed block, is not a tracked-store finding, while an ignored file under
   `.working/imported/` or `.working/archive/` is one (section 4.2).
+- In a valid store, `.working/.gitignore` holding the section 4.2 managed block is not a
+  containment finding (section 4.2).
+- A store whose backlog index carries a comment, with the views re-rendered, is a C-CONTAINMENT
+  finding naming that index; one whose index differs from the canonical serialization only by
+  holding U+2028 literally inside a basic string is not, and neither is one whose index differs
+  only by holding U+2029 (section 5.7). An `init.toml` that does not parse is a finding, and one
+  that cannot be read is cannot-evaluate (section 5.7).
 - A file under `.working/imported/import/<run-id>/` that no inventory row claims, a bundle without
   `inventory.toml`, and a listed file whose bytes differ from its recorded digest are each a
   C-EVIDENCE-ENUM finding; a path claimed twice and an unreadable inventory are each
@@ -2323,7 +2351,7 @@ platform." Wire all four, not only the platform you run on.
   | R19 | `lease.toml` taken and released | 5.7 | the running operation | the step 7 lease, inside every operation that writes the store |
   | R20 | `init.toml`, the empty imported leaves, the pointer `.opf.toml`, `.working/.gitignore` and `.working/README.md`, each created | 4.2, 9; OPF-INIT-D2B; open point 14 | the operator | `opf init` (step 9), and module enablement (step C) for an enabled module's imported leaves; no operation writes them after, and every other file init creates is then written by the rows that name it |
   | R21 | Records moved to the archive, with the year's `archive.toml` | 12 | the operator | rotation (step 12); until it exists nothing rotates |
-  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and the section 8.8 refusal of a store file that is not canonical (item 2), which the validator does not report | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
+  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and a machine-store TOML file that is not in canonical form, which the validator reports as a C-CONTAINMENT finding (section 5.7) and the writer refuses (section 8.8, item 2) | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
   | R23 | A store file conflicted in a merge: the integration base's version taken and the operation redone | 5.7 | the operator | `git merge --abort`, then each of the branch's authoring operations redone through the writer on a branch from the integration base, each committed (step 7) |
   | R24 | View drift | 10.3, 11 | any actor | R14 |
   | R25 | A tracked-store finding (an unstaged or ignored path), or the step 2 `.opf.local.toml` finding | 5.1; open point 19; step 2 | the operator | staging, an ignore-rule change, or `git rm --cached`; none writes a protected path |
@@ -2442,12 +2470,6 @@ platform." Wire all four, not only the platform you run on.
     refs or registered `x-<vendor>` tables of any other clean record, which this prompt's reading
     routes through `create` linking `corrects` (Ordering, R1 to R9), that keeps the record
     schema-valid and its links resolving, since no check compares those records' fields with `HEAD`;
-  - a store file that is not canonical, such as one carrying a comment: the validator grades parsed
-    content, so with the views re-rendered (a source-set digest taken over bytes changes with the
-    comment, open point 6) it reports nothing for it, and only the byte-reproduction precondition of
-    the operations that rewrite store files refuses such a file (step 1; section 8.8, item 2), so
-    the next operation that rewrites it refuses (row R22), while your `opf upgrade` reads no file
-    at all (step 8);
   - the deletion of `.working/README.md`, which the validator does not require (open point 14).
 
   Adding any of those comparisons is the maintainer's choice. The deletion of `init.toml`, which
@@ -2536,8 +2558,9 @@ Acceptance checks:
   or `.working/README.md`, which Residuals above covers), a counter row missing for an enabled
   namespace, a duplicated ID, an ID above its counter, a dangling link, a pending_decision chain
   without exactly one current effective resolution, more than one `current` handoff, a ratified
-  `done` item without its receipt, an edited frozen entry, a range-coverage defect, and an
-  `archive.toml` that does not enumerate its year's archive. For each, commit the defect with the
+  `done` item without its receipt, an edited frozen entry, a range-coverage defect, an
+  `archive.toml` that does not enumerate its year's archive, and a machine-store TOML file that is
+  not in canonical form (section 5.7). For each, commit the defect with the
   hooks bypassed, as the per-clone residual allows, and show that the validator reports it at that
   commit as CI would, naming the defect and its remedy in words. Where your platform's deny hook
   covers the defective file, show that an assistant's direct edit of it is denied. Then show that a
@@ -2548,18 +2571,17 @@ Acceptance checks:
   a ratified `done` item committed with no receipt ever written, show instead that `receipt-repair`
   (section 8.8; R7a) adds the missing receipt and that the validator then reports valid. Any other
   class whose repair adds a record with a new ID has no sanctioned act under open point 27: report
-  it as not run, and checklist item 17 then does not pass. A store file that is not canonical is not
-  one of the validator's classes: commit an index carrying a comment, with the views re-rendered,
-  which the pre-commit check allows, since the validator reports nothing for it, and show that the
-  next writer operation that rewrites that index refuses and leaves it untouched, as step 10 tests,
-  and that once a maintainer's reviewed edit restores its canonical bytes, with the views
-  re-rendered, that edit is allowed by the pre-commit check and the same operation succeeds. The
+  it as not run, and checklist item 17 then does not pass. For the file that is not in canonical
+  form, use an index carrying a comment, with the views re-rendered: show first that the pre-commit
+  check, which runs the validator, blocks its commit while the hooks are active (section 5.7), and,
+  once it is committed with the hooks bypassed, that the next writer operation that rewrites that
+  index refuses and leaves it untouched, as step 10 tests, until the maintainer's reviewed edit
+  restores its canonical bytes, with the views re-rendered; the same operation then succeeds. The
   defects that no single revision shows, which Residuals above lists, are outside this check: step 6
   tests the comparison with `HEAD` that reports a disallowed status change, a lowered counter or a
   deleted record before commit, and once such a
   defect is committed it is disclosed, not tested. Every other defect that Residuals above says no
-  check reports is disclosed, not tested, apart from the store file that is not canonical, which
-  this check tests through the writer's refusal. Report each class by name.
+  check reports is disclosed, not tested. Report each class by name.
 
 ### Step 15: clean-start completion
 
