@@ -60,6 +60,10 @@ out is a finding for having none. Where the reader cannot tell whether a comment
 A block a reader cannot see for another reason (a hidden element, a style, or a Markdown fence around it) is
 not detected.
 
+Its entry point first runs the child-status guard, an inline copy of opf/tools/_child_status.py that
+tools/check_child_status_coverage.py pins to it: where this process cannot read a child's exit status (SIGCHLD
+ignored), it writes a refusal naming this gate and exits 2 before main() runs; otherwise it changes nothing.
+
 The gate exits 0 only by an explicit normal return, but for the loaded-code residual below: its entry point calls
 main() inside a bare except and exits with main()'s status only when main() returns exactly the int 0, 1 or 2.
 Where the self-test has armed its execution report, it exits through _selftest_exit_report.exit_with (which raises
@@ -1981,6 +1985,61 @@ def main(argv=None):
     return 2
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. Inline, not imported, because the self-test runs
+# copies of this file alone in scratch trees. The self-test launches children and reads their exit status, so
+# under an ignored SIGCHLD a failed child would read as a success; _entry() runs it first instead, before main().
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 def _entry_cannot_evaluate(what):
     """Print the entry point's fixed cannot-evaluate line for `what`, best effort, reading nothing from any
     exception, and return 2; a KeyboardInterrupt raised while it is printed, told by its real type, propagates."""
@@ -1999,7 +2058,10 @@ def _entry():
     # KeyboardInterrupt by its real type, which propagates. Unarmed (a plain run or a plain --self-test), exit_with is
     # sys.exit, which loaded code can replace with a function that exits with another status, so the entry point
     # raises the exit itself there and calls exit_with only once arm() has returned (_REPORT_ARMED), where exit_with
-    # raises the exit itself (the module docstring states what loaded code can still do)
+    # raises the exit itself (the module docstring states what loaded code can still do). The child-status guard runs
+    # first: where a child's exit status cannot be read it writes its refusal and exits 2 (os._exit) before main()
+    # runs, and otherwise returns 0 and changes nothing
+    _child_status_refusal_exit("check_opf_declaration.py")
     try:
         status = main()
     except:
