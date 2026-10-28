@@ -525,12 +525,15 @@ ADOPT_OPS = (
          "merge, re-emitted byte-exact, never a blind append, whose bytes match new_digest",)),
     AdoptOp(
         "render-views", ("store_root", "members"), ("create", "write"),
-        "remove the views this op created, each from its journaled absent preimage",
+        "remove the views this op created, each from its journaled absent preimage, and write each taken-over "
+        "destination's archived source bytes back",
         ("composes create-only view publications into the journaled apply transaction; the render engine's "
          "read-only planner supplies the bytes and the U6 source gate refuses an unsound store; every "
-         "destination is observed absent (an occupied view destination refuses fail-closed; its "
-         "preserve-then-render write joins with the file ops, so the declared write effect is not yet "
-         "exercised); it writes exactly its members, one per declared view destination",)),
+         "destination is observed absent, save one whose plan-enumerated occupying source the same "
+         "transaction already archived, which the view takes over through the declared write effect, one "
+         "write pinned to the archived bytes in place of that source's removal (any other occupied view "
+         "destination refuses fail-closed); it writes exactly its members, one per declared view "
+         "destination",)),
     AdoptOp(
         "record-adoption", ("receipt_path", "receipt_core_digest"), ("create", "write"),
         "remove or restore the receipt artefacts to their prior state",
