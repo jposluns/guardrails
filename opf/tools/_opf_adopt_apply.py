@@ -102,7 +102,9 @@ engine writes no state under `.aiqt/`: in homes 2 that is AIQT-owned material, n
 (spec 4.2, 15). That no-write rule is the homes-2 store's; homes-1 tooling still writes the legacy
 record journal at `.aiqt/record/journal` (_opf_record), outside this engine. A preparation that created
 `.working/` for the journal pins it to the planned store directory mode (_pin_created_working), so the
-mkdir's umask artefact never becomes the mode init-store's admission later holds `.working/` to.
+mkdir's umask artefact never becomes the mode init-store's admission later holds `.working/` to. Homes 2
+is not activated in this build (SUPPORTED_HOMES = 1). Where it is (adoption_journal_fenced), apply and
+reconcile refuse before any `.aiqt` access, and plan, approve and status do not read this journal.
 
 Journal discipline (reconcile-first, the `opf record` step-1 posture): every transaction inspects the
 adoption journal FIRST and REFUSES on a held lock (never seized) or any open (INTENT-without-terminal)
@@ -436,6 +438,12 @@ OPERATION = "adopt-apply"
 # from the one shared path authority and located by this fixed relative path alone, never by store
 # resolution (see the module docstring; the self-test pins the literal spelling).
 JOURNAL_REL = store.journal_root("adoption")
+# The refusal of apply and reconcile on base 2.0.0 (adoption_journal_fenced).
+ADOPTION_FENCE = "adoption on base 2.0.0 lands with the adoption-journal move; nothing was read or written"
+# The cannot-evaluate of plan, approve and status on base 2.0.0 (adoption_journal_fenced): the journal is
+# not read there, so its state is unknown, never clean.
+JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: the .aiqt adoption journal is not "
+                  "read, and its homes-2 home lands with the adoption-journal move")
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
 # The run's evidence-bundle members apply persists: the approved plan, its captured approval and the
@@ -1965,7 +1973,10 @@ def reconcile_report(product_root):
     that recovery's writes (frames appended, preimages restored from it); the agreement check then
     refuses, so it is never reported recovered. A product root that cannot be opened raises
     AdoptApplyError before anything is read, never a ReconcileRefusal (`opf adopt reconcile` prints it as
-    cannot evaluate)."""
+    cannot evaluate), and so does every call on base 2.0.0 (adoption_journal_fenced: ADOPTION_FENCE,
+    before the product root is opened)."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(ADOPTION_FENCE)
     root_fd = _open_product_root(product_root)
     taken = []      # (machine_rel, payload) of every store lease THIS call took: only these are released
     broke = []      # non-empty once THIS call's stale-lock break claimed its leases; its recovery follows
@@ -6258,6 +6269,15 @@ def planning_inventory_rel(run_id):
     return evidence_home_rel(run_id) + "/" + PLANNING_INVENTORY_NAME
 
 
+def adoption_journal_fenced():
+    """True while this tooling activates homes generation 2 (spec 4.2), whose stores keep no OPF state
+    under .aiqt: the adoption journal at JOURNAL_REL is a homes-1 location, and its homes-2 home has
+    not landed. While fenced, run_apply and reconcile_report refuse with ADOPTION_FENCE before any
+    .aiqt access, and plan, approve and status do not read the journal. False at the shipped
+    constants (SUPPORTED_HOMES 1), so every adoption path is unchanged there."""
+    return store.SUPPORTED_HOMES >= 2
+
+
 def require_clean_journal(product_root):
     """The stage driver's reconcile-first gate for plan, approve and apply alike, read-only: investigation
     does not read the adoption journal, so a stage over an interrupted transaction or a held lock refuses
@@ -6710,7 +6730,11 @@ def capture_approval(product_root, plan_bytes, worksheet, actor, now):
     return the canonical
     approval bytes, in the receipt's APPROVAL_REQUIRED shape, binding the plan's plan_digest and
     inventory_digest. `now` is the clock instant of the approval. The adopter holds those bytes until apply,
-    which persists them with the plan in the run's evidence bundle; nothing is written here."""
+    which persists them with the plan in the run's evidence bundle; nothing is written here. On base 2.0.0
+    (adoption_journal_fenced) the adoption journal is not read, so it refuses with JOURNAL_UNREAD before any
+    of this: no approval issues over a journal state that is unknown."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(JOURNAL_UNREAD)
     plan_doc = frozen_plan(plan_bytes)
     require_clean_journal(product_root)
     _require_unapplied(product_root, plan_doc["run_id"])
@@ -6769,7 +6793,10 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     created, so it too leaves the tree as it found it, unless a release or a removal fails or may not be
     durable (a directory a concurrent run has populated meanwhile stays, disclosed): run_adopt_transaction
     then names each such leftover in place of "nothing written".
-    Returns the transaction name."""
+    Returns the transaction name. On base 2.0.0 (adoption_journal_fenced) it refuses with
+    ADOPTION_FENCE before any of this, so nothing is read or written."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(ADOPTION_FENCE)
     plan_doc = frozen_plan(plan_bytes)
     approval = _canonical_toml(approval_bytes, "the adoption approval")
     gate = apply_plan(plan_doc, approval)
@@ -15449,6 +15476,8 @@ def _self_test_checks():
                       died == 137 and rdied == 137 and recovered == 0 and again == [] and journal_quiet(root)
                       and tree_state(root, journal=False) == pre and txn_state(root, txn_of) == "rolled-back")
 
+    _self_test_fence(check)
+
     if census:
         left_open = sorted(descriptors() - entry_descriptors)
         check("self-test-leaves-no-descriptor-open", not left_open,
@@ -15908,6 +15937,84 @@ def _class_sweep_record(check, bound_expired, run=None):
             check(name, False, observed="class sweep child: " + why)
         else:
             check(name, rows[index][1], observed=rows[index][2])
+
+
+def _self_test_fence(check):
+    """The base 2.0.0 adoption fence (adoption_journal_fenced), with SUPPORTED_HOMES raised to 2 inside each
+    vector and restored in a finally. Every engine step a fenced call must not reach is replaced by a
+    recorder that refuses under its own name, so a step reached is named, never run. apply and reconcile
+    refuse with ADOPTION_FENCE before any of them and leave no .aiqt entry; approve refuses with
+    JOURNAL_UNREAD before any of them; at the shipped constants each of those steps is still reached."""
+    import tempfile
+    from unittest import mock
+    this = sys.modules[__name__]
+
+    def raised(thunk):
+        saved = store.SUPPORTED_HOMES
+        store.SUPPORTED_HOMES = 2
+        try:
+            return thunk()
+        finally:
+            store.SUPPORTED_HOMES = saved
+
+    def refusal(thunk):
+        try:
+            thunk()
+        except AdoptApplyError as exc:
+            return str(exc)
+        return None
+
+    def recorded(names, thunk):
+        # (refusal text, the recorded steps reached in order) of thunk with each named step replaced.
+        reached = []
+
+        def recorder(name):
+            def step(*_args, **_kwargs):
+                reached.append(name)
+                raise AdoptApplyError("reached " + name)
+            return step
+        with contextlib.ExitStack() as stack:
+            for name in names:
+                stack.enter_context(mock.patch.object(this, name, recorder(name)))
+            said = refusal(thunk)
+        return said, reached
+
+    apply_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "_open_product_root")
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-fence-") as temp:
+        said, reached = raised(lambda: recorded(apply_steps, lambda: run_apply(temp, b"", b"", {})))
+        check("adopt-apply-fenced-homes2",
+              said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
+        said, reached = recorded(apply_steps, lambda: run_apply(temp, b"", b"", {}))
+        check("adopt-apply-unfenced-at-shipped-constants",
+              said == "reached frozen_plan" and reached == ["frozen_plan"],
+              observed="{!r} reached {}".format(said, reached))
+
+        reconcile_steps = ("_open_product_root", "_reconcile_run", "_journal_root")
+        said, reached = raised(lambda: recorded(reconcile_steps, lambda: reconcile_report(temp)))
+        check("adopt-reconcile-fenced-homes2",
+              said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
+        said, reached = recorded(reconcile_steps, lambda: reconcile_report(temp))
+        check("adopt-reconcile-unfenced-at-shipped-constants",
+              said == "reached _open_product_root" and reached == ["_open_product_root"],
+              observed="{!r} reached {}".format(said, reached))
+
+        def approve():
+            return capture_approval(temp, b"", {}, "fixture", None)
+        approve_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "rederive_or_refuse")
+        said, reached = raised(lambda: recorded(approve_steps, approve))
+        check("adopt-approve-no-journal-read-homes2",
+              said == JOURNAL_UNREAD and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
+        with mock.patch.object(this, "frozen_plan", lambda _bytes: dict(run_id="fixture-run")):
+            said, reached = recorded(approve_steps[1:], approve)
+            check("adopt-approve-journal-read-at-shipped-constants",
+                  said == "reached require_clean_journal" and reached == ["require_clean_journal"],
+                  observed="{!r} reached {}".format(said, reached))
+        check("adopt-fence-inert-at-shipped-constants",
+              store.SUPPORTED_HOMES == 1 and not adoption_journal_fenced()
+              and raised(adoption_journal_fenced) is True)
 
 
 def _self_test_outcome(failures, failure_details, checked, bound_expired, skipped=()):
