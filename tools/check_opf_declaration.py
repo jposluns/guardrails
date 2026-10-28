@@ -41,9 +41,10 @@ out is a finding for having none. Where the reader cannot tell whether a comment
     does not close, so a span read that way hides no comment there; a span over more than one line is not
     removed. A fenced code block is skipped only where its opening line starts at the left margin, outside any
     HTML block and before any fence-like line the reader cannot place (one that, after its indentation and any
-    quote or list markers, starts with three backticks or tildes and surely opens no fence: one that is
-    indented, inside a list item, a quote or an HTML block other than a comment block, or a backtick run with a
-    backtick after it; its end may close a fence there), and it ends at a closing line of at most three spaces
+    quote or list markers, starts with three backticks or tildes and that the reader does not take as surely
+    opening a fence: one that is indented, inside a list item, a quote or an HTML block other than a comment
+    block opened at the left margin, or a backtick run with a backtick after it; its end may close a fence
+    there), and it ends at a closing line of at most three spaces
     of indentation. So an indented code block, an indented fence and every line after a fence-like line the
     reader cannot place keep their markers.
   - In a Markdown surface a line that begins with `<` (after any indentation and any quote or list markers)
@@ -60,11 +61,12 @@ A block a reader cannot see for another reason (a hidden element, a style, or a 
 not detected.
 
 Every helper module the gate imports that cannot be imported (it is missing or unreadable, or its import raises
-any Exception, a SyntaxError included) is a cannot-evaluate (exit 2), never a finding:
-tools/_selftest_exit_report.py and tools/check_selftest_execution.py, opf/tools/_opf_declaration.py and
-opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py. So is a declaration file, VERSION, surface
-or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes, cannot be read or (but for the
-declaration file) is not UTF-8, and a directory rule 6 cannot list.
+any BaseException other than a KeyboardInterrupt, which is re-raised unchanged; a SyntaxError, a SystemExit of
+any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2) that names the cause, never a finding
+or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
+opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py. So is a
+declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
+cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
@@ -105,7 +107,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
     import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
-except Exception as exc:   # a tools-side helper is missing, unreadable or fails to import: main() exits 2
+except BaseException as exc:   # a tools-side helper is missing, unreadable or fails to import: main() exits 2
     _selftest_exit_report = check_selftest_execution = None
     _HELPER_ERROR = exc
 else:
@@ -415,7 +417,9 @@ def surface_problems(documents):
 def run(root):
     try:
         _load()
-    except Exception as exc:   # a helper _load() imports is missing, unreadable or fails to import
+    except BaseException as exc:   # a helper _load() imports is missing, unreadable or fails to import
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
             type(exc).__name__, exc), file=sys.stderr)
         return 2
@@ -526,7 +530,9 @@ def self_test(report_path=None):
     try:
         _load()
         opf = _load_opf()
-    except Exception as exc:   # a helper or opf.py is missing, unreadable or fails to import
+    except BaseException as exc:   # a helper or opf.py is missing, unreadable or fails to import
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         print("SELF-TEST CANNOT EVALUATE: opf-declaration: a helper module cannot be loaded ({}: {})".format(
             type(exc).__name__, exc))
         return 2
@@ -905,8 +911,9 @@ def self_test(report_path=None):
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         unguarded = _copy_mutant(tmp, Path(__file__).resolve(), "opf_declaration_load_mutant",
-                                 "    try:\n        _load()\n    except Exception as exc:   # a helper _load()",
-                                 "    _load()\n    try:\n        pass\n    except Exception as exc:   # a helper _load()")
+                                 "    try:\n        _load()\n    except BaseException as exc:   # a helper _load()",
+                                 "    _load()\n    try:\n        pass\n"
+                                 "    except BaseException as exc:   # a helper _load()")
         with patch.object(unguarded, "_load", missing_helper), contextlib.redirect_stderr(io.StringIO()):
             try:
                 rc = unguarded.run(ROOT)
@@ -952,7 +959,7 @@ def self_test(report_path=None):
     # mode: a copy of this gate alone in a scratch tools directory, launched as its own process, exits 2; with
     # its imports unguarded it exits 1 on the escaping ModuleNotFoundError
     source = Path(__file__).resolve().read_text(encoding="utf-8")
-    guard = ("except Exception as exc:   # a tools-side helper "
+    guard = ("except BaseException as exc:   # a tools-side helper "
              "is missing, unreadable or fails to import")
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
@@ -979,13 +986,25 @@ def self_test(report_path=None):
     # escapes and it exits 1
     guards = {
         "tools": guard,
-        "run": "except Exception as exc:   # a helper _load() imports " "is missing, unreadable or fails to import",
-        "self-test": "except Exception as exc:   # a helper or opf.py " "is missing, unreadable or fails to import",
+        "run": "except BaseException as exc:   # a helper _load() imports " "is missing, unreadable or fails to import",
+        "self-test": "except BaseException as exc:   # a helper or opf.py " "is missing, unreadable or fails to import",
     }
     stubs = {"tools/_selftest_exit_report.py": "import sys\nexit_with = sys.exit\n",
              "tools/check_selftest_execution.py": "", "opf/tools/_opf_declaration.py": "",
              "opf/tools/_opf_store.py": "", "opf/tools/opf.py": ""}
     syntax_error, raises = "def broken(:\n", "raise RuntimeError('broken at import')\n"
+
+    def launch(home, site, rel, text, args, narrowing):
+        """The (exit status, output) of a copy of this gate in a scratch tree of stub helpers at `home`, the
+        helper `rel` holding `text`, launched with `args`; with `narrowing`, the guard at `site` replaced by it."""
+        for stub_rel, stub in dict(stubs, **{rel: text}).items():
+            (home / stub_rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / stub_rel).write_text(stub, encoding="utf-8")
+        gate = source.replace(guards[site], narrowing) if narrowing else source
+        (home / "tools" / "check_opf_declaration.py").write_text(gate, encoding="utf-8")
+        done = subprocess.run([sys.executable, "-I", "-B", str(home / "tools" / "check_opf_declaration.py")] + args,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        return done.returncode, done.stdout + done.stderr
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         broken = {}
@@ -998,15 +1017,8 @@ def self_test(report_path=None):
             ("self-test-raises", "self-test", "opf/tools/opf.py", raises, ["--self-test"]),
         ):
             for narrowed in (False, True):
-                home = Path(tmp, "{}-{}".format(name, int(narrowed)))
-                for stub_rel, stub in dict(stubs, **{rel: text}).items():
-                    (home / stub_rel).parent.mkdir(parents=True, exist_ok=True)
-                    (home / stub_rel).write_text(stub, encoding="utf-8")
-                gate = source.replace(guards[site], "except (ImportError, OSError) as exc:   #") if narrowed else source
-                (home / "tools" / "check_opf_declaration.py").write_text(gate, encoding="utf-8")
-                done = subprocess.run([sys.executable, "-I", "-B", str(home / "tools" / "check_opf_declaration.py")]
-                                      + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
-                broken[name, narrowed] = done.returncode, done.stdout + done.stderr
+                broken[name, narrowed] = launch(Path(tmp, "{}-{}".format(name, int(narrowed))), site, rel, text, args,
+                                                "except (ImportError, OSError) as exc:   #" if narrowed else None)
     finally:
         shutil.rmtree(tmp)
 
@@ -1028,6 +1040,56 @@ def self_test(report_path=None):
     ):
         check(check_id, source.count(guards[site]) == 1 and broken_rows(site, narrowed) == [(rc, True)] * 2,
               broken_rows(site, narrowed))
+
+    # a helper whose import ends by raising a BaseException that is not an Exception (a SystemExit of any code, a
+    # bare sys.exit(), or a subclass of its own) is a cannot-evaluate at each load site too, never a clean exit:
+    # with that site's guard narrowed back to Exception, a SystemExit(0) or a bare sys.exit() escapes and the gate
+    # exits 0, and a subclass of its own escapes and it exits 1
+    system_exit_0, bare_exit = "raise SystemExit(0)\n", "import sys\nsys.exit()\n"
+    own_base = "class Stop(BaseException):\n    pass\n\n\nraise Stop('stopped at import')\n"
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        exiting = {}
+        for site, kind, rel, text, args in (
+            ("tools", "exit-0", "tools/check_selftest_execution.py", system_exit_0, []),
+            ("tools", "bare-exit", "tools/_selftest_exit_report.py", bare_exit, []),
+            ("tools", "own-base", "tools/check_selftest_execution.py", own_base, []),
+            ("run", "exit-0", "opf/tools/_opf_declaration.py", system_exit_0, []),
+            ("run", "bare-exit", "opf/tools/_opf_store.py", bare_exit, []),
+            ("run", "own-base", "opf/tools/_opf_store.py", own_base, []),
+            ("self-test", "exit-0", "opf/tools/opf.py", system_exit_0, ["--self-test"]),
+            ("self-test", "bare-exit", "opf/tools/opf.py", bare_exit, ["--self-test"]),
+            ("self-test", "own-base", "opf/tools/opf.py", own_base, ["--self-test"]),
+        ):
+            for narrowed in (False, True):
+                exiting[site, kind, narrowed] = launch(Path(tmp, "{}-{}-{}".format(site, kind, int(narrowed))), site,
+                                                       rel, text, args,
+                                                       "except Exception as exc:   #" if narrowed else None)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, site, kind, narrowed, rc in (
+        ("live/tools-helper-system-exit-0-cannot-evaluate", "tools", "exit-0", False, 2),
+        ("revert/tools-helper-guard-narrowed-system-exit-0-red", "tools", "exit-0", True, 0),
+        ("live/tools-helper-bare-sys-exit-cannot-evaluate", "tools", "bare-exit", False, 2),
+        ("revert/tools-helper-guard-narrowed-bare-sys-exit-red", "tools", "bare-exit", True, 0),
+        ("live/opf-helper-system-exit-0-cannot-evaluate", "run", "exit-0", False, 2),
+        ("revert/load-guard-narrowed-system-exit-0-red", "run", "exit-0", True, 0),
+        ("live/opf-helper-bare-sys-exit-cannot-evaluate", "run", "bare-exit", False, 2),
+        ("revert/load-guard-narrowed-bare-sys-exit-red", "run", "bare-exit", True, 0),
+        ("live/self-test-helper-system-exit-0-cannot-evaluate", "self-test", "exit-0", False, 2),
+        ("revert/self-test-load-guard-narrowed-system-exit-0-red", "self-test", "exit-0", True, 0),
+        ("live/self-test-helper-bare-sys-exit-cannot-evaluate", "self-test", "bare-exit", False, 2),
+        ("revert/self-test-load-guard-narrowed-bare-sys-exit-red", "self-test", "bare-exit", True, 0),
+    ):
+        found, output = exiting[site, kind, narrowed]
+        check(check_id, source.count(guards[site]) == 1 and found == rc
+              and (narrowed or "CANNOT EVALUATE" in output and "SystemExit" in output), (found, output))
+    own = [exiting[site, "own-base", False] for site in guards]
+    check("live/custom-base-exception-helper-cannot-evaluate",
+          all(rc == 2 and "CANNOT EVALUATE" in output and "Stop" in output for rc, output in own), own)
+    own = [exiting[site, "own-base", True] for site in guards]
+    check("revert/custom-base-exception-guard-narrowed-red",
+          all(rc == 1 and "Stop" in output for rc, output in own), own)
     check("live/real-tree-passes", run(ROOT) == 0)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
@@ -1056,6 +1118,8 @@ def self_test(report_path=None):
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     if _HELPER_ERROR is not None:
+        if isinstance(_HELPER_ERROR, KeyboardInterrupt):
+            raise _HELPER_ERROR   # here: tools/check_python_floor.py admits no raise in an import fallback
         print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
             type(_HELPER_ERROR).__name__, _HELPER_ERROR), file=sys.stderr)
         return 2
