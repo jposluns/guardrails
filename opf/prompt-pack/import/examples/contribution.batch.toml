@@ -1,0 +1,15 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-upstream.md"
+
+[[record]]
+key = "upstream-csv-patch"
+type = "contribution"
+created_at = "2019-12-02T14:20:00Z"
+dedup_class = "csv-quoting-fix"
+delivery = {channel = "issue tracker", receipt_ref = "https://example.org/csv-writer/issues/42#reply-1", receipted_at = "2019-12-05T09:12:00Z", ref = "https://example.org/csv-writer/issues/42", sent_at = "2019-12-02T15:00:00Z"}
+recipient = "csv-writer library maintainers"
+status = "acknowledged"
+title = "Offered the CSV quoting fix to the upstream library"
+unrecorded = [{field = "content_digest", reason = "not_recorded_in_source"}, {field = "updated_at", reason = "not_recorded_in_source"}]
