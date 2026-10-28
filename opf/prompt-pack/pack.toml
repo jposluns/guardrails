@@ -17,11 +17,11 @@
 # (validate_examples). No writer consumes them in this release; `opf record import --batch` does not exist.
 format = "opf.prompt-pack/v1"
 version = "0.6.0"
-digest = "sha256:2655ef7d216b83e1d6318bb885555778435ccf09bafc8b01c7a651e5f6cd5473"
+digest = "sha256:00b03b30b8fb75abe741679894563a38449298ba0209021144080c91caea1b6f"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "0fbcd27eae2ad4297388c09eb8e9f02d0b1b04488a436129a938d260533a68b2"
+sha256 = "0c195a944018aa82499db9cd63e84e6af5b19cf5f03ce0014d3552c43cce9016"
 
 [[members]]
 path = "adopt/clean-start.md"
@@ -29,7 +29,7 @@ sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "dedb38ce8aecb7ed597fdad4bc700ca590c85bc7ff8beca18f51fe25a5785c33"
+sha256 = "4786d25957a0cab6766107510e3c5c91f33d18ef22eda49d2ff4aa2353aa6f9f"
 
 [[members]]
 path = "import/examples/autonomous_decision.batch.toml"

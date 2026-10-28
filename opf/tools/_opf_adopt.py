@@ -284,9 +284,11 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # destination beneath the store's Move archive excepted, is a member of some row, so a named decoy cannot
 # leave the file that runs uninspected;
 # a launcher filed in that archive, and a source's preservation copy (no op row's write), go uninspected.
-# A moved file is never a row member (a member is installed by one of the two ops, which would write its
-# path twice), so the planner refuses a declared move destination under a launcher's file name outside that
-# archive before it freezes the plan (_in_move_archive). Like every launch check, that clause runs only when
+# A move destination under a launcher's file name outside that archive is refused by the frozen plan whether
+# or not a row names it: named in no row, by that clause; named in a row, as a member no op installs, or, where
+# one of the two ops installs it, as a path written twice unless a launch check refuses the installed
+# launcher first; so the planner refuses such a declared destination before it freezes the plan
+# (_in_move_archive). Like every launch check, that clause runs only when
 # every op row is VALID, and it also waits for well-formed member lists whose every path one of the two
 # ops places (each defect is an INVALID finding of its own); a plan with any other defect as well can report
 # that clause's CANNOT-EVALUATE ahead of its INVALID findings. A launcher in a row of a platform with no
@@ -524,12 +526,15 @@ ADOPT_OPS = (
          "merge, re-emitted byte-exact, never a blind append, whose bytes match new_digest",)),
     AdoptOp(
         "render-views", ("store_root", "members"), ("create", "write"),
-        "remove the views this op created, each from its journaled absent preimage",
+        "remove the views this op created, each from its journaled absent preimage, and write each taken-over "
+        "destination's archived source bytes back",
         ("composes create-only view publications into the journaled apply transaction; the render engine's "
          "read-only planner supplies the bytes and the U6 source gate refuses an unsound store; every "
-         "destination is observed absent (an occupied view destination refuses fail-closed; its "
-         "preserve-then-render write joins with the file ops, so the declared write effect is not yet "
-         "exercised); it writes exactly its members, one per declared view destination",)),
+         "destination is observed absent, save one whose plan-enumerated occupying source the same "
+         "transaction already archived, which the view takes over through the declared write effect, one "
+         "write pinned to the archived bytes in place of that source's removal (any other occupied view "
+         "destination refuses fail-closed); it writes exactly its members, one per declared view "
+         "destination",)),
     AdoptOp(
         "record-adoption", ("receipt_path", "receipt_core_digest"), ("create", "write"),
         "remove or restore the receipt artefacts to their prior state",
@@ -1650,8 +1655,8 @@ def _launcher_of(path):
 def _in_move_archive(path, root):
     """Whether `path` lies strictly beneath the Move archive of the store at `root`, where a move disposition
     files an old file away. _launcher_writes leaves a move-file destination there out, and the planner
-    refuses a declared move destination under a launcher's file name anywhere else, since no enforcement row
-    can name a moved file."""
+    refuses a declared move destination under a launcher's file name anywhere else, since the frozen plan
+    refuses one there whether or not an enforcement row names it."""
     return path.startswith(_compose(root, ARCHIVE_REL + "/moved") + "/")
 
 
@@ -3223,6 +3228,24 @@ def self_test():
     result = _validated(lambda p: _moved_in(p, [(".opf/hooks/pre-commit", "legacy/hooks/pre-commit")]))
     check("launch-unnamed-launcher-by-move-file-outside-archive", result.status == CANNOT_EVALUATE
           and "plan move-file row places 'legacy/hooks/pre-commit' " + _unrowed in result.findings[0])
+    # naming such a destination in an enforcement row does not admit it: no install op installs the member
+    # (INVALID); an install op that does writes the path a second time (INVALID); and a launch check refuses
+    # an installed launcher whose target the mirror does not hold before that collision (CANNOT-EVALUATE)
+    for label, destination, installed, want, reason in (
+            ("uninstalled", "legacy/hooks/pre-commit", False, INVALID,
+             "member 'legacy/hooks/pre-commit' is installed by no "),
+            ("installed-collision", "opf/enforcement/other/pre-commit", True, INVALID,
+             "plan effects claim 'opf/enforcement/other/pre-commit' twice"),
+            ("installed-unrunnable", "legacy/hooks/pre-commit", True, CANNOT_EVALUATE,
+             "member 'legacy/hooks/pre-commit' launches '../../tools/opf.py'")):
+        def _named_move(p, destination=destination, installed=installed):
+            _moved_in(p, [(".opf/hooks/pre-commit", destination)])
+            p["enforcement"][2]["members"].append({"path": destination, "digest": _D9})
+            if installed:
+                _insert(p, [_plant(destination, _D9)])
+        result = _validated(_named_move)
+        check("launch-named-move-destination-" + label, result.status == want
+              and any(reason in finding for finding in result.findings))
     check("launch-move-archive-predicate", _in_move_archive(ARCHIVE_REL + "/moved/x/pre-commit", ".")
           and not _in_move_archive(ARCHIVE_REL + "/moved", ".")
           and not _in_move_archive(ARCHIVE_REL + "/moved2/x/pre-commit", ".")

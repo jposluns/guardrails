@@ -138,8 +138,9 @@ or unreadable one is cannot-evaluate (exit 2), never an empty side. The
 job-set, step-shell, result-masking and aggregator rules above apply to each
 file on its own, so the one-job msg-leaks.yml is its own status; that branch
 protection requires it beside Quality gates is not checked here. msg-leaks.yml
-may run only that scan
-and its self-test (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
+may run only that scan,
+its self-test and the child-status probe (CHILD_STATUS_PROBE, the first step of
+every job that runs Python) (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
 relocation finding (exit 1), because a gate moved from quality.yml into
 msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
 on every PR metadata edit.
@@ -227,19 +228,24 @@ evaluates the pinned expressions as their text says (this rule compares text);
 and a cancelled run left on a live head (a label added while its run is in
 progress, the merge-train label re-applied included, or a push back to an
 earlier head), which tools/ci-status.sh then refuses until a new head commit.
-OPF GROUPS. The OPF tooling self-test runs in CI as parallel shards, one
-opf/tools/opf.py --self-test-group NAME step per group of SELF_TEST_GROUPS in
-that file. The self-test reads SELF_TEST_GROUPS from the live file with ast
-(_opf_group_names, a literal; the file is never run) and requires each
-group's command in HEAVY_COMMANDS and on exactly one line of the live local
-runner and of the live quality.yml, each line read back through this gate's
-own tokenizer (_opf_group_lines), and no other group command in any of the
-three (_opf_group_wiring_faults), so a shard removed from both runners
-together, which keeps set parity, a group run on a second line, or a group
-opf.py adds without a step, turns the self-test red. The whole opf.py
---self-test runs in CI only, in the host-patch job (an ALLOWLIST exception).
-The rule runs in the self-test, which reads the live files, not in the
-gate's own run. Not checked: which shard job runs which group.
+OPF GROUPS. The local runner runs the OPF tooling self-test as one
+opf/tools/opf.py --self-test-group NAME line per group of SELF_TEST_GROUPS in
+that file; CI runs the whole opf.py --self-test once, in a heavy job (the
+host-patch job), and no group. Each side is an ALLOWLIST exception: the
+groups local-only, the whole self-test ci-only. The self-test reads
+SELF_TEST_GROUPS from the live file with ast (_opf_group_names, a literal; the
+file is never run) and requires each group's command in HEAVY_COMMANDS, on
+exactly one line of the live local runner and on no line of the live
+quality.yml, and the whole self-test (OPF_WHOLE_COMMAND) in HEAVY_COMMANDS and
+on exactly one line of the live quality.yml, inside a HEAVY_JOBS job, each
+line read back through this gate's own tokenizer and placed in its job by
+the nearest job id above it (_opf_group_lines), and no other group command in
+either file (_opf_group_wiring_faults). So a group removed from the local
+runner, a group run on a second line, a group opf.py adds without a line, a
+group step put back into quality.yml, and the whole self-test removed,
+repeated or moved out of the heavy jobs each turn the self-test red. The rule
+runs in the self-test, which reads the live files, not in the gate's own run.
+Not checked: which HEAVY_JOBS job runs the whole self-test.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -262,6 +268,10 @@ invocations cannot be detected if nobody runs the remaining file manually. The r
 contracts (REPO_GATES) and the cited-standards contract's --self-test are
 MANDATORY_MEMBERS, so removing one of them from both runners together is a
 missing-mandatory finding, not a silent pass. The
+child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
+the same reason: removing either from both runners together is a missing-mandatory
+finding. Where the probe sits in a roster (first) is held by
+tools/check_child_status_coverage.py, not here. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
@@ -595,10 +605,8 @@ HEAVY_JOB_IF_LINE = (
     "(startsWith(github.head_ref, 'merge-train-') && "
     "github.event.pull_request.head.repo.full_name == github.repository)")
 HEAVY_JOBS = frozenset({
-    "opf", "opf-adopt", "opf-init", "selftest-execution", "git-fixture-env-core",
-    "git-fixture-env-config-combined", "git-fixture-env-config-malformed",
-    "git-fixture-env-config-system", "opf-host-patch",
-    "git-fixture-env-core-host-patch",
+    "opf-tooling", "selftest-execution", "git-fixture-env-core",
+    "opf-host-patch", "git-fixture-env-core-host-patch",
     "git-fixture-env-config-combined-host-patch",
     "git-fixture-env-config-malformed-host-patch",
     "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
@@ -630,17 +638,23 @@ HEAVY_COMMANDS = frozenset({
 })
 
 # The opf.py self-test groups (module docstring, OPF GROUPS): the file that names them in its
-# SELF_TEST_GROUPS, and the command prefix each group runs as.
+# SELF_TEST_GROUPS, the command prefix each group runs as on the local runner, and the whole
+# self-test CI runs instead, once, in a heavy job.
 OPF_TOOL = ROOT / "opf" / "tools" / "opf.py"
 OPF_GROUP_COMMAND = "opf/tools/opf.py --self-test-group "
+OPF_WHOLE_COMMAND = "opf/tools/opf.py --self-test"
 
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
-# The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan and that
-# scan's self-test. Any other member there is a relocation finding, because that workflow's status
-# is separate from the aggregated Quality gates and re-runs on every PR metadata edit, so a gate
-# moved into it would leave the aggregated required check silently.
+# The child-status probe: the first step of every CI job that runs Python, msg-leaks.yml's one job
+# included, so that workflow admits it beside its own scan.
+CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
+CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+# The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
+# scan's self-test and the child-status probe. Any other member there is a relocation finding,
+# because that workflow's status is separate from the aggregated Quality gates and re-runs on every
+# PR metadata edit, so a gate moved into it would leave the aggregated required check silently.
 MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
-    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test"))
+    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test", CHILD_STATUS_PROBE))
 EDIT_EVENTS = ("pull_request", "pull_request_target")
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
@@ -720,11 +734,50 @@ ALLOWLIST = (
         "identity": "opf/tools/opf.py --self-test",
         "reason": (
             "The host-patch job runs the whole OPF tooling self-test on the "
-            "host patch release; the local runner, like the '3.14' OPF "
-            "shards, runs it as its named groups (--self-test-group), which "
-            "opf.py holds to every registered self-test exactly once."
+            "host patch release, its one CI run; the local runner runs it as "
+            "its named groups (--self-test-group), which opf.py holds to "
+            "every registered self-test exactly once."
         ),
         "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group core",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group adopt",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group watchdog",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
     },
     {
         "side": "local-only",
@@ -763,6 +816,10 @@ MANDATORY_MEMBERS = frozenset({
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
     "tools/check_git_option_table.py --self-test",
+    # The child-status probe and its coverage gate: removing either from both rosters together would
+    # leave every gate reading a lost child exit status as a pass, unseen.
+    CHILD_STATUS_PROBE,
+    CHILD_STATUS_COVERAGE,
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -3519,12 +3576,15 @@ def _opf_group_names(source):
     return tuple(name for name, _labels in groups)
 
 
-def _opf_group_lines(text, extraction):
-    """Map each opf.py group command (OPF_GROUP_COMMAND) that `extraction`, the extraction of
-    `text`, holds to the line numbers that run it. Each line whose origin names opf/tools/opf.py
-    is read back through _strip_comment, _tokenize and normalize, as _registered_selftests in
+def _opf_group_lines(text, extraction, jobs=None):
+    """Map each opf.py group command (OPF_GROUP_COMMAND) and the whole self-test
+    (OPF_WHOLE_COMMAND) that `extraction`, the extraction of `text`, holds to the line numbers
+    that run it. Each line whose origin names opf/tools/opf.py is read back through
+    _strip_comment, _tokenize and normalize, as _registered_selftests in
     tools/selftest_git_fixture_env.py recovers a member's line; one that does not read back maps
-    under None. The member set keeps no count; this does, so a group run twice is seen."""
+    under None. The member set keeps no count; this does, so a command run twice is seen. When
+    `jobs` is a dict, each mapped line number is also entered there with the id of the workflow
+    job that holds it (_job_above), or None outside any job."""
     script = OPF_GROUP_COMMAND.split(" ", 1)[0]
     lines = text.splitlines()
     found = {}
@@ -3540,34 +3600,81 @@ def _opf_group_lines(text, extraction):
             command = tokens.value[2:] if tokens.value[:1] == ["run_gate"] else tokens.value
             normalized = normalize(command)
             member = normalized.value if normalized.ok else None
-        if member is None or member.startswith(OPF_GROUP_COMMAND):
+        if (member is None or member.startswith(OPF_GROUP_COMMAND)
+                or member == OPF_WHOLE_COMMAND):
             found.setdefault(member, []).append(number)
+            if jobs is not None:
+                jobs[number] = _job_above(lines, number)
     return found
 
 
-def _opf_group_wiring_faults(groups, local, ci, heavy=HEAVY_COMMANDS):
-    """Return the faults of the opf.py group commands (module docstring, OPF GROUPS) against the
-    _opf_group_lines maps `local` and `ci`: a group named in `groups` whose command HEAVY_COMMANDS
-    lacks or a side runs on other than exactly one line, a group command in any of the three for a
-    group `groups` does not name, and an opf.py line that does not read back. No fault means each
-    side runs every group once, and the LANES rule then holds the CI steps to the conditioned
-    heavy jobs."""
+def _job_above(lines, number):
+    """The id of the workflow job whose block holds line `number` of `lines`: the nearest
+    non-blank, non-comment line above it at indent 2, when that is a plain job id key and the
+    top-level key above it is jobs:. None for any other shape, a run_all_checks.sh line among
+    them, so an unplaced line is never read as a heavy job's."""
+    job = None
+    for index in range(number - 2, -1, -1):
+        raw = lines[index]
+        code = _strip_comment(raw).rstrip()
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        if indent == 0:
+            return job if code == "jobs:" else None
+        if indent == 2 and job is None:
+            match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", code)
+            if match is None:
+                return None
+            job = match.group(1)
+    return None
+
+
+def _opf_group_wiring_faults(groups, local, ci, heavy=HEAVY_COMMANDS, ci_jobs=None,
+                             heavy_jobs=HEAVY_JOBS):
+    """Return the faults of the opf.py self-test wiring (module docstring, OPF GROUPS) against the
+    _opf_group_lines maps `local` and `ci` and the job of each `ci` line (`ci_jobs`): a group
+    named in `groups` whose command HEAVY_COMMANDS lacks, that the local runner runs on other than
+    exactly one line, or that quality.yml runs on any line; a group command in any of the three
+    for a group `groups` does not name; the whole self-test missing from HEAVY_COMMANDS, or run
+    in quality.yml on other than exactly one line or outside `heavy_jobs`; and an opf.py line
+    that does not read back. No fault means the local runner runs every group once, CI runs no
+    group and the whole self-test once, in a heavy job, and the LANES rule then holds that job to
+    the pinned if:."""
     wanted = {OPF_GROUP_COMMAND + name for name in groups}
     faults = [] if wanted else ["opf.py names no self-test group"]
-    faults += ["HEAVY_COMMANDS lacks " + command for command in sorted(wanted - set(heavy))]
+    faults += ["HEAVY_COMMANDS lacks " + command
+               for command in sorted((wanted | {OPF_WHOLE_COMMAND}) - set(heavy))]
     faults += ["HEAVY_COMMANDS holds {}, a group opf.py does not name".format(member)
                for member in sorted(set(heavy) - wanted) if member.startswith(OPF_GROUP_COMMAND)]
     for where, found in ((LOCAL_SOURCE, local), (CI_SOURCE, ci)):
         if None in found:
             faults.append("{} line(s) {} run opf/tools/opf.py in a form that does not read back".format(
                 where, ", ".join(str(number) for number in found[None])))
-        commands = set(found) - {None}
-        faults += ["{} runs no {}".format(where, command) for command in sorted(wanted - commands)]
-        faults += ["{} runs {} on {} lines ({}), not once".format(
-                       where, command, len(found[command]), ", ".join(str(n) for n in found[command]))
-                   for command in sorted(wanted & commands) if len(found[command]) != 1]
+        commands = set(found) - {None, OPF_WHOLE_COMMAND}
         faults += ["{} runs {}, a group opf.py does not name".format(where, member)
                    for member in sorted(commands - wanted)]
+    local_commands = set(local) - {None, OPF_WHOLE_COMMAND}
+    faults += ["{} runs no {}".format(LOCAL_SOURCE, command)
+               for command in sorted(wanted - local_commands)]
+    faults += ["{} runs {} on {} lines ({}), not once".format(
+                   LOCAL_SOURCE, command, len(local[command]),
+                   ", ".join(str(n) for n in local[command]))
+               for command in sorted(wanted & local_commands) if len(local[command]) != 1]
+    faults += ["{} runs {} on {} line(s) ({}); no CI job runs a group, CI runs the whole {} "
+               "once".format(CI_SOURCE, command, len(ci[command]),
+                             ", ".join(str(n) for n in ci[command]), OPF_WHOLE_COMMAND)
+               for command in sorted(wanted & set(ci))]
+    whole = ci.get(OPF_WHOLE_COMMAND, [])
+    if not whole:
+        faults.append("{} runs no {}".format(CI_SOURCE, OPF_WHOLE_COMMAND))
+    elif len(whole) != 1:
+        faults.append("{} runs {} on {} lines ({}), not once".format(
+            CI_SOURCE, OPF_WHOLE_COMMAND, len(whole), ", ".join(str(n) for n in whole)))
+    jobs = {} if ci_jobs is None else ci_jobs
+    faults += ["{} runs {} at line {} in job {!r}, not a HEAVY_JOBS job".format(
+                   CI_SOURCE, OPF_WHOLE_COMMAND, number, jobs.get(number))
+               for number in whole if jobs.get(number) not in heavy_jobs]
     return faults
 
 
@@ -4252,6 +4359,9 @@ def self_test():
         "python3 -I -B .github/check_cited_standards_contract.py --self-test",
         "python3 -I -B .github/check_cited_standards_contract.py",
         "python3 -I -B .github/check_newtab_contract.py",
+        # The child-status probe and its coverage gate, mandatory as the contracts are.
+        "python3 -I -B opf/tools/_child_status.py",
+        "python3 -I -B tools/check_child_status_coverage.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -4425,16 +4535,20 @@ def self_test():
     # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
     # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
     # the contracts out of that set turns these vectors red instead of silently skipping.
+    # The child-status probe and its coverage gate are held the same way: either one
+    # removed from both runners together is a missing-mandatory finding.
     for member in (
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
-            ".github/check_newtab_contract.py"):
+            ".github/check_newtab_contract.py",
+            "opf/tools/_child_status.py",
+            "tools/check_child_status_coverage.py"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(
                 "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
-                "repository contract would be undetected again".format(member))
-        case("01h repository contract removed from both runners: " + member,
+                "mandatory member would be undetected again".format(member))
+        case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
              1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"
@@ -5954,25 +6068,22 @@ def self_test():
     # One reader for the whole class: every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
     # This structural vector parses this file,
-    # tools/selftest_git_fixture_env.py and its four registered suite
-    # runners and pins EVERY read_text or
-    # splitlines attribute and every text-mode open() call, as spelled, to
-    # an exact per-function site count, so a new, moved or removed read
-    # written through those APIs turns this vector red and forces review
-    # against the reader. Every pinned site reads no runner or workflow
-    # text under the parity guarantee: the sites parse Python sources for
-    # ast (the git auto-maintenance pin scan included), read harness, stub
-    # call and Trace2 event logs (the auto-maintenance probe), write the
-    # selftest report, read the config-member timeout control's pid file
-    # and /proc stat, split the timeout controls' captured diagnostics,
-    # split an in-memory citation string from an in-module table,
-    # or split text the reader or a screen has already
-    # validated. A read
-    # spelled another way (getattr, an alias) is outside this tripwire, as
-    # the module docstring discloses. This vector fails without the
-    # change: the former Path.read_text() calls on the runners and the
-    # workflow (vector 26, _registered_selftests, _roster_checks) are not
-    # in this allowlist.
+    # tools/selftest_git_fixture_env.py and its four registered suite runners
+    # and pins EVERY read_text or splitlines attribute and every text-mode
+    # open() call, as spelled, to an exact per-function site count, so a new,
+    # moved or removed read written through those APIs turns this vector red
+    # and forces review against the reader. Every pinned site reads no runner
+    # or workflow text under the parity guarantee: the sites parse Python
+    # sources for ast (the git auto-maintenance pin scan included), read
+    # harness and stub call logs, write the selftest report, read the
+    # config-member timeout control's pid file and /proc stat, split the
+    # timeout controls' captured diagnostics, split an in-memory citation
+    # string from an in-module table, or split text the reader or a screen
+    # has already validated. A read spelled another way (getattr, an alias)
+    # is outside this tripwire, as the module docstring discloses. This
+    # vector fails without the change: the former Path.read_text() calls on
+    # the runners and the workflow (vector 26, _registered_selftests,
+    # _roster_checks) are not in this allowlist.
     count += 1
     import ast
     def _read_api_sites(tree):
@@ -6028,8 +6139,6 @@ def self_test():
         },
         "tools/selftest_git_fixture_env.py": {
             ("_archive_reads_use_caller_env", "read_text"): 1,
-            ("_auto_maintenance_children", "read_text"): 1,
-            ("_auto_maintenance_children", "splitlines"): 1,
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
@@ -7452,9 +7561,9 @@ def self_test():
     # its finding.
     def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
                 top=CONCURRENCY_BLOCK, job_tail=(),
-                light_commands=None, opf_id="opf",
+                light_commands=None, opf_id="opf-tooling",
                 opf_commands=("python3 tools/b.py",), drop_heavy=()):
-        other_heavy = sorted(HEAVY_JOBS - {"opf"} - set(drop_heavy))
+        other_heavy = sorted(HEAVY_JOBS - {"opf-tooling"} - set(drop_heavy))
         lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
         for job, commands, condition in (
                 ("secrets",
@@ -7514,7 +7623,7 @@ def self_test():
              ("carries no top-level concurrency: block",)),
             ("the pinned if: removed from a heavy job",
              evaluate(multi_local, lane_ci(heavy_if=None), ()),
-             ("heavy job 'opf' of {} carries no job-level if:".format(
+             ("heavy job 'opf-tooling' of {} carries no job-level if:".format(
                  CI_SOURCE),)),
             ("both removed, the workflow before the lane change",
              evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
@@ -7658,7 +7767,7 @@ def self_test():
                 opf_commands=(heavy_member,)), ())
     lane_case("39j a renamed heavy job (needs: updated, if: removed) is a "
               "missing-heavy-job lane finding",
-              renamed, 1, "heavy job 'opf' is missing")
+              renamed, 1, "heavy job 'opf-tooling' is missing")
     lane_case("39j the renamed job's heavy member runs without the pinned "
               "if: and is a lane finding",
               renamed, 1,
@@ -7672,6 +7781,50 @@ def self_test():
                   lane_ci(light_commands=common + (
                       "python3 tools/a.py", heavy_member)), ()),
               1, "job 'secrets' of {} runs heavy member(s)".format(CI_SOURCE))
+    # The combined, malformed and system git-fixture-env suites run in CI only
+    # in their host-patch jobs, and the core suite also in the '3.14' canary
+    # job: each stays a heavy command, so a '3.14' copy put back into an
+    # unconditioned job is a lane finding, and in a job carrying the pinned
+    # if: it passes. The suite names are written out here, not read from
+    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors.
+    for suite in ("git-fixture-env-core", "git-fixture-env-config-combined",
+                  "git-fixture-env-config-malformed",
+                  "git-fixture-env-config-system"):
+        suite_member = ("python3 -I -B tools/check_selftest_execution.py "
+                        "--suite " + suite)
+        suite_local = local_fixture(common + (
+            "python3 tools/a.py", "python3 tools/b.py", suite_member))
+        lane_case("39j control: a git-fixture-env suite in a heavy job "
+                  "carrying the pinned if: passes: " + suite,
+                  evaluate(suite_local, lane_ci(opf_commands=(
+                      "python3 tools/b.py", suite_member)), ()), 0)
+        lane_case("39j a git-fixture-env suite in an unconditioned job is a "
+                  "lane finding: " + suite,
+                  evaluate(suite_local, lane_ci(light_commands=common + (
+                      "python3 tools/a.py", suite_member)), ()),
+                  1, "job 'secrets' of {} runs heavy member(s) "
+                  "tools/check_selftest_execution.py --suite {}".format(
+                      CI_SOURCE, suite))
+    # The jobs the reduction removed are no longer heavy: each id put back
+    # with the pinned if: is a lane finding, so a '3.14' copy of the OPF
+    # tooling shards or of a git-fixture-env config lane cannot return under
+    # its former id without a reviewed change to HEAVY_JOBS. With HEAVY_JOBS
+    # reverted to hold these ids, each fixture declares the id twice (the
+    # renamed job and lane_ci's own heavy job), so each row stays red through
+    # the duplicate-job cannot-evaluate (exit 2) rather than passing.
+    for removed_job in ("opf", "opf-adopt", "opf-init",
+                        "git-fixture-env-config-combined",
+                        "git-fixture-env-config-malformed",
+                        "git-fixture-env-config-system"):
+        lane_case("39j a removed heavy job id carrying the pinned if: is a "
+                  "lane finding: " + removed_job,
+                  evaluate(multi_local, lane_ci(
+                      light_if=HEAVY_JOB_IF_LINE).replace(
+                          "  secrets:\n", "  " + removed_job + ":\n", 1).replace(
+                          "      - secrets\n", "      - " + removed_job + "\n", 1),
+                      ()),
+                  1, "job {!r} of {} carries a job-level if:".format(
+                      removed_job, CI_SOURCE))
     # 39k the Quality gates exemption is the quality.yml job's alone: the
     # same job name in another workflow exempts nothing, so an if: on the
     # scan job stays a lane finding whatever the job is named. Before the
@@ -7686,17 +7839,12 @@ def self_test():
               1, "job 'quality' of {} carries a job-level if:".format(
                   MSG_LEAKS_CI_SOURCE))
 
-    # 40 OPF GROUPS: the OPF tooling shard jobs are heavy jobs and each
-    # opf.py --self-test-group command a heavy command, so a removed shard
-    # job and a group step moved into an unconditioned job are lane
-    # findings; before the change neither was heavy and each fixture passed
-    # with exit 0. The group names are written out here, not read from
-    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors.
-    for shard_job in ("opf-adopt", "opf-init"):
-        lane_case("40 a removed OPF tooling shard job is a lane finding: "
-                  + shard_job,
-                  evaluate(multi_local, lane_ci(drop_heavy=(shard_job,)), ()),
-                  1, "heavy job {!r} is missing".format(shard_job))
+    # 40 OPF GROUPS: the local runner runs the OPF tooling self-test as its
+    # named groups, and CI runs the whole self-test once, in a heavy job, and
+    # no group. Each opf.py --self-test-group command stays a heavy command, so
+    # a group step moved into an unconditioned job is a lane finding. The
+    # group names are written out here, not read from HEAVY_COMMANDS, so a
+    # revert of that set cannot empty these vectors.
     for name in ("core", "adopt", "watchdog"):
         group_member = "python3 -I -B " + OPF_GROUP_COMMAND + name
         lane_case("40 an opf.py group step moved into an unconditioned job "
@@ -7710,11 +7858,13 @@ def self_test():
                       CI_SOURCE))
     # Every group of SELF_TEST_GROUPS, read from the live opf/tools/opf.py
     # with ast, runs as its --self-test-group command on exactly one line of
-    # the live runner and of the live quality.yml, and HEAVY_COMMANDS holds
-    # it; no other group command is wired. Before the change a shard
-    # removed from both runners together kept set parity and passed, and a
-    # group run on two lines passed too; each flip below drops, adds or
-    # repeats one command and must be named.
+    # the live runner and on no line of the live quality.yml, HEAVY_COMMANDS
+    # holds it, and the whole self-test runs on exactly one line of the live
+    # quality.yml, inside a HEAVY_JOBS job; no other group command is wired.
+    # Before the change each group had to run on exactly one quality.yml
+    # line, so a group step put back there passed and a group missing from
+    # quality.yml failed, and the whole self-test was not held at all; each
+    # flip below drops, adds, repeats or moves one command and must be named.
     count += 1
     try:
         opf_groups = _opf_group_names(OPF_TOOL.read_bytes().decode("utf-8"))
@@ -7724,50 +7874,160 @@ def self_test():
             OPF_TOOL, exc))
     if opf_groups is not None:
         group_sides = []
-        for path, source, extract in ((LOCAL_PATH, LOCAL_SOURCE, extract_local),
-                                      (CI_PATH, CI_SOURCE, extract_ci)):
+        live_ci_text = None
+        ci_jobs = {}
+        for path, source, extract, jobs in (
+                (LOCAL_PATH, LOCAL_SOURCE, extract_local, None),
+                (CI_PATH, CI_SOURCE, extract_ci, ci_jobs)):
             text, diagnostic = read_runner_text(path, source)
             if diagnostic is not None:
                 failures.append("40 cannot read {}: {!r}".format(source, diagnostic))
                 group_sides.append({})
             else:
-                group_sides.append(_opf_group_lines(text, extract(text)))
-        live = _opf_group_wiring_faults(opf_groups, *group_sides)
+                if source == CI_SOURCE:
+                    live_ci_text = text
+                group_sides.append(_opf_group_lines(text, extract(text), jobs))
+        live = _opf_group_wiring_faults(opf_groups, *group_sides, ci_jobs=ci_jobs)
         if live:
-            failures.append("40 the opf.py self-test groups are not wired: "
+            failures.append("40 the opf.py self-test is not wired: "
                             + "; ".join(live))
         local_lines, ci_lines = group_sides
         first = OPF_GROUP_COMMAND + (opf_groups[0] if opf_groups else "core")
-        ci_dropped = {key: value for key, value in ci_lines.items() if key != first}
+        whole_lines = ci_lines.get(OPF_WHOLE_COMMAND, [])
         flips = (
-            ("a group removed from both runners",
+            ("a group removed from the local runner",
              (opf_groups, {key: value for key, value in local_lines.items() if key != first},
-              ci_dropped),
+              ci_lines), {},
              LOCAL_SOURCE + " runs no " + first),
-            ("a group removed from quality.yml alone",
-             (opf_groups, local_lines, ci_dropped),
-             CI_SOURCE + " runs no " + first),
+            ("a group step put back into quality.yml",
+             (opf_groups, local_lines, {**ci_lines, first: [0]}), {},
+             CI_SOURCE + " runs {} on 1 line(s)".format(first)),
             ("a group removed from HEAVY_COMMANDS",
-             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {first}),
+             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {first}), {},
              "HEAVY_COMMANDS lacks " + first),
-            ("a group opf.py adds with no step",
-             (opf_groups + ("synthetic",), local_lines, ci_lines),
-             CI_SOURCE + " runs no " + OPF_GROUP_COMMAND + "synthetic"),
-            ("a group opf.py drops while its step stays",
-             (opf_groups[1:], local_lines, ci_lines),
+            ("the whole self-test removed from HEAVY_COMMANDS",
+             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {OPF_WHOLE_COMMAND}), {},
+             "HEAVY_COMMANDS lacks " + OPF_WHOLE_COMMAND),
+            ("a group opf.py adds with no line",
+             (opf_groups + ("synthetic",), local_lines, ci_lines), {},
+             LOCAL_SOURCE + " runs no " + OPF_GROUP_COMMAND + "synthetic"),
+            ("a group opf.py drops while its line stays",
+             (opf_groups[1:], local_lines, ci_lines), {},
              "runs {}, a group opf.py does not name".format(first)),
-            ("a group run on a second line of quality.yml",
-             (opf_groups, local_lines, {**ci_lines, first: ci_lines.get(first, []) + [0]}),
-             CI_SOURCE + " runs {} on {} lines".format(first, len(ci_lines.get(first, [])) + 1)),
+            ("a group run on a second line of the local runner",
+             (opf_groups, {**local_lines, first: local_lines.get(first, []) + [0]},
+              ci_lines), {},
+             LOCAL_SOURCE + " runs {} on {} lines".format(
+                 first, len(local_lines.get(first, [])) + 1)),
             ("an opf.py line that does not read back",
-             (opf_groups, {**local_lines, None: [0]}, ci_lines),
+             (opf_groups, {**local_lines, None: [0]}, ci_lines), {},
              LOCAL_SOURCE + " line(s) 0 run opf/tools/opf.py in a form"),
-            ("no group at all", ((), local_lines, ci_lines),
+            ("the whole self-test removed from quality.yml",
+             (opf_groups, local_lines,
+              {key: value for key, value in ci_lines.items() if key != OPF_WHOLE_COMMAND}),
+             {}, CI_SOURCE + " runs no " + OPF_WHOLE_COMMAND),
+            ("the whole self-test on a second line of quality.yml",
+             (opf_groups, local_lines, {**ci_lines, OPF_WHOLE_COMMAND: whole_lines + [0]}),
+             {}, CI_SOURCE + " runs {} on {} lines".format(
+                 OPF_WHOLE_COMMAND, len(whole_lines) + 1)),
+            ("the whole self-test in a job outside HEAVY_JOBS",
+             (opf_groups, local_lines, ci_lines),
+             {"ci_jobs": {number: "registry" for number in whole_lines}},
+             "in job 'registry', not a HEAVY_JOBS job"),
+            ("no group at all", ((), local_lines, ci_lines), {},
              "opf.py names no self-test group"))
-        for label, args, want in flips:
+        for label, args, options, want in flips:
             count += 1
-            if not any(want in fault for fault in _opf_group_wiring_faults(*args)):
+            options = dict({"ci_jobs": ci_jobs}, **options)
+            if not any(want in fault for fault in _opf_group_wiring_faults(*args, **options)):
                 failures.append("40 {} not named".format(label))
+        # The live quality.yml edited in memory and read back through the
+        # extractor, the line reader and the job placement, not a hand-built
+        # map: a --self-test-group step put back into the OPF tooling job, the
+        # whole self-test moved from the host-patch job into the registry job,
+        # and the whole self-test run a second time in the heavy OPF tooling
+        # job are each a wiring fault.
+        homes = "        run: python3 -I -B opf/tools/check_opf_homes.py --self-test\n"
+        whole_run = "        run: python3 -I -B " + OPF_WHOLE_COMMAND + "\n"
+        host_step = ("      - name: OPF tooling self-test (host patch)\n"
+                     "        shell: bash\n" + whole_run)
+        parity_step = "        run: python3 -I -B tools/check_ci_parity.py --self-test\n"
+        for label, edits, want in (
+                ("a group step put back into the live quality.yml",
+                 ((homes, homes + "\n      - name: OPF tooling self-test (core group)\n"
+                   "        shell: bash\n        run: python3 -I -B " + first + "\n"),),
+                 CI_SOURCE + " runs {} on 1 line(s)".format(first)),
+                ("the whole self-test moved into the live registry job",
+                 ((host_step, ""),
+                  (parity_step, parity_step + "\n      - name: Moved\n        shell: bash\n"
+                   + whole_run)),
+                 "in job 'registry', not a HEAVY_JOBS job"),
+                ("the whole self-test added to the live OPF tooling job",
+                 ((homes, homes + "\n      - name: Twice\n        shell: bash\n" + whole_run),),
+                 CI_SOURCE + " runs {} on 2 lines".format(OPF_WHOLE_COMMAND))):
+            count += 1
+            if live_ci_text is None:
+                failures.append("40 {}: the live quality.yml was not read".format(label))
+                continue
+            edited = live_ci_text
+            for old, new in edits:
+                if edited.count(old) != 1:
+                    failures.append("40 {}: {!r} occurs {} times in the live quality.yml".format(
+                        label, old, edited.count(old)))
+                edited = edited.replace(old, new, 1)
+            edited_jobs = {}
+            faults = _opf_group_wiring_faults(
+                opf_groups, local_lines,
+                _opf_group_lines(edited, extract_ci(edited), edited_jobs),
+                ci_jobs=edited_jobs)
+            if not any(want in fault for fault in faults):
+                failures.append("40 {} not named: {!r}".format(label, faults))
+    # A fixture quality.yml: the whole self-test in the heavy OPF tooling job
+    # with no group step passes; the same fixture with a --self-test-group
+    # core step put back beside it is a wiring fault, and so is the whole
+    # self-test in an unconditioned job.
+    fixture_groups = ("core", "adopt", "watchdog")
+    group_core = "python3 -I -B " + OPF_GROUP_COMMAND + "core"
+    whole_member = "python3 -I -B " + OPF_WHOLE_COMMAND
+    fixture_local = local_fixture(common + ("python3 tools/a.py",) + tuple(
+        "python3 -I -B " + OPF_GROUP_COMMAND + name for name in fixture_groups))
+    fixture_local_lines = _opf_group_lines(fixture_local, extract_local(fixture_local))
+    for label, ci_text, want in (
+            ("control: the whole self-test in the heavy job and no group step passes",
+             lane_ci(opf_commands=(whole_member,)), None),
+            ("a --self-test-group core step put back is a wiring fault",
+             lane_ci(opf_commands=(whole_member, group_core)),
+             CI_SOURCE + " runs " + OPF_GROUP_COMMAND + "core on 1 line(s)"),
+            ("the whole self-test in an unconditioned job is a wiring fault",
+             lane_ci(light_commands=common + ("python3 tools/a.py", whole_member)),
+             "in job 'secrets', not a HEAVY_JOBS job")):
+        count += 1
+        fixture_jobs = {}
+        faults = _opf_group_wiring_faults(
+            fixture_groups, fixture_local_lines,
+            _opf_group_lines(ci_text, extract_ci(ci_text), fixture_jobs),
+            ci_jobs=fixture_jobs)
+        if want is None and faults:
+            failures.append("40 fixture {}: unexpected fault(s) {!r}".format(label, faults))
+        if want is not None and not any(want in fault for fault in faults):
+            failures.append("40 fixture {} not named: {!r}".format(label, faults))
+    # A job id under a top-level key other than jobs: is no job: the passing
+    # fixture with its jobs: line renamed in place (the line numbers kept)
+    # places the whole self-test in job None, not in the heavy OPF tooling
+    # job above it. The extractor already refuses that file (unknown-top-key),
+    # so the placement is read over the unedited fixture's extraction.
+    count += 1
+    placed_text = lane_ci(opf_commands=(whole_member,))
+    unplaced_text = placed_text.replace("\njobs:\n", "\nworkflow-jobs:\n", 1)
+    unplaced_jobs = {}
+    faults = _opf_group_wiring_faults(
+        fixture_groups, fixture_local_lines,
+        _opf_group_lines(unplaced_text, extract_ci(placed_text), unplaced_jobs),
+        ci_jobs=unplaced_jobs)
+    if (unplaced_text == placed_text
+            or not any("in job None, not a HEAVY_JOBS job" in fault for fault in faults)):
+        failures.append("40 a job under a top-level key other than jobs: was placed: {!r}".format(
+            faults))
     # The line read-back counts repeats: a group on two lines of a runner
     # and of quality.yml maps to two line numbers on each side, which the
     # member set alone cannot show.

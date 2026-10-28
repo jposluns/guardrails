@@ -106,8 +106,8 @@ index and worktree content, though reset --soft still MOVES HEAD, a reflog-recov
 discards no working-tree content and may ALLOW even on a dirty tree, as detailed below). That no-silent-allow
 guarantee is bounded to WORKING-TREE CONTENT and is best-effort, not categorical: some ref-level moves (a
 merged-branch delete, reset --soft moving HEAD) are reflog-recoverable, and the obfuscation/config residuals
-disclosed below (a fragmented git command word or verb, a git alias, ambient config) can hide a discard the
-lexical scan never sees. An UNPARSEABLE command
+disclosed below (a fragmented git command word or verb, a git alias defined in a configuration file, ambient
+config) can hide a discard the lexical scan never sees. An UNPARSEABLE command
 (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and, when one is present,
 takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
 verb: checkout/switch/restore/reset/clean/stash/
@@ -140,8 +140,12 @@ No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALL
 on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost of more asks. No in-band
 override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
-recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git; deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
+recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias
+defined in a configuration file, or a shell function, renaming git (a git alias the command defines for itself,
+or runs under from the session environment, DENIES, and so does every git command of a command whose text names
+GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_: _git_local_alias, _git_alias_inherited,
+_git_alias_named);
+deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
 continuation-joined or de-quoted reading assembles (an escape decoded inside $'...', or a word built by a
 parameter expansion or a command substitution at run time, reads as 'no recognized lossy verb' and is
 silently ALLOWED - a best-effort residual; a quote- or backslash-fragmented spelling under a wrapper, such
@@ -362,9 +366,9 @@ NOTE_CONSTRUCTORS = (
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_hash_doubt_opaque_deny", "_protected_line_fallback", "_raw_push_guard", "_redirect_deny",
-    "_wrtscp_deny")
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
+    "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
+    "_protected_line_fallback", "_raw_push_guard", "_redirect_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -475,6 +479,98 @@ _Redirect = collections.namedtuple(
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde"))
+# How the word reader (_read_word) found one word spelled: literal, the number of leading characters of the
+# decoded word spelled as plain literal text (unquoted text, single- or double-quoted text, or an escaped
+# character), so len(word) when the whole word is, and brace, True where the word holds an unquoted '{' that may
+# open a brace expansion (one right after a '$', or inside an open '${...}', opens a parameter expansion
+# instead). A character stops being plain literal text where a part of the word came from a parameter or
+# command expansion (a '$' or a backquote, unquoted or inside double quotes, as the reader reads it as opaque: a
+# '$' bash reads literally, as in 'x$', counts too), an ANSI-C quote $'...', a locale quote $"..." (with locale
+# False its '$' is such a '$'), or a brace expansion; a word read right after a ')' or inside an open '${...}'
+# continues one that carried a substitution, so none of it is. unquoted, True where such a part may expand to
+# several words, or came through an ANSI-C or locale quote: an unquoted parameter or command expansion (an unquoted
+# '$' or backquote, a '$' bash reads literally included, or a word read right after a ')' or inside an open
+# '${...}'), which bash may split, and, inside double quotes too, an expansion of the positional list or of an
+# array subscripted with @ (_DQ_LIST_EXPANSION_RE), which bash expands to one word per element. A word whose every
+# such part stands inside double quotes and expands to one word has it False, as does one whose only such part is a
+# brace; so a word reads as one word to bash only where no part of it can expand to several.
+_WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace", "unquoted"))
+# One shared _WordSpelling for each value whose literal part is shorter than 64 characters, at index
+# 4 * literal + 2 * brace + unquoted: a record is immutable and its readers read only its fields, so a long run of
+# words spelled alike (a run of backquote substitutions, or of short plain words) builds no record per word.
+_WORD_SPELLINGS = tuple(_WordSpelling(literal, brace, unquoted) for literal in range(64)
+                        for brace in (False, True) for unquoted in (False, True))
+# An expansion that bash expands to one word per element even inside double quotes, as bash 5.3 printed for each
+# form: the positional list ("$@", "${@}", "${@:1}", "${@/x/y}"), an array subscripted with @ in any parameter
+# expansion form ("${A[@]}", "${A[@]:0}", "${A[@]#-}", "${A[@]@Q}", "${!A[@]}"), the names with a prefix
+# ("${!pre@}"), and an indirect expansion, whose reference (a variable, an array element read through a
+# subscript of its own, or a positional parameter or $*) can itself hold a list reference such as @ or an
+# array[@] subscript, so bash splits it into one word per element (bash 5.3: with R, A[0], H[k] or $1 set to @
+# or to B[@], "${!R}", "${!A[0]}", "${!A[$i]}", "${!H[k]}", "${!1}" and "${!*}" expanded to the positional or
+# array list); anywhere in a '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts
+# too. A length ('${#A[@]}', '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}", "${!A[0]*}"),
+# the '*' key list ("${!A[*]}"), one element ("${A[0]}") and an indirect expansion through a parameter that
+# only holds a number or the option flags ("${!#}", "${!?}", "${!-}") expand to one word, and so match nothing
+# here. The indirect form is read whatever operator follows the reference ("${!R}", "${!R:-x}", "${!R@Q}",
+# "${!A[0]:-x}" each expand the array when the reference holds a list reference), except the prefix-names-star
+# "${!pre*}", one word, so a name is matched only when a '*' does not immediately follow it, and a subscript
+# only when it is not the '*' key list ("${!A[*]}" alone; "${!A[*]:-x}" reads the joined elements indirectly)
+# and does not close right before a prefix-names star.
+_DQ_LIST_EXPANSION_RE = re.compile(
+    r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![0-9*]"
+    r"|![A-Za-z_][A-Za-z0-9_]*(?:(?![A-Za-z0-9_*[])|\[(?!\*\]\})(?![^\]]*\]\*\}))))")
+
+
+class _SpelledWords(list):
+    """The decoded words of one segment (its argv) as a lex inside _WordSpellings returns them: the same words, in
+    the same order, as any other lex of the command returns, with spelling beside them, a tuple holding the
+    _WordSpelling of each word."""
+
+    __slots__ = ("spelling",)
+
+    def __init__(self, words, spelling):
+        list.__init__(self, words)
+        self.spelling = tuple(spelling)
+
+
+class _WordSpellings:
+    """A context in which every lex records how each word it returns was spelled: each segment's argv that holds a
+    word is a _SpelledWords, whose words are those every other lex returns, with the _WordSpelling of each beside
+    them (a segment with no word keeps a plain empty list, in which no reader finds anything). Outside it argv is a
+    plain list and nothing is recorded. The git alias readers read the record where it is
+    there (_git_alias_defined_at, _git_local_alias); protected_line, gate_weakening, git_discard and branch_root
+    lex inside this context, and so does the partial lex of _git_alias_recovered (HOW A WORD IS SPELLED, above
+    _GIT_ALIAS_KEY_RE). It restores the previous setting on exit, as _SubstHeredocFloor does."""
+
+    on = False
+
+    def __enter__(self):
+        self.was_on = _WordSpellings.on
+        _WordSpellings.on = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _WordSpellings.on = self.was_on
+        return False
+
+
+class _LexStops:
+    """A context in which every partial lex that stops before the end of the command records, in seen, one (start,
+    words) pair per pass that stops: start, the index of the token it could not read, where the text it read no word
+    of begins, and words, the words it read of the segment it was still inside (its argv), else None. The git
+    alias reading of an unparseable command reads them (_git_alias_unread); the segments a lex returns are the same
+    inside it as outside. It restores the previous record on exit, as _WordSpellings restores its setting."""
+
+    at = None
+
+    def __enter__(self):
+        self.was = _LexStops.at
+        self.seen = _LexStops.at = []
+        return self
+
+    def __exit__(self, *exc_info):
+        _LexStops.at = self.was
+        return False
 
 # THE '#' COMMENT RULE, shared by the scanners that decide where a comment starts in what the guards read as
 # commands (the shared lexer and its word reader, the substitution skip _skip_quoting, the redirect-target
@@ -1171,7 +1267,8 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
     return i
 
 
-def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None):
+def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None,
+               spelling=None):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -1204,9 +1301,18 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     double-quoted string (a locale one included) is skipped whole by _skip_quoting, which applies the same
     rule to a '#' inside it with nest and hash_reading, and reads a quoted here-document's body inside it as
     text with heredoc (the lexer's shared _SubstHeredocs; None reads none, see _skip_quoting), on which an
-    unquoted backquote the word holds is counted as a command substitution too."""
+    unquoted backquote the word holds is counted as a command substitution too. spelling, when given, is a
+    one-element list whose item the read sets to the word's _WordSpelling (how each part of it was spelled); the
+    tuple returned is the same either way."""
     chars = []
     opaque = bool(glued) or (nest is not None and "${" in nest)
+    # The decoded length where the first character not spelled as plain literal text begins (-1 while none has),
+    # whether an unquoted '{' may open a brace expansion, and whether such a part may expand to several words or
+    # came through an ANSI-C or locale quote (_WordSpelling). Each is set only on a character that also makes the
+    # word opaque, so an ordinary character pays nothing for it.
+    literal = 0 if opaque else -1
+    brace = False
+    unquoted = opaque
     started = False
     all_digits = True
     leading_tilde = False
@@ -1262,6 +1368,9 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
             # replace the text at run time.
             opaque = True
+            unquoted = True
+            if literal < 0:
+                literal = sum(map(len, chars))
             i += 1
             c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
@@ -1312,10 +1421,19 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     if _LexPlaces.spans is not None:
                         _LexPlaces.spans.append((_sub_start, i, "code"))
                     opaque = True
+                    if literal < 0:
+                        literal = sum(map(len, chars))
+                    if d == "$" and command[_sub_start + 1] == "{" and _DQ_LIST_EXPANSION_RE.search(
+                            command, _sub_start, i):
+                        unquoted = True  # a list expansion: one word per element, inside double quotes too
                     chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
+                    if literal < 0:
+                        literal = sum(map(len, chars))
+                    if d == "$" and i + 1 < n and command[i + 1] == "@":
+                        unquoted = True  # "$@": one word per positional parameter
                 chars.append(d)
                 i += 1
             if _LexPlaces.spans is not None:
@@ -1333,6 +1451,9 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             if tilde_prefix_open:
                 leading_tilde = False
                 tilde_prefix_open = False
+            if literal < 0:
+                literal = sum(map(len, chars))
+            unquoted = True
             i += 2
             while True:
                 if i >= n:
@@ -1377,6 +1498,15 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             tilde_prefix_open = True  # begin tracking the tilde-prefix; a later quote/escape voids the tilde
         elif c in _OPAQUE_WORD_CHARS:
             opaque = True
+            if c in "$`{":
+                # A parameter or command expansion, or a brace: no longer plain literal text (_WordSpelling). A
+                # '{' right after a '$', or inside an open '${...}', opens a parameter expansion, not a brace one.
+                if literal < 0:
+                    literal = sum(map(len, chars))
+                if c != "{":
+                    unquoted = True
+                elif dollar_end != i and (nest is None or "${" not in nest):
+                    brace = True
         elif c == "/" and tilde_prefix_open:
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
             # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
@@ -1394,7 +1524,12 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
             all_digits = False
         chars.append(c)
         i += 1
-    return "".join(chars), opaque, started, all_digits, leading_tilde, i
+    text = "".join(chars)
+    if spelling is not None:
+        literal = len(text) if literal < 0 else literal
+        spelling[0] = (_WORD_SPELLINGS[4 * literal + 2 * brace + unquoted] if literal < 64
+                       else _WordSpelling(literal, brace, unquoted))
+    return text, opaque, started, all_digits, leading_tilde, i
 
 
 def _match_operator(command, i, n):
@@ -1776,6 +1911,14 @@ def _join_continuations(command):
     return _join_continuations_walk(command)
 
 
+def _joined_text(command):
+    """The joined text of _join_continuations alone, for a caller that reads no raw index: the command itself where
+    it holds no backslash-newline (the same fast path), so a long command builds no index list to discard."""
+    if chr(92) + "\n" not in command:
+        return command
+    return _join_continuations_walk(command)[0]
+
+
 def _join_continuations_walk(command):
     """The context walk behind _join_continuations, with no fast path: the same (joined, raw_index)
     for every command. The self-test compares the two on commands with and without a continuation."""
@@ -1886,8 +2029,7 @@ def _dequoted_text(command):
     example the push backstop's segments, the uncertain-lex push fallback and its git gate, the discard
     scope scan on every reading, and the unparseable-command discard fallback's scope scan), never to
     prove a command safe."""
-    joined, _raw_index = _join_continuations(command)
-    joined = re.sub(r"\$(?=['\"])", "", joined)
+    joined = re.sub(r"\$(?=['\"])", "", _joined_text(command))
     return joined.replace("'", "").replace('"', "").replace(chr(92), "")
 
 
@@ -2090,7 +2232,8 @@ class _LexFork:
     began with backslash-newlines and stopped at the '#', the redirect operator, or the IO_NUMBER before it,
     whose target begins with the '#'), before that token changed anything: the index at, the segments built
     so far, the words, flags and redirects of the segment in
-    progress, the start of that segment, the queued here-document delimiters, the nesting stack, what
+    progress (with the words' _WordSpelling records inside _WordSpellings, else None), the start of that
+    segment, the queued here-document delimiters, the nesting stack, what
     precedes at (glued_at and before), and the pass's _SubstHeredocs (None for a pass reading no body). A
     lex under a reading that extends the stopped one resumes from it with its own copies (_lex_reading,
     _lex_readings); the segments themselves are shared, and no reader changes one.
@@ -2104,13 +2247,14 @@ class _LexFork:
     lex the same rest, and a later one takes the recorded rest instead of lexing it again: readings of a '#'
     line meet again at its newline, so the text after it is lexed once too."""
 
-    def __init__(self, at, segments, argv, argv_opaque, argv_leading_tilde, redirects, opaque, seg_start,
-                 pending_heredocs, nest, glued_at, before, heredocs, tails):
+    def __init__(self, at, segments, argv, argv_opaque, argv_leading_tilde, argv_spelling, redirects, opaque,
+                 seg_start, pending_heredocs, nest, glued_at, before, heredocs, tails):
         self.at = at
         self.segments = segments
         self.argv = argv
         self.argv_opaque = argv_opaque
         self.argv_leading_tilde = argv_leading_tilde
+        self.argv_spelling = argv_spelling
         self.redirects = redirects
         self.opaque = opaque
         self.seg_start = seg_start
@@ -2327,13 +2471,18 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
     is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
     hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
-    the _UncertainHashError raised carries the _LexFork of this pass at the start of that token."""
+    the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
+    _WordSpellings each segment's argv that holds a word is a _SpelledWords holding the words' _WordSpelling records
+    (spelled, the word reader's one-element list, and argv_spelling, parallel to argv), and a plain list outside it
+    or with no word."""
     n = len(command)
+    spelled = [None] if _WordSpellings.on else None
     if fork is None:
         segments = []
         argv = []
         argv_opaque = []
         argv_leading_tilde = []
+        argv_spelling = None if spelled is None else []
         redirects = []
         opaque = [False]
         seg_start = [0]
@@ -2347,6 +2496,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         argv = list(fork.argv)
         argv_opaque = list(fork.argv_opaque)
         argv_leading_tilde = list(fork.argv_leading_tilde)
+        # A fork from a lex outside _WordSpellings carries no records to resume, so its segments get none either.
+        argv_spelling = None if spelled is None or fork.argv_spelling is None else list(fork.argv_spelling)
         redirects = list(fork.redirects)
         opaque = [fork.opaque]
         seg_start = [fork.seg_start]
@@ -2373,16 +2524,26 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
             tails[tail_key] = (segments[tail_from:], flags,
                                None if subst_heredocs is None else subst_heredocs.state())
 
+    def words():
+        # The segment's argv: a copy of the words read so far, with their spelling records inside _WordSpellings. A
+        # segment with no word gets a plain list there too: no reader of the record finds anything in it, and a long
+        # run of separators then builds no record object per segment.
+        return list(argv) if argv_spelling is None or not argv else _SpelledWords(argv, argv_spelling)
+
     def end_segment(sep, op_start, next_start):
-        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
-        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
+        # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
         if argv or redirects or not skip_empty:
-            segments.append(_Segment(list(argv), sep, list(redirects),
-                                      command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                      list(argv_leading_tilde)))
+            # words(), written out: this runs once per segment, and a long run of separators makes many.
+            segments.append(_Segment(list(argv) if argv_spelling is None or not argv
+                                     else _SpelledWords(argv, argv_spelling), sep, list(redirects),
+                                     command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                     list(argv_leading_tilde)))
             del argv[:]
             del argv_opaque[:]
             del argv_leading_tilde[:]
+            if argv_spelling:
+                del argv_spelling[:]
             del redirects[:]
             opaque[0] = False
         seg_start[0] = next_start
@@ -2545,7 +2706,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 continue
             text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, nest,
                                                                                  i == glued_at, hash_reading,
-                                                                                 locale, subst_heredocs)
+                                                                                 locale, subst_heredocs, spelled)
             if j == i:
                 # Unreachable while this loop decides every '#' before it calls the word reader, which then
                 # consumes at least one character (a '#' this reading takes as word text included); kept so a
@@ -2569,6 +2730,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 argv.append(text)
                 argv_opaque.append(w_opaque)
                 argv_leading_tilde.append(w_leading_tilde)
+                if argv_spelling is not None:
+                    argv_spelling.append(spelled[0])
                 if w_opaque:
                     opaque[0] = True
             else:
@@ -2588,16 +2751,18 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         if partial and (hash_reading is None or not isinstance(exc, _UncertainHashError)):
             in_progress = bool(argv or redirects)
             if in_progress:
-                segments.append(_Segment(list(argv), "", list(redirects),
+                segments.append(_Segment(words(), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
+            if _LexStops.at is not None:
+                _LexStops.at.append((i, segments[-1].argv if in_progress and argv else None))
             remember((False, in_progress))
             return segments, False, in_progress
         if isinstance(exc, _UncertainHashError) and exc.at is not None and exc.at == hash_at[0]:
             # Stopped at the '#' the token at i asks about, before the token changed anything: a reading
             # that maps that '#' resumes here (_LexFork).
             exc.fork = _LexFork(i if hash_at[1] < 0 else hash_at[1], segments, argv, argv_opaque,
-                                argv_leading_tilde, redirects, opaque[0],
+                                argv_leading_tilde, argv_spelling, redirects, opaque[0],
                                 seg_start[0], pending_heredocs, nest, glued_at, before, subst_heredocs, tails)
         raise
     remember((True, False))
@@ -2660,10 +2825,18 @@ def _command_word(tokens):
 # own token) is never mistaken for the subcommand: '-C DIR', '-c NAME=VALUE', and the long forms below.
 # Their '--opt=value' inline shape carries the value in the same token (an '=' is present), consuming no
 # separate arg; that case is handled by the '=' test, so only the space-separated forms skip two tokens.
+# The set was checked against git(1) of git 2.53.0 and git 2.56.0 and by running every option-shaped string
+# of each git binary as a global option ('git OPT VALUE version'): on both, exactly -C, -c, --git-dir,
+# --work-tree, --namespace, --config-env, --attr-source and --shallow-file take the next word as their value.
+# --shallow-file is absent from git(1) yet consumes the next word ('git --shallow-file /dev/null version'
+# runs version; its '=' form is an unknown option), so without it 'git --shallow-file status push --force'
+# read 'status' as the subcommand. --exec-path and --super-prefix take no separate value (a bare --exec-path
+# prints the exec path and exits, and both versions reject --super-prefix as an unknown option), so the
+# word skipped after them is harmless: git runs no subcommand there.
 _GIT_ARG_OPTS = frozenset((
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
-    "--config-env", "--attr-source"))  # --attr-source (git 2.40+) consumes its value in separated form;
-    # git does NOT abbreviate top-level options, so exact membership is complete here (F-121)
+    "--config-env", "--attr-source", "--shallow-file"))  # --attr-source (git 2.40+) consumes its value in
+    # separated form; git does NOT abbreviate top-level options, so exact membership is complete here
 
 
 def _git_subcommand_rest(tokens):
@@ -3162,7 +3335,15 @@ def _has_info_flag(tokens):
     safe-direction residual is an over-ask/over-deny on ANY complete option placed immediately before help
     (a valueless flag, git commit --amend --help, or an attached-value flag, git commit -mfoo --help / git
     push -ofoo --help --force), where git shows help but the preceding '-' token makes this treat the
-    segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
+    segment as live; recoverable, re-issue as 'git <subcommand> --help'.
+    A git alias is the exception: git runs a shell alias (a value starting with '!') with the flag passed on to it
+    (on git 2.53.0 'git -c alias.c=!VALUE c -h', 'git -c alias.c=!VALUE c x -h' and 'git -c alias.c=!VALUE c x
+    --help' each ran the alias, a commit past a refusing pre-commit hook included, and so did 'git c -h' under such
+    an alias in GIT_CONFIG_PARAMETERS), and the value of an alias cannot be read with certainty here (see
+    _GIT_ALIAS_KEY_RE). So a guard that reads a git alias (_git_alias_segment) tests it whatever this returns:
+    the flag never exempts a segment that defines one for its git command or runs under one the command's text or
+    the hook's environment defines. The alias name followed directly by --help ('git -c alias.c=!VALUE c --help')
+    printed only the alias on git 2.53.0 and ran nothing; it is refused all the same, a disclosed over-refusal."""
     end = len(tokens)
     for j, tok in enumerate(tokens):
         if tok == "--" or tok == "--end-of-options":  # git's two end-of-options spellings (F-117)
@@ -4175,7 +4356,7 @@ def find_ai_authorship(command):
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False):
     """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
     readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
     once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
@@ -4191,7 +4372,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
     bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
     only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
     already scanned for a co-author trailer, on this line or another line of the command, to its result
-    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    (_co_author_ai). from_env is True when a git alias defined outside a git command's own segment, through a git
+    configuration variable the text of a line that encloses this one names (_git_config_env_named) or the hook's
+    environment carries (_git_alias_inherited), applies to every git command of that line, which this one runs
+    under. A parse error in the command itself (depth 0) raises: at once when neither reading parses
     it, and otherwise after the other reading has found nothing."""
     readings = []  # (the readings that read the line so, its segments)
     error = None
@@ -4219,6 +4403,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
         unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
     elif error is not None and not readings:
         raise error
+    line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
         for tokens, _sep in segments:
@@ -4226,7 +4411,23 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
             if hit is not None:
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
-            if any(tokens[k] in COMMIT_VERBS for k in subs):
+            if not subs:
+                continue  # no git command: no commit to read and no run line to build
+            if line_env is None:
+                # The hook's environment is read at depth 0 only: a nested line is built by a git command of the
+                # line that encloses it, whose line_env, passed down as from_env, already holds that reading.
+                line_env = from_env or (depth == 0 and _git_alias_inherited()) or _git_config_env_named(command)
+            # A subcommand word after a git alias definition (_git_alias_defined_at) may name that alias, which
+            # may run a commit, so the segment is read as a commit-family one; so is every subcommand word of a
+            # line whose text names a git configuration variable (_git_config_env_named) or that runs under an
+            # alias the hook's environment carries (_git_alias_inherited).
+            if line_env:
+                alias_at = -1
+            elif _git_alias_text_may_define(" ".join(tokens)):
+                alias_at = next((j for j in range(len(tokens)) if _git_alias_defined_at(tokens, j)), len(tokens))
+            else:
+                alias_at = len(tokens)
+            if any(tokens[k] in COMMIT_VERBS or alias_at < k for k in subs):
                 hit = _commit_message_and_author_ai(tokens, judged)
                 if hit is not None:
                     return hit
@@ -4244,7 +4445,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
                         if depth >= _CMTIDN_RUN_DEPTH or all(spent):
                             break
                     hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
-                                          judged)
+                                          judged, line_env)
                     if hit is not None:
                         return hit
     if error is not None and depth == 0:
@@ -4296,6 +4497,8 @@ def _commit_identity_fallback(command, error):
     removed as well, since bash drops the '$' of a locale quote $"..." (--author=Cl$""aude ...); the cost is a
     disclosed over-deny of such a command whose text merely names an AI product, and the second form also joins
     the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
+    None of these scans reads the git subcommand, so a git command that runs under a git alias the command defines
+    (the reader's _git_config_env_named and _git_alias_defined_at) is judged here as a commit-family one is.
     Never silent-allow a plausibly-violating command the check could not read in full."""
     if error == _CMTIDN_TOO_LONG:
         match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
@@ -4787,10 +4990,12 @@ def bash_absolute_paths(data):
 # layer (see the block comment above _SNAPSHOTTABLE_VERBS) is SIDE-EFFECTING - it writes an inert
 # refs/aiqt-recovery/* snapshot ref and an external ledger for a not-provably-clean discard - but writes only
 # git objects and one private ref, never the real index, worktree, HEAD, or a branch. HONEST RESIDUAL (not
-# caught by a lexical hook): a git alias or shell function that renames git, a discard performed outside the
-# Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
-# discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
-# marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
+# caught by a lexical hook): a git alias defined in a configuration file, or a shell function, that renames git
+# (one the command defines or runs under denies, _git_local_alias, _git_alias_inherited, _git_alias_named), a
+# discard performed outside the Bash tool, or persistent shell/config state set in a prior turn; the
+# recovery/snapshot layer backstops a discard it CAN see, but cannot snapshot content the probe itself cannot
+# see (assume-unchanged/skip-worktree marks or submodule.<name>.ignore hide work from the probe) nor ignored
+# files (git add --all excludes them).
 # REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
 # command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
 # could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
@@ -4901,6 +5106,790 @@ def _git_sub_and_args(tokens):
     return None, []
 
 
+# A git alias that the command itself defines. git runs an alias in place of a subcommand word that names no
+# built-in and no git-NAME program, matching the word to the alias name without regard to case (on git 2.53.0
+# '-c alias.lg=log' made 'git LG' run log, and '-c alias.status=log' left 'git status' running status). The
+# definition is a -c or --config-env global option whose key lies in the alias section, or in the include or
+# includeIf section, which makes git read a file as more configuration that can hold an alias ('-c
+# include.path=FILE' ran an alias FILE defined), or the same key passed by a GIT_CONFIG_PARAMETERS or
+# GIT_CONFIG_KEY_<n> assignment before the command word (each observed on git 2.53.0). Such an alias cannot be
+# expanded here with certainty: a --config-env value lives in the environment and an include in a file, a value
+# starting with '!' runs a shell command, an alias may name another alias, and git splits the value by its own
+# quoting rules. So a git command that defines one runs an unknown subcommand, possibly a mutating one, and each
+# reader of the subcommand treats it that way (_git_local_alias), wherever the git word stands in its segment: the
+# command word, or a word behind a reserved word, a '{', '!', time or a wrapper (on git 2.53.0 with bash 5.3 'if
+# true; then git -c alias.p=log p; fi', '{ git -c alias.p=log p; }' and 'time git -c alias.p=log p' each ran the
+# alias). A definition outside the git command's own segment, through a git configuration variable the command's
+# text names or the hook's environment carries, is read below (_git_alias_named, _git_alias_outside). Outside this
+# lexical reading: an alias in a configuration file git reads anyway (the repository, global or system file, or one
+# an assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
+# built at run time, a definition or git word built at run time, and a definition inside the text of another word
+# (an sh -c, bash -c or eval body), which is one word here.
+# HOW A WORD IS SPELLED. The decoded word a reader matches is not the word bash builds where part of it comes from
+# an expansion: '-c "${A:-alias}.l"=log', "-c $'\x61lias.l'=log", '-c $"alias".l=log' and '-c {alias,x}.l=log'
+# each pass alias.l to git while the decoded key names no alias section, and bash splits what an unquoted expansion
+# yields into several words, so with D set to '/r -c alias.l=log', 'git -C $D l' passes git -C /r -c alias.l=log l
+# while 'git -C "$D" l' passes one word (bash 5.3 printed both). So where the lexer records how each word was
+# spelled (_WordSpellings, read from argv's _SpelledWords record), the rule is closed over the whole region a git
+# word's walk reads, from the word after it through its subcommand word (_git_local_alias): a word there that
+# carries an unquoted parameter or command expansion, or whose text came through an ANSI-C or locale quote
+# (_WordSpelling.unquoted), defines a git alias whatever it decodes to and whatever its position (an option word,
+# any option's value, or the word read as the subcommand). So does a word there holding an unquoted brace and a
+# comma, since bash expands it into several words that can be global options and a definition ('git
+# {-c,alias.l=log} l' runs 'git -c alias.l=log l'), except a -c or --config-env word and its value; and so does a
+# -c value or a --config-env word whose key part (the text before its first '=', or the whole word when it has
+# none) holds a character not spelled as plain literal text (_WordSpelling.literal: a parameter or command
+# expansion, inside double quotes too, an ANSI-C or locale quote, or a brace expansion) (_git_alias_defined_at). A
+# word reads as one word to bash only when no part of it can expand to several: a double-quoted expansion of the
+# positional list or of an array subscripted with @, in any parameter-expansion form ("$@", "${A[@]}", "${A[@]:0}",
+# _DQ_LIST_EXPANSION_RE), expands to one word per element ('set -- -c alias.l=log; git "$@" l' ran the alias on bash
+# 5.3), so the reader marks it as it marks an unquoted expansion. A word whose every expansion stands inside double
+# quotes and expands to one word keeps the plain reading: behind a literal key ('-c core.pager="$P"'), as another
+# option's value ('git -C "$D" log') or as the subcommand it defines nothing. The deny reason of each git guard
+# names a word read so as one the shell builds at run time, with the fix, and keeps the alias wording for a
+# definition its decoded words spell (_git_alias_built). Disclosed over-refusal (the safe direction): an unquoted variable in a git option or subcommand
+# position now reads as an alias ('git -C $D log', 'git $SUB', 'git -c core.pager=$P log'), as does one after any
+# other word the readers take for a git word ('grep -r git $D'), and a git command inside an unquoted backquote
+# substitution whose closing backquote the lexer reads into the subcommand word ('echo `git status`'); quoting
+# the expansion restores the plain reading. A key that is literal in effect but spelled through an expansion ("-c
+# $'core.pager'=cat", '-c "${K:-core.pager}"=cat') reads as an alias, and so does a brace word in the region that
+# expands to no option ('git {log,status}'). protected_line, gate_weakening, git_discard and branch_root lex inside
+# _WordSpellings, and _git_alias_spelled reads the same rule from the de-quoted text of an unparseable command,
+# where a quoted '$' or backquote counts as an unquoted one; a git region such a command leaves unread denies (A GIT
+# REGION THE LEXER DID NOT READ, above _git_region_open). A reader given words with no record reads the decoded
+# key alone, as before: git_explicit_binding, commit_identity and commit_msg_subst lex outside _WordSpellings, so on
+# a parsed command they read no spelling, while commit_msg_subst's unparseable fallback reads it through
+# _git_alias_recovered. Outside this reading: a word past the subcommand word; the git word itself, read by its
+# decoded text alone (an unquoted expansion in it, "git$IFS-c$IFS'alias.l=log' l", or a brace word that is the git
+# word, '{git,-c,alias.l=log} l', each passed -c alias.l=log); a word in the region that bash builds by filename
+# expansion (an unquoted '*', '?' or '[': '-[c]' passed -c where a file named -c existed) or by a brace sequence
+# expression ('-{c..c}' passed -c; it holds no comma), each printed so by bash 5.3; and a word whose every expansion
+# stands inside double quotes and expands to one word, which keeps the plain reading by decision, so one that names
+# an option at run time ('git -"$C" alias.l=log l' with C set to c) is not read as one.
+_GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
+_GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
+
+
+def _git_key_spelled(word, literal, skip):
+    """Whether the key part of word, the text from index skip to its first '=' (to the end when there is none),
+    holds a character not spelled as plain literal text, literal being the number of leading characters of word
+    that were (_WordSpelling.literal)."""
+    key_end = word.find("=", skip)
+    return literal < (len(word) if key_end < 0 else key_end)
+
+
+def _git_alias_defined_at(tokens, i):
+    """Whether tokens[i] defines a git alias for the command (see _GIT_ALIAS_KEY_RE): a separated -c or
+    --config-env whose next word starts with a key of the alias, include or includeIf section, an attached
+    --config-env=KEY=ENVVAR with such a key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment whose
+    value names such a section. Where tokens carries the lexer's spelling record (_SpelledWords), a separated -c
+    or --config-env whose next word has a key part not spelled as plain literal text, or an attached
+    --config-env=KEY=ENVVAR whose KEY is not, defines one too, whatever the key decodes to (HOW A WORD IS SPELLED,
+    above). This reads the key part alone, so a value spelled so behind a literal key defines nothing here; the
+    region rule of _git_local_alias reads such a value as a definition where it carries an expansion that may expand
+    to several words (an unquoted one, or a double-quoted list expansion such as "$@") or came through an ANSI-C or
+    locale quote, and as none where its every expansion stands inside double quotes and expands to one word."""
+    token = tokens[i]
+    spelling = getattr(tokens, "spelling", None)
+    if token in ("-c", "--config-env"):
+        if i + 1 >= len(tokens):
+            return False
+        return bool(_GIT_ALIAS_KEY_RE.match(tokens[i + 1])) or (
+            spelling is not None and _git_key_spelled(tokens[i + 1], spelling[i + 1].literal, 0))
+    if token.startswith("--config-env="):
+        return bool(_GIT_ALIAS_KEY_RE.match(token[len("--config-env="):])) or (
+            spelling is not None and _git_key_spelled(token, spelling[i].literal, len("--config-env=")))
+    assign = _GIT_CONFIG_ENV_ASSIGN_RE.match(token)
+    return bool(assign and _GIT_ALIAS_KEY_RE.search(token, assign.end()))
+
+
+def _git_local_alias(tokens):
+    """Whether a segment defines a git alias for a git command of its own (_git_alias_defined_at): a word that
+    names git as a word (_GIT_WORD_RE) and is no option, wherever that word stands (the command word, or a word
+    behind a reserved word, a '{', '!', time or any wrapper), with a definition among the assignments before the
+    command word or among the git global options after that git word, walked as _git_sub_and_args walks them.
+    That git command's subcommand is then unknown and possibly mutating. One pass: a git word inside the options
+    an earlier git word's walk has read is the value of one of them, so its own walk would read the same options.
+    Where tokens carries the lexer's spelling record (_SpelledWords), the rule is closed over the region the walk
+    reads after that git word, through the word it stops at, which it reads as the subcommand (HOW A WORD IS
+    SPELLED, above): a word there that carries an unquoted parameter or command expansion or came through an ANSI-C
+    or locale quote (_WordSpelling.unquoted) defines one, whatever its position (an option word, any option's
+    value, or the subcommand word), and so does a word there spelled with an unquoted brace and holding a comma,
+    other than a -c or --config-env word and its value, which are read by their key part instead. The git word
+    itself is read by its decoded text alone: the lexer reads a backquote substitution's opening backquote, or a
+    whole ANSI-C quoted sh -c body, into the word that names git ('cd `git rev-parse --show-toplevel`', "bash -c
+    $'git status'"), where no word of the region carries an expansion. A segment none of whose words names git, read
+    as one search over its words joined at blanks (a blank is neither a letter of git nor a character allowed
+    between them, so a match there lies inside one word, with the same characters around it), defines none, and
+    its words are not walked one by one."""
+    if not _GIT_WORD_RE.search(" ".join(tokens)):
+        return False
+    start = _command_word_index(tokens)
+    assigned = any(_git_alias_defined_at(tokens, j) for j in range(start))
+    spelling = getattr(tokens, "spelling", None)
+    n = len(tokens)
+    end = 0
+    for k in range(start, n):
+        if k < end or tokens[k].startswith("-") or not _GIT_WORD_RE.search(tokens[k]):
+            continue
+        if assigned:
+            return True
+        i = k + 1
+        while i < n and tokens[i].startswith("-"):
+            if _git_alias_defined_at(tokens, i):
+                return True
+            step = 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+            config = tokens[i] in ("-c", "--config-env") or tokens[i].startswith("--config-env=")
+            if spelling is not None and any(
+                    spelling[j].unquoted or (not config and spelling[j].brace and "," in tokens[j])
+                    for j in range(i, min(i + step, n))):
+                return True
+            i += step
+        if spelling is not None and i < n and (spelling[i].unquoted or (spelling[i].brace and "," in tokens[i])):
+            return True
+        end = i
+    return False
+
+
+# A git alias defined outside the git command's own segment. git reads configuration from the environment
+# variables GIT_CONFIG_PARAMETERS, and GIT_CONFIG_COUNT with GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>, and a
+# shell can set a variable in more ways than a reading of shell forms can list: an export, declare -x, typeset -x
+# or local -x word, a bare assignment or a readonly word to a variable already exported, and under set -a also a
+# bare assignment, read, printf -v, a for loop variable, ${NAME:=...} or an assignment through a nameref (declare
+# -n), each one anywhere in a compound command (on git 2.53.0 with bash 5.3 a later 'git p' ran the alias p that
+# each of these defined). So no form is recognized. When the text of a command names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or
+# GIT_CONFIG_KEY_ anywhere, read with every quote character, backslash, '$' and newline removed
+# (_git_config_env_named), so a quoted, escaped or continued spelling counts as the plain one does, in any word,
+# a here-string, a comment or an echo, and in a parsed or an unparseable command alike, every git command of the
+# command counts as running under a git alias the command defines, those written before the name included, since
+# a loop or a function can run them after it (in 'for i in 1 2; do git p; export GIT_CONFIG_PARAMETERS=...; done'
+# the second pass ran the alias). A git command here is any segment one of whose words names git as a word
+# (_names_git), wherever the word stands (behind a reserved word, '!', time or a wrapper, or inside the text of
+# an sh -c or eval word), and, for the readers that deny such a git command and on an unparseable command, git
+# named as a word anywhere in the command's text (_git_alias_named). Neither the form nor the value is read, so a
+# mention that sets nothing (an echo, a comment, an unset, an unrelated value) makes the git commands of that
+# command count too: a disclosed over-refusal. Outside this reading: a name built at run time (GIT_CONFIG_$X, a
+# brace expansion, an escape decoded inside an ANSI-C quote), and a variable set outside the command's text (in
+# the startup files of the Bash tool's shell, or in a sourced file or a script the command runs).
+# The hook's own environment counts as well (_git_alias_inherited): the shell the Bash tool runs a command in
+# inherits the session's environment, as this hook does (the premise _ambient_repo_view_override reads it on), so
+# a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> there whose value names an alias, include or includeIf key defines
+# that alias for every git command the command runs. It counts exactly as a text naming one of the variables does
+# (_git_alias_outside): every segment naming git as a word, and git named as a word anywhere in the text, wherever
+# the word stands, so no reading of shell forms is needed here either (on git 2.53.0 with bash 5.3 the alias ran
+# behind 'if true; then', inside '{ ...; }' and after time). Its value is set before the command runs and is
+# visible here, so it is read as an assignment before the command word is, and an environment carrying only
+# unrelated configuration (gc.auto) is not refused.
+_GIT_CONFIG_ENV_NAME_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_)")
+# git as a word, in any case: its letters with only the characters _CMTIDN_UNREAD_CHARS_RE drops between them,
+# and no letter, digit or underscore directly before or after it, so the variable names above are not git words.
+# The test for the character before the g follows the g ('(?<!\w.)' there reads the same character as '(?<!\w)'
+# before it), so the pattern starts with the letter and a search skips to each g instead of trying every index.
+_GIT_WORD_RE = re.compile(r"(?i)g(?<!\w.)[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
+
+
+def _git_config_env_named(command):
+    """Whether the text of command names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere,
+    once every quote character, backslash, '$' and newline is removed (_CMTIDN_UNREAD_CHARS_RE). The removal only
+    joins text around the name, so a name the command spells plainly is found too (see _GIT_CONFIG_ENV_NAME_RE). It
+    removes no 'G' or '_', so a command lacking either names none of them and is not copied."""
+    if "G" not in command or "_" not in command:
+        return False
+    return bool(_GIT_CONFIG_ENV_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
+
+
+def _git_word_index(tokens):
+    """The index of the first word of a segment that names git as a word (_GIT_WORD_RE), wherever it stands in
+    the segment, or len(tokens) when no word does."""
+    return next((i for i, token in enumerate(tokens) if _GIT_WORD_RE.search(token)), len(tokens))
+
+
+def _names_git(tokens):
+    """Whether a word of a segment names git as a word (_git_word_index)."""
+    return _git_word_index(tokens) < len(tokens)
+
+
+def _git_alias_outside(command):
+    """Whether every git command of command runs under a git alias defined outside its own segment: the text of
+    command names a git configuration variable (_git_config_env_named), or the hook's environment carries one
+    naming an alias (_git_alias_inherited), which counts the same way (see _GIT_CONFIG_ENV_NAME_RE)."""
+    return _git_config_env_named(command) or _git_alias_inherited()
+
+
+def _git_alias_named(command):
+    """Whether every git command of command runs under a git alias defined outside its own segment
+    (_git_alias_outside) and its text names git as a word (_GIT_WORD_RE): every git command it runs then counts
+    as running under that alias (see _GIT_CONFIG_ENV_NAME_RE), on a parsed and an unparseable command alike."""
+    return _git_alias_outside(command) and bool(_GIT_WORD_RE.search(command))
+
+
+def _git_alias_segment(tokens, outside):
+    """Whether a segment runs git under a git alias: it names git as a word (_names_git) while outside says the
+    command's git commands run under one defined outside their segment (_git_alias_outside), or it defines one for
+    a git command of its own (_git_local_alias). Either way the git word may stand anywhere in the segment."""
+    return (outside and _names_git(tokens)) or _git_local_alias(tokens)
+
+
+def _git_alias_inherited():
+    """Whether the hook's environment carries a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> whose value names an
+    alias, include or includeIf key (read as _git_alias_defined_at reads an assignment), which defines that alias
+    for every git command the command runs (see _GIT_CONFIG_ENV_NAME_RE)."""
+    inherited = ["{}={}".format(name, value) for name, value in os.environ.items()
+                 if name.startswith("GIT_CONFIG_")]
+    return any(_git_alias_defined_at(inherited, j) for j in range(len(inherited)))
+
+
+# The words _git_alias_spelled reads: the de-quoted text split at blanks, newlines and the shell operator and opener
+# characters (; & | < > ( ) { } and the backquote), so a word next to a redirect, a here-string or a '{fd}' name
+# reads as the word the lexer would have read there.
+_GIT_ALIAS_TEXT_SPLIT_RE = re.compile(r"[\s;&|<>(){}`]+")
+# The tokens _git_alias_spelled_segments reads: in the de-quoted text with each '$' kept, a redirection operator (a
+# run of '<' and '>', with a '&' after it, '&>', '&>>' or '>|'), a command separator (a newline, or a run of ; & | (
+# and )), or a word (a run of any other text but blanks, so a '$', a backquote, '{' and '}' stay in their word).
+_GIT_ALIAS_SPELLED_TOKEN_RE = re.compile(
+    r"(?P<redirect>&>>?|>\||[<>]+&?)|(?P<sep>\n|[;&|()]+)|(?P<word>[^\s;&|<>()]+)")
+# Where a de-quoted word's plain literal text ends: its first '$', backquote or '{'. A '{' that may open a brace
+# expansion in such a word: one not right after a '$', which opens a parameter expansion instead. A part of such a
+# word that may come from an unquoted expansion or an ANSI-C or locale quote: any '$' or backquote.
+_GIT_ALIAS_SPELLED_MARK_RE = re.compile(r"[$`{]")
+_GIT_ALIAS_SPELLED_BRACE_RE = re.compile(r"(?<!\$)\{")
+_GIT_ALIAS_SPELLED_UNQUOTED_RE = re.compile(r"[$`]")
+
+
+def _git_alias_git_lines(text):
+    """The lines of text (split at each newline) that name git as a word (_GIT_WORD_RE), in order. A git word inside
+    a word of a line is a match inside that line, and a match that spans a newline is a word of no line, so a line
+    holding no match the search finds is left out. The search runs once over the whole text and steps to the end
+    of each line it keeps, so a text of many lines costs one scan, not one call per line."""
+    lines = []
+    pos = 0
+    while True:
+        match = _GIT_WORD_RE.search(text, pos)
+        if match is None:
+            return lines
+        if "\n" in match.group():
+            pos = match.end()
+            continue
+        end = text.find("\n", match.end())
+        if end < 0:
+            end = len(text)
+        lines.append(text[text.rfind("\n", 0, match.start()) + 1:end])
+        pos = end
+
+
+def _git_alias_text_may_define(text):
+    """Whether text can hold a word that defines a git alias (_git_alias_defined_at): every such word holds '-c' (a
+    -c or --config-env word, or an attached --config-env=) or 'GIT_CONFIG_' (an assignment), with or without a
+    spelling record. Neither holds a blank, so where text holds neither, no word split from it defines one, nor does
+    any word of a list whose words joined at blanks are text, and the per-word reading can be skipped."""
+    return "-c" in text or "GIT_CONFIG_" in text
+
+
+def _git_alias_spelled_segments(command):
+    """The commands of the text of command, read as _git_alias_spelled reads them: its line continuations joined
+    and its quote characters and backslashes removed, each '$' kept (so what is left of an ANSI-C or locale quote
+    is a '$'), split into commands at each separator and into words at blanks (_GIT_ALIAS_SPELLED_TOKEN_RE), with
+    each redirection, its target word, and an all-digit or '{name}' word right before it left out, as the lexer
+    leaves them out of argv. Each command is a _SpelledWords whose record reads a word's first '$', backquote or
+    '{' as where its plain literal text ends, a '{' not right after a '$' as a brace, and any '$' or backquote as an
+    unquoted expansion. The de-quoted text cannot tell a quoted or escaped '$', backquote, '{' or operator character
+    from an unquoted one, so each counts as an unquoted one would. Only the commands of a line that names git as a
+    word are returned (_git_alias_git_lines): every reader of these commands (_git_local_alias, _git_region_open,
+    _segment_runs_git_command) finds nothing in a command none of whose words names git, and a newline always ends a
+    command here, so each line is read on its own and a line naming no git is not split into words at all."""
+    text = _joined_text(command).replace("'", "").replace('"', "").replace(chr(92), "")
+    segments = []
+    for line in _git_alias_git_lines(text):
+        words = []
+        target = False  # the next word is the target of a redirection, which no argv holds
+        last_end = -1  # where the last word kept ended, while no other token has followed it
+        for match in _GIT_ALIAS_SPELLED_TOKEN_RE.finditer(line):
+            kind = match.lastgroup
+            if kind == "word":
+                if target:
+                    target = False
+                    last_end = -1
+                else:
+                    words.append(match.group())
+                    last_end = match.end()
+                continue
+            if kind == "redirect":
+                if last_end == match.start() and (words[-1].isdigit() or _FD_VAR_RE.match(words[-1])):
+                    words.pop()  # an IO number or a '{name}' before the operator is part of the redirection
+                target = True
+            else:
+                if words:
+                    segments.append(words)
+                words = []
+                target = False
+            last_end = -1
+        if words:
+            segments.append(words)
+    spelled = []
+    for seg in segments:
+        spelling = []
+        for word in seg:
+            mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
+            spelling.append(_WordSpelling(len(word) if mark is None else mark.start(),
+                                          bool(_GIT_ALIAS_SPELLED_BRACE_RE.search(word)),
+                                          bool(_GIT_ALIAS_SPELLED_UNQUOTED_RE.search(word))))
+        spelled.append(_SpelledWords(seg, spelling))
+    return spelled
+
+
+def _git_alias_spelled(command):
+    """Whether the text of a command the lexer could not read to its end defines a git alias: it names git as a word
+    (_GIT_WORD_RE) and one of its words starts a definition (_git_alias_defined_at: a -c or --config-env whose next
+    word has an alias, include or includeIf key, an attached --config-env=KEY with one, or a GIT_CONFIG_PARAMETERS
+    or GIT_CONFIG_KEY_<n> assignment naming one), the words being those of the de-quoted text (_dequoted_text) split
+    at _GIT_ALIAS_TEXT_SPLIT_RE. The lexer stops at a here-string, an unquoted heredoc, a '{fd}' redirect or an
+    unbalanced quote and recovers no word after it, so a definition there is in no segment a partial lex recovers
+    (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an alias FILE defined). The whole text is read, the
+    recovered part included, so neither where the lexer stopped nor which git command a definition belongs to is
+    needed. Disclosed over-refusal (the safe direction): a definition spelling in any word of such a command counts,
+    one in an echo, a quoted sh -c body, a heredoc or here-string body or a 'grep -c alias.x' included. The rule
+    for a word spelled through an expansion, a quote or a brace (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE)
+    applies here to the de-quoted words too, through the same reader: each command of the de-quoted text, its
+    spelling read from the '$', backquote and '{' left in its words (_git_alias_spelled_segments), defines one where
+    _git_local_alias finds one in it, in the region after a git word through its subcommand word, past a here-string,
+    heredoc or '{fd}' redirect included, so any '$' or backquote there counts as an unquoted expansion. Since those
+    words cannot tell a quoted or escaped '$', backquote or '{' from an unquoted one, a quoted one counts too, a
+    disclosed over-refusal: here a double-quoted expansion in that region ('git -C "$D" log') defines one as well.
+    Read only for a command whose lex failed; it only ever denies."""
+    return _git_alias_spelled_kind(command) is not None
+
+
+def _git_alias_spelled_kind(command):
+    """What _git_alias_spelled finds in the text of command: "alias" where a de-quoted word starts a definition its
+    decoded text spells, "built" where only how a word in a git command's region is spelled reads as one (a '$',
+    backquote or brace there), and None where neither does."""
+    if not _GIT_WORD_RE.search(command):
+        return None
+    text = _dequoted_text(command)
+    if _git_alias_text_may_define(text):
+        words = _GIT_ALIAS_TEXT_SPLIT_RE.split(text)
+        if any(_git_alias_defined_at(words, j) for j in range(len(words))):
+            return "alias"
+    if any(_git_local_alias(seg) for seg in _git_alias_spelled_segments(command)):
+        return "built"
+    return None
+
+
+def _git_alias_recovered(command, unread=False, lexed=None):
+    """Whether an unparseable command runs git under a git alias the command defines: its text names git while its
+    git commands run under one defined outside their segment (_git_alias_named), its text defines one wherever the
+    lexer stopped (_git_alias_spelled), or a segment that a partial lex recovers runs git under one
+    (_git_alias_segment). The segment the lexer was still inside is kept: the words of it already read stand
+    whatever follows, and this reading only ever denies. The partial lex records how each word was spelled
+    (_WordSpellings), so a recovered word spelled through an expansion, a quote or a brace counts as on a parsed
+    command (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE), where the de-quoted reading of _git_alias_spelled
+    splits the text otherwise (a quoted blank or ';' moves its subcommand word: 'git -C "a b" $X' is read there as
+    git -C a with the subcommand b). With unread True a git command whose option region the lexer did not read
+    counts too (_git_alias_unread), read from the stops of the same partial lex: gate_weakening and git_discard pass
+    it, protected_line and branch_root read _git_alias_unread from their own partial lex, and commit_msg_subst's
+    fallback does not read it. The result is False, or "alias"
+    where a definition the decoded words spell, or one outside the segment, is found, and "built" where only how a
+    word in a git command's region is spelled, or that region left unread, reads as one (_git_alias_built), which a
+    guard's deny reason tells apart. lexed, when given, is (argvs, stops): the argv of every segment, in order, of
+    the partial lex this reading makes (_lex_command with partial True, inside _WordSpellings and _LexStops) and the
+    stops it recorded, from a caller that has just made that lex (gate_weakening), so the command is not lexed twice."""
+    outside = _git_alias_outside(command)  # read once: _git_alias_named, then every recovered segment
+    if outside and _GIT_WORD_RE.search(command):
+        return "alias"
+    kind = _git_alias_spelled_kind(command)
+    if kind is not None:
+        return kind
+    if lexed is None:
+        try:
+            with _WordSpellings(), _LexStops() as stops:
+                recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
+        except ValueError:
+            return "built" if unread and _git_alias_unread(command, [(0, None)]) else False
+        lexed = recovered, stops.seen
+    recovered, seen = lexed
+    # A segment runs git under an alias only where one of its words names git (_git_alias_segment), so an empty
+    # segment, or one whose words joined at blanks name no git, is passed over without the per-word walk.
+    for tokens in filter(None, recovered):
+        if _GIT_WORD_RE.search(" ".join(tokens)) and _git_alias_segment(tokens, outside):
+            return "built" if _git_alias_built(tokens, outside) else "alias"
+    return "built" if unread and _git_alias_unread(command, seen) else False
+
+
+def _git_alias_built(tokens, outside):
+    """Whether a segment that runs git under a git alias (_git_alias_segment) does so only through how a word in its
+    git command's region is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): read as plain words, with no
+    spelling record, it defines none and runs under none. A guard's deny then names the word the shell builds at run
+    time, not an alias the command never wrote."""
+    return not _git_alias_segment(list(tokens), outside)
+
+
+# How each git guard's deny reason states a git command whose region holds a word the shell builds at run time, or
+# that the lexer did not read (_git_alias_built, _git_alias_unread), in place of the wording for an alias definition,
+# which such a command may never have written, and the fix.
+_GIT_BUILT_WORD_REASON = (
+    "runs git with a word in its global options or subcommand position that the shell builds at run time (an "
+    "unquoted variable or command substitution such as -C $D, a \"$@\" or \"${A[@]}\" list, an ANSI-C or locale "
+    "quote, a brace expansion with a comma, or a -c or --config-env key spelled through an expansion), or with "
+    "options this guard could not read (a here-string, heredoc, process substitution or {fd} redirect before the "
+    "subcommand word of a command the shell lexer cannot parse); bash can expand such a word into several words, "
+    "such as -c and a git alias definition, so the subcommand git runs is unknown here")
+_GIT_BUILT_WORD_FIX = (
+    "Quote the expansion (\"$D\" rather than $D): on a command the shell lexer can parse, that keeps it one word and "
+    "restores the plain reading; on one it cannot parse (a here-string, an unquoted heredoc, a process substitution "
+    "or a {fd} redirect anywhere in it) a quoted expansion in those options counts too, so write that value "
+    "literally or run the git command on its own. Spell a -c or --config-env key literally, write a list's words "
+    "out, and put a here-string or heredoc after the subcommand word.")
+
+
+# A GIT REGION THE LEXER DID NOT READ. On a command the full parse cannot read, the partial lexer stops at the first
+# construct it refuses (a here-string, an unquoted heredoc, a process substitution, a '{fd}' redirect or an unbalanced
+# quote) and reads no word after it. The segment it stopped inside is read only where it runs git AS ITS OWN COMMAND
+# (_segment_runs_git_command: its command word is git or a wrapper the guards resolve), never a git word another
+# command merely carries. Where it stops before such a git command's option region ('git <<<x -C "a b" $X l') or
+# inside it, that region is unread, and the de-quoted reading of _git_alias_spelled cannot stand in for it: a
+# quoted blank or separator moves its subcommand word ('-C "a b" $X' reads there as -C a with the subcommand b, so $X
+# stands past it; with X set to '-c alias.l=log', bash 5.3 passed git -C 'a b' -c alias.l=log l). So an unread region
+# on a git segment counts as a definition, fail closed (_git_alias_unread): a git command the lexer was still inside
+# whose walk (_git_region_open) reads no subcommand word among the words read before the stop, and, past where it
+# stopped, the UNION of two readings of the text, a deny from either standing: a quote-aware re-lex of the text past
+# each construct the reader can measure (_construct_end; a here-string's target word, or a process substitution's
+# balanced parentheses with backslash escapes honoured), each recovered command judged where its region runs open or
+# holds a word that defines one under HOW A WORD IS SPELLED (_git_local_alias), and the every-git-word reading
+# (_git_alias_unread_everyword), which walks the region of each git word in the raw text and so reaches one inside a
+# construct's own body, a comment, a redirect target or quoted text. The re-lex alone decides only where its ground
+# is proven (the construct measured with no backslash escape met, no git word inside the measured construct's own
+# text, a resume at a command separator, and every git word of the re-lexed text read as a word of a recovered
+# command, none beside a '$' or backquote in its word): there a git word the re-lex proves to be quoted text
+# ('cat <<<x; echo "run git"', a pull-request or issue body naming git) allows, while a plain git word any command carries as a word of its own
+# ('cat <<<x; flock /tmp/l git -C "a b" $X l') is still walked (_segment_union_words) and denies where its region
+# runs open or holds a word built at run time. A literal region read in full keeps its decision either way.
+# Disclosed over-refusal (the safe direction): a word naming git that is the last word read before such a construct
+# and is its command word ('git <<<x log') still denies, and so does a quoted or commented git word anywhere the
+# re-lex ground is not proven. Scoping before the stop stands: a git word only an operand of the stopped segment
+# ('grep -c git <<<"$s"') is not read as a git command. Read only for a command whose lex failed.
+
+
+def _segment_runs_git_command(tokens):
+    """Whether a segment runs git AS ITS OWN COMMAND: its command word, found past any leading reserved words, a
+    function or coprocess name, an env-assignment prefix and the wrapper words the git readers resolve
+    (_CMTIDN_GIT_WRAPPERS), names git as a word (a path to git included, read by its basename), or such a wrapper
+    stands there and a later word names git. A git word that is only an operand of another command ('grep -c git',
+    'echo "git log"', a pull-request body) makes this False. The unread-region rule is scoped by this, so it reads
+    only a git command's own unread region and never denies a command whose command words name no git command."""
+    i = 0
+    n = len(tokens)
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return False
+    word = tokens[i].rsplit("/", 1)[-1]
+    if _GIT_WORD_RE.search(word):
+        return True
+    if word in _CMTIDN_GIT_WRAPPERS:
+        return any(_GIT_WORD_RE.search(tok.rsplit("/", 1)[-1]) for tok in tokens[i + 1:])
+    return False
+
+
+def _git_region_open(tokens):
+    """Whether a git word among the words a lex read before it stopped has a region that runs past them: its walk
+    (as _git_local_alias walks it, a git word inside an earlier walk's options skipped) reads no subcommand word."""
+    start = _command_word_index(tokens)
+    n = len(tokens)
+    end = 0
+    for k in range(start, n):
+        if k < end or tokens[k].startswith("-") or not _GIT_WORD_RE.search(tokens[k]):
+            continue
+        i = k + 1
+        while i < n and tokens[i].startswith("-"):
+            i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+        if i >= n:
+            return True
+        end = i
+    return False
+
+
+def _git_region_target(command, i, n):
+    """The index past the target word of a redirection whose operator ends at i, read as the lexer reads it, or None
+    where the lexer would refuse it (no target word, or one it cannot read)."""
+    while i < n and command[i] in " \t":
+        i += 1
+    if i >= n or command[i] == "\n" or command[i] in _METACHARS or command[i] == "#":
+        return None
+    try:
+        _text, _opaque, started, _digits, _tilde, j = _read_word(command, i, n)
+    except ValueError:
+        return None
+    return j if started else None
+
+
+def _git_region_read(command, at):
+    """The words of the git command whose git word starts at index at, read from that word through its subcommand
+    word (or to the end of its segment) as the lexer reads them, blanks, redirections and their targets aside, with
+    their spelling record: (words, end), words a _SpelledWords and end the index past the last one; None where a
+    construct the lexer refuses (a here-string, a heredoc, a process substitution, a '{fd}' redirect, a word it cannot
+    read) stands before the subcommand word, so the region is unread."""
+    n = len(command)
+    words = []
+    spelling = []
+    value = False  # the next word is the value of the option before it
+    i = at
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "\n":
+            break
+        if c in _METACHARS:
+            op, kind, oplen = _match_operator(command, i, n)
+            if kind == "sep":
+                break
+            i = None if kind == "cannot" else _git_region_target(command, i + oplen, n)
+            if i is None:
+                return None
+            continue
+        holder = [None]
+        try:
+            text, _opaque, started, all_digits, _tilde, j = _read_word(command, i, n, spelling=holder)
+        except ValueError:
+            return None
+        if not started:
+            if j == i:
+                break  # a '#' that starts a word: a comment to the end of the line
+            i = j
+            continue
+        if j < n and command[j] in "<>" and (all_digits or _FD_VAR_RE.match(text)):
+            op, kind, oplen = _match_operator(command, j, n)
+            i = None if kind == "cannot" or not all_digits else _git_region_target(command, j + oplen, n)
+            if i is None:
+                return None
+            continue
+        words.append(text)
+        spelling.append(holder[0])
+        i = j
+        if len(words) == 1:
+            continue
+        if value:
+            value = False
+        elif text.startswith("-"):
+            value = "=" not in text and text in _GIT_ARG_OPTS
+        else:
+            break
+    return _SpelledWords(words, spelling), i
+
+
+def _skip_balanced_parens(command, i, n, escape=None):
+    """The index just past the ')' that closes the '(' at index i, single and double quotes, backslash escapes
+    and nested parentheses respected, or None when it is unterminated. Reads past a process substitution's body
+    to the word after it. A backslash outside quotes escapes the next character, so an escaped parenthesis
+    opens and closes nothing ('<(echo \\()' ends at its real ')'); meeting one is recorded in escape (a
+    one-element list) where the caller passes it, so the caller can keep the every-git-word reading beside a
+    measure whose body carried escapes."""
+    depth = 0
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            if escape is not None:
+                escape[0] = True
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return None
+            i = j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and command[i] != '"':
+                i += 2 if command[i] == "\\" and i + 1 < n else 1
+            if i >= n:
+                return None
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _construct_end(command, pos, escape=None):
+    """The index just past the construct the partial lexer stopped at (position pos), so the text after it lexes
+    as the lexer would read it once the redirect is consumed, or None where this reader cannot measure the
+    construct on the same text (an unquoted heredoc whose body is deferred, a '{fd}' redirect, an unbalanced
+    quote, or a substitution). A here-string ('<<<word') is read past its one target word, and a process
+    substitution ('<(...)'/'>(...)') past its balanced parentheses (backslash escapes honoured; one met is
+    recorded in escape, see _skip_balanced_parens); only these two carry their whole extent on the text the
+    reader can walk."""
+    n = len(command)
+    if command.startswith("<<<", pos):
+        j = pos + 3
+        while j < n and command[j] in " \t":
+            j += 1
+        if j >= n or command[j] == "\n" or command[j] in _METACHARS or command[j] == "#":
+            return None
+        try:
+            _text, _opaque, started, _digits, _tilde, k = _read_word(command, j, n)
+        except ValueError:
+            return None
+        return k if started else None
+    if command.startswith("<(", pos) or command.startswith(">(", pos):
+        return _skip_balanced_parens(command, pos + 1, n, escape)
+    return None
+
+
+def _git_alias_unread_everyword(command, pos):
+    """The every-git-word reading of the text from index pos: the region of each git word in the raw text is
+    read quote-aware from that word (_git_region_read), denying where it cannot be read to its subcommand word
+    (a here-string, heredoc, process substitution, '{fd}' redirect or a word the reader refuses stands before
+    it) or holds a word that defines a git alias under HOW A WORD IS SPELLED (_git_local_alias). Each git word
+    inside a region already read is skipped, so the text is read about once. The raw text is walked as written,
+    so this reading reaches a git word inside a construct's own body, a comment, a redirect target or quoted
+    text, where it can only over-refuse (a region read from inside quoted text can differ from any word bash
+    builds); _git_alias_unread narrows it only where the measured re-lex proves its ground, and takes the union
+    with it everywhere else, so no deny of this reading is lost there."""
+    end = pos
+    for match in _GIT_WORD_RE.finditer(command, pos):
+        if match.start() < end:
+            continue
+        region = _git_region_read(command, match.start())
+        if region is None:
+            return True
+        words, end = region
+        if _git_local_alias(words):
+            return True
+    return False
+
+
+# The characters no unquoted shell word can carry: a decoded word holding one was spelled through quotes or
+# escapes, so a git word beside one in its word is quoted text, never a word that can run git on its own.
+_UNQUOTED_NEVER_CHARS = " \t\n;&|<>()'\""
+
+
+def _segment_union_words(tokens):
+    """The union view of a recovered segment for _git_alias_unread: (words, expansion). words is the token list
+    with each git word the lex PROVES to be quoted text neutralized (its token carries a character no unquoted
+    word can, _UNQUOTED_NEVER_CHARS, and no '$' or backquote, so bash passes it as one operand that runs no git:
+    'echo "run git"'), or None where no token could run git as a word of its own; a plain git word any command
+    carries ('flock /tmp/l git ...') stays, so the caller's walk reads its region as the every-git-word reading
+    would. expansion says a token carries a git word beside a '$' or backquote (a substitution or expansion the
+    lex keeps opaque, 'echo "$(git ...)"'), whose region only the raw every-git-word reading can place; such a
+    word is neutralized here and the caller takes that union instead."""
+    masked = list(tokens)
+    expansion = False
+    plain = False
+    for idx, tok in enumerate(tokens):
+        if not _GIT_WORD_RE.search(tok):
+            continue
+        if "$" in tok or "`" in tok:
+            expansion = True
+            masked[idx] = _GIT_WORD_RE.sub("x", tok)
+        elif any(c in _UNQUOTED_NEVER_CHARS for c in tok):
+            masked[idx] = _GIT_WORD_RE.sub("x", tok)
+        else:
+            plain = True
+    if not plain:
+        return None, expansion
+    spelling = getattr(tokens, "spelling", None)
+    if spelling is not None:
+        return _SpelledWords(masked, spelling), expansion
+    return masked, expansion
+
+
+def _resumes_at_separator(rest):
+    """Whether the text past a measured construct resumes at a command separator (or runs out), so the construct
+    ended its segment and every later word stands at a command position the re-lex reaches. A word, a redirect
+    or a '#' there continues the stopped segment (bash reads '<(a)#b' as one word and a wrapper's options can
+    stand there, 'nice <<<x -n 5 git ...'), where the re-lex cannot place what it reads against the words read
+    before the stop."""
+    i = 0
+    n = len(rest)
+    while i < n and rest[i] in " \t":
+        i += 1
+    return i >= n or rest[i] in ";\n&|"
+
+
+def _git_alias_unread(command, stops):
+    """Whether an unparseable command holds a GIT COMMAND of its own whose option region the lexer did not read (A
+    GIT REGION THE LEXER DID NOT READ, above), given stops, the (start, words) pairs its partial lex recorded
+    (_LexStops). Before the stop, the reading is scoped to a segment that runs git as its own command
+    (_segment_runs_git_command), never a git word another command merely carries: a segment the lexer stopped
+    inside denies where its git command's region runs past the words it read (_git_region_open). Past the earliest
+    stop, the decision is the UNION of two readings, a deny from either standing: the text past each construct the
+    reader can measure (_construct_end), re-lexed quote-aware (so a quoted blank or separator does not shift the
+    region as the de-quoted reading does), each recovered command denying where it runs git as its own command, or
+    carries a plain git word (_segment_union_words), with a region that runs open or holds a word that defines a
+    git alias under HOW A WORD IS SPELLED (_git_local_alias); and the every-git-word reading of the raw text
+    (_git_alias_unread_everyword). The re-lex alone decides only where its ground is proven: the construct measured
+    with no backslash escape met, no git word inside the measured construct's own text (a process substitution's
+    body and a here-string's word are run or expanded, so a git region there keeps the raw reading), a resume at a
+    command separator, and every git word of the re-lexed text read as a word of a recovered command (one in a
+    comment or a redirect target is not), none beside a '$' or backquote in its word (a substitution the lex keeps
+    opaque, _segment_union_words); only there does a git word the re-lex proves to be quoted text allow.
+    Where a construct cannot be measured (an unquoted heredoc, a '{fd}' redirect, an unbalanced quote, or no
+    recovered position), the union is taken with the de-quoted reading beside the every-git-word reading, so a git
+    command past such a construct never goes unread."""
+    for _start, words in stops:
+        if words is not None and _segment_runs_git_command(words) and _git_region_open(words):
+            return True
+    if not stops:
+        return False
+    pos = min(start for start, _words in stops)
+    while True:
+        escape = [False]
+        end = _construct_end(command, pos, escape)
+        if end is None:
+            # The reader cannot measure this construct (or the partial lex recovered no position): the decision
+            # is the union of the every-git-word reading, which reaches a git region inside or past any construct
+            # on the raw text, and the de-quoted reading, which reaches every command word past it but cannot
+            # undo a quoted blank or separator that shifts a region; a deny from either stands, so no deny of
+            # the every-git-word reading is narrowed here.
+            return (_git_alias_unread_everyword(command, pos)
+                    or any(_segment_runs_git_command(seg)
+                           and (_git_region_open(seg) or _git_local_alias(seg))
+                           for seg in _git_alias_spelled_segments(command[pos:])))
+        rest = command[end:]
+        with _WordSpellings(), _LexStops() as rstops:
+            recovered = _lex_command(rest, partial=True, skip_empty=True)[0]
+        # The re-lex ground (docstring above): any failed condition keeps the every-git-word union below. The
+        # accounting compares the raw git words of the re-lexed span (up to the next stop, where the loop takes
+        # over) against those the recovered words carry, so one in a comment or a redirect target, which no argv
+        # holds, falls back to the raw reading instead of going unread. The measure honours backslash escapes, so
+        # one met in a process substitution's body does not misplace the construct's end; the escape term is
+        # defence in depth, keeping the raw reading past such a body, where a git word in quoted text or in an
+        # sh -c body still denies.
+        raw_limit = min((start for start, _words in rstops.seen), default=len(rest))
+        unproven = (escape[0]
+                    or bool(_GIT_WORD_RE.search(command, pos, end))
+                    or not _resumes_at_separator(rest)
+                    or len(_GIT_WORD_RE.findall(rest, 0, raw_limit)) != sum(
+                        len(_GIT_WORD_RE.findall(tok)) for seg in recovered for tok in seg.argv))
+        for seg in recovered:
+            if _segment_runs_git_command(seg.argv) and (_git_region_open(seg.argv)
+                                                        or _git_local_alias(seg.argv)):
+                return True
+            union, expansion = _segment_union_words(seg.argv)
+            if expansion:
+                unproven = True
+            if union is not None and (_git_region_open(union) or _git_local_alias(union)):
+                return True
+        if unproven and _git_alias_unread_everyword(command, pos):
+            return True
+        if not rstops.seen:
+            return False
+        command = rest
+        pos = min(start for start, _words in rstops.seen)
+
+
 # The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
 # ref), never an option, so a token that merely LOOKS like an option past this point is a literal operand.
 _EOO_TOKENS = frozenset(("--", "--end-of-options"))
@@ -4917,10 +5906,15 @@ def _split_pre_post(args):
 
 
 # --- expbnd: explicit git target and enumerated scope -----------------------------------------------
+# history, refs and repack write refs, history or objects (observed on git 2.56.0): every git history
+# subcommand (drop, fixup, reword, split) rewrites commits and moves each descendant branch; git refs create,
+# delete, update and rename write refs, and migrate and optimize rewrite the ref store; git repack rewrites
+# packs, its -d deletes redundant ones and --drop-filtered deletes objects. Only git refs list, exists and
+# verify read, so _git_is_mutating exempts those; any other form is mutating (fail-safe).
 _GIT_MUTATING_VERBS = frozenset((
-    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "init",
-    "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
-    "switch", "tag", "update-index", "update-ref", "worktree"))
+    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "history", "init",
+    "merge", "mv", "notes", "pull", "push", "rebase", "refs", "repack", "reset", "restore", "revert", "rm",
+    "stash", "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
 # branch/tag classification (flag behaviour pinned to git 2.53, plus the git 2.56 branch options marked in
 # the table; the long universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated
@@ -5033,10 +6027,13 @@ _GIT_CONFIG_READ_SUBCMDS = frozenset((
     "get", "get-all", "get-regexp", "get-urlmatch", "list"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
+# refs followed by '/' is a ref name (refs/heads/main), which read-only commands spell too, never the refs
+# subcommand, so it is not read as one.
 _RAW_EXPBND_MUTATE_RE = _RawSequence(
     r"(?i)\bgit\b",
-    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|notes|"
+    r"pull|push|rebase|refs(?!/)|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
+    r"worktree)\b")
 _RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
     r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
 # The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
@@ -5232,6 +6229,8 @@ def _git_is_mutating(sub, args):
         return not args or args[0] != "list"
     if sub == "notes":
         return not args or args[0] not in ("list", "show")
+    if sub == "refs":
+        return not args or args[0] not in ("list", "exists", "verify")
     return True
 
 
@@ -5315,17 +6314,34 @@ def _expbnd_breadth_publish_deny(verb):
         "expbnd); stage explicit paths and push as a reviewed separate step.".format(verb))
 
 
+def _expbnd_git_verb(tokens):
+    """The subcommand of the first word of a segment that is git (_git_sub_and_args from that word), for the
+    expbnd messages, or 'git' when there is none (git named inside another word, such as an sh -c body)."""
+    for i, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] == "git":
+            return _git_sub_and_args(tokens[i:])[0] or "git"
+    return "git"
+
+
 def _expbnd_fallback_kind(command):
     """The decision _expbnd_fallback gives command, by its raw probes: "publish" (a breadth stage and a
     push) denies, "target" (a cd and a mutation or a pruning fetch, with no such breadth-push pair) notes,
     and None allows. The publish pair is tested FIRST, mirroring the parsed pre-scan's precedence: a cd in
     the same text earns only the relocate note, which must not stand in for the breadth-and-publish denial.
-    git_explicit_binding reads it for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
+    git_explicit_binding reads it for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading). In a
+    command whose text names a git configuration variable, or that runs under a git alias the hook's environment
+    carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
+    parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
+    first, and one git word beside a cd notes."""
+    named = _git_alias_outside(command)
+    if named and len(_GIT_WORD_RE.findall(command)) > 1:
+        return "publish"
     if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
             and _RAW_EXPBND_PUSH_RE.search(command)):
         return "publish"
     if (_RAW_EXPBND_CD_RE.search(command) and
-            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
+            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command)
+             or (named and _GIT_WORD_RE.search(command)))):
         return "target"
     return None
 
@@ -5403,20 +6419,24 @@ def git_explicit_binding(data):
     # of any cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd
     # (which would otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish
     # hazard. A push BEFORE the breadth stage publishes only the pre-breadth state and does not fire; the
-    # before/after order is read within ONE reading at a time, never across the reading boundary.
+    # before/after order is read within ONE reading at a time, never across the reading boundary. A git alias
+    # the command defines may be either, so it counts as both a publish and a breadth stage: one a segment
+    # defines for a git command of its own (_git_local_alias) and, in a command whose text names a git
+    # configuration variable or that runs under an alias the hook's environment carries (_git_alias_outside),
+    # every segment naming git (_names_git), whatever its command word (_git_alias_segment).
+    named = _git_alias_outside(command)
     for segments in readings:
         breadth_before_push = None
         for seg in segments:
             eff = _expbnd_effective_tokens(seg.argv)
-            if _command_word(eff) != "git":
+            s, a = _git_sub_and_args(eff) if _command_word(eff) == "git" else (None, [])
+            aliased = _git_alias_segment(seg.argv, named)
+            if s is None and not aliased:
                 continue
-            s, a = _git_sub_and_args(eff)
-            if s is None:
-                continue
-            if s == "push" and breadth_before_push is not None:
+            if (s == "push" or aliased) and breadth_before_push is not None:
                 return _expbnd_breadth_publish_deny(breadth_before_push)
-            if _git_is_breadth(s, a):
-                breadth_before_push = s
+            if aliased or _git_is_breadth(s, a):
+                breadth_before_push = s or _expbnd_git_verb(seg.argv)
     floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
     if floor and _expbnd_fallback_kind(command) == "publish":
         return _expbnd_fallback(command)  # the deny main's failed lex takes
@@ -5439,16 +6459,17 @@ def git_explicit_binding(data):
             if word in _CD_BUILTINS or word == "popd":
                 saw_dir_change = True
                 continue
-            if word != "git":
+            sub, args = _git_sub_and_args(eff) if word == "git" else (None, [])
+            # its subcommand is unknown, so possibly mutating (the pre-scan above names the aliased segments)
+            aliased = _git_alias_segment(seg.argv, named)
+            if sub is None and not aliased:
                 continue
-            sub, args = _git_sub_and_args(eff)
-            if sub is None:
-                continue
-            if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
+            verb = sub or _expbnd_git_verb(seg.argv)
+            if ((aliased or _git_is_mutating(sub, args)) and not _git_target_is_explicit(eff)
                     and saw_dir_change):
-                return _expbnd_target_ask(sub)
-            if _git_is_breadth(sub, args) and saw_dir_change:
-                return _expbnd_breadth_ask(sub)
+                return _expbnd_target_ask(verb)
+            if (aliased or _git_is_breadth(sub, args)) and saw_dir_change:
+                return _expbnd_breadth_ask(verb)
     if floor:
         return _expbnd_fallback(command)  # its note, or the allow, in place of this allow
     return _allow()
@@ -6414,7 +7435,14 @@ def _git_discard_fallback(command):
     (_dequoted_text: continuations joined, a '$' before a quote, quote characters and backslashes
     removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
     plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
-    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot."""
+    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot. A command that runs git
+    under a git alias it defines (_git_alias_recovered: its text names a git configuration variable and git, its
+    text names git and defines one anywhere, past where the lexer stopped included, or a git segment a partial lex
+    recovers defines one or runs under one the session environment carries) denies first, as on a parsed command,
+    since the alias may name no work-losing verb this scan can see."""
+    kind = _git_alias_recovered(command, unread=True)
+    if kind:
+        return _git_discard_alias_deny(kind == "built")
     if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
         return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
@@ -6427,6 +7455,32 @@ def _git_discard_fallback(command):
         "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
         "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
         "re-issue it as a plain, parseable git command, or commit or stash first.")
+
+
+def _git_discard_alias_deny(built=False):
+    """git_discard's deny of a git command that runs under a git alias the command defines (_git_local_alias,
+    _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one (_git_discard_fallback)
+    alike. With built True the git command reads so only through a word built at run time, or a region the lexer
+    did not read (_git_alias_built), and the reason says that, with the fix (_GIT_BUILT_WORD_REASON)."""
+    if built:
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command " + _GIT_BUILT_WORD_REASON + ", and it may "
+            "be a work-losing verb this guard cannot resolve or snapshot; denied rather than run on an unknown "
+            "discard. " + _GIT_BUILT_WORD_FIX + " Or commit or stash your work first. " + _DISCARD_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may discard "
+            "work (rule prsunc); quote the expansion or spell the option literally.")
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): this command defines a git alias for itself, or runs git "
+        "under one (a -c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> assignment naming one, the name GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or "
+        "GIT_CONFIG_KEY_ anywhere in the command's text, in any word, quoted or not, whatever sets or mentions it, "
+        "or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the session environment naming one) that may expand "
+        "to a work-losing verb this guard cannot resolve or snapshot; denied rather than run on an unknown discard. "
+        "Re-issue the command the alias expands to explicitly, with no mention of those variable names, so this "
+        "guard can classify it (an alias from the session environment needs a session started without that "
+        "variable), or commit or stash your work first. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: denied a git alias the command defines or runs under, which may discard work (rule "
+        "prsunc); run the aliased command explicitly, or commit or stash first.")
 
 
 def _pristine_single_bare_git(command, segments):
@@ -8495,7 +9549,10 @@ def git_discard(data):
     'any wrapper DENIES' is still NOT
     categorical: a command word or verb no raw, joined or de-quoted reading assembles (an escape decoded
     inside $'...', a word built by a parameter expansion or a command substitution at run time) reads as 'no
-    recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual. A real discard whose VERB is
+    recognized lossy verb'. Where that verb is the subcommand word and an ANSI-C quote or an unquoted expansion
+    builds it, the git alias reading denies it (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE); a verb built
+    inside double quotes ("${r}set") and a command word built at run time are silently ALLOWED - a DISCLOSED
+    best-effort residual. A real discard whose VERB is
     outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
     worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
     closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
@@ -8517,7 +9574,15 @@ def git_discard(data):
     exactly where the raw text or its de-quoted copy names git with a work-losing verb, the scope scan below
     reads that text too (and the joined text), and such a command holds the form's '"', '$', '(' and '<<',
     so it is never pristine and the closed allowlist grammar denies it (as does the missing session
-    directory); where the fallback allows, this guard's own decision is at least as strict.
+    directory); where the fallback allows, this guard's own decision is at least as strict. A git alias the
+    command defines denies however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): the lex here
+    runs inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
+    unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
+    --config-env key part spelled through any expansion, quote or brace defines one, parsed or unparseable
+    (_git_alias_recovered); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a
+    value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a git
+    option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -8571,7 +9636,9 @@ def git_discard(data):
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
         # when the command holds any shell metacharacter (every separator and the newline among them), so
         # it reads only the single segment that ends the command, and drops that one too when it has no word.
-        segments = _segments(command, skip_empty=True)
+        # Each word's spelling is recorded for the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            segments = _segments(command, skip_empty=True)
     except _UncertainHashError:
         # The same raw scan, also run on the text with its backslash-newlines and then its quote characters
         # and backslashes removed: the lexer saw nothing past a '#' whose comment reading it could not judge
@@ -8639,6 +9706,18 @@ def git_discard(data):
     raw_lossy = (_raw_has_lossy_git(command)
                  or _raw_has_lossy_git(_join_continuations(command)[0])
                  or _raw_has_lossy_git(_dequoted_text(command)))
+    # A git alias the command defines runs a subcommand this guard cannot resolve, whether or not the text names a
+    # work-losing verb (a --config-env value, a configuration variable's value or an included file names none), so
+    # it cannot be classified or snapshotted and denies, on a clean tree as on a dirty one: one a segment defines
+    # for a git command of its own (_git_local_alias), and every git command of a command whose text names a git
+    # configuration variable or that runs under an alias the hook's environment carries (_git_alias_named,
+    # _git_alias_segment), wherever its git word stands.
+    outside = _git_alias_outside(command)
+    if _git_alias_named(command):
+        return _git_discard_alias_deny()
+    for tokens, _sep in segments:
+        if _git_alias_segment(tokens, outside):
+            return _git_discard_alias_deny(_git_alias_built(tokens, outside))
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
@@ -8666,8 +9745,10 @@ def git_discard(data):
         # scan, and the grammar denies it (eval and a concatenated quote are outside it). A verb
         # obfuscated so thoroughly that it evades even that scan (built by an escape decoded inside
         # $'...' or by a parameter expansion at run time, so no raw, joined or de-quoted reading holds a
-        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at
-        # the in-scope boundary above, a DISCLOSED best-effort residual, not something this path closes.
+        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: as the subcommand
+        # word spelled through an ANSI-C quote or an unquoted expansion it denies above as a git alias, and
+        # built inside double quotes it is ALLOWED at the in-scope boundary above, a DISCLOSED best-effort
+        # residual, not something this path closes.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
         if np_base is None:
@@ -9550,18 +10631,26 @@ def _commit_syntax_step(seg):
     return _CommitStep(kind, target, branch, seg)
 
 
-def _commit_apparent_segment(seg):
+def _commit_apparent_segment(seg, named=False):
     """Conservative detection for an UNCLASSIFIED segment only.
 
     Decoded words expose ordinary quote/backslash fragmentation. Raw text additionally
     exposes apparent commands inside opaque syntax. Neither scan is applied to data
     in an already admitted literal commit/printf segment.
 
+    A git alias the segment defines for a git command of its own (_git_local_alias)
+    runs a subcommand this reading cannot see, possibly a commit, so that segment is
+    apparent too, and so is every segment naming git (_names_git) when named says the
+    command's text names a git configuration variable or the hook's environment
+    carries one naming an alias (_git_alias_outside, _git_alias_segment).
+
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
     sub, _args = _git_sub_and_args(seg.argv)
     if _command_word(seg.argv) == "git" and sub == "commit":
+        return True
+    if _git_alias_segment(seg.argv, named):
         return True
     return bool(_RAW_COMMIT_RE.search(" ".join(seg.argv))
                 or _RAW_COMMIT_RE.search(seg.raw))
@@ -9608,12 +10697,21 @@ def _commit_command_syntax(command):
         # comment reading the lexer could not judge under both readings, the raw commit probe also reads the
         # text with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and
         # a command whose quoting that removal does not decode (_hash_doubt_opaque) is an apparent commit.
-        partial, _complete, _in_progress = _lex_command(command, partial=True)
+        with _LexStops() as stops:
+            partial, _complete, _in_progress = _lex_command(command, partial=True)
         doubt = isinstance(exc, _UncertainHashError)
         scan = _hash_doubt_scan(command) if doubt else command
         apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
-        apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
+        # Every git command of a command whose text names a git configuration variable, or that runs under an
+        # alias the hook's environment carries, is apparent, the ones the partial lex does not recover included
+        # (_git_alias_named), and so is a command whose text defines a git alias wherever the lexer stopped
+        # (_git_alias_spelled), and so is a git command whose option region the lexer did not read
+        # (_git_alias_unread, from the stops of the partial lex above).
+        apparent = (apparent or _git_alias_named(command) or _git_alias_spelled(command)
+                    or _git_alias_unread(command, stops.seen))
+        named = _git_alias_outside(command)
+        apparent = apparent or any(_commit_apparent_segment(seg, named) for seg in partial)
         status = "unverifiable" if apparent else "outside"
         return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
     if len(records) > _COMMIT_MAX_SEGMENTS:
@@ -9625,7 +10723,8 @@ def _commit_command_syntax(command):
                              "ANSI-C or locale quoting has unknown execution-time bytes")
     commits = tuple(i for i, step in enumerate(steps)
                     if step is not None and step.kind == "commit")
-    hidden = any(_commit_apparent_segment(seg)
+    named = _git_alias_outside(command)
+    hidden = any(_commit_apparent_segment(seg, named)
                  for seg, step in zip(records, steps) if step is None)
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
@@ -10007,9 +11106,11 @@ def _push_protected(tokens, args, cwd):
     # push.default=matching configured-state residual (which could force every matching branch) is
     # disclosed, not modelled; likewise a bare 'git push --prune <remote>' whose deletion is driven
     # by a configured remote.<name>.push refspec, and a PERSISTED mirror mode (remote.<name>.mirror
-    # =true in repository, worktree, global, or system git config, or the GIT_CONFIG_* env protocol),
-    # which reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard
-    # reads no git config offline, so these are disclosed residuals, not modelled (GD-145). The
+    # =true in repository, worktree, global, or system git config, or the GIT_CONFIG_* env protocol from the
+    # session environment; a command whose text names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_
+    # denies before this reading, _git_alias_named), which reproduce the force-and-delete sweep with no bulk flag
+    # in the judged push args: the guard reads no git config offline, so these are disclosed residuals, not
+    # modelled (GD-145). The
     # COMMAND-LOCAL mirror configuration ('git -c remote.<name>.mirror=true push', or the key through
     # --config-env) IS now modelled at the mirror clause above (GD-146), since it lives in the command
     # string the guard can read. A '--repo=<remote>'
@@ -10680,6 +11781,18 @@ def protected_line(data):
     _SubstHeredocFloor), and the push scan of the fallback (_protected_line_fallback_push)
     on a commit-free command (a commit the grammar proves cannot carry that body, since
     a '$' is outside the literal grammar).
+
+    A git alias the command defines denies however it is spelled (HOW A WORD IS SPELLED,
+    above _GIT_ALIAS_KEY_RE): the commit syntax is lexed inside _WordSpellings, so in the
+    region after a git word through its subcommand word a word carrying an unquoted
+    parameter or command expansion or an ANSI-C or locale quote, a brace word with a
+    comma, or a -c or --config-env key part spelled through any expansion, quote or brace
+    defines one, on an unparseable command too (_git_alias_spelled). A word whose every
+    expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a value so spelled
+    behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in
+    a git option or subcommand position, or after any word naming git, now denies
+    ('git -C $D log'; quoting it restores the plain reading), and so does a key literal
+    in effect but spelled through an expansion or quote.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -10706,15 +11819,50 @@ def protected_line(data):
         return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
     reads = _SubstHeredocs.reads
-    syntax = _commit_command_syntax(command)
+    # Each lex of the commit syntax records each word's spelling for the git alias reading below and the commit
+    # recognizer's (_WordSpellings).
+    with _WordSpellings():
+        syntax = _commit_command_syntax(command)
     # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails. The path
     # main's failed lex takes denies or allows: an apparent commit its commit syntax, read as main reads it,
     # cannot prove denies, and so does its push fallback on a commit-free command. Each such deny stands after
     # this guard's own denies and before its allows.
     floor = _SubstHeredocs.reads != reads
     if floor:
-        with _SubstHeredocFloor():
+        with _SubstHeredocFloor(), _WordSpellings():
             failed = _commit_command_syntax(command)
+    # A git alias the command defines runs a subcommand neither reading below can see: it may commit on the
+    # protected line or force-push to it (git -c alias.p=push p --force origin names no push), so it denies on any
+    # branch, as a commit outside the admitted grammar does: one a segment defines for a git command of its own
+    # (_git_local_alias), and every git command of a command whose text names a git configuration variable or that
+    # runs under an alias the hook's environment carries (_git_alias_named, _git_alias_segment), parsed or not,
+    # wherever its git word stands. The commit recognizer reads the same segments as apparent commits
+    # (_commit_apparent_segment), which covers main's reading of the floor, and on an unparseable command it reads a
+    # definition anywhere in the text, past where the lexer stopped included, as an apparent commit too
+    # (_git_alias_spelled), which denies below as an unverifiable commit.
+    outside = _git_alias_outside(command)
+    aliased = [seg.argv for seg in syntax.records if _git_alias_segment(seg.argv, outside)]
+    if aliased and not _git_alias_named(command) and all(_git_alias_built(tokens, outside) for tokens in aliased):
+        return _deny(
+            "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
+            + _GIT_BUILT_WORD_REASON + ", and it may be a commit on the protected line or a push that rewrites it; "
+            "denied fail-safe. " + _GIT_BUILT_WORD_FIX + " " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may commit to "
+            "or force-push the protected branch (rules prtbrn, artbr1); quote the expansion or spell the option "
+            "literally.")
+    if _git_alias_named(command) or aliased:
+        return _deny(
+            "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
+            "defines a git alias for itself, or runs git under one (a -c or --config-env alias.<name>, include.path "
+            "or includeIf key, a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one, the name "
+            "GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere in the command's text, in any word, "
+            "quoted or not, whatever sets or mentions it, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the "
+            "session environment naming one), so the subcommand it runs is unknown here and may be a commit on the "
+            "protected line or a push that rewrites it; denied fail-safe. Re-issue the command the alias expands to "
+            "explicitly, with no mention of those variable names, so this guard can classify it (an alias from the "
+            "session environment needs a session started without that variable). " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a git alias the command defines or runs under, which may commit to or "
+            "force-push the protected branch (rules prtbrn, artbr1); run the aliased command explicitly.")
     if syntax.status == "help":
         return _allow()  # only literal lone git commit --help / -h
     if syntax.status == "unverifiable":
@@ -11236,6 +12384,26 @@ def _branch_root_probe(repo, start):
 # a '#' whose comment reading the lexer cannot judge under both readings stops it (_hash_doubt_names). A
 # _RawSequence, so the test is linear in the command's length.
 _BRANCH_CREATE_WORD_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:checkout|switch|branch|worktree)\b")
+# branch_root's (reason, banner) for a form it cannot classify, a git command running under a git alias the
+# command defines included.
+_BRNROT_UNCLASSIFIED = (
+    "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form this guard cannot "
+    "classify with confidence (an --orphan, an abbreviated or negated option, an option of unknown arity, or a git "
+    "alias the command defines or runs under, every git command of a command whose text names "
+    "GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere included); it may create a branch from an "
+    "unverified or orphaned start, so its ancestry cannot be checked here and it is denied fail-safe. Re-issue it "
+    "with an explicit start point (e.g. 'git switch -c <name> origin/HEAD'), with no mention of those variable "
+    "names; the CI branch-root gate remains the authoritative backstop.",
+    "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
+    "(rule brnrot); re-issue with an explicit start point.")
+# branch_root's deny of a git command that reads as running under a git alias only through a word built at run time,
+# or a region the lexer did not read (_git_alias_built, _git_alias_unread), in place of the alias wording above.
+_BRNROT_BUILT = (
+    "AIQT rule brnrot (branch-rooted-on-live-main): this command " + _GIT_BUILT_WORD_REASON + ", and it may create "
+    "a branch from an unverified or orphaned start, so its ancestry cannot be checked here and it is denied "
+    "fail-safe. " + _GIT_BUILT_WORD_FIX + " The CI branch-root gate remains the authoritative backstop.",
+    "AIQT guardrail: denied a git command whose options hold a word built at run time, which may create a branch "
+    "from an unchecked start (rule brnrot); quote the expansion or spell the option literally.")
 
 
 def branch_root(data):
@@ -11258,12 +12426,22 @@ def branch_root(data):
     both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
     git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
     decode (_hash_doubt_opaque), DENIES fail-safe, since the lexer reads nothing past that '#'; any other
-    unparseable command takes the partial-recovery path below. Where a lex read a quoted here-document's body
+    unparseable command takes the partial-recovery path below, where one whose text names git and defines a git
+    alias anywhere, past where the lexer stopped included (_git_alias_spelled), DENIES as a form this guard cannot
+    classify. Where a lex read a quoted here-document's body
     that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments
     are judged beside the lex's own where main's reading lexes (a partial lex returns main's partial reading
     beside its own), and where it fails the segments main's partial lex recovers, past the body, are judged
     too, after the clean lex's own, so a creation either list holds is checked (a cd in the clean lex's
-    segments also counts for a creation in the recovered ones, the stricter way)."""
+    segments also counts for a creation in the recovered ones, the stricter way). A git alias the command
+    defines counts however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): each lex here runs
+    inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
+    unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
+    --config-env key part spelled through any expansion, quote or brace defines one, on an unparseable command
+    too (_git_alias_spelled); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading,
+    so a value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a
+    git option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -11280,11 +12458,15 @@ def branch_root(data):
             "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    named = _git_alias_named(command)
+    built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
     reads = _SubstHeredocs.reads
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
-        # and no redirect is not built at all, here, in the partial reread or in main's floor reread.
-        segments = _segments(command, skip_empty=True)
+        # and no redirect is not built at all, here, in the partial reread or in main's floor reread. Each lex
+        # records each word's spelling for the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            segments = _segments(command, skip_empty=True)
     except ValueError as exc:
         # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
         # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
@@ -11300,19 +12482,33 @@ def branch_root(data):
                                    "rooted"),
                 "AIQT guardrail: denied a branch-capable git command behind a '#' this guard could not read "
                 "(rule brnrot, fail-closed).")
+        # A git alias the text defines past where the lexer stopped is in no segment the partial lex recovers
+        # (_git_alias_spelled), so every git command of the command counts as running under it, as under a text
+        # naming a git configuration variable: a form this guard cannot classify. One the text reads only through
+        # how a word in a git command's region is spelled is a word built at run time (_BRNROT_BUILT).
+        spelled = _git_alias_spelled_kind(command)
+        named = named or spelled == "alias"
+        built = spelled == "built"
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
-        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
+        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed). A git
+        # command whose option region the lexer did not read counts as built at run time (_git_alias_unread).
         try:
-            segments = [(seg.argv, seg.sep_after)
-                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+            with _WordSpellings(), _LexStops() as stops:
+                segments = [(seg.argv, seg.sep_after)
+                            for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
+            if named:
+                return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
+            if built or _git_alias_unread(command, [(0, None)]):
+                return _deny(*_BRNROT_BUILT)
             return _allow()  # even partial recovery failed: open grammar, best-effort
+        built = built or _git_alias_unread(command, stops.seen)
     if _SubstHeredocs.reads != reads:
         # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
         # segments main's partial lex recovers, past the body, are judged too.
-        with _SubstHeredocFloor():
+        with _SubstHeredocFloor(), _WordSpellings():
             segments = segments + [(seg.argv, seg.sep_after)
                                    for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
 
@@ -11320,34 +12516,41 @@ def branch_root(data):
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
     # correct action (an explicit start point, a plain command from the target repo, or restoring
     # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny's (reason, banner) is held in
-    # pending_deny so a confirmed orphan elsewhere wins first.
-    pending_deny = None
+    # pending_deny so a confirmed orphan elsewhere wins first. Every git command of a command whose text names a
+    # git configuration variable, or that runs under an alias the hook's environment carries, runs under a git
+    # alias (_git_alias_named), a subcommand this guard cannot read, so that command holds a form this guard cannot
+    # classify from the start; one that reads so only through a word built at run time holds one too (_BRNROT_BUILT).
+    pending_deny = _BRNROT_UNCLASSIFIED if named else (_BRNROT_BUILT if built else None)
     pending_note = None
     saw_dir_change = False
+    outside = _git_alias_outside(command)
     for tokens, _sep in segments:
         word = _command_word(tokens)
+        # A git command behind a reserved word, a '{', '!', time or a wrapper that runs under a git alias, or
+        # defines one for itself (_git_alias_segment), runs a subcommand this guard cannot read, as one whose
+        # command word is git does below.
+        if word != "git" and pending_deny is None and _git_alias_segment(tokens, outside):
+            pending_deny = _BRNROT_BUILT if _git_alias_built(tokens, outside) else _BRNROT_UNCLASSIFIED
         if word in _CD_BUILTINS or word == "popd":
             # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
             # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
             saw_dir_change = True
             continue
-        if word != "git" or _has_info_flag(tokens):
+        # An info flag exempts a git command only when it runs under no git alias: git runs an alias with the flag
+        # passed on to it (_has_info_flag), so a segment with one reaches the alias test below, flag or no flag.
+        if word != "git" or (_has_info_flag(tokens) and not _git_alias_segment(tokens, outside)):
             continue
         sub, args = _git_sub_and_args(tokens)
-        start = _branch_creation_start(sub, args)
+        # A git alias the segment runs under or defines for itself (_git_alias_segment) runs a subcommand this
+        # guard cannot read, possibly a branch creation, so it is a form this guard cannot classify.
+        aliased = _git_alias_segment(tokens, outside)
+        start = _ASK_START if aliased else _branch_creation_start(sub, args)
         if start is None:
             continue
         if start is _ASK_START:
             if pending_deny is None:
-                pending_deny = (
-                    "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
-                    "this guard cannot classify with confidence (an --orphan, an abbreviated or negated "
-                    "option, or an option of unknown arity); it may create a branch "
-                    "from an unverified or orphaned start, so its ancestry cannot be checked here and it is "
-                    "denied fail-safe. Re-issue it with an explicit start point (e.g. 'git switch -c <name> "
-                    "origin/HEAD'); the CI branch-root gate remains the authoritative backstop.",
-                    "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
-                    "(rule brnrot); re-issue with an explicit start point.")
+                pending_deny = (_BRNROT_BUILT if aliased and _git_alias_built(tokens, outside)
+                                else _BRNROT_UNCLASSIFIED)
             continue
         cwd0 = data.get("cwd")
         cwd0 = cwd0 if isinstance(cwd0, str) and cwd0 else None
@@ -11500,9 +12703,14 @@ _GATE_ALTS = (
 # The way on named in every hook-skip and grammar deny a git commit whose quoted message only quotes a
 # hook-skip spelling can draw: the message read from a file is never opened here, so git commit -F FILE and
 # cat FILE | git commit -F - allow (a '<' redirection or a here-document on the git segment still denies).
+# Behind a '#' the shared lexer could not judge, the doubt test denies any option on a roster verb, -F
+# included (_gate_doubt_bypass), so the route names that exception in the words of _hash_doubt_reason.
 _GATE_FILE_ROUTE = (
     "If a commit message only quotes a hook-skip spelling, write it to a file and commit with git commit -F FILE "
-    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data.")
+    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data. One exception: "
+    "behind a '#' this guard could not read (right after a '(', ')' or backquote, or at the start of a word "
+    "inside an open substitution), git commit -F denies too until that '#' is fixed: put a blank before it "
+    "outside any grouping or substitution, or drop it.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
@@ -11514,6 +12722,13 @@ _GATE_FILE_ROUTE = (
 # (_gate_doubt_bypass, _gate_doubt_checker) instead of these spelling probes, so widening a spelling here
 # is never the mechanism that closes a doubt-path gap.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
+# The doubt path's sibling for a git word built at run time (_gate_doubt_bypass): a character that opens an
+# expansion, a substitution, a glob or a brace expansion (_OPAQUE_WORD_CHARS), a '~' (a tilde-prefix,
+# _gate_tilde_word, matched wherever it stands), or the '@', '+' or '!' of an extglob opener
+# (_GATE_EXTGLOB_OPENERS, its '(' read by a lookahead), then a roster verb. A separate sequence, not an
+# alternation inside the git step, so every step but the last stays one fixed-length match.
+_RAW_RUNTIME_NOVERIFY_VERB_RE = _RawSequence(r"[$`*?\[{~]|[@+!](?=\()",
+                                             r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
 _RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
@@ -11554,12 +12769,14 @@ def _gate_doubt_sink(scan):
 
 # The hook-bypass test behind a '#' whose comment reading the shared lexer could not judge under both
 # readings. Like the sink test above it is fail-closed BY CONSTRUCTION, not spelling-matched: text that
-# names git with a subcommand that accepts --no-verify (commit, merge, push, pull, rebase, am) and
-# carries ANY dash-prefixed option token DENIES, because behind such a '#' nothing can bind an option to
-# that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a probe that spells
-# out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings) misses the next
-# spelling it did not enumerate. An option token starts at the text's start, after whitespace or after a
-# shell operator character (; & | < > ( )), and takes one of two shapes. In the first, a '-' stands
+# names git (or holds a character that builds a word at run time that may be git, before the subcommand:
+# _RAW_RUNTIME_NOVERIFY_VERB_RE) with a subcommand that accepts --no-verify (commit, merge, push, pull,
+# rebase, am) and carries ANY dash-prefixed option token DENIES, because behind such a '#' nothing can
+# bind an option to that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a
+# probe that spells out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings)
+# misses the next spelling it did not enumerate. An option token starts at the text's start, after
+# whitespace or after a shell operator character (; & | < > ( )), and takes one of two shapes. In the
+# first, a '-' stands
 # right at that start and one character follows it that does not end the token in bash: anything but a
 # blank (space, tab, newline) or one of those operator characters. So a lone '-' (a stdin operand)
 # spelled with no quote or backslash next to it does not match, even where an operator ends it
@@ -11597,11 +12814,13 @@ _RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])(?:-(?:[^ \t\n;&|<>()]|[<>]
 
 
 def _gate_doubt_bypass(scan):
-    """True when scan (a _hash_doubt_scan text) names git with a subcommand that accepts --no-verify and
-    carries a dash-prefixed option token anywhere, read in scan as written and with its backslash-newlines
-    removed (the comment above _RAW_DOUBT_OPTION_RE): the bounded fail-closed hook-bypass test behind a '#'
-    whose comment reading the shared lexer could not judge under both readings."""
-    return _RAW_NOVERIFY_VERB_RE.search(scan) is not None and (
+    """True when scan (a _hash_doubt_scan text) names git, or holds a character that builds a word at run time
+    that may be git (_RAW_RUNTIME_NOVERIFY_VERB_RE: $G commit -nv, ~ commit -nv), with a subcommand that
+    accepts --no-verify after it, and carries a dash-prefixed option token anywhere, read in scan as written and
+    with its backslash-newlines removed (the comment above _RAW_DOUBT_OPTION_RE): the bounded fail-closed
+    hook-bypass test behind a '#' whose comment reading the shared lexer could not judge under both readings."""
+    return (_RAW_NOVERIFY_VERB_RE.search(scan) is not None
+            or _RAW_RUNTIME_NOVERIFY_VERB_RE.search(scan) is not None) and (
         _RAW_DOUBT_OPTION_RE.search(scan) is not None
         or _RAW_DOUBT_OPTION_RE.search(scan.replace("\\\n", "")) is not None)
 
@@ -12806,7 +14025,7 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False):
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -12821,7 +14040,9 @@ def _gate_weakening_fallback(command, heredoc_message=False):
     on the failed-main-reading floor, where the lexer did parse the command. Every caller passes the raw
     text; gate_weakening's ordinary-parse-failure branch first denies a bypass that the de-quoted unread
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
-    it calls this."""
+    it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
+    denies here and before the note, so a command these denies refuse keeps their message and one they would
+    only note or allow ($G commit -nv <<<x) denies."""
     kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
@@ -12844,6 +14065,10 @@ def _gate_weakening_fallback(command, heredoc_message=False):
         grammar_kind, what, how = grammar_hit
         reason, banner = _gate_grammar_messages(grammar_kind, what, how, True)
         return _deny(reason, banner)
+    if runtime:
+        runtime_hit = _gate_runtime_bypass(command)
+        if runtime_hit is not None:
+            return _gate_runtime_deny(runtime_hit)
     if kind == "swallow":
         # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
@@ -12857,6 +14082,32 @@ def _gate_weakening_fallback(command, heredoc_message=False):
             "let its exit status stand (redirect output to a file if you need to page it), rather than "
             "discarding its failure signal; if it is a benign optional probe, this is allowed.")
     return _allow()
+
+
+def _gate_alias_deny(built=False):
+    """gate_weakening's deny of a git command that runs under a git alias the command defines (_git_local_alias,
+    _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one alike. With built True the
+    git command reads so only through a word built at run time, or a region the lexer did not read
+    (_git_alias_built), and the reason says that, with the fix (_GIT_BUILT_WORD_REASON)."""
+    if built:
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): this command " + _GIT_BUILT_WORD_REASON + ", so a bypass of the "
+            "verification hooks (--no-verify, or -n on commit or am) cannot be ruled out. " + _GIT_BUILT_WORD_FIX +
+            " " + _GATE_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may bypass "
+            "verification hooks (rule gatdis); quote the expansion or spell the option literally.")
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): this git command defines a git alias for itself, or runs under one (a "
+        "-c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> assignment naming one, the name GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or "
+        "GIT_CONFIG_KEY_ anywhere in the command's text, in any word, quoted or not, whatever sets or mentions it, "
+        "or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the session environment naming one), so this guard "
+        "cannot read the subcommand or the options it runs, and a bypass of the verification hooks (--no-verify, "
+        "or -n on commit or am) cannot be ruled out. Re-issue the command the alias expands to explicitly, with no "
+        "mention of those variable names (an alias from the session environment needs a session started without "
+        "that variable). {}".format(_GATE_ALTS),
+        "AIQT guardrail: denied a git alias the command defines or runs under, which may bypass verification hooks "
+        "(rule gatdis); run the aliased command explicitly.")
 
 
 # The command-running wrappers whose own options and operands stand BEFORE the git command they run, so
@@ -13042,13 +14293,34 @@ def _gate_partial_segments(command, doubt=None):
     full partial lex instead: a partial lex does not raise there, it returns every reading's recovered
     segments, so resuming from the fork would drop the segments of the readings that lex whole and miss a
     sink past the first uncertain '#'."""
-    if doubt is not None and not doubt.reading_failed:
+    if _gate_partial_resumes(doubt):
         recovered, _complete, in_progress = _lex_resume_partial(command, doubt)
     else:
         recovered, _complete, in_progress = _lex_command(command, partial=True)
     if in_progress:
         return recovered[:-1], recovered[-1]
     return recovered, None
+
+
+def _gate_partial_resumes(doubt):
+    """Whether _gate_partial_segments resumes from the fork of doubt (an uncertain-'#' doubt that no failed reading
+    raised) rather than making a fresh partial lex of the whole command, the lex _git_alias_recovered makes."""
+    return doubt is not None and not doubt.reading_failed
+
+
+def _gate_partial_lex(command, doubt=None):
+    """(complete, open_segment, lexed): the partial lex of _gate_partial_segments, and lexed, where that lex is a
+    fresh partial lex of the whole command (_gate_partial_resumes is False), the (argvs, stops) of it that
+    _git_alias_recovered reads instead of lexing the command again, else None. The fresh lex runs inside
+    _WordSpellings and _LexStops, which record what the alias reading reads and leave every segment's words, the
+    only part the other checks of gate_weakening read, unchanged."""
+    if _gate_partial_resumes(doubt):
+        recovered, open_seg = _gate_partial_segments(command, doubt)
+        return recovered, open_seg, None
+    with _WordSpellings(), _LexStops() as stops:
+        recovered, open_seg = _gate_partial_segments(command, doubt)
+    argvs = [seg.argv for seg in recovered] + ([open_seg.argv] if open_seg is not None else [])
+    return recovered, open_seg, (argvs, stops.seen)
 
 
 def _gate_recovered_segments(command, doubt=None):
@@ -13084,11 +14356,12 @@ def _gate_dequoted_words(text):
     joined, quote characters and backslashes removed) split at blanks. After an option word whose attached
     value names git (a '--name=' value whose basename is git, or a single-dash word ending in git:
     env --split-string='g"i"t ...', env -S'git ...') a 'git' word is added, so the git that option runs starts
-    the walk too. A raw-text reading only: it can only add a deny, never prove a command safe. It reads no
-    git word built at run time (an expansion, a substitution, a glob or brace expansion), and a quote is
-    removed wherever it stands, so a quoted word holding a blank is split into several words. This is the
-    blank-split reading: its escapes keep a NUL and the rest of the quote, and it splits at every character
-    str.split() treats as whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
+    the walk too. A raw-text reading only: it can only add a deny, never prove a command safe. A git
+    word built at run time (an expansion, a substitution, a glob or brace expansion) is kept as written, never
+    read as git here; _gate_runtime_bypass reads such a word from these words. A quote is removed wherever it
+    stands, so a quoted word holding a blank is split into several words. This is the blank-split reading:
+    its escapes keep a NUL and the rest of the quote, and it splits at every character str.split() treats as
+    whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
     deny it gives is kept."""
     words = []
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _GATE_ANSI_C_ESCAPE_RE.sub(_gate_ansi_c_escape, m.group(1)), text)
@@ -13224,15 +14497,17 @@ def _gate_bash_readings(text):
             _gate_reading_words(decoded))
 
 
-def _gate_any_word_bypass(words):
+def _gate_any_word_bypass(words, first=None):
     """(sub, spelling) when a word after the first word naming git (_gate_word) is a roster verb and a word after
     that verb is a hook-skip spelling for it, else None: a '--' word naming a prefix of no-verify
     (_has_long_prefix) after any roster verb, or a single-dash word holding an 'n' after commit or am. Each word
     is read on its own: no '--' ends the options, no option takes the next word or the rest of its own word as
     its value, and no global option between git and the verb is resolved, so a quoted span that splits into a
     '--', a value-taking option or a global option can never swallow a real -n. One pass from the end, linear
-    in the word count."""
-    first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+    in the word count. first, when given, is the index of the word the walk reads after instead (a word built
+    at run time that may be git, _gate_runtime_bypass)."""
+    if first is None:
+        first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
     long_at = short_at = None  # the nearest long and short spelling words after the word being read
     found = None
     for p in range(len(words) - 1, first, -1):
@@ -13303,15 +14578,435 @@ def _gate_unread_bypass(text):
     separators outside any quoting _skip_quoting can prove (_raw_push_segments, the bounded split the push
     backstop reads), and each segment is judged by its de-quoted readings (_gate_text_bypass), so a
     quote-concatenated git (g'i't) past a here-string or process substitution the lexer stops at is still read.
-    A raw-text reading only, read beside the partial lex and the raw fallback, so it can only add a deny, never
-    prove a command safe. Disclosed safe-direction over-deny: a quoted word holding a blank or an operator is
-    split into several words here (g'i't commit -m 'fix -n' <<<x reads a -n), and any word whose basename is
-    git starts the walk, so text that merely names such a command denies too."""
-    for segment in _raw_push_segments(text):
-        bypass = _gate_text_bypass(segment)
+    Where that split may cut inside one bash word, the slices _gate_split_spans adds are judged too: the
+    segments of the split with every here-document body made inert (an unquoted here-document the lexer stops
+    at, whose body line Don't re-pairs the split's quoting before g'i't commit -m 'a;b' -nv), and the text from
+    a piece of either split holding an ANSI-C escaped quote or a case word to the end. A raw-text reading only,
+    read beside the partial lex and the raw fallback, so it can only add a deny, never prove a command safe.
+    Disclosed safe-direction over-deny:
+    a quoted word holding a blank or an operator is split into several words here (g'i't commit -m 'fix -n'
+    <<<x reads a -n), any word whose basename is git starts the walk, so text that merely names such a command
+    denies too, and the read from an ANSI-C escaped quote or a case word to the end spans separators."""
+    for start, end in _gate_split_spans(text)[1]:
+        bypass = _gate_text_bypass(text[start:end])
         if bypass is not None:
             return bypass
     return None
+
+
+# The extglob openers bash reads as a pattern under shopt -s extglob: a word holding one is built at run time
+# too (/usr/bin/+(gi)t, /usr/bin/@(git)). '*(' and '?(' already hold a character of _OPAQUE_WORD_CHARS.
+_GATE_EXTGLOB_OPENERS = ("@(", "+(", "!(")
+_GATE_EXTGLOB_HEADS = frozenset(opener[0] for opener in _GATE_EXTGLOB_OPENERS)
+
+
+def _gate_extglob_word(word):
+    """True when word holds an extglob opener (_GATE_EXTGLOB_OPENERS: '@(', '+(', '!(')."""
+    return any(opener in word for opener in _GATE_EXTGLOB_OPENERS)
+
+
+def _gate_runtime_word(word):
+    """True when word, one word of a de-quoted reading, holds a character that opens an expansion, a
+    substitution, a glob or a brace expansion (_OPAQUE_WORD_CHARS: '$', backquote, '*', '?', '[', '{') or an
+    extglob opener (_gate_extglob_word), so the word bash runs there is built at run time and may be git."""
+    return not _OPAQUE_WORD_CHARS.isdisjoint(word) or _gate_extglob_word(word)
+
+
+def _gate_tilde_word(word):
+    """True when word, one word of a de-quoted reading, starts with a tilde and holds no '/': bash expands such a
+    tilde-prefix as a whole (~ to $HOME, ~+ to $PWD, ~- to $OLDPWD, ~N, ~+N and ~-N to a directory stack entry,
+    ~name to that user's home directory), so the word bash runs there is built at run time and may be git
+    (HOME=/usr/bin/git; ~ commit -nv) or a hook-skip spelling (HOME=-nv; $G commit ~). A word with a '/' after its
+    prefix ends in the literal text after that '/' (~/bin/x), and a '~' later in a word is not expanded (a~b)."""
+    return word[:1] == "~" and "/" not in word
+
+
+# A tilde that starts a word outside any quoting: the '~' at the start of the text or after a blank, a shell
+# operator character or a backquote, never after a quote or a backslash ('~', "~", \~ and ''~ are literal). A
+# raw-text match, so it also matches a '~' after a blank inside a quoted span, which can only add a deny.
+_GATE_TILDE_START_RE = re.compile(r"(?:^|(?<=[\s;&|()<>`]))~")
+
+
+def _gate_runtime_at(words, p, tilde):
+    """True when words[p], a word of a de-quoted reading, is built at run time: it holds a character or an
+    extglob opener _gate_runtime_word reads, or it is a tilde word (_gate_tilde_word) that is not the reading's
+    first word or stands in text whose raw form holds a tilde at a word start outside any quoting (tilde,
+    _GATE_TILDE_START_RE). A quoted or escaped tilde is literal where bash reads it as the command word ('~'
+    commit -nv), but a reading removes that quoting and eval or sh -c reads the word again unquoted (eval '~'
+    commit -nv, sh -c '~ commit -nv'), so after the first word a tilde word counts however it is quoted."""
+    word = words[p]
+    return _gate_runtime_word(word) or (_gate_tilde_word(word) and (tilde or p > 0))
+
+
+def _gate_runtime_text(text):
+    """False when no de-quoted reading of text (_gate_dequoted_words, _gate_bash_readings) can hold a word built
+    at run time (_gate_runtime_at), True otherwise. A reading only removes characters or decodes an ANSI-C
+    escape, which needs a '$', so such a word holds a character of _OPAQUE_WORD_CHARS or a '~' that text holds,
+    or an extglob opener whose '@', '+' or '!' and '(' text holds."""
+    return (not _OPAQUE_WORD_CHARS.isdisjoint(text) or "~" in text
+            or ("(" in text and not _GATE_EXTGLOB_HEADS.isdisjoint(text)))
+
+
+# A character a word built at run time holds (_gate_runtime_at): one of _OPAQUE_WORD_CHARS, a '~', or an extglob
+# opener's '@', '+' or '!' with only characters a de-quoted reading removes (_GATE_READING_DROPS) before its '('.
+_GATE_RUNTIME_START_RE = re.compile(r"[$`*?\[{~]|[@+!]['\"$\n\\]*\(")
+
+
+def _gate_runtime_may_hit(text):
+    """False when no walk of _gate_runtime_bypass over a de-quoted reading of text (_gate_dequoted_words,
+    _gate_bash_readings) can give a hit, so no reading of text need be built; True otherwise. Each walk gives a hit
+    only through a roster verb word (_NOVERIFY_VERBS) after the word it starts at: a word built at run time
+    (_gate_runtime_reading, the extglob read) or a word naming git in a reading of text with every standalone git
+    masked out (_gate_runtime_masked_git, _gate_assembled_reading). Only an ANSI-C $'...' escape decodes a
+    character text does not hold, and that needs both a '$' and a backslash. Without one of them, a reading only
+    removes characters (_GATE_READING_DROPS) and splits what is left, in text's order, so a word is a run of text's
+    own characters with only removed ones between them: a roster verb word stands in text with those removed, after
+    the first character a word built at run time can hold (_GATE_RUNTIME_START_RE), and a word naming git leaves
+    'git' in the masked text with those removed and lowercased (_gate_text_may_name_git). Text with no such
+    character (_gate_runtime_text), with no roster verb, or with no such 'git' and no roster verb after that first
+    character, gives None however it is read; a slice of text gives False wherever text does. A few translates and
+    substring tests, where the readings take several passes per character and per word, so a long command that
+    holds a '$' and no roster verb after it costs those passes, not the readings; one with no roster verb costs one."""
+    if not _gate_runtime_text(text):
+        return False
+    if "$" in text and chr(92) in text:
+        return True
+    plain = text.translate(_GATE_READING_DROPS)
+    if not any(verb in plain for verb in _NOVERIFY_VERBS):
+        return False
+    if "git" in _gate_runtime_masked_git(text).translate(_GATE_READING_DROPS).lower():
+        return True
+    start = _GATE_RUNTIME_START_RE.search(text)
+    if start is None:
+        return False
+    tail = text[start.start() + 1:].translate(_GATE_READING_DROPS)
+    return any(verb in tail for verb in _NOVERIFY_VERBS)
+
+
+def _gate_runtime_hit(words, k, tilde=False):
+    """(word, sub, what) when, after words[k], a word built at run time that may be git, a roster verb carries a
+    hook-skip spelling for it (_gate_any_word_bypass) or a later word is built at run time too (_gate_runtime_at,
+    tilde as there), which may expand to one ($G commit $O, $G commit -$N, $G commit {-nv,}, $G commit ~), else
+    None; what is the phrase the deny reason names. Linear in the word count."""
+    bypass = _gate_any_word_bypass(words, k)
+    if bypass is not None:
+        return words[k], bypass[0], "{}, a hook-skip spelling for it".format(bypass[1])
+    verb = next((p for p in range(k + 1, len(words)) if words[p] in _NOVERIFY_VERBS), None)
+    if verb is not None:
+        later = next((words[p] for p in range(verb + 1, len(words)) if _gate_runtime_at(words, p, tilde)), None)
+        if later is not None:
+            return (words[k], words[verb], "the word {!r}, also built at run time, which may expand to a hook-skip "
+                    "spelling for it".format(later[:40]))
+    return None
+
+
+# A standalone git in raw text: 'git' in either case with no word character and no '-' on either side (a bare
+# git, a path's last part, a '.git' ending). Each is masked out of the copy of a raw piece the walk from a
+# quote-assembled git reads (_gate_runtime_masked_git), since the closed literal grammar judges each as written.
+# A git glued to a '-' is left intact, so an option name like --git-dir keeps its text and the option-skip walk
+# skips its value; masking it to --xxx-dir would drop the arg-consuming skip, so the walk would read the
+# option's value as the subcommand. The closed literal grammar still scans every '\bgit\b', a '-'-glued one
+# included (_GATE_GIT_WORD_RE), and the walk can start from a git the mask leaves (echo -x-git commit $O, whose
+# reading adds a git word after -x-git); such a walk can only add a deny.
+_GATE_RAW_GIT_RE = re.compile(r"(?i)(?<![\w-])git(?![\w-])")
+# The characters a de-quoted reading removes to join a word (quote characters and backslashes; an ANSI-C quote,
+# the one escape a reading decodes, holds a quote too): a masked piece with none of them and no 'git' left in
+# any case has no reading that names git (_gate_runtime_piece_hit).
+_GATE_ASSEMBLY_CHARS = frozenset("'\"\\")
+
+
+def _gate_runtime_masked_git(text):
+    """text with each standalone git (_GATE_RAW_GIT_RE: 'git' in either case with no word character and no '-' on
+    either side) replaced by 'xxx', one for one, so a de-quoted reading of the result names git only where quote
+    removal, a backslash or an ANSI-C escape assembles it (g'i't, g\\it, $'\\x67it') or an option's attached value
+    adds it (env -Sgit, -x-git). A 'git' glued to a '-' is left intact (an option name like --git-dir, a dashed
+    builtin name like git-commit), so an option name like --git-dir keeps its text and the option-skip walk skips
+    its value; the closed literal grammar still scans every '\\bgit\\b', a '-'-glued one included. Linear in the
+    length of text."""
+    return _GATE_RAW_GIT_RE.sub("xxx", text)
+
+
+def _gate_runtime_reading(words, tilde):
+    """(word, sub, what) for the words of one de-quoted reading of a raw piece (_gate_runtime_bypass), else None:
+    the walk from its first word built at run time (_gate_runtime_at, _gate_runtime_hit; tilde as there). Linear
+    in the word count."""
+    k = next((p for p in range(len(words)) if _gate_runtime_at(words, p, tilde)), None)
+    if k is None:
+        return None
+    return _gate_runtime_hit(words, k, tilde)
+
+
+def _gate_assembled_reading(words):
+    """(word, sub, what) for the words of one de-quoted reading of a raw piece with every standalone git masked
+    out (_gate_runtime_masked_git, which leaves a git glued to a '-'), else None: the walk from each word naming
+    git (_gate_word), a git quote removal assembles or one the mask leaves, in turn, when that git's subcommand
+    (_git_sub_and_args) is a roster verb with a word built at run time after it, which may expand to a hook-skip
+    spelling for it (g'i't commit $O, sudo g'i't commit ~, g'i't commit $O git, whose last git is an operand, and
+    sh -c "g'i't log; g'i't commit \\$O", whose first git's subcommand is off the roster). The closed literal
+    grammar denies git commit $O and accepts its one here-document message form, but it reads a git word only as
+    written, so a git assembled by quote removal is read here, wherever a git written as such stands in the same
+    piece. Each git's subcommand is found as _git_sub_and_args finds it, from tables (command_at, sub_at,
+    runtime_at) built from the SAME words in one pass from the end, so an option name the mask leaves intact
+    (--git-dir) is read by the option skip and its value is not taken for the subcommand; the walk is linear in
+    the word count however many git words the reading holds."""
+    gits = [p for p, w in enumerate(words) if _gate_word(w) == "git"]
+    if not gits:
+        return None
+    n = len(words)
+    # From each index: the first word that is not a leading env assignment (_command_word_index), the subcommand
+    # the option skip of _git_sub_and_args reaches, and the first word built at run time (a tilde word anywhere,
+    # as after a roster verb); n where there is none.
+    command_at = [n] * (n + 1)
+    sub_at = [n] * (n + 2)
+    runtime_at = [n] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        w = words[i]
+        command_at[i] = command_at[i + 1] if _ENV_ASSIGN_RE.match(w) else i
+        if w.startswith("-"):
+            sub_at[i] = sub_at[min(i + (2 if "=" not in w and w in _GIT_ARG_OPTS else 1), n)]
+        else:
+            sub_at[i] = i
+        runtime_at[i] = i if _gate_runtime_word(w) or _gate_tilde_word(w) else runtime_at[i + 1]
+    for g in gits:
+        s = sub_at[min(command_at[g] + 1, n)]
+        if s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:
+            return (words[g], words[s], "the word {!r}, built at run time, which may expand to a hook-skip spelling "
+                    "for it".format(words[runtime_at[s + 1]][:40]))
+    return None
+
+
+# Text the raw piece split may cut where bash does not (_gate_split_doubt): an ANSI-C quote holding an escaped
+# quote, which the split pairs as a single-quoted string that ends at that escaped quote ($'it\'s fixed'), and a
+# case word, whose pattern's ')' inside a command or process substitution the split reads as that
+# substitution's end ($(case a in a) ;; esac)).
+_GATE_CASE_WORD_RE = re.compile(r"\bcase\b")
+
+
+def _gate_split_doubt(piece):
+    """True when piece, one raw piece of the split (_raw_push_segments), holds a construct that split may read
+    differently from bash, so a separator it cut at after piece's start may sit inside one bash word: both "$'"
+    and an escaped quote ("\\'"), read as written and with its backslash-newlines removed (a line continuation
+    between the '$' and the quote is removed first), or a case word (_GATE_CASE_WORD_RE). A raw-text test that
+    over-matches by design (a "\\'" outside any ANSI-C quote counts too)."""
+    if _GATE_CASE_WORD_RE.search(piece) is not None:
+        return True
+    return any("$'" in form and "\\'" in form for form in (piece, piece.replace("\\\n", "")))
+
+
+# A here-document operator ('<<' or '<<-', never a '<<<' here-string) and its delimiter word with its quoting
+# (_gate_heredoc_masked), and the characters of a here-document body the raw piece split reads as quoting, a
+# substitution or an escape.
+_GATE_HEREDOC_OP_RE = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*([^\s;&|<>()]*)")
+_GATE_HEREDOC_BODY_MASK = str.maketrans({c: "_" for c in "'\"`\\()$"})
+
+
+def _gate_heredoc_masked(text):
+    """text with every quote character, backquote, backslash, parenthesis and '$' inside a here-document body
+    replaced by '_', one for one, so the raw piece split (_raw_push_segments) of the result cuts where bash cuts
+    after a body bash reads as text (cat <<'EOF' >f, a body line Don't, EOF, then $G commit -m 'a;b' -nv) and its
+    pieces stand at the same indices in text. A body is each line after a line holding a '<<' or '<<-' operator
+    (_GATE_HEREDOC_OP_RE), up to the line that is that operator's delimiter word with its quoting removed (after
+    its leading tabs for '<<-'), or to the end of text; the bodies of several operators on one line follow one
+    another. A raw-text reading, whose pieces are only read beside those of text, so where it masks what bash
+    reads as commands that can only add a deny. Disclosed residual, the here-document shapes it misreads: a
+    stray '<<' it reads as an operator, inside quotes, in a comment or as an arithmetic shift, on the real
+    operator's line or a line before it (echo '<<X' && cat <<EOF, cat <<EOF # <<X, cat <<EOF >f; (( 1<<2 )),
+    echo $((1<<2)) on an earlier line), opens a body that never ends, so the real body is not the one it masks
+    and the command lines after it are masked too; and a delimiter word it does not read as bash does, one
+    with a line continuation inside it (cat <<E\\, then OF on the next line), an ANSI-C or locale quote
+    (cat <<$'EOF', cat <<$"EOF", read as $EOF), an escaped blank (cat <<E\\ F) or a blank inside quotes
+    (cat <<'E F', cut at the blank), never matches the line that ends the body. In each, a quote in the real
+    body (Don't) can then still re-pair the split of text, and neither split puts a later hook skip in one
+    piece with its git word (a body line Don't, then $G commit -m 'a;b' -nv, allows). Linear in the length of
+    text."""
+    out = []
+    pending = []  # the (delimiter, strip_tabs) of each operator read, in order; pending[head] is the open body
+    head = 0
+    for line in text.split("\n"):
+        if head < len(pending):
+            delimiter, strip_tabs = pending[head]
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                head += 1
+                out.append(line)
+            else:
+                out.append(line.translate(_GATE_HEREDOC_BODY_MASK))
+            continue
+        out.append(line)
+        for m in _GATE_HEREDOC_OP_RE.finditer(line):
+            delimiter = m.group(2).replace("'", "").replace('"', "").replace(chr(92), "")
+            if delimiter:
+                pending.append((delimiter, m.group(1) == "-"))
+    return "\n".join(out)
+
+
+def _gate_piece_spans(pieces):
+    """The (start, end) index of each piece of _raw_push_segments in the text it split: the pieces are that text's
+    slices in order, each separated from the next by the one separator character it was cut at."""
+    spans = []
+    start = 0
+    for piece in pieces:
+        spans.append((start, start + len(piece)))
+        start += len(piece) + 1
+    return spans
+
+
+def _gate_split_doubt_start(pieces, spans):
+    """The start of the first of pieces, before the last, that holds a construct the split may cut inside
+    (_gate_split_doubt), spans being their (start, end) spans; None when none does."""
+    return next((start for (start, _end), piece in zip(spans, pieces[:-1]) if _gate_split_doubt(piece)), None)
+
+
+def _gate_split_spans(text):
+    """(pieces, spans): the raw pieces of text (_raw_push_segments) and the (start, end) span in text of each slice
+    a piece-by-piece reading of text reads: each of those pieces; each piece of the split of text with every
+    here-document body made inert (_gate_heredoc_masked) that the first split does not give, since a quote,
+    backquote or ')' in a body bash reads as text re-pairs the quoting the first split reads after it; and the
+    rest of text from the first piece before the last, of either split, that holds an ANSI-C escaped quote or a
+    case word (_gate_split_doubt), since either split may cut inside those, and a body quote that re-pairs the
+    first split can carry such a construct across its pieces (Don't, then $G -c $'x.y=a;\\';b' commit -nv).
+    Linear in the length of text."""
+    pieces = _raw_push_segments(text)
+    spans = _gate_piece_spans(pieces)
+    starts = [_gate_split_doubt_start(pieces, spans)]
+    masked = _gate_heredoc_masked(text)
+    if masked != text:
+        masked_pieces = _raw_push_segments(masked)
+        masked_spans = _gate_piece_spans(masked_pieces)
+        seen = set(spans)
+        spans += [span for span in masked_spans if span not in seen]
+        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))
+    for start in sorted(set(starts) - {None}):
+        spans.append((start, len(text)))
+    return pieces, spans
+
+
+def _gate_runtime_piece_hit(piece):
+    """The hit of the first de-quoted reading of piece (_gate_dequoted_words, _gate_bash_readings) that gives one
+    (_gate_runtime_reading), or of the same reading of piece with every standalone git masked out, a git glued
+    to a '-' left intact (_gate_runtime_masked_git, _gate_assembled_reading), else None. No reading is built when no
+    walk over a reading of piece can give a hit (_gate_runtime_may_hit), the readings of piece serve both walks when
+    it holds no such git, and none of the masked piece is built when it holds no character a reading removes
+    (_GATE_ASSEMBLY_CHARS) and no 'git' in any case, since then no reading of it names git."""
+    if not _gate_runtime_may_hit(piece):
+        return None
+    tilde = _GATE_TILDE_START_RE.search(piece) is not None
+    readings = (_gate_dequoted_words(piece),) + _gate_bash_readings(piece)
+    masked = _gate_runtime_masked_git(piece)
+    if masked == piece:
+        assembled = readings
+    elif _GATE_ASSEMBLY_CHARS.isdisjoint(masked) and "git" not in masked.lower():
+        assembled = ((),) * len(readings)
+    else:
+        assembled = (_gate_dequoted_words(masked),) + _gate_bash_readings(masked)
+    for words, masked_words in zip(readings, assembled):
+        hit = _gate_runtime_reading(words, tilde)
+        if hit is None:
+            hit = _gate_assembled_reading(masked_words)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _gate_runtime_bypass(text):
+    """(word, sub, what) when a word built at run time (_gate_runtime_at) may be git and, later in the same raw
+    command piece, a roster verb carries a hook-skip spelling for it or a word built at run time follows that
+    verb (_gate_runtime_hit), else None: the git word no other reading sees, because bash builds it ($G commit
+    -nv, "$G" commit -nv, g$(true)it commit -nv, g${x}it commit -nv, $(echo git) commit -nv, /usr/bin/g?t commit
+    -nv, /usr/bin/+(gi)t commit -nv under shopt -s extglob, ~ commit -nv with HOME=/usr/bin/git, and ~+, ~-, ~N
+    and ~name, a tilde-prefix with no '/' after it: _gate_tilde_word). A word built at run time after the verb
+    may itself be a hook-skip spelling ($G commit $O, $G commit -${N}, $G commit {--no-verify,}, $G commit ~),
+    so it denies as the closed literal grammar denies git commit $O, and it denies after each git a reading
+    assembles by quote removal, behind a wrapper or not, when that git's subcommand is a roster verb (g'i't
+    commit $O, sudo g'i't commit ~: _gate_assembled_reading), read with every standalone git masked out of the
+    piece (_gate_runtime_masked_git), since the closed literal grammar judges each as written, so a git written as
+    such elsewhere in the piece, an operand, a message or an option value, hides none (g'i't commit $O git, sudo
+    g'i't commit ~ -m git); a git glued to a '-' is left intact, so an option name like --git-dir keeps its text,
+    the option-skip walk skips its value, and a git before --git-dir <value> and a roster verb denies (g'i't
+    --git-dir .git commit $O); the grammar still scans every '\\bgit\\b', a '-'-glued one included, and the walk
+    can start from a git the mask leaves (echo -x-git commit $O); and a later assembled git is read too (sh -c
+    "g'i't log; g'i't commit \\$O").
+    text is split into raw command pieces at the ;, &, | and newline separators outside
+    any quoting _skip_quoting can prove (_raw_push_segments, which keeps a substitution whole, so $(cd /; echo
+    git) commit -nv is one piece, and splits a here-document body at its newlines). Where that split may cut
+    inside one bash word, text is also read so (_gate_split_spans, which the parse-error path's unread-text
+    reading, _gate_unread_bypass, reads too): split again with every here-document body made inert
+    (_gate_heredoc_masked), since a quote, backquote or ')' in a body bash reads as text (Don't) re-pairs the
+    quoting the split reads after it, each piece of that split read as text's slice at the same indices; and
+    from the first piece of either split holding an ANSI-C quote with an escaped quote ($G commit -m $'a\\';b'
+    -nv) or a case word ($G $(case a in a) ;; esac) commit -nv) to the end of text, as one piece
+    (_gate_split_doubt), since a body quote that re-pairs the first split can carry such a quote across its
+    pieces (a body line Don't, then $G -c $'x.y=a;\\';b' commit -nv). An
+    extglob group keeps every character up to its ')' in one word, a blank or separator included
+    (/usr/bin/@(git|x;y) commit -nv), which that split cuts, so text holding an extglob opener's characters is
+    also read whole, from its first word holding an extglob opener. In each piece's de-quoted readings
+    (_gate_dequoted_words, _gate_bash_readings) the walk reads after the first such word, so a wrapper on any
+    list or none (sudo $G commit -nv), an sh -c or eval script (sh -c '$G commit -nv') and a here-document body
+    line are read too; a later word built at run time adds nothing the walk from the first one does not read. A
+    word with no such character is left to the other readings (make commit -n, make g++ commit -n, a~b commit
+    -nv and ~/bin/x commit -nv allow), as is a quoted or escaped tilde
+    the command word stands in ('~' commit -nv), and so is such a word with no roster verb after it carrying a
+    hook-skip spelling or followed by a word built at run time ($G log -n 5, $G push -n origin x, $G commit -m
+    x). A raw-text reading only: it can only add a deny, never prove a command safe. Disclosed safe-direction
+    over-deny: any such word counts, an operand or quoted text included, so pytest tests/*.py -k commit -n 4,
+    echo $((1+1)) commit -nv, git status # $X commit -n and git commit -m 'use $X, then commit -n' deny too, so
+    does any word built at run time after the verb, a safe value included ($G commit -m "$msg", $G push origin
+    "$branch", g'i't commit -m "$msg"), any quote-assembled git, an operand included (g'i't log -- g'i't commit
+    $O), and a git an option's attached value names (git log -Sgit commit $x, read as env -Sgit runs git), and
+    so does a tilde word whatever it expands to (~root commit -nv), or
+    a quoted tilde after the first word (echo '~' commit -nv); with an extglob opener the whole-text read spans
+    separators too (ls @(a|b); echo commit -n), and so does the read from an ANSI-C quote with an escaped quote
+    or a case word to the end of text (ls $D $'a\\';b'; echo commit -n). Disclosed residual: a verb also
+    built at run time ($G $V -nv, $G co$()mmit -nv, and $G {commit,-nv}, whose one brace word carries the skip
+    option too), a name bound to git by hash -p, an alias or a function (G commit -nv after hash -p /usr/bin/git
+    G), words fed to git from another stage (echo commit -nv | xargs $G), a git builtin run by its dashed name
+    (/usr/lib/git-core/git-commit -nv, $(git --exec-path)/git-commit -nv, $P/git-commit --no-verify) and a git
+    alias defined on the command line ($G -c alias.ci=commit ci -nv), whose verb this rule does not see, the
+    here-document shapes _gate_heredoc_masked misreads (a stray '<<' inside quotes, in a comment or as an
+    arithmetic shift, on the real operator's line or a line before it, and a delimiter with a line continuation
+    inside it, an ANSI-C or locale quote, an escaped blank or a blank inside quotes), after which a body quote
+    can still re-pair the split, and, behind a '#' the shared lexer could not
+    judge, where gate_weakening runs the doubt test (_gate_doubt_bypass) and not this rule, every skip option
+    built at run time with no dash-prefixed option token in the text, after any roster verb and behind any
+    word built at run time that may be git ($G commit $O, $G commit {-nv,}, $G commit ${P:--nv}, $G commit ?nv,
+    $G commit ~, $G push $L, sudo $G commit $O, /usr/bin/g?t commit $O), are not read. The readings of a piece,
+    and of a longer text, are built only when a walk over them can give a hit (_gate_runtime_may_hit: both a '$'
+    and a backslash, a roster verb after a character a word built at run time can hold, or one anywhere with a git
+    left in the masked text), and text that gives none is not split either. Linear in the length of text."""
+    if not _gate_runtime_may_hit(text):
+        return None
+    pieces, spans = _gate_split_spans(text)
+    for start, end in spans:
+        hit = _gate_runtime_piece_hit(text[start:end])
+        if hit is not None:
+            return hit
+    if len(pieces) > 1 and "(" in text and not _GATE_EXTGLOB_HEADS.isdisjoint(text):
+        tilde = _GATE_TILDE_START_RE.search(text) is not None
+        for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+            k = next((k for k, w in enumerate(words) if _gate_extglob_word(w)), None)
+            if k is not None:
+                hit = _gate_runtime_hit(words, k, tilde)
+                if hit is not None:
+                    return hit
+    return None
+
+
+def _gate_runtime_deny(hit):
+    """The gatdis deny for a word built at run time that may be git, followed by a roster verb carrying a
+    hook-skip spelling or a word built at run time, or for a word naming git whose roster verb a word built at
+    run time follows (_gate_runtime_bypass); hit is that reading's (word, sub, what)."""
+    word, sub, what = hit
+    if _gate_runtime_word(word) or _gate_tilde_word(word):
+        lead = ("the word {!r} is built at run time (an expansion, a substitution, a glob, an extglob pattern, a "
+                "brace expansion or a tilde-prefix), so bash may run git there".format(word[:40]))
+    else:
+        lead = "a de-quoted reading of the command names git ({!r})".format(word[:40])
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): {}, and a later {} in the same command carries {}; a bypass of the "
+        "verification hooks that gate git cannot be ruled out, so it is denied fail-closed. Never weaken a gate to "
+        "obtain a pass; fix the artefact instead. Spell git and its options literally, and if the text only quotes "
+        "such a spelling, keep it out of the command. {} {}".format(lead, sub, what, _GATE_ALTS, _GATE_FILE_ROUTE),
+        "AIQT guardrail: denied a possible git verification-hook bypass (--no-verify family) behind a word "
+        "built at run time (rule gatdis, fail-closed).")
 
 
 def _gate_word_start(raw, argv, idx):
@@ -13485,16 +15180,20 @@ def gate_weakening(data):
     deny such a message can draw (parsed, de-quoted, parse-error fallback and opaque '#' doubt) ends with the
     way on (_GATE_FILE_ROUTE): commit the message from a file with git commit -F FILE, or cat FILE | git
     commit -F -, which allows because this guard never opens the file; a '<' redirection or here-document on
-    the git segment, or a stage before it whose own text names the spelling, still denies.
+    the git segment, or a stage before it whose own text names the spelling, still denies, and behind a '#'
+    this guard could not read the -F commit denies too until that '#' is fixed, which the route says.
     DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
-    git (printf ... | xargs git commit) is not reconstructed, and an alias or shell function that renames
-    git is not resolved. A command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid,
-    stdbuf) and a wrapper option the peel cannot resolve FAIL CLOSED through the dequoted-word scan
-    (_gate_novrf_segment_bypass), and behind ANY other word of a segment, a wrapper on no list included,
-    the segment's de-quoted text is read too (_gate_behind_bypass, _gate_text_bypass), in four readings: the
-    blank-split reading (_gate_dequoted_words), and three bash-model readings (_gate_bash_readings): the text
-    at its own quoting level as bash reads it, that result read once more as a shell it is handed to reads it
-    (sh -c, eval, env -S), and the text with every ANSI-C quote the raw match finds decoded. In those three an
+    git (printf ... | xargs git commit) is not reconstructed, an alias or shell function that renames
+    git is not resolved, and neither is a git alias defined on the command line of a git word built at run time
+    ($G -c alias.ci=commit ci -nv) or a git builtin run by its dashed name (/usr/lib/git-core/git-commit -nv). A
+    command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid, stdbuf) and a wrapper option
+    the peel cannot
+    resolve FAIL CLOSED through the dequoted-word scan (_gate_novrf_segment_bypass), and behind ANY other word
+    of a segment, a wrapper on no list included, the segment's de-quoted text is read too (_gate_behind_bypass,
+    _gate_text_bypass), in four readings: the blank-split reading (_gate_dequoted_words), and three bash-model
+    readings (_gate_bash_readings): the text at its own quoting level as bash reads it, that result read once
+    more as a shell it is handed to reads it (sh -c, eval, env -S), and the text with every ANSI-C quote the
+    raw match finds decoded. In those three an
     ANSI-C quote is decoded with bash's own escapes and cut at its first NUL escape as bash cuts it
     ($'gi\\0zz't is git), words split only at bash's blanks (space, tab, newline) and at every shell operator
     character and opener (; & | ( ) < >, the backquote, so $(, <( and >( too), wherever each stands, and env
@@ -13527,11 +15226,67 @@ def gate_weakening(data):
     such a word denies (git commit -m 'see git log; then commit -n'); a quoted operator or blank splits words
     inside any script, so a later unrelated -n there counts (sh -c 'git commit -m x; ls -n'); and a \\_ is
     read as a separator wherever it stands, not only inside an env -S value (env -S g"i"t\\_commit\\_-nv, which
-    bash does not split, denies). This reading still cannot see a git word built at run time (an expansion, a
-    substitution, a glob or brace expansion: $g commit -nv, g$()it commit -nv), a here-document body a shell
-    reads as commands, or an ANSI-C quote the two level readings do not decode (two or more shell levels in,
-    or behind a quote inside a command substitution standing in double quotes, which they pair at the outer
-    level) whose opener the raw match also pairs with an earlier '$''. A verb off the roster
+    bash does not split, denies). This reading still cannot see a git spelled with no run-time character in a
+    here-document body a shell reads as commands, or an ANSI-C quote the two level readings do not decode (two
+    or more shell levels in, or behind a quote inside a command substitution standing in double quotes, which
+    they pair at the outer level) whose opener the raw match also pairs with an earlier '$''.
+    A GIT WORD BUILT AT RUN TIME (an expansion, a substitution, a glob, an extglob pattern, a brace
+    expansion or a tilde-prefix: $G commit -nv, "$G" commit -nv, g$(true)it commit -nv, g${x}it commit -nv,
+    $(echo git) commit -nv, g?t commit -nv, /usr/bin/+(gi)t commit -nv under shopt -s extglob, and ~, ~+, ~-, ~N
+    or ~name with no '/' after it, as in HOME=/usr/bin/git; ~ commit -nv) has its own rule
+    (_gate_runtime_bypass), read over the whole raw text after every other deny on this path, and on the
+    ordinary parse-error path after every other deny there, the raw fallback's own included
+    (_gate_weakening_fallback), so a command one of them denies keeps its message: a word of a de-quoted
+    reading holding '$', a backquote, '*', '?', '[', '{' or an extglob opener ('@(', '+(', '!('), or a tilde
+    word (a quoted or escaped one only after the first word, where eval or sh -c reads it unquoted), may be
+    git, so a later roster verb in the same raw command piece (split at ;, &, | and newline outside provable
+    quoting; split again with every here-document body made inert, since a quote in a body bash reads as text
+    re-pairs that split; read from a piece of either split holding an ANSI-C quote with an escaped quote or a
+    case word to the end, since a split cuts inside those, and a body quote that re-pairs the first split can
+    carry such a quote across its pieces; and read whole too where an extglob group can hold a separator)
+    carrying a hook-skip spelling for it, or followed by a word built at run time that may be one ($G commit
+    $O, $G commit -${N}, $G commit {-nv,}, $G commit ~), denies fail-closed, behind a wrapper (sudo $G commit
+    -nv), inside an sh -c or eval script and on a here-document body line too, and so does each git a
+    de-quoted reading assembles that the closed literal grammar does not read as written (g'i't commit $O, sudo
+    g'i't commit ~, sh -c "g'i't log; g'i't commit \\$O") with a word built at run time after its roster verb,
+    read with every standalone git masked out of the piece, since the grammar judges each as written, so a git
+    operand, message or option value in the same piece hides none (g'i't commit $O git, g\\it commit $O -m git,
+    g'i't commit $O --author=git); a git glued to a '-' is left intact, so an option name like --git-dir keeps its
+    text, the option-skip walk skips its value, and a git before --git-dir <value> and a roster verb denies (g'i't
+    --git-dir .git commit $O), while the grammar still scans every '\\bgit\\b', a '-'-glued one included; behind
+    an unjudged '#' the doubt test reads
+    such a character, or a '~', before a roster verb as it reads git (_RAW_RUNTIME_NOVERIFY_VERB_RE). A word
+    with no such character keeps the readings above (make commit -n, make g++ commit -n, a~b commit -nv,
+    ~/bin/x commit -nv and '~' commit -nv allow), and so does such a word with no roster verb after it carrying
+    a hook-skip spelling or followed by a word built at run time ($G log -n 5, $G push -n origin x, $G commit
+    -m x). Disclosed safe-direction over-deny: any such word counts, an operand or quoted text included (pytest
+    tests/*.py -k commit -n 4, find ~ -name commit -print, echo $((1+1)) commit -nv, git status # $X commit
+    -n, git commit -m 'use $X, then commit -n', and a git commit -m "$(cat <<'EOF' ... EOF)" message whose body
+    names a roster verb and then such a spelling), a tilde word whatever it expands to (~root commit -nv, ~""
+    commit -nv), so does any word built at run time after the verb, a safe value included ($G commit -m "$msg",
+    $G push origin "$branch", $G commit -m 'see ~', g'i't commit -m "$msg"), any quote-assembled git, an
+    operand included (g'i't log -- g'i't commit $O), or a git an option's attached value names (git log -Sgit
+    commit $x, read as env -Sgit runs git), and with an extglob opener, an
+    ANSI-C escaped quote or a case word the read spans separators (ls @(a|b); echo commit -n, and case $x in a)
+    ls;; esac; echo commit -n). Disclosed residual: a verb also built at run time ($G $V -nv, $G co$()mmit -nv,
+    and $G {commit,-nv}, whose one brace word carries the skip option too), a name bound to git by hash -p, an
+    alias or a function (G commit -nv after hash -p /usr/bin/git G), words fed to git from another stage (echo
+    commit -nv | xargs $G), a git builtin run by its dashed name (/usr/lib/git-core/git-commit -nv,
+    /usr/lib/git-core/git-push --no-verify, $(git --exec-path)/git-commit -nv, $P/git-commit --no-verify) and a
+    git alias defined on the command line of a git word built at run time ($G -c alias.ci=commit ci -nv), whose
+    roster verb no reading here sees, the here-document shapes the inert-body split misreads
+    (_gate_heredoc_masked): a stray '<<' inside quotes, in a comment or as an arithmetic shift, on the real
+    operator's line or a line before it (echo '<<X' && cat <<EOF, cat <<EOF # <<X, cat <<EOF '<<X',
+    cat <<EOF >f; (( 1<<2 )), cat <<EOF; echo $((1<<2)), or echo '<<X' on an earlier line), which opens a body
+    that never ends, and a delimiter with a line continuation inside it (cat <<E\\ then OF on the next line), an
+    ANSI-C or locale quote (cat <<$'EOF', cat <<$"EOF"), an escaped blank (cat <<E\\ F) or a blank inside quotes
+    (cat <<'E F'), which never matches the line that ends the body; in each a body quote (Don't) can still
+    re-pair the split, so a later $G commit -m 'a;b' -nv allows; and, behind an unjudged
+    '#', where the doubt test decides and this rule does not run, every skip option built at run time with no
+    dash-prefixed option token in the text, after any roster verb and behind any word built at run time that
+    may be git ($G commit $O, $G commit {-nv,}, $G commit ${P:--nv}, $G commit ?nv, $G commit ~, $G am $O,
+    $G push $L, sudo $G commit $O, /usr/bin/g?t commit $O, ~ commit $O, and x=$(true #'<newline>) or x=`true #`
+    before $G commit $O), are not read. A verb off the roster
     is untouched (git log ${x}-n, git log
     --format="$f"). On a parse error the same judgement reads every segment the partial lex recovers, the
     in-progress segment the lexer stopped in included, and outside the doubt path the text from that
@@ -13563,11 +15318,13 @@ def gate_weakening(data):
     segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
     _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word in text that holds a
     '|' DENIES wherever each stands (_gate_doubt_sink, fail-closed by construction over the doubled scan),
-    text naming git with a subcommand that accepts --no-verify plus ANY dash-prefixed option token DENIES
+    text naming git (or holding a character that builds a word at run time, before the subcommand) with a
+    subcommand that accepts --no-verify plus ANY dash-prefixed option token DENIES
     (_gate_doubt_bypass, fail-closed by construction: no list of bypass spellings is left for a new
     abbreviation, cluster alphabet or token ending to escape, at the stated cost of a NEW OVER-DENIAL,
-    since a harmless option there, 'git commit -m x' behind such a '#', denies too, as does a lone '-'
-    spelled with a quote or backslash next to it), and remaining text
+    since a harmless option there, 'git commit -m x' behind such a '#', denies too, as does 'make commit
+    -j4' after a backquote holding such a '#' and a lone '-' spelled with a quote or backslash next to it),
+    and remaining text
     holding a checker-shaped word (_gate_doubt_checker, the parsed recognizer's own name splitter and
     lexicon, called rather than re-spelled) and a pipe, process substitution or here-string
     ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a readable spelling of the same
@@ -13588,8 +15345,26 @@ def gate_weakening(data):
     body (_gate_recovered_sink inside _SubstHeredocFloor) and a raw fallback deny
     (_gate_weakening_fallback_kind) deny after this guard's own denies, and the raw fallback decides in place
     of this guard's allow.
+    A git command that defines a git alias for itself (_git_local_alias), or runs under one the session
+    environment carries (_git_alias_inherited), DENIES: the subcommand and options it runs cannot be read, so a
+    hook bypass cannot be ruled out; so does a command whose text names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or
+    GIT_CONFIG_KEY_ anywhere and git (_git_alias_named), every git command of which runs under an alias the
+    command may define. On a parse error such a command DENIES too (_git_alias_recovered: the text, a definition
+    anywhere in it, past where the lexer stopped included, or a git segment the partial lex recovers), after the
+    recovered sink. A definition counts however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE):
+    the lex here runs inside _WordSpellings, so in the region after a git word through its subcommand word a word
+    carrying an unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma,
+    or a -c or --config-env key part spelled through any expansion, quote or brace defines one, parsed or
+    unparseable; a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a value so
+    spelled behind a literal key defines no alias. Disclosed over-refusal: an unquoted variable in a git option or
+    subcommand position, or after any word naming git, now denies ('git -C $D log'), and so does a key literal in
+    effect but spelled through an expansion or quote. In this guard quoting the variable does not restore an allow:
+    the closed literal grammar (_gate_closed_grammar_scan) denies an expansion in a git command's global options or
+    subcommand word, quoted or not ('git -C "$D" log'), as it does one anywhere else on a roster-verb git segment
+    outside its one accepted commit-message here-document form (_gate_heredoc_message).
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
-    xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
+    options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:
@@ -13610,16 +15385,17 @@ def gate_weakening(data):
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
         # below, whose canonical shape needs every earlier segment benign; every other check reads the
-        # segments of all readings in turn, as _lex_command returns them.
-        readings = _lex_readings(command)
+        # segments of all readings in turn, as _lex_command returns them. Each word's spelling is recorded for
+        # the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            readings = _lex_readings(command)
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
         # otherwise the raw fallback stands. The sink check drops the in-progress segment the lexer was
         # inside, since its unseen tokens could change it; a construct that begins a new segment (a lone quote
         # after 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        recovered, open_seg = _gate_partial_segments(
-            command, exc if isinstance(exc, _UncertainHashError) else None)
+        recovered, open_seg, lexed = _gate_partial_lex(command, exc if isinstance(exc, _UncertainHashError) else None)
         for seg in recovered + ([open_seg] if open_seg is not None else []):
             # the same fail-closed wrapper judgement as the parsed path, over each recovered segment's
             # dequoted argv, so a git bypass hidden behind an unresolved or unlisted wrapper on an
@@ -13658,6 +15434,16 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
+        # A git command that runs under a git alias the command defines denies as on a parsed command
+        # (_git_alias_recovered: a text naming a git configuration variable and git, a text naming git that defines
+        # one past where the lexer stopped, or a recovered git segment): its subcommand and options cannot be read,
+        # and the raw probes below may see no bypass spelling in an alias value they cannot reach.
+        kind = _git_alias_recovered(command, unread=True, lexed=lexed)
+        # A doubt that a failed reading raised holds this frame in a reference cycle through its traceback until the
+        # collector runs, so the shared lex is not left here for each later collection to scan.
+        lexed = None
+        if kind:
+            return _gate_alias_deny(kind == "built")
         if not isinstance(exc, _UncertainHashError):
             # The text the partial lex could not read, from the start of the in-progress segment (its raw
             # slice runs to the end of command) or the whole command where no segment was in progress, is
@@ -13700,7 +15486,10 @@ def gate_weakening(data):
                     "run. " + _GATE_ALTS,
                     "AIQT guardrail: denied an unparseable command whose quoting spells a git "
                     "verification-hook bypass (rule gatdis, fail-safe).")
-            return _gate_weakening_fallback(command)
+            # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
+            # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
+            # above and each of the fallback's keeps its message.
+            return _gate_weakening_fallback(command, runtime=True)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -13730,8 +15519,9 @@ def gate_weakening(data):
         # over-denial: a harmless option there denies too).
         if _gate_doubt_bypass(scan):
             return _deny(
-                _hash_doubt_reason("gatdis (gate-discipline)", "its text names git with a subcommand that "
-                                   "accepts --no-verify (commit, merge, push, pull, rebase or am) and "
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text names git, or a word built at run "
+                                   "time that may be git, with a subcommand that accepts --no-verify (commit, "
+                                   "merge, push, pull, rebase or am) and "
                                    "carries a dash-prefixed option this guard cannot bind to that "
                                    "subcommand's grammar past that '#', so a verification-hook bypass "
                                    "spelling cannot be ruled out") + " " +
@@ -13763,11 +15553,22 @@ def gate_weakening(data):
     floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
     records = [seg for reading in readings for seg in reading]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
+    # A git alias the command defines runs a subcommand, and options in its value, that this guard cannot read, so
+    # a hook bypass cannot be ruled out: it denies like one. Every git command of a command whose text names a git
+    # configuration variable, or that runs under an alias the hook's environment carries, runs under one
+    # (_git_alias_named), whatever segment holds it; so does a git command that a segment defines one for
+    # (_git_local_alias), wherever its git word stands (_git_alias_segment), an info flag included: git runs an
+    # alias with the flag passed on to it (_has_info_flag), so the flag exempts only a git command under no alias.
+    if _git_alias_named(command):
+        return _gate_alias_deny()
+    outside = _git_alias_outside(command)
     for index, seg in enumerate(records):
         tokens = seg.argv
         if not tokens and not seg.redirects:
             continue  # no word and no redirection, so nothing runs or expands (a run of separators reads nothing here)
         sep_after = seg.sep_after
+        if _git_alias_segment(tokens, outside):
+            return _gate_alias_deny(_git_alias_built(tokens, outside))
         bypass = _gate_novrf_segment_bypass(tokens)
         if bypass is not None:
             sub, spelling = bypass
@@ -13849,6 +15650,13 @@ def gate_weakening(data):
             return _deny(reason, banner)
         if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
             return _gate_weakening_fallback(command, heredoc_message=True)
+    # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
+    # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
+    # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
+    # here-document body are read too. It runs after every other deny, so each keeps its own message.
+    runtime_hit = _gate_runtime_bypass(command)
+    if runtime_hit is not None:
+        return _gate_runtime_deny(runtime_hit)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
@@ -13920,19 +15728,33 @@ def _commit_msg_command_index(tokens):
     return i
 
 
-def _commit_msg_subst_hit(seg):
+def _commit_msg_subst_hit(seg, named=False):
     """Return (argument, marker) for the first post-subcommand hit in a recognized git commit segment.
 
     Every token after commit is inspected without Git option binding: Bash performs substitution before Git
     parses options or an end-of-options token, so neither an option value nor `--` makes a marker safe.
+    named is True when the command's text names a git configuration variable or the hook's environment carries
+    one naming an alias (_git_alias_outside): every segment naming git (_names_git) then runs git under an alias,
+    whatever its command word, and so does a segment that defines one for a git command of its own
+    (_git_local_alias, wherever its git word stands), so every token from its first word naming git on
+    (_git_word_index) is read as a commit's argument (that word too, which may be the text of an sh -c or eval
+    word).
     """
     tokens = seg.argv
+    if _git_alias_segment(tokens, named):
+        for index in range(_git_word_index(tokens), len(tokens)):
+            marker = _commit_msg_subst_marker(tokens[index], seg.argv_opaque[index], index, seg)
+            if marker is not None:
+                return tokens[index], marker
     command_index = _commit_msg_command_index(tokens)
     if (command_index >= len(tokens)
             or tokens[command_index].rsplit("/", 1)[-1] != "git"):
         return None
     sub, args = _git_sub_and_args(tokens[command_index:])
-    if sub != "commit":
+    # A git alias an assignment before the command word defines (env NAME=VALUE words included) may run git
+    # commit, so its arguments are read as a commit's.
+    aliased = any(_git_alias_defined_at(tokens, j) for j in range(command_index))
+    if sub != "commit" and not (sub is not None and aliased):
         return None
     offset = len(tokens) - len(args)
     for index, token in enumerate(args, offset):
@@ -13946,15 +15768,21 @@ def _commit_msg_subst_fallback(command):
     """Conservative raw fallback for an unparseable command: an apparent git commit + substitution marker is
     a HAZARD-class (command-injection) case this guard cannot parse, so it DENIES-and-educates (hooks never
     ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named).
+    A command that runs git under a git alias it defines (_git_alias_recovered: its text names a git
+    configuration variable and git, its text names git and defines one anywhere, past where the lexer stopped
+    included, or a git segment a partial lex recovers defines one or runs under one the session environment
+    carries) may run git commit under another name, so a marker anywhere in it denies too.
     Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
-    if (_RAW_COMMIT_MSG_GIT_RE.search(command)
-            and _RAW_COMMIT_MSG_MARKER_RE.search(command)):
+    if (_RAW_COMMIT_MSG_MARKER_RE.search(command)
+            and (_RAW_COMMIT_MSG_GIT_RE.search(command) or _git_alias_recovered(command))):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
-            "lexer and appears to carry a backtick or $( command substitution in a git commit argument, "
-            "which the shell may execute BEFORE git processes the argument; it is denied fail-safe. Re-issue "
-            "with single quotes, escape the marker as \\` or \\$(, or write the message to a file and use "
-            "git commit -F <file>.",
+            "lexer and appears to carry a backtick or $( command substitution in a git commit argument, or in "
+            "an argument of a git command that runs under a git alias the command defines (a -c or "
+            "--config-env alias key, or the name GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ "
+            "anywhere in its text), which the shell may execute BEFORE git processes the argument; it is denied "
+            "fail-safe. Re-issue with single quotes, escape the marker as \\` or \\$(, or write the message to a "
+            "file and use git commit -F <file>.",
             "AIQT guardrail: denied an unparseable git commit argument that appears to carry an executable "
             "command substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
     return _allow()
@@ -14004,8 +15832,9 @@ def commit_msg_subst(data):
         return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
+    named = _git_alias_outside(command)
     for seg in segments:
-        hit = _commit_msg_subst_hit(seg)
+        hit = _commit_msg_subst_hit(seg, named)
         if hit is None:
             continue
         argument, marker = hit
@@ -21142,7 +22971,12 @@ _RDP_REPOSITORY_KEYS = ("core.worktree", "core.bare", "include.path", "includeif
 _RDP_GIT_READS = frozenset(("status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep",
                             "cat-file"))
 # git's global options before the subcommand: those taking the next word as their value (or, written
-# long, a value after =), and those taking none. Any other leaves the subcommand unknown.
+# long, a value after =), and those taking none. Any other leaves the subcommand unknown. The valued list is
+# narrower than _GIT_ARG_OPTS on purpose: this reader admits only the global options it has vetted, and
+# --attr-source and --shallow-file, which also take the next word, stay out, so a command carrying either ends
+# the parse with no subcommand and is refused rather than misread (--attr-source reads the attributes that
+# select diff and filter drivers from a tree, and --shallow-file names the file git reads the shallow boundary
+# from). --exec-path and --super-prefix take no separate value.
 _RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"))
 _RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
                                    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
@@ -29869,6 +31703,44 @@ def _dispatcher_fail_open_warn(handler_name, detail):
     return 0
 
 
+# The child-status guard: an inline copy of the canonical constant and probe in
+# opf/tools/_child_status.py, which tools/check_child_status_coverage.py pins this copy to by AST. main()
+# runs it right after it decides the mode's error posture (see the block there).
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+
 def _stderr_note(line):
     """Best-effort stderr diagnostic: write the line and flush, swallowing every failure (a closed
     descriptor 2 leaves sys.stderr None; a full device or a broken pipe raises OSError), so the EXIT
@@ -29915,6 +31787,28 @@ def main(argv):
         return 2
     handler_name = mode
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
+    # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
+    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture). A fail-open mode must not
+    # exit 2 and must still run its handler (a stop guard's deliberate deny included), so it restores
+    # SIG_DFL for this one short-lived hook process, re-probes, and notes the restore; SIG_DFL is
+    # SIGCHLD's normal disposition, signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open
+    # handlers reach waits for its child. If the re-probe still fails, it warns without running the
+    # handler.
+    unobservable = _child_status_refusal()
+    if unobservable is not None:
+        if not is_fail_open:
+            _stderr_note("aiqt_hooks: {}: {}, so a failed child would read as a success; failing closed"
+                         .format(handler_name, unobservable))
+            return 2
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        restored = _child_status_refusal()
+        if restored is not None:
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "child exit status unobservable: " + restored)
+            except BaseException:
+                return 0
+        _stderr_note("aiqt_hooks: {}: {}; SIGCHLD restored to SIG_DFL for this hook process and the probe "
+                     "then read its child's status".format(handler_name, unobservable))
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:

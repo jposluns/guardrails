@@ -37,7 +37,8 @@ Their guards:
 
   check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
                                         import examples included
-  check_opf_prompt_pack.py --self-test  synthetic packs assert each guard's exact status and guard name
+  check_opf_prompt_pack.py --self-test  synthetic packs assert each guard's exact status and guard name,
+                                        and the shipped flow/SKILL.md carries each FLOW_PINNED sentence
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
@@ -48,7 +49,8 @@ the manifest agrees with the bytes on disk and each import example passes the gu
 authentication, it does not check that a content change also bumped the version, and it does not review
 what the documents say: whether an example's history, unparsed text and missingness reasons are faithful
 to a real source is not machine-checked (spec 8.3), and the example-midnight guard refuses every UTC
-midnight, a genuinely recorded one included, so an example never spells one.
+midnight, a genuinely recorded one included, so an example never spells one. Of the Markdown members,
+only the self-test reads text, and only for the FLOW_PINNED sentences, present verbatim or not.
 """
 import sys
 
@@ -356,6 +358,60 @@ def _sha(data):
 
 _DOCS = dict([("adoption-sop.md", b"# Adoption\n\nStep one.\n"),
               ("examples/worklog.toml", b"id = 'WL-1'\n")])
+
+# Normative /flow rules the self-test pins in the shipped member: the member digest passes a consistent
+# revert of the prose (digests recomputed), so each sentence here must appear verbatim, every whitespace
+# run read as one space so a re-flow of the lines never fails it. An edit to one of these rules edits
+# its sentence here in the same change.
+FLOW_MEMBER = "flow/SKILL.md"
+FLOW_PINNED = (
+    "its later lines list the IDs of the findings its round opened, closed, and routed out of the unit, "
+    "and each re-report matched to an accepted ID with the grade the panel gave it (section 7)",
+    "each accepted residual named by its `finding` ID on the entry's later lines with each re-report "
+    "matched to it and the grade the panel gave that re-report (section 7)",
+    "a re-report the run matches to an accepted ID is open unless the `accept` names it, the same defect "
+    "at the same site as the finding it names by ID, the round's entry listing each such match with the "
+    "grade the panel gave it.",
+    "The grade a match is compared with is the one the `accept` records for the finding it names (the "
+    "at-stall bullet below), never one read from the `finding` record, which carries no grade while open "
+    "(OPF-SPEC.md section 8.5).",
+    "A re-report is a match only when the panel grades it no worse than that recorded grade; where either "
+    "grade is missing or unreadable, or the two cannot be ordered, it reads as graded worse.",
+    "A re-report graded worse is no match and is never named in a standing `accept`, the `accept` never "
+    "carried to a worse grade: the round records it as an opening under a new `finding` ID that links "
+    "`relates` to the accepted `finding` ID, and it is fixed, or reaches the maintainer through the stall "
+    "test or a park, as any open finding does (the verification rule below).",
+    "a still-open finding a later round reports again is not opened again, save that a re-report of an "
+    "accepted finding graded worse is the new finding the convergence bullet above opens)",
+    "and each re-report it matched to an accepted ID with the grade the panel gave it (the convergence "
+    "bullet above), and a converging round's `converge` entry lists its closures, routings, and matches on "
+    "its later lines the same way (section 5), so a resumed run reads every round's openings, closures, "
+    "routings, and matches from the unit's `verdict` and `converge` entries in `WL` order (section 5).",
+    "The reopening is that new finding, which carries its own grade and is opened, routed, and closed as "
+    "its own, so a minor one routes out of the unit (the routing bullet below), and the closed finding it "
+    "follows stays closed.",
+    "that leaves such a finding open outside a standing `accept`, a finding being inside one only where "
+    "the `accept` names its own `finding` ID or it is a match graded no worse, so the new finding a "
+    "re-report graded worse than an accepted finding opens is outside (the convergence bullet above);",
+    "where an `accept` names each residual it accepts by its `finding` ID together with the panel's grade "
+    "of that finding when the `accept` is recorded, the grade a later match is compared with (the "
+    "convergence bullet above).",
+    "a re-report of a still-open residual the `accept` names, matched only as the convergence bullet "
+    "allows, graded no worse than the grade the `accept` records for it, and listed on that entry with its "
+    "grade,",
+    "an oscillation (a confirmed recurrence linked `follows` to a closed finding, graded medium or worse) "
+    "counts as no reduction and never vetoes convergence;",
+)
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def _missing_pinned(text, pinned=FLOW_PINNED):
+    """The pinned sentences absent from text, each whitespace run on either side read as one space."""
+    flat = _flat(text)
+    return [sentence for sentence in pinned if _flat(sentence) not in flat]
 
 
 def _vectors():
@@ -773,6 +829,20 @@ sys.exit(0)
             print("{} close-vectors: {}".format("FAIL" if close_failures else "PASS",
                                                 "; ".join(close_failures) or "3 green, 1 pre-fix red"))
             failures.extend(close_failures)
+        # The shipped /flow member carries every pinned rule sentence, and dropping any one of them from
+        # it is caught as exactly that sentence missing, so reverting a pinned rule is red.
+        shipped = _read_regular(DEFAULT_PACK_DIR / FLOW_MEMBER, MAX_MEMBER_BYTES, "member").decode("utf-8")
+        count += 1
+        missing = _missing_pinned(shipped)
+        print("{} flow-pinned-sentences: {} of {} present".format(
+            "FAIL" if missing else "PASS", len(FLOW_PINNED) - len(missing), len(FLOW_PINNED)))
+        failures.extend("flow-pinned-sentences: {} lacks {!r}".format(FLOW_MEMBER, s) for s in missing)
+        count += 1
+        present = [s for s in FLOW_PINNED if s not in missing]
+        blind = [s for s in present if _missing_pinned(_flat(shipped).replace(_flat(s), "")) != [s]]
+        print("{} flow-pinned-sentences-revert: {} of {} present red when dropped".format(
+            "FAIL" if blind else "PASS", len(present) - len(blind), len(present)))
+        failures.extend("flow-pinned-sentences-revert: dropping {!r} is not red".format(s) for s in blind)
         count += 1
         if compute_digest("1.0.0", []) != "sha256:" + _sha(b"opf.prompt-pack/v1\nversion 1.0.0\n"):
             failures.append("digest-definition")

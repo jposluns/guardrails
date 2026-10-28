@@ -38,7 +38,8 @@ register-unmanaged, repoint-consumer). The stage driver
 adds the plan-v2 apply-input gate, the one approval and the apply stage (spec 14.1): `opf adopt approve`
 re-proves a frozen plan from its own bytes, re-derives it over the live tree and prints the approval
 binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply` admits only that approved
-pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
+pair, persists both, beside the sealed planning inventory re-derivation reproves against the plan's
+inventory_digest, in the run's evidence bundle within the run's one base transaction, and dispatches
 every plan op through the dispatch table and then the driver's mandatory receipt stage (which mints the
 record-adoption row and assembles the receipt core), so while any plan op or the driver's mandatory
 receipt stage is unlanded, apply refuses before anything is written. Every op of the vocabulary has a
@@ -232,10 +233,13 @@ Leak-freedom under interrupt, or under an exception raised in those windows, is 
 finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
 has run, a real adoption's plant, render and receipt transactions refuse until the lease join lands;
-render-views composes create-only view publications through this journal (an occupied view destination
-refuses fail-closed in this slice; the spec 14.2 preserve-then-render write for a plan-enumerated
-occupying source composes with the file-ops slice), delegating only read-only planning and the U6 source
-gate to the render and check engines; the receipt core's content (files, approval,
+render-views composes create-only view publications through this journal, save that a destination whose
+plan-enumerated occupying source this same transaction archived is taken over by one write pinned to the
+archived bytes in place of that source's removal (ApplyOps.replace_vacated; the view keeps the source's
+mode bits, and any other occupied view destination refuses fail-closed), delegating only read-only
+planning and the U6 source gate to the render and check engines; the stage driver does not yet supply a
+render-views row (_DRIVER_UNSUPPLIED: it gathers no observations), so that takeover is reached only by
+direct dispatch, as in the self-test; the receipt core's content (files, approval,
 transaction ids, checks, probes) is the stage driver's to assemble, held here only to the shipped
 validator and the plan bindings adoption_record names; and the trust gate proves member bytes against the
 agreed release inventory, never the publisher's authenticity beyond it.
@@ -398,9 +402,14 @@ OPERATION = "adopt-apply"
 JOURNAL_REL = ".aiqt/adopt/journal"
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
-# The run's evidence-bundle members apply persists: the approved plan and its captured approval (spec 14.1).
+# The run's evidence-bundle members apply persists: the approved plan, its captured approval and the
+# sealed planning inventory the plan's inventory_digest binds (spec 14.1).
 PLAN_NAME = "plan.toml"
 APPROVAL_NAME = "approval.toml"
+# Not an evidence-inventory name (store.is_evidence_inventory_name), so the persisted copy is a listed
+# bundle member, never read as a bundle-root inventory; `inventory-planning.toml` would match that
+# pattern and be taken for a phase inventory.
+PLANNING_INVENTORY_NAME = "planning-inventory.toml"
 BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
 # The stage every plan op composes in during apply; the retirement stage follows a green completion check.
 APPLY_STAGE = "apply"
@@ -962,16 +971,18 @@ def _pinned_remove(rel, data, mode):
 
 class _Composition:
     """ONE transaction's whole composition state in one object: the ordered op list, the staged bytes,
-    the directory bookkeeping and the seal. ApplyOps reaches all four only through its one `_state`
-    reference, so publishing a fork's state is a single attribute store (ApplyOps._adopt)."""
+    the directory bookkeeping, the seal and the vacated map (each occupying path this transaction archived,
+    keyed to its pinned removal still in the op list). ApplyOps reaches all five only through its one
+    `_state` reference, so publishing a fork's state is a single attribute store (ApplyOps._adopt)."""
 
-    __slots__ = ("ops", "staged", "dirs", "sealed")
+    __slots__ = ("ops", "staged", "dirs", "sealed", "vacated")
 
-    def __init__(self, ops, staged, dirs, sealed):
+    def __init__(self, ops, staged, dirs, sealed, vacated):
         self.ops = ops
         self.staged = staged
         self.dirs = dirs
         self.sealed = sealed
+        self.vacated = vacated
 
 
 class ApplyOps:
@@ -979,8 +990,8 @@ class ApplyOps:
     against the live tree beneath `root_fd`: create-only publication, preserve-first archival, and a
     final inventory derived from the list itself. check_apply_ops re-proves every invariant over the
     finished list, so a hand-built list is held to the same rules. The composition state (ops, staged,
-    _dirs, sealed) is held in ONE _Composition behind the `_state` reference; the four names are
-    read-only views of it, so nothing rebinds one of them apart from the other three."""
+    _dirs, sealed, vacated) is held in ONE _Composition behind the `_state` reference; the five names are
+    read-only views of it, so nothing rebinds one of them apart from the other four."""
 
     def __init__(self, root_fd, run_id, phase=None, plan_digest=None):
         self.root_fd = root_fd
@@ -988,7 +999,7 @@ class ApplyOps:
         self.phase = phase
         self.plan_digest = plan_digest
         self.inventory = inventory_rel(run_id, phase)
-        self._state = _Composition([], {}, set(), False)
+        self._state = _Composition([], {}, set(), False, {})
         # A phase transaction's view of the run's COMMITTED base: the archive copies its INTENT published
         # ({path: content sha256}) and the mode each was created at ({path: mode}, the source's own mode),
         # set by run_adopt_transaction. And the source -> destination pairs this transaction relocates, each
@@ -1012,6 +1023,10 @@ class ApplyOps:
     @property
     def sealed(self):
         return self._state.sealed
+
+    @property
+    def vacated(self):
+        return self._state.vacated
 
     def _mkdirs(self, rel):
         parts = rel.split("/")[:-1]
@@ -1107,9 +1122,39 @@ class ApplyOps:
 
     def archive_occupying(self, source_path, plan_digest):
         """Resolve one occupied destination preserve-first (spec 14.2): the verified archive copy's create
-        op, then the pinned removal of the live source, in THIS transaction and in that order."""
+        op, then the pinned removal of the live source, in THIS transaction and in that order. The removal
+        is also recorded in `vacated`, so a later composer may take the path over (replace_vacated, which
+        swaps that removal for one pinned write at the same position); otherwise the removal stays."""
         data, mode = self.preserve(source_path, plan_digest)
-        self.ops.append(_pinned_remove(source_path, data, mode))
+        removal = _pinned_remove(source_path, data, mode)
+        self.ops.append(removal)
+        self.vacated[source_path] = removal
+
+    def replace_vacated(self, rel, data):
+        """Take over a path this transaction archived and vacated (archive_occupying) with new bytes (spec
+        14.2: after the archival the destination is an ordinary managed path). Its pending pinned removal
+        is REPLACED, at the same position in the op list and so still after the archive copy's create, by
+        one `write` pinned to the same source digest and mode: the pairing check_apply_ops admits, one op
+        per path, and a reversal (the journal's inverse of a write) that restores the source bytes. A
+        journal write installs bytes only, so the path keeps the source's mode bits and the poststate names
+        no mode. The removal's table is replaced in the list, never edited, so a fork's copied list never
+        changes a table its parent holds. A path not pending in `vacated`, a path already staged and
+        anything but bytes refuse, as does a removal not found exactly once in the list."""
+        if self.sealed:
+            raise AdoptApplyError("the transaction is sealed by its inventory; nothing may follow it")
+        if rel not in self.vacated or not isinstance(data, bytes) or rel in self.staged:
+            raise AdoptApplyError("replace_vacated needs a path this transaction archived and vacated and "
+                                  "has not yet rewritten, and bytes, not {!r} (fail-closed)".format(rel))
+        removal = self.vacated[rel]
+        at = [i for i, op in enumerate(self.ops) if op is removal]
+        if len(at) != 1:
+            raise AdoptApplyError("the pinned removal of {!r} is not in this transaction's op list exactly "
+                                  "once, so it cannot be replaced (fail-closed)".format(rel))
+        self.ops[at[0]] = dict(op="write", path=rel,
+                               poststate=dict(kind="file", **{"content-sha256": _sha256(data)}),
+                               **{"source-poststate": dict(removal["source-poststate"])})
+        self.staged[rel] = data
+        del self.vacated[rel]
 
     def _sealing_plan_digest(self):
         """The plan digest the sealed inventory's [adoption] identity carries (spec 4.2): the explicit
@@ -1171,22 +1216,26 @@ class ApplyOps:
 
     def _fork(self):
         """An isolated copy of this transaction's composition state (ops, staged bytes, directory
-        bookkeeping, seal) over the SAME live tree, so a multi-op pass composes into it and publishes
-        through _adopt only once the whole pass succeeds; a refusal part-way leaves this one untouched.
-        The op list, staged map and directory set are copied one level (the composing methods only
-        append to them, and staged values are immutable bytes); the seal is carried over, so a sealed
-        transaction's fork refuses every create exactly as the transaction itself does."""
+        bookkeeping, seal, vacated map) over the SAME live tree, so a multi-op pass composes into it and
+        publishes through _adopt only once the whole pass succeeds; a refusal part-way leaves this one
+        untouched. The op list, staged map, directory set and vacated map are copied one level: the
+        composing methods only append to them, save replace_vacated, which assigns one element of the
+        fork's own list and never edits the op table it replaces; staged values are immutable bytes; and
+        each vacated value is the very removal table the copied list holds, so replace_vacated finds it
+        there by identity. The seal is carried over, so a sealed transaction's fork refuses every create
+        exactly as the transaction itself does."""
         work = ApplyOps(self.root_fd, self.run_id, self.phase)
         state = self._state
-        work._state = _Composition(list(state.ops), dict(state.staged), set(state.dirs), state.sealed)
+        work._state = _Composition(list(state.ops), dict(state.staged), set(state.dirs), state.sealed,
+                                   dict(state.vacated))
         return work
 
     def _adopt(self, work):
         """Publish a fork's finished composition state as this transaction's own by ONE attribute store,
-        `self._state = work._state`: ops, staged bytes, directory bookkeeping and seal travel together
-        in the fork's _Composition, so this method has no instruction boundary at which the caller holds
-        part of the fork's state. An exception or interruption raised at any instruction up to that
-        store leaves the full entry state; one raised after it leaves the full new state (pinned by an
+        `self._state = work._state`: ops, staged bytes, directory bookkeeping, seal and vacated map travel
+        together in the fork's _Composition, so this method has no instruction boundary at which the
+        caller holds part of the fork's state. An exception or interruption raised at any instruction up to
+        that store leaves the full entry state; one raised after it leaves the full new state (pinned by an
         opcode-level fault at every instruction of this method and of compose_preservation, an
         AdoptApplyError and a KeyboardInterrupt alike). The store itself runs no Python code (no
         __setattr__ and no `_state` descriptor), so nothing can raise part-way through it; that is
@@ -1279,10 +1328,12 @@ def compose_preservation(ops, plan):
     whole pass as cannot-evaluate, never a silent skip. Then, in plan order, every live read and every op is
     composed into an ISOLATED copy of the caller's ops, staged bytes and directory bookkeeping
     (ApplyOps._fork): an OCCUPYING source is archived and then removed with a pinned remove, in that order
-    and in this transaction (ApplyOps.archive_occupying); a NON-OCCUPYING retire or migrate source is
-    preserved (its byte-identical archive copy created) and left frozen in place (ApplyOps.preserve), its
-    removal waiting for the green completion check; a kept source and a non-occupying move source take no
-    op here (a non-occupying move is preserved at its move destination by move-file, not by this pass).
+    and in this transaction (ApplyOps.archive_occupying), unless a later op rewrites the path through
+    ApplyOps.replace_vacated, which swaps that removal for one pinned write; a NON-OCCUPYING retire or
+    migrate source is preserved (its byte-identical archive copy created) and left frozen in place
+    (ApplyOps.preserve), its removal waiting for the green completion check; a kept source and a
+    non-occupying move source take no op here (a non-occupying move is preserved at its move destination
+    by move-file, not by this pass).
     Nor does a retire source, or an occupying move source, that a retire-file or move-file row of the
     plan's `ops` binds at its path and digest (_file_op_archived): that file op composes its archive copy in
     the apply stage, so the stage driver, which composes this pass and then every plan row into ONE
@@ -5283,12 +5334,14 @@ def _planned_views(res):
 
 def _render_views(op_row, context=None):
     """render-views (spec 14, 14.2): compose, into the transaction context["ops"] carries, the CREATE of
-    every declared view with the exact approved bytes, so the views land through the same journaled
-    adoption transaction, per-op preimage checks, reversal (the journal's rollback removes them from their
-    captured absent preimages) and adoption-journal lock as every other composing op. `context` carries
-    `product_root` (the transaction's own product root, bound to ops.root_fd by directory identity), `plan`
-    (its frozen `store` identity) and `observations` (the inert git-derived facts the git-aware caller
-    gathers, exactly as `opf render --write` does through _opf_observe.gather).
+    every declared view with the exact approved bytes (or, at a destination this transaction vacated, the
+    pinned WRITE below), so the views land through the same journaled adoption transaction, per-op
+    preimage checks, reversal (the journal's rollback removes a created view from its captured absent
+    preimage and writes a vacated source's bytes back) and adoption-journal lock as every other composing
+    op. `context` carries `product_root` (the transaction's own product root, bound to ops.root_fd by
+    directory identity), `plan` (its frozen `store` identity and its `sources` rows) and `observations`
+    (the inert git-derived facts the git-aware caller gathers, exactly as `opf render --write` does
+    through _opf_observe.gather).
 
     Preconditions, all before anything is composed: the plan's frozen DEFAULT store resolves at the product
     root, which is the transaction's own root; the row's members are EXACTLY the declared view destinations
@@ -5298,15 +5351,27 @@ def _render_views(op_row, context=None):
     view is rendered over a store whose source integrity is not sound; every authored deliverable this op
     does not own (C-CHANGELOG-GATES always, C-VERSION-FILE unless a VERSION view is planned) already
     passes, so an authored residual refuses with NOTHING written, never after a write; and every
-    destination is observed ABSENT, contained and no-follow. An occupied view destination refuses
-    fail-closed in this slice (spec 14.2: adopter content is never absorbed, deleted or overwritten; the
-    preserve-then-render write for a plan-enumerated occupying source composes with the file-ops slice).
-    The journal then captures each create's absent prestate under its lock and digest-verifies the written
-    poststate: a destination raced in between compose and that capture is refused there as a prestate
-    violation before the transaction's INTENT publishes (nothing opened), and the create itself is
-    exclusive and no-follow; an arbitrary concurrent writer is outside the journal's model. Every handler
-    refusal is CANNOT-EVALUATE and precedes any filesystem publication; the preconditions above refuse
-    before anything is composed, while one raised inside ApplyOps.create can leave context["ops"] partly
+    destination is observed ABSENT, contained and no-follow, or is VACATED: the plan's `sources` carry an
+    OCCUPYING row at exactly that path, and this same transaction has already archived that source
+    (ApplyOps.archive_occupying, from the preservation pass or a file op composed before this row), so its
+    pinned removal is still pending in the op list. Any other occupied view destination refuses
+    fail-closed (spec 14.2: adopter content is never absorbed, deleted or overwritten). A vacated
+    destination is taken over through ApplyOps.replace_vacated: ONE write, pinned to the archived source's
+    digest and mode, replaces that pending removal (one op per path), still after the verified archive
+    copy, and the journal's reversal of that write restores the source bytes. Spec 14.2 says the source is
+    removed from the live path; here its bytes are destroyed by that pinned write after the archive copy,
+    not by an unlink and a later create, a disclosed reading of that sentence. The rendered view keeps the
+    vacated source's mode bits, not FILE_MODE (a journal write installs bytes only), a disclosed residual
+    (git records only 644 or 755). The stage driver does not reach this handler yet: run_apply refuses a
+    render-views row for want of the observations it does not gather (_DRIVER_UNSUPPLIED), so this path
+    runs only under direct dispatch, as in the self-test, until the driver gathers them.
+    The journal then captures each op's prestate under its lock (a create's absence, a takeover write's
+    pinned source bytes and mode) and digest-verifies the written poststate: a destination raced in
+    between compose and that capture is refused there as a prestate violation before the transaction's
+    INTENT publishes (nothing opened), and the create itself is exclusive and no-follow; an arbitrary
+    concurrent writer is outside the journal's model. Every handler refusal is CANNOT-EVALUATE and
+    precedes any filesystem publication; the preconditions above refuse before anything is composed,
+    while one raised inside ApplyOps.create or ApplyOps.replace_vacated can leave context["ops"] partly
     composed, so the compose callable MUST raise on any refusing verdict, discarding the whole transaction
     before it opens (run_adopt_transaction then writes nothing)."""
     try:
@@ -5364,12 +5429,22 @@ def _render_views_compose(op_row, context):
                               "own declared views and repairs nothing authored; nothing composed".format(
                                   ", ".join(residual)))
     occupied = sorted(p for p in planned if observe_live(ops.root_fd, p)["kind"] != "absent")
+    # a destination is vacated only when the plan enumerates its occupant as an occupying source AND this
+    # transaction already archived it (its pinned removal pending); every other occupied one refuses
+    sources = plan.get("sources") if isinstance(plan.get("sources"), list) else []
+    enumerated = set(row["path"] for row in sources if isinstance(row, dict)
+                     and isinstance(row.get("path"), str) and row.get("occupying") is True)
+    vacated = set(p for p in occupied if p in ops.vacated and p in enumerated)
+    occupied = [p for p in occupied if p not in vacated]
     if occupied:
         raise AdoptApplyError("view destination(s) {} are occupied; adopter content is never absorbed or "
                               "overwritten (spec 14.2), and an occupying source routes to its preserve-first "
                               "disposition with the file ops; nothing composed".format(", ".join(occupied)))
     for path in sorted(planned):
-        ops.create(path, planned[path])
+        if path in vacated:
+            ops.replace_vacated(path, planned[path])
+        else:
+            ops.create(path, planned[path])
 
 
 def event_digest(event):
@@ -5768,6 +5843,13 @@ def approval_rel(run_id):
     return evidence_home_rel(run_id) + "/" + APPROVAL_NAME
 
 
+def planning_inventory_rel(run_id):
+    """`<bundle>/planning-inventory.toml`: the sealed planning inventory the plan's inventory_digest binds,
+    which apply persists beside the plan and approval after re-derivation reproves it (rederive_bound_or_refuse);
+    the completion evaluator's check 2 reads this copy (spec 14.1)."""
+    return evidence_home_rel(run_id) + "/" + PLANNING_INVENTORY_NAME
+
+
 def require_clean_journal(product_root):
     """The stage driver's reconcile-first gate for plan, approve and apply alike, read-only: investigation
     does not read the adoption journal, so a stage over an interrupted transaction or a held lock refuses
@@ -5969,7 +6051,7 @@ def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None
     plan's source rows (so its claims span every file-op row), the registration handler to ONE
     RegistrationContext over the plan's frozen store identity, each keep source's approved digest (so a
     registration chain extends link by link) and `manifest_digest`, the store manifest digest of the
-    observation rederive_or_refuse re-derived (plan-bound: the byte-identical plan's inventory_digest seals
+    observation rederive_bound_or_refuse re-derived (plan-bound: the byte-identical plan's inventory_digest seals
     it; None binds nothing, so a live manifest refuses), and the enable-hook handler to a HookContext. Every other
     handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`).
     No typed context carries a value the plan does not bind: the OpContext holds no planned bytes, the
@@ -6141,7 +6223,21 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
     product, decisions, ops, bindings. Returns the store manifest digest of the re-derived observation
     (resolution.manifest_digest: a sha256 digest, or empty when no store resolved), plan-bound because the
     byte-identical plan's inventory_digest seals that observation; an observation that carries none in
-    that shape refuses."""
+    that shape refuses. The re-derivation is rederive_bound_or_refuse's, so the sealed planning inventory
+    is proved here as well and an inventory that does not seal to the plan refuses approve exactly as it
+    refuses apply; run_apply takes both values from rederive_bound_or_refuse itself."""
+    return rederive_bound_or_refuse(product_root, plan_doc, plan_bytes, worksheet)[0]
+
+
+def rederive_bound_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
+    """The re-derivation rederive_or_refuse states (its docstring is the freshness rule), returning the two
+    values the re-derived, byte-identical plan binds: (manifest_digest, inventory_bytes). `inventory_bytes`
+    is the sealed planning inventory the re-run planner produced, proved by the completion evaluator's own
+    rule (pop the digest field, re-seal the re-emitted body) to seal its own bytes and to equal the plan's
+    bound inventory_digest, so apply can persist that copy in the run's evidence bundle (check 2 reads it);
+    re-planning that returns no inventory, or one that does not seal to the plan, refuses before anything
+    is written and before the observation is read. `manifest_digest` is the store manifest digest of the
+    re-derived observation, rederive_or_refuse's return, which the driver's RegistrationContext binds."""
     import _opf_adopt_plan as planner
     observed = observe_revision(product_root)
     if observed != plan_doc["revision"]:
@@ -6167,6 +6263,25 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
         raise AdoptApplyError("re-planning from the worksheet over the live tree freezes a different plan than "
                               "{}: a bound item drifted, so a fresh plan with its own single approval is the "
                               "remedy (spec 14.1, fail-closed)".format(plan_doc["plan_digest"]))
+    inventory_bytes = res.inventory
+    if not isinstance(inventory_bytes, bytes):
+        raise AdoptApplyError("re-planning returned no planning inventory beside the byte-identical plan; "
+                              "apply persists the sealed planning inventory, so it refuses (fail-closed)")
+    inventory_doc = _canonical_toml(inventory_bytes, "the re-derived planning inventory")
+    body = dict(inventory_doc)
+    claimed = body.pop("inventory_digest", None)
+    try:
+        sealed = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    except EmitError as exc:
+        raise AdoptApplyError("the re-derived planning inventory cannot be re-sealed ({}); "
+                              "fail-closed".format(exc))
+    if claimed != sealed:
+        raise AdoptApplyError("the re-derived planning inventory's inventory_digest does not seal its own "
+                              "bytes; fail-closed")
+    if claimed != plan_doc["inventory_digest"]:
+        raise AdoptApplyError("the re-derived planning inventory {!r} is not the one the plan binds ({!r}); "
+                              "any bound-item drift refuses into a fresh plan with its own single approval "
+                              "(spec 14.1, fail-closed)".format(claimed, plan_doc["inventory_digest"]))
     try:
         digest = tomllib.loads(res.observation.decode("utf-8"))["resolution"]["manifest_digest"]
     except (AttributeError, KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError,
@@ -6176,7 +6291,7 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
     if not isinstance(digest, str) or (digest != "" and not schema._is_digest(digest)):
         raise AdoptApplyError("the re-derived observation's store manifest digest {!r} is neither empty nor a "
                               "sha256 digest; fail-closed".format(digest))
-    return digest
+    return digest, inventory_bytes
 
 
 def capture_approval(product_root, plan_bytes, worksheet, actor, now):
@@ -6212,14 +6327,16 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     apply_plan (the approval binds this plan's plan_digest and inventory_digest and follows its plan);
     refuse over a non-clean adoption journal; refuse a run already applied (_require_unapplied, replay
     admission ahead of freshness); re-derive the plan over the live tree and its observed revision
-    (rederive_or_refuse); refuse while any plan op's slice, or the driver's mandatory receipt stage
-    (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
+    (rederive_bound_or_refuse, which returns the store manifest digest the RegistrationContext binds and
+    the sealed planning inventory the bundle persists); refuse while any plan op's slice, or the driver's
+    mandatory receipt stage (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
     construction, never half of it; and refuse a row whose handler needs what this driver cannot supply
     (_DRIVER_UNSUPPLIED: a value neither the sealed plan nor its approval carries, or init-store's own
     sequencing), naming it, never composing the row over a default.
 
-    Composition is the driver's, and so are its rules. One compose function stages the plan and approval
-    bytes in the run's evidence bundle, composes the preservation pass (compose_preservation: the archive
+    Composition is the driver's, and so are its rules. One compose function stages the plan, approval and
+    sealed planning-inventory bytes (the inventory rederive_bound_or_refuse returned, proved to seal to the
+    plan's inventory_digest) in the run's evidence bundle, composes the preservation pass (compose_preservation: the archive
     copy of each source requiring one that no plan file-op row archives, a migrate source's), dispatches
     EVERY plan op in plan
     order in the apply stage, each with the context its handler requires, built from the sealed plan, its
@@ -6254,7 +6371,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     run_id = plan_doc["run_id"]
     require_clean_journal(product_root)
     _require_unapplied(product_root, run_id)
-    manifest_digest = rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
+    manifest_digest, inventory_bytes = rederive_bound_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     rows = list(plan_doc["ops"])
     unlanded = []
     ops_unlanded = sorted(set(row["op"] for row in rows
@@ -6277,6 +6394,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
         with _composing():
             ops.create(plan_rel(run_id), plan_bytes)
             ops.create(approval_rel(run_id), approval_bytes)
+            ops.create(planning_inventory_rel(run_id), inventory_bytes)
             compose_preservation(ops, plan_doc)
             context, typed = _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest)
             for i, row in enumerate(rows):
@@ -11876,8 +11994,8 @@ def _self_test_checks():
 
     def ops_state(ops):
         """A copy of one ApplyOps's composition state (each op table copied one level): ops, staged bytes,
-        directory bookkeeping, seal."""
-        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed
+        directory bookkeeping, seal, vacated map."""
+        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed, dict(ops.vacated)
 
     def entry_compose(root, plan, sealed_entry=False, run_pass=attempt):
         """(accounting, refusal, entry state, final state) of the pass, run through `run_pass`, over an
@@ -12208,6 +12326,8 @@ def _self_test_checks():
               acct is None and entry[3] is True
               and "the transaction is sealed by its inventory; nothing may follow it" in (why or "")
               and final == entry and snapshot(root) == before)
+    # 9c: the takeover of a vacated path (ApplyOps.replace_vacated), see _replace_vacated_self_test.
+    _replace_vacated_self_test(check)
     # retire-file has landed with the file-ops slice (handlers-executable-exactly-the-file-ops), so this
     # vector no longer pins it to the refusing handler: the preservation pass did not enable it and is not
     # its route; it executes only through _execute_file_op, and a bare row still refuses for want of its
@@ -12312,7 +12432,15 @@ def _self_test_checks():
 
     def _freeze(root, sheet, nonce="0123456789abcdef"):
         res = planner.plan(root, now=now, run_nonce=nonce, **_copy.deepcopy(sheet))
-        return res.plan if res.status == VALID else None
+        return (res.plan, res.inventory) if res.status == VALID else (None, None)
+
+    def _inventory_seal(data):
+        """The planning inventory's inventory_digest, but only when it seals its own bytes (the evaluator's
+        check-2 rule: pop the digest field, re-seal the re-emitted body); None otherwise."""
+        doc = tomllib.loads(data.decode("utf-8"))
+        body = dict((k, v) for k, v in doc.items() if k != "inventory_digest")
+        sealed = _digest(emit_checked(body).encode("utf-8"))
+        return sealed if doc.get("inventory_digest") == sealed else None
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = Path(temp).resolve()
@@ -12321,9 +12449,9 @@ def _self_test_checks():
         head = _selftest_git_commit(root)
         check("driver-fixture-git-revision", head is not None and attempt(observe_revision, root)[0] == head)
         sheet = _sheet(root, head)
-        plan_bytes = _freeze(root, sheet)
-        check("driver-fixture-plan-frozen", plan_bytes is not None)
-        plan_bytes = plan_bytes or b""
+        plan_bytes, inventory_bytes = _freeze(root, sheet)
+        check("driver-fixture-plan-frozen", plan_bytes is not None and inventory_bytes is not None)
+        plan_bytes, inventory_bytes = plan_bytes or b"", inventory_bytes or b""
         plan_doc, _err = attempt(frozen_plan, plan_bytes)
         check("driver-frozen-plan-reproved", isinstance(plan_doc, dict)
               and plan_doc == tomllib.loads(plan_bytes.decode("utf-8")))
@@ -12348,6 +12476,50 @@ def _self_test_checks():
               and approval_doc.get("inventory_digest") == plan_doc.get("inventory_digest")
               and approval_doc.get("approved_at") == "2026-09-17T12:00:00Z")
         check("driver-approve-writes-nothing", _snapshot(root) == before)
+        # re-derivation returns the sealed planning inventory the plan's inventory_digest binds, for apply
+        # to persist in the run's bundle, beside the store manifest digest rederive_or_refuse returns, empty
+        # at this NOT-ADOPTED root where no store resolves (red if the inventory is dropped from the pair).
+        rederived, err = attempt(rederive_bound_or_refuse, root, plan_doc, plan_bytes, sheet)
+        digest_only, err_digest = attempt(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+        check("rederive-returns-sealed-inventory", err is None and err_digest is None
+              and rederived == (digest_only, inventory_bytes) and digest_only == ""
+              and _inventory_seal(inventory_bytes) == plan_doc["inventory_digest"])
+        # the persisted copy's name is a listed bundle member, never an evidence-inventory name (red if
+        # renamed to a name the bundle-root inventory pattern matches).
+        check("planning-inventory-name-is-bundle-member",
+              not store.is_evidence_inventory_name(PLANNING_INVENTORY_NAME)
+              and _evidence_eligible(frid, planning_inventory_rel(frid))
+              and not _bundle_root_inventory(frid, planning_inventory_rel(frid)))
+        # the byte-identical plan beside an inventory that does not seal to the plan's inventory_digest
+        # refuses, in approve's re-derivation and before apply writes anything (red with the plan-binding
+        # comparison removed): the forged inventory seals its own bytes, so only the plan binding refuses it.
+        forged_doc = tomllib.loads(inventory_bytes.decode("utf-8"))
+        forged_doc.pop("inventory_digest", None)
+        forged_doc["decisions"] = list(forged_doc["decisions"]) + [dict(
+            path="zz.md", disposition="keep", actor="forger")]
+        forged = emit_checked(dict(forged_doc, inventory_digest=_digest(
+            emit_checked(forged_doc).encode("utf-8")))).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=forged)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-sealed-to-plan",
+              "is not the one the plan binds" in (err_direct or "")
+              and "is not the one the plan binds" in (err_apply or "") and _snapshot(root) == before)
+        # the same changed body carrying the plan's APPROVED inventory_digest is caught only by the
+        # self-seal comparison (the kept digest still satisfies the plan binding), so it refuses in
+        # re-derivation, approve and apply, with the tree unchanged (red with only the self-seal
+        # comparison removed).
+        unsealed = emit_checked(dict(forged_doc, inventory_digest=plan_doc["inventory_digest"])).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=unsealed)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_approve = refusal(capture_approval, root, plan_bytes, sheet, "adopter", now)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-self-sealed",
+              "does not seal its own bytes" in (err_direct or "")
+              and "does not seal its own bytes" in (err_approve or "")
+              and "does not seal its own bytes" in (err_apply or "") and _snapshot(root) == before)
         check("driver-approve-multiline-actor-refused", "actor" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
         # the approval follows its plan: an approval instant before the plan's created_at is refused.
@@ -12422,7 +12594,7 @@ def _self_test_checks():
               and "mandatory receipt stage" in (err or "") and "retire-file" not in (err or "")
               and _bytes(root / "legacy.md") == b"legacy rules\n", observed=err)
         check("driver-apply-unlanded-writes-nothing", _snapshot(root) == before)
-        other_plan = _freeze(root, sheet, nonce="fedcba9876543210") or b""
+        other_plan = _freeze(root, sheet, nonce="fedcba9876543210")[0] or b""
         check("driver-apply-approval-binding-flip-refused", "does not bind" in
               (refusal(run_apply, root, other_plan, approval_bytes, sheet) or ""))
         check("driver-apply-edited-approval-refused", "canonical emitted form" in
@@ -12759,10 +12931,16 @@ def _self_test_checks():
               and _bytes(root / archive_rel(frid, "legacy.md")) == b"legacy rules\n")
         check("driver-apply-persists-plan-and-approval",
               _bytes(root / plan_rel(frid)) == plan_bytes and _bytes(root / approval_rel(frid)) == approval_bytes)
+        # the bundle copy is the planner's own sealed inventory for this worksheet, sealing to the plan's
+        # bound inventory_digest (red without the compose line that persists it).
+        check("driver-apply-persists-plan-approval-and-planning-inventory",
+              _bytes(root / planning_inventory_rel(frid)) == inventory_bytes
+              and _inventory_seal(inventory_bytes) == plan_doc["inventory_digest"])
         bundle_rows = tomllib.loads((_bytes(root / inventory_rel(frid)) or b"").decode("utf-8")).get("file", [])
         check("driver-apply-bundle-verifies", verify_bundle(root, frid).status == VALID
               and sorted(r["path"] for r in bundle_rows)
-              == sorted([plan_rel(frid), approval_rel(frid), archive_rel(frid, "legacy.md")]))
+              == sorted([plan_rel(frid), approval_rel(frid), planning_inventory_rel(frid),
+                         archive_rel(frid, "legacy.md")]))
         # one approval, one apply: the second apply refuses on that rule itself, ahead of the freshness
         # refusal its own first apply would otherwise trigger, with the evidence unchanged.
         applied = _snapshot(root)
@@ -12818,7 +12996,7 @@ def _self_test_checks():
         sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture"),
                                          dict(path="legacy.md", disposition="retire", actor="fixture"),
                                          dict(path="old.md", disposition="migrate", actor="fixture")], hook_op)
-        typed_plan = _freeze(root, sheet) or b""
+        typed_plan = _freeze(root, sheet)[0] or b""
         typed_doc = tomllib.loads(typed_plan.decode("utf-8")) if typed_plan else dict(
             run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
         trid = typed_doc["run_id"]
@@ -12988,8 +13166,8 @@ def _self_test_checks():
               and all(after.get(rel) == payload for rel, payload in typed_files.items())
               and verify_bundle(root, trid).status == VALID
               and sorted(r["path"] for r in typed_rows)
-              == sorted([plan_rel(trid), approval_rel(trid), retire_copy_rel, migrate_copy_rel,
-                         archive_rel(trid, hook_rel)]))
+              == sorted([plan_rel(trid), approval_rel(trid), planning_inventory_rel(trid), retire_copy_rel,
+                         migrate_copy_rel, archive_rel(trid, hook_rel)]))
 
     # the unsupplied values are keyed by the handler that needs them, each named: red against a
     # _DRIVER_UNSUPPLIED missing any one entry (for example the init-store entry).
@@ -13024,7 +13202,7 @@ def _self_test_checks():
         head = _selftest_git_commit(root)
         sheet = _sheet_with(root, head, [dict(path=".working/TODO.md", disposition="move", actor="fixture"),
                                          dict(path="legacy/MOVE.md", disposition="move", actor="fixture")])
-        move_plan = _freeze(root, sheet) or b""
+        move_plan = _freeze(root, sheet)[0] or b""
         move_doc = tomllib.loads(move_plan.decode("utf-8")) if move_plan else dict(
             run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
         mrid = move_doc["run_id"]
@@ -13763,21 +13941,42 @@ def _self_test_checks():
     # the driver binds the digest re-derivation returns: rederive_or_refuse hands back the re-derived
     # observation's manifest digest (red against a re-derivation that returns nothing), refuses one in
     # neither accepted shape, and _driver_contexts carries it into the RegistrationContext (red against a
-    # context built without it, which binds nothing).
-    rederive_doc = dict(revision="a" * 40, run_id=rid, plan_digest=_D_ZERO)
+    # context built without it, which binds nothing). Re-planning also returns the sealed planning inventory
+    # the plan's inventory_digest binds, without which re-derivation refuses (apply persists it), so the
+    # stand-in result carries one sealed to the stand-in plan's inventory_digest: rederive_bound_or_refuse
+    # returns it beside the digest, and the same result with no inventory refuses before the observation
+    # is read (red against a re-derivation that admits a missing inventory).
+    rederive_body = dict(format="opf.adoption.planning-inventory/v1", run_id=rid)
+    rederive_seal = plan_digest(emit_checked(rederive_body).encode("utf-8"))
+    rederive_inventory = emit_checked(dict(rederive_body, inventory_digest=rederive_seal)).encode("utf-8")
+    rederive_doc = dict(revision="a" * 40, run_id=rid, plan_digest=_D_ZERO, inventory_digest=rederive_seal)
     rederive_sheet = dict.fromkeys(("sources", "targets", "expected_observation_digest", "product", "decisions",
                                     "ops", "bindings"))
     for label, observation, want in (
             ("store", emit_checked(dict(resolution=dict(manifest_digest=plan_digest(b"m\n")))), plan_digest(b"m\n")),
             ("no-store", emit_checked(dict(resolution=dict(manifest_digest=""))), ""),
             ("malformed", emit_checked(dict(resolution=dict(manifest_digest="sha256:nope"))), None)):
-        result = _opf_adopt_plan.AdoptResult(VALID, observation=observation.encode("utf-8"), plan=b"frozen\n")
+        result = _opf_adopt_plan.AdoptResult(VALID, observation=observation.encode("utf-8"), plan=b"frozen\n",
+                                             inventory=rederive_inventory)
         with mock.patch.dict(globals(), observe_revision=lambda product_root: "a" * 40), \
                 mock.patch.object(_opf_adopt_plan, "plan", lambda *args, **kwargs: result):
             got, why = attempt(rederive_or_refuse, "unused-root", rederive_doc, b"frozen\n", rederive_sheet)
+            got_pair, why_pair = attempt(rederive_bound_or_refuse, "unused-root", rederive_doc, b"frozen\n",
+                                         rederive_sheet)
         check("driver-rederive-returns-manifest-digest-{}".format(label),
               (got, why is None) == (want, True) if want is not None
               else got is None and "neither empty nor a sha256 digest" in (why or ""), observed=(got, why))
+        check("driver-rederive-bound-returns-digest-and-inventory-{}".format(label),
+              (got_pair, why_pair is None) == ((want, rederive_inventory), True) if want is not None
+              else got_pair is None and "neither empty nor a sha256 digest" in (why_pair or ""),
+              observed=(got_pair, why_pair))
+    result = _opf_adopt_plan.AdoptResult(VALID, observation=emit_checked(dict(resolution=dict(
+        manifest_digest=plan_digest(b"m\n")))).encode("utf-8"), plan=b"frozen\n")
+    with mock.patch.dict(globals(), observe_revision=lambda product_root: "a" * 40), \
+            mock.patch.object(_opf_adopt_plan, "plan", lambda *args, **kwargs: result):
+        why = refusal(rederive_or_refuse, "unused-root", rederive_doc, b"frozen\n", rederive_sheet)
+    check("driver-rederive-refuses-without-planning-inventory",
+          "returned no planning inventory" in (why or ""), observed=why)
     _table, typed_reg = _driver_contexts(None, dict(sources=[], store=reg_store), None, "unused-root",
                                          plan_digest(b"m\n"))
     check("driver-registration-context-carries-manifest-digest",
@@ -13794,7 +13993,7 @@ def _self_test_checks():
         bound_sheet = _sheet_with(root, bound_head, [dict(path=keep, disposition="keep", actor="fixture")])
         # the store resolves, so the plan takes no init-store row
         bound_sheet["ops"] = [row for row in bound_sheet["ops"] if row["op"] != "init-store"]
-        bound_plan = _freeze(root, bound_sheet) or b""
+        bound_plan = _freeze(root, bound_sheet)[0] or b""
         bound_approval = attempt(capture_approval, root, bound_plan, bound_sheet, "adopter", now)[0] or b""
         bound_before = _snapshot(root)
         bound_built = []
@@ -17671,6 +17870,168 @@ def _init_store_git_checks(check, ctx, refused):
               and stage_leftovers(root) == [] and len(op_ids(root)) == 1)
 
 
+def _replace_vacated_self_test(check):
+    """ApplyOps.replace_vacated over the shell's own throwaway fixture (_st_fixture, where no store
+    resolves): a path this transaction archived and vacated (archive_occupying) is taken over by ONE write
+    pinned to the archived bytes, in place of its pending removal. The takeover commits, a path never
+    vacated and a second takeover of one path refuse, a bare archival keeps its op list (copy, then pinned
+    removal), a fork's takeover leaves the caller's state untouched, and an interruption after the write
+    landed leaves an open transaction the explicit reconcile rolls back byte-exact."""
+    import tempfile
+    from unittest import mock
+    now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    rid = mint_run_id(now, "0123456789abcdef")
+    todo, taken = ".working/TODO.md", b"rendered over the vacated path\n"
+    todo_copy = archive_rel(rid, todo)
+
+    class _Interrupt(Exception):
+        pass
+
+    def digest(payload):
+        return "sha256:" + _sha256(payload)
+
+    def snapshot(root):
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob("*"))
+                if p.is_file() and not p.is_symlink() and not str(p.relative_to(root)).startswith(".aiqt/")}
+
+    def state(ops):
+        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed, dict(ops.vacated)
+
+    def attempt(fn, *args):
+        """(result, None), or (None, refusal text); a raw escape fails the vector, never the harness."""
+        try:
+            return fn(*args), None
+        except AdoptApplyError as exc:
+            return None, str(exc)
+        except Exception as exc:  # noqa: BLE001  a raw escape fails this vector, never the harness
+            return None, "raw {}: {}".format(type(exc).__name__, exc)
+
+    def bare(root, compose):
+        """(refusal text, composed ops, staged bytes, vacated map) of `compose` over a bare ApplyOps."""
+        root_fd = _open_product_root(root)
+        try:
+            ops = ApplyOps(root_fd, rid)
+            why = attempt(compose, ops)[1]
+            return why, [dict(op) for op in ops.ops], dict(ops.staged), dict(ops.vacated)
+        finally:
+            store._close_fd_exc_safe(root_fd)
+
+    def kinds(ops_list):
+        return [(op["op"], op["path"]) for op in ops_list if op["op"] != "mkdir"]
+
+    # the takeover commits through the shell: the archive copy holds the source's bytes, the path holds the
+    # new bytes, and the one op at the path is the write, after the copy, pinned to the archived digest.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        seen = []
+
+        def take_over(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            ops.replace_vacated(todo, taken)
+            seen.append(state(ops))
+        txn, why = attempt(_st_run_adopt_transaction, root, rid, take_over)
+        after = snapshot(root)
+        composed = seen[0] if seen else ([], {}, set(), False, {})
+        pins = [op.get("source-poststate", {}).get("sha256") for op in composed[0] if op["path"] == todo]
+        check("apply-replace-vacated-write-commits",
+              txn == rid and after.get(todo) == taken and after.get(todo_copy) == files[todo]
+              and kinds(composed[0]) == [("create", plan_rel(rid)), ("create", todo_copy), ("write", todo)]
+              and pins == [_sha256(files[todo])] and composed[1].get(todo) == taken and composed[4] == {}
+              and verify_bundle(root, rid).status == store.VALID, observed=why)
+
+    # a path this transaction never vacated (a live source no archival composed), and a second takeover of a
+    # vacated path, each refuse by the takeover's own rule, the first with nothing composed.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        before = snapshot(root)
+        why, composed, staged, vacated = bare(root, lambda ops: ops.replace_vacated("legacy/RULES.md", taken))
+        check("apply-replace-vacated-unvacated-refused",
+              "replace_vacated needs" in (why or "") and composed == [] and staged == {} and vacated == {}
+              and snapshot(root) == before, observed=why)
+
+        def twice(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            ops.replace_vacated(todo, taken)
+            ops.replace_vacated(todo, b"a second takeover\n")
+        why, composed, staged, vacated = bare(root, twice)
+        check("apply-replace-vacated-twice-refused",
+              "replace_vacated needs" in (why or "") and staged.get(todo) == taken and vacated == {}
+              and kinds(composed) == [("create", todo_copy), ("write", todo)] and snapshot(root) == before,
+              observed=why)
+
+    # a bare archival is unchanged by the takeover's bookkeeping: copy, then the pinned removal, which the
+    # vacated map names by identity, and the source is gone once the transaction commits.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        seen = []
+
+        def archive_only(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            seen.append((state(ops), ops.vacated.get(todo) is ops.ops[-1]))
+        txn, why = attempt(_st_run_adopt_transaction, root, rid, archive_only)
+        after = snapshot(root)
+        composed, same = seen[0] if seen else (([], {}, set(), False, {}), False)
+        check("apply-unreplaced-vacated-still-removed",
+              txn == rid and kinds(composed[0]) == [("create", plan_rel(rid)), ("create", todo_copy),
+                                                    ("remove", todo)]
+              and same and list(composed[4]) == [todo] and todo not in after
+              and after.get(todo_copy) == files[todo], observed=why)
+
+    # a takeover composed in a fork leaves the caller's ops, staged bytes, directories, seal and vacated map
+    # exactly as they were, the caller's removal table included (it is replaced in the fork's list, never
+    # edited), while the fork holds the write; the fork is then discarded.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        seen = []
+
+        def forked(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            removal, entry = ops.ops[-1], state(ops)
+            work = ops._fork()
+            work.replace_vacated(todo, taken)
+            seen.append((entry == state(ops) and ops.ops[-1] is removal and ops.vacated.get(todo) is removal,
+                         kinds(work.ops), dict(work.vacated)))
+        why = bare(root, forked)[0]
+        isolated, fork_ops, fork_vacated = seen[0] if seen else (False, [], None)
+        check("apply-replace-vacated-fork-isolated",
+              why is None and isolated and fork_ops == [("create", todo_copy), ("write", todo)]
+              and fork_vacated == {}, observed=why)
+
+    # an interruption after the takeover's write landed (the journal's kill-point seam) leaves an open
+    # transaction, which reconcile(), working from the journal alone, rolls back to the byte-identical source.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        before = snapshot(root)
+
+        def take_over_only(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            ops.replace_vacated(todo, taken)
+
+        def written(name):
+            live = root / todo
+            if name.startswith("after-apply-") and live.is_file() and live.read_bytes() == taken:
+                raise _Interrupt(name)
+        interrupted, why, left = False, None, None
+        with mock.patch.object(_journal, "_kill_point", written):
+            try:
+                _st_run_adopt_transaction(root, rid, take_over_only)
+            except _Interrupt:
+                interrupted = True
+            except AdoptApplyError as exc:
+                why = str(exc)
+        if interrupted:
+            jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+            try:
+                left = _journal.classify_state(jr_fd, _journal_root(root) / rid)
+            finally:
+                _journal._close_fd_quietly(jr_fd)
+        with mock.patch.object(store, "resolve_store", side_effect=AssertionError("reconcile resolved")):
+            outcomes = attempt(reconcile, root)[0] or []
+        check("apply-replace-vacated-kill-reconciles",
+              interrupted and left == "open" and (rid, "rolled-back") in outcomes and snapshot(root) == before
+              and _st_lock_free(root), observed=why)
+
+
 def _finish_ops_self_test(check):
     """Slice 5: plant-governance, record-adoption and render-views. The two composing ops run through the
     journaled shell over throwaway NOT-ADOPTED fixtures; render-views runs over a resolvable store built from
@@ -18107,6 +18468,80 @@ def _finish_ops_self_test(check):
         check("render-views-occupied-destination-preserved",
               txn is None and "are occupied; adopter content is never absorbed" in (why or "")
               and (root / views[0]).read_bytes() == adopter and snapshot(root) == before)
+
+        # the spec 14.2 takeover: the same adopter file, enumerated by the plan as an OCCUPYING source and
+        # archived earlier in the SAME transaction (ApplyOps.archive_occupying, as the preservation pass or a
+        # file op composes it before this row), is rendered through ONE write pinned to the archived bytes in
+        # place of the source's pending removal: one op per path, after the verified archive copy. The view
+        # keeps the source's mode bits (a journal write installs bytes only), the disclosed residual, pinned.
+        def vacated_plan(occupying=True):
+            return seal(dict(plan, sources=[dict(path=views[0], digest="sha256:" + _sha256(adopter),
+                                                 disposition="retire", occupying=occupying,
+                                                 preservation=archive_rel(rid, views[0]))]))
+
+        def takeover(name, vplan, archive=True, patch=None):
+            """(root, prestate, transaction name, refusal text, composed ops) of one base transaction over an
+            adopter file at views[0] (mode 0640): stage `vplan`, archive that file when `archive`, render."""
+            root = built_store(temp, name)
+            (root / views[0]).write_bytes(adopter)
+            os.chmod(root / views[0], 0o640)
+            before, seen = snapshot(root), []
+
+            def compose(ops):
+                ops.create(plan_rel(rid), emit_checked(vplan).encode("utf-8"))
+                if archive:
+                    ops.archive_occupying(views[0], "sha256:" + _sha256(adopter))
+                composer([row], **rctx(root, plan=vplan))(ops)
+                seen.append([dict(op) for op in ops.ops])
+            with lease_stand_in(), (patch or contextlib.nullcontext()):
+                try:
+                    txn, why = run_adopt_transaction(root, rid, compose, None, vplan["plan_digest"]), None
+                except AdoptApplyError as exc:
+                    txn, why = None, str(exc)
+            return root, before, txn, why, (seen[0] if seen else [])
+
+        vplan, copy_rel = vacated_plan(), archive_rel(rid, views[0])
+        root, before, txn, why, composed = takeover("vacated", vplan)
+        after = snapshot(root)
+        at = [i for i, op in enumerate(composed) if op["path"] == views[0]]
+        copied = [i for i, op in enumerate(composed) if op["op"] == "create" and op["path"] == copy_rel]
+        write = composed[at[0]] if len(at) == 1 else {}
+        check("render-views-vacated-destination-rendered",
+              txn == rid and why is None and all(after.get(v) == rendered.get(v) for v in views)
+              and after.get(copy_rel) == adopter and write.get("op") == "write" and len(copied) == 1
+              and copied[0] < at[0] and write.get("source-poststate", {}).get("sha256") == _sha256(adopter)
+              and "mode" not in write.get("poststate", {}) and verify_bundle(root, rid).status == valid
+              and set(after) - set(before) == (set(views) - {views[0]}) | {plan_rel(rid), inventory_rel(rid),
+                                                                          copy_rel}, observed=why)
+        check("render-views-vacated-view-keeps-source-mode",
+              txn == rid and stat.S_IMODE(os.stat(root / views[0]).st_mode) == 0o640)
+        # an injected failure at the final op rolls the takeover back: the journal's inverse of the write
+        # restores the source's bytes (and the archive copy's create is undone), the exact prestate.
+        abort = mock.patch.object(_journal, "_verify_staged_digest", failing_inventory)
+        root, before, txn, why, _composed = takeover("vacated-abort", vplan, patch=abort)
+        check("render-views-vacated-abort-restores-source",
+              txn is None and "rolled back" in (why or "") and snapshot(root) == before
+              and (root / views[0]).read_bytes() == adopter
+              and stat.S_IMODE(os.stat(root / views[0]).st_mode) == 0o640, observed=why)
+        # no archival in this transaction, though the plan enumerates the occupying source: refused, untouched.
+        root, before, txn, why, _composed = takeover("vacated-unarchived", vplan, archive=False)
+        check("render-views-occupied-without-archive-refused",
+              txn is None and "are occupied; adopter content is never absorbed" in (why or "")
+              and snapshot(root) == before, observed=why)
+        # archived, but the plan's source row is not occupying: the vacated test is bound to the plan too.
+        root, before, txn, why, _composed = takeover("vacated-unplanned", vacated_plan(occupying=False))
+        check("render-views-vacated-unplanned-source-refused",
+              txn is None and "are occupied; adopter content is never absorbed" in (why or "")
+              and snapshot(root) == before, observed=why)
+        # the takeover, its inherited mode, the spec 14.2 reading and the driver's reach are disclosed where
+        # a reader of the handler, the module and the op roster looks.
+        rv_doc = _render_views.__doc__ or ""
+        rv_note = schema.ADOPT_OPS_BY_NAME["render-views"].preconditions[0]
+        check("render-views-preserve-then-render-disclosed",
+              "replace_vacated" in rv_doc and "replace_vacated" in (_this.__doc__ or "")
+              and all(word in rv_doc for word in ("mode bits", "_DRIVER_UNSUPPLIED",
+                                                  "removed from the live path"))
+              and "takes over" in rv_note and "not yet exercised" not in rv_note)
 
         def refuses_uncomposed(label, name, needle, rrow=row, changelog=True, **changes):
             root = built_store(temp, name, changelog)
