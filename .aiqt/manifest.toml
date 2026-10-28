@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3a7c34c5e3a08496a0a0a97b8d92e9af98016a194c2c150b1531caf5a2b35c85"
+tree-sha256 = "1ec0934b5b713e8f19b47158206b89eb87f06b82ae32aa35cfb13078f9096688"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3376,8 +3376,8 @@ sha256 = "d7d7614791529f4ba2fc961b84e7a8dee7fcc832fd6c2d034c682fcfc1b7549c"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 128144
-sha256 = "7afe5f966a12a901bea4a7b5011c090369574f2555b4376aa9699cbf4d926fc0"
+bytes = 128542
+sha256 = "189387bb36a64ce70b6af2e23a5c67e43274ef498fbda334ac6976626c450b03"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
