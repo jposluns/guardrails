@@ -361,6 +361,7 @@ _CONTRACT = {
         'Init, and any upgrade, MUST render this managed block into .working/.gitignore from the topology constants: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
         'Installation MUST inspect effective ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed untracking change, never silent index mutation.',
         _D('The block travels with the store and joins the indexed-ignore candidate set.'),
+        'At homes 2 an implementation MUST register .working/.gitignore by its exact path as a managed control file that containment recognizes as OPF control area; containment never reads it for drift, and the doctor does not yet grade drift of its managed block.',
         _D('Gitignore is not access control: git add -f can stage ignored state.'),
         'Journals are machine-local even after completion; a clone without them cannot recover those transactions, and requested recovery MUST fail closed on a missing journal.',
         _D('Containment and doctor exclude journals and make no recovery claim, with one exception: the doctor reads the reservations under journals/<kind>/allocations/ read-only, and only for the section 8.2 counter checks; any other journal content, a rogue file included, is outside their coverage.'),
@@ -2428,6 +2429,20 @@ def boundary_self_test():
                 check("unmanaged-collision-" + operand,
                       lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
                       and not doctor.classify_containment(m, machine).valid_unmanaged)
+        # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
+        # path only, so an [unmanaged] declaration of it collides like any managed path.
+        control = ".working/.gitignore"
+        check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
+        check("classifier-gitignore-legacy-stray",
+              lambda: not doctor.classify_containment(manifest, machine).managed_file(control))
+        check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
+              and not cls2.managed_file(".working/staging/.gitignore"))
+        altered = dict(manifest2, unmanaged={"paths": [control]})
+        check("unmanaged-collision-" + control,
+              lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+              and not doctor.classify_containment(m, machine).valid_unmanaged)
+    check("classifier-gitignore-inert-declaration",
+          lambda: not doctor.classify_containment(manifest2, machine).managed_file(".working/.gitignore"))
     for home in homes[1:]:
         for operand in (home, home + "/child"):
             check("unmanaged-legacy-valid-" + operand, lambda o=operand: doctor.classify_containment(
