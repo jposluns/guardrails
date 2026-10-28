@@ -22382,8 +22382,9 @@ def _main_isolated(monitor):
         # UNREAD TAIL: the text from a construct the full lex does not read (a here-string, process
         # substitution, '{fd}' redirect, unquoted here-document, or unbalanced quote) onward is judged on the
         # raw text for the deny tier (_abspth_unread_truncation): a truncating redirect there whose target is
-        # not shown absolute DENIES. Every deny below allowed before that scan (fails when reverted); the
-        # allows pin the tiers the scan keeps and the over-deny it discloses.
+        # not shown absolute DENIES. Every deny below except ap-c89 allowed before that scan (fails when
+        # reverted); ap-c89 is a redirect the full lex reads and denied before it. The allows pin the tiers the
+        # scan keeps and the over-deny it discloses.
         bcmd("(ap-c85) relative truncating redirect AFTER a here-string DENIES (unread tail)",
              "cat <<<y > out.txt", "deny")
         bcmd("(ap-c86) relative truncating redirect AFTER a process substitution DENIES (unread tail)",
@@ -22434,6 +22435,8 @@ def _main_isolated(monitor):
              'echo "a > b"; cat <<<y', "allow")
         bcmd("(ap-c93b) a '>' in a here-string's quoted text DENIES (unread tail, disclosed over-deny)",
              'cat <<<"a > b"', "deny")
+        bcmd("(ap-c93c) a '>' in a comment after a here-string DENIES (unread tail, disclosed over-deny)",
+             "cat <<<y # a > b", "deny")
         # an unquoted here-document: the body of the one the lex stopped at is left out only in the narrow shape
         # _abspth_unread_truncation states (no quote, escape, expansion, brace or parenthesis before the opener
         # or after the delimiter on its line, no line before the delimiter line starting with the delimiter
@@ -22543,6 +22546,45 @@ def _main_isolated(monitor):
              "cat <<EOF > {}/out\nx EOF) a > b\nEOF".format(rp), "allow")
         bcmd("(ap-c96u) a line after the delimiter line starting with the delimiter text leaves the body out: "
              "allows", "cat <<EOF > {}/out\nx -> y\nEOF\nEOFX".format(rp), "allow")
+        # inside a backquote substitution bash turns each '\\' into '\' and keeps a '\>' before it reads the
+        # command there, so an odd run of three or more backslashes before a '>' can leave it an operator; where
+        # the command holds a backquote the scan reads the text again with each such run cut to two. Every deny
+        # below allowed before that second reading (fails when reverted), and bash 5.3.9 writes out.txt for each
+        # of them except ap-c97p, which pins the disclosed over-deny (five backslashes inside one backquote
+        # substitution leave the '>' escaped); a single backslash and a command with no backquote keep their
+        # allow.
+        bcmd("(ap-c97) three backslashes before '>' in a backquote substitution after a here-string DENY",
+             "cat <<<y; echo `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97b) three backslashes before '>' in a backquote substitution in a here-document body DENY",
+             "cat <<EOF\n`echo a \\\\\\> out.txt`\nEOF", "deny")
+        bcmd("(ap-c97c) seven backslashes before '>' in a backquote substitution DENY",
+             "cat <<<y; echo `echo a \\\\\\\\\\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97d) five backslashes before '>' in a nested backquote substitution DENY",
+             "cat <<<y; echo `echo \\`echo a \\\\\\\\\\> out.txt\\``", "deny")
+        bcmd("(ap-c97e) a '>|' after three backslashes in a backquote substitution DENIES",
+             "cat <<<y; echo `echo a \\\\\\>| out.txt`", "deny")
+        bcmd("(ap-c97f) a '>&' to a file after three backslashes in a backquote substitution DENIES",
+             "cat <<<y; echo `echo a \\\\\\>& out.txt`", "deny")
+        bcmd("(ap-c97g) three backslashes before '>' in a backquote substitution inside double quotes DENY",
+             "cat <<<y; echo \"`echo a \\\\\\> out.txt`\"", "deny")
+        bcmd("(ap-c97h) three backslashes before '>' in a '$(...)' inside a backquote substitution DENY",
+             "cat <<<y; echo `echo $(echo a \\\\\\> out.txt)`", "deny")
+        bcmd("(ap-c97i) three backslashes before '>' in a backquote substitution inside '$(...)' DENY",
+             "cat <<<y; echo $(echo `echo a \\\\\\> out.txt`)", "deny")
+        bcmd("(ap-c97j) three backslashes before '>' in a backquote substitution on a here-document's opener "
+             "line DENY", "cat <<EOF; echo `echo a \\\\\\> out.txt`\nx\nEOF", "deny")
+        bcmd("(ap-c97k) three backslashes before '>' in a backquote substitution after a here-document body "
+             "DENY", "cat <<EOF\nx\nEOF\necho `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97l) three backslashes before '>' in a backquote substitution after a process substitution "
+             "DENY", "cat <(true); echo `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97m) three backslashes before '>' inside an absolute target word in a backquote substitution "
+             "DENY", "cat <<<y; echo `echo a >{}/x\\\\\\>out.txt `".format(rp), "deny")
+        bcmd("(ap-c97n) one backslash before '>' in a backquote substitution keeps its allow",
+             "cat <<<y; echo `echo a \\> out.txt`", "allow")
+        bcmd("(ap-c97o) three backslashes before '>' with no backquote in the command keep their allow",
+             "cat <<<y; echo a \\\\\\> out.txt", "allow")
+        bcmd("(ap-c97p) five backslashes before '>' in one backquote substitution DENY (disclosed over-deny)",
+             "cat <<<y; echo `echo a \\\\\\\\\\> out.txt`", "deny")
         # the deny names the unread construct, the target and the remedy.
         _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": "cat <<<y > out.txt"}})
@@ -22570,6 +22612,15 @@ def _main_isolated(monitor):
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
                             .format(_ut_cost_got, _ut_cpu))
+        # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
+        # it and the reads stay linear in the command's length.
+        _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
+        _ut_t0 = time.process_time()
+        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
+        _ut_cpu = time.process_time() - _ut_t0
+        if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
+            failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
+                            "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",

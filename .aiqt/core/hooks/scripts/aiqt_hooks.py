@@ -4808,6 +4808,10 @@ _ABSPTH_OPENER_SPECIAL_RE = re.compile(r"[\\'\"`$(){}]")
 # body: it removes a backslash-newline there before it looks for the delimiter line, and it expands a '$' or
 # backquote form. A body holding any of them is read, whatever form it takes.
 _ABSPTH_BODY_SPECIAL_RE = re.compile(r"[\\$`]")
+# A whole run of an odd number of backslashes, three or more, right before a '>'. Inside a backquote
+# substitution bash turns each '\\' into '\' and keeps a '\>' before it reads the command there, so such a run
+# leaves the '>' an operator at some nesting depth of backquotes (_abspth_unread_truncation).
+_ABSPTH_HALVED_RUN_RE = re.compile(r"(?<!\\)\\\\\\(?:\\\\)*(?=>)")
 
 
 def _abspth_unread_truncation(command, stop):
@@ -4820,11 +4824,21 @@ def _abspth_unread_truncation(command, stop):
     one word (_read_word) and classed as the lexer classes it (_classify_redirect). A descriptor ('2>&1',
     '>&-'), an unquoted current-user tilde, a process substitution or an absolute static path passes; a
     relative or opaque target, or one this scan cannot read (no word, or a quote or escape the word read
-    cannot close), is returned. A '>' in quoted text or a here-string reads the same way, an over-deny the
-    caller discloses. At most one span is left out unread: the text from the line after the opener of the
-    here-document the lex stopped at up to the first line that is exactly its delimiter (leading tabs
-    stripped for the <<- form), that line included, and only where every one of these holds: the command's
-    text before the opener's '<<' holds no '(', ')', '{', '}', quote, backslash, '$' or backquote, so no
+    cannot close), is returned. A '>' in quoted text, a here-string or a comment reads the same way, an
+    over-deny the caller discloses. A backslash and the character after it are passed over, as bash reads an
+    escape outside a backquote substitution. Inside one, bash first turns each pair of backslashes into one
+    and leaves a backslash before a '>' in place, then reads the command there, so where the command holds a
+    backquote anywhere, the text is read a second time with each odd run of three or more backslashes before
+    a '>' cut to two (_ABSPTH_HALVED_RUN_RE), and a truncating operator that reading finds is returned too.
+    Such a run leaves the '>' an operator at some nesting depth of backquotes, a single backslash never does,
+    and the first reading already reads an even run as an operator. The second reading over-denies where the
+    run is quoted, outside any backquote substitution, or at a depth that leaves the '>' escaped (five
+    backslashes inside one, three inside two), as the caller discloses. Like the lex, neither reading models
+    a command that parses its argument again (eval, bash -c). At most one span is left out unread: the text
+    from the line after the opener of the here-document the lex stopped at up to the first line that is
+    exactly its delimiter (leading tabs stripped for the <<- form), that line included, and only where every
+    one of these holds: the command's text before the opener's '<<' holds no '(', ')', '{', '}', quote,
+    backslash, '$' or backquote, so no
     substitution, group or quote is open at the opener; the rest of the opener's line after the delimiter
     holds none of those either; that delimiter line exists; no line between the opener and that delimiter
     line starts with the delimiter text (after its leading tabs for the <<- form); and the text between holds
@@ -4859,9 +4873,11 @@ def _abspth_unread_truncation(command, stop):
             k = body[1]
             continue
         if command[k] == "\\":
-            # The character after a backslash is never an operator to bash: unquoted, the backslash escapes
-            # it, and quoted, it is quoted text or a closing quote. Passing over both also keeps a run of
-            # escaped '>' inside one long target word from making one long word read per '>'.
+            # Outside a backquote substitution the character after a backslash is not an operator to bash:
+            # unquoted, the backslash escapes it, and quoted, it is quoted text or a closing quote. Inside one,
+            # bash halves a backslash run before it reads the command, which the second reading below covers.
+            # Passing over both also keeps a run of escaped '>' inside one long target word from making one
+            # long word read per '>'.
             k += 2
             continue
         if command[k] not in _METACHARS:
@@ -4887,6 +4903,14 @@ def _abspth_unread_truncation(command, stop):
             continue
         if redirect.target_class == "opaque" or not _is_absolute(target):
             return "a truncating redirection ('{}') to the relative or unverified target {!r}".format(op, target)
+    # A backquote anywhere in the command may open a substitution around this text. The reading above is
+    # kept whole, so this only adds denials: the text is read again with each odd run of three or more
+    # backslashes before a '>' cut to two, so that '>' reads as an operator. The text read again holds no
+    # such run, so the call below does not read a third time.
+    if "`" in command:
+        tail = _ABSPTH_HALVED_RUN_RE.sub(r"\\\\", command[stop:])
+        if tail != command[stop:]:
+            return _abspth_unread_truncation(command[:stop] + tail, stop)
     return None
 
 
@@ -4908,8 +4932,9 @@ def bash_absolute_paths(data):
     a cd cannot be ruled out. A redirect operator is never quoted, so the '>' test reads the text as written.
     Where the full lex stops at another construct it does not read (such as a here-document, here-string,
     process substitution, '{fd}' redirect, or an unbalanced quote or escape), the partial lex below reads
-    nothing from there on, so a truncating redirect operator in that text whose target the raw text does not
-    show absolute DENIES (_abspth_unread_truncation), a '>' in quoted text or a here-string there included.
+    nothing from there on, so a truncating redirect operator that _abspth_unread_truncation reads in that text
+    whose target the raw text does not show absolute DENIES (that scan states how it reads a backslash and
+    what it does not model), a '>' in quoted text, a here-string or a comment there included.
     The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
     and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
     fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
@@ -4942,8 +4967,11 @@ def bash_absolute_paths(data):
     # stopped): a truncating redirect ('>', '>|', '&>', '>&' to a file) whose target that text does not show
     # absolute DENIES, while an append '>>', a descriptor duplication ('2>&1') and an absolute or current-user
     # tilde target pass. That scan cannot tell quoted text from a redirect, so a '>' in a here-string, in
-    # quoted text, in an unbalanced quote's text or in a here-document body it reads denies too (a disclosed
-    # over-deny); it leaves out only the body of the here-document the lex stopped at, and only where the
+    # quoted text, in a comment, in an unbalanced quote's text or in a here-document body it reads denies too
+    # (a disclosed over-deny). Where the command holds a backquote, a '>' after an odd run of three or more
+    # backslashes reads as an operator too, since bash halves a backslash run inside a backquote substitution
+    # (a disclosed over-deny where bash still reads that '>' as escaped or quoted). The scan leaves out only
+    # the body of the here-document the lex stopped at, and only where the
     # text before its '<<' holds no quote, escape, expansion, brace or parenthesis, no line before its
     # delimiter line starts with the delimiter text, and the body holds no backslash, '$' or backquote
     # (_abspth_unread_truncation states every condition). A cd or a non-truncating redirect position WITHIN or
