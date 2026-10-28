@@ -97,14 +97,18 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    `init-store-reversal-unproven` or `pre-lock-fault` came before any recovery write.
    `recovery-failed` has three causes. The recovery started and may be partial: the journal
    records how far it got, and a later reconcile resumes it. A transaction directory was replaced
-   during the recovery, which is never reported as recovered. Or the recovery finished, but
-   releasing the journal lock it took faulted or left that lock in place: the message says so and
-   names the lock if it stays. A later reconcile breaks such a lock once its owner has exited if
-   the lock can be read and is well formed, and refuses on it as `journal-unclassifiable` while it
-   cannot be read or is malformed. `store-lease-release-failed` means the recovery finished but
-   releasing a store lease it took faulted; the message names each lease that stays. Exit 2 with
-   "cannot evaluate" and no finding means the product root could not be evaluated. After
-   reconcile, run `opf adopt status` again.
+   during the recovery, which is never reported as recovered. Or the recovery finished, but the
+   journal lock it took was not confirmed released: its release faulted or left that lock in
+   place, or reconcile could not observe the lock afterwards, for example because the journal
+   path no longer names the journal it recovered. The message says so, and names the lock if it
+   stays or each place it may stay. A later reconcile breaks such a lock once its owner has exited
+   if the lock can be read and is well formed, and refuses on it as `journal-unclassifiable`
+   while it cannot be read or is malformed. `store-lease-release-failed` means the recovery
+   finished but releasing a store lease it took faulted; the message names each lease that stays.
+   Exit 2 with "cannot evaluate" and no finding has two causes. The product root could not be
+   evaluated. Or an unexpected error stopped reconcile, which can happen after a recovery already
+   ran; the message names that error and everything recorded on it, such as a lock or lease that
+   stays. After reconcile, run `opf adopt status` again.
 4. Keep every working file of this procedure (the worksheet, saved observations and plans)
    outside the product repository. A new file inside an investigated root changes the
    inventory, and the plan then refuses as "inventory changed".

@@ -16,12 +16,12 @@
 # record type: each is a canonical opf.record.import-batch/v1 batch that the gate also parses and checks
 # (validate_examples). No writer consumes them in this release; `opf record import --batch` does not exist.
 format = "opf.prompt-pack/v1"
-version = "0.6.1"
-digest = "sha256:f158ea1a7da045793e11fdd4cb3184e10c5ede9f84409d3c1a59e4bf104da55d"
+version = "0.6.2"
+digest = "sha256:bb6daee76bdb469142ac5fb7e58e2f1f40fa6ec7d7aefb96a50d29ff9863d348"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "1bdb09e35d06bd47d80f60bcb80290123af7e91225456a366eb6649173743c82"
+sha256 = "9073b2333d3577d562e492b7ba2306866be90f47a2234e8c031a9b539a99aa68"
 
 [[members]]
 path = "adopt/clean-start.md"

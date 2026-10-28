@@ -19314,28 +19314,33 @@ def _cmd_adopt(rest):
           printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
           product files and every transaction as found, and releases any lock or lease it took; its message
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
-          creation failed part-way, a journal lock whose release faulted or left it in place):
-          journal-lock-held (a possibly-live owner holds the journal lock, never
-          seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
-          listing), store-lease-held (a store pointer at the product root other than the in-root one
-          init-store publishes, or a store lease present in a machine subdirectory other than a dead adoption
-          apply's leftover, or one claimed by another writer or that cannot be claimed, beside an open
-          transaction other than init-store's), init-store-reversal-unproven (the reversal could remove
+          creation failed part-way, a journal lock whose release faulted or left it in place, or whose
+          staying could not be observed): journal-lock-held (a possibly-live owner holds the journal lock,
+          never seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read
+          or classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
+          listing, or, once reconcile took the journal lock, a journal path that no longer names the journal
+          it listed or a lock it took that it cannot read back there), store-lease-held (a store pointer at
+          the product root other than the in-root one init-store publishes, or a store lease present in a
+          machine subdirectory other than a dead adoption apply's leftover, or one claimed by another writer
+          or that cannot be claimed, beside an open transaction other than init-store's),
+          init-store-reversal-unproven (the reversal could remove
           content the operation did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
           open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
-          never reported recovered; also a finished recovery whose journal-lock release faulted or left
-          that lock in place, which stays, named), or store-lease-release-failed (the recovery finished,
-          but releasing a store lease this run took faulted: one that could not be released stays, named,
-          and one removed before its directory close failed is named as released). Also exit 2: a
-          cannot-evaluate root. A leftover store lease an interrupted adoption apply kept (operation
-          adopt-apply) beside an OPEN adoption transaction is released through this reconciliation only
-          once its holder is confirmed dead on this host (spec 5.7), and the release is printed on every
-          outcome, before a refusal or error too, and named in the text of every refusal raised after it;
-          beside such a transaction any other present lease
-          refuses as store-lease-held, and a lease beside no open transaction is not touched: each stays
+          never reported recovered; also a finished recovery whose journal lock was not confirmed released:
+          its release faulted or left that lock in place, which stays, named, or the lock could not be
+          observed afterwards, each place it may stay named), or store-lease-release-failed (the recovery
+          finished, but releasing a store lease this run took faulted: one that could not be released
+          stays, named, and one removed before its directory close failed is named as released). Also exit
+          2, printed as cannot evaluate with no finding: a product root that cannot be evaluated, or an
+          unexpected error, which can come after a recovery already ran, printed with every note recorded
+          on it (such a note can name a lock or lease that stays). A leftover store lease an interrupted
+          adoption apply kept (operation adopt-apply) beside an OPEN adoption transaction is released
+          through this reconciliation only once its holder is confirmed dead on this host (spec 5.7), and
+          the release is printed on every outcome, before a refusal or error too, and named in the text of
+          every refusal raised after it; beside such a transaction any other present lease refuses as
+          store-lease-held, and a lease beside no open transaction is not touched: each stays
           the operator's to release. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
@@ -21433,7 +21438,10 @@ def _cli_self_test():
             the partial state the journal records (the transaction open, no lock and no lease left), and a
             second reconcile resumes it to the prestate; a recovery that finishes while the release of its
             journal lock leaves that lock in place exits 2 as recovery-failed too, the lock named as one that
-            stays. A product root that does not exist exits 2 as
+            stays, and so does one whose release leaves a directory at the lock's name, whether the lock stays
+            named as not observed. A journal swapped before the lock is taken, with a transaction to recover or
+            with none left, exits 2 as journal-unclassifiable before any recovery write, both locations
+            named. A product root that does not exist exits 2 as
             cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
             the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
             reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
@@ -21595,6 +21603,9 @@ def _cli_self_test():
                     failing = interrupted("recoveryfailed", mid_archive)
                     failing_before = product(fixture("recoveryfailedprestate"))
                     stays = interrupted("lockstays", mid_archive)
+                    swapped = interrupted("swappedbeforelock", mid_archive)
+                    swapped_idle = interrupted("swappednothingleft", mid_archive)
+                    dirlock = interrupted("directorylock", mid_archive)
                 except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the reconcile fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -21801,6 +21812,79 @@ def _cli_self_test():
                     failures.append("adopt reconcile over a finished recovery whose journal lock release leaves that "
                                     "lock in place: rc={!r} (expected 2 + REFUSED (recovery-failed), the recovery "
                                     "finished, the lock named as one that STAYS; {})".format(rc, out.strip()))
+
+                # the journal renamed aside, an empty directory put at its path, just before the lock is taken, and
+                # the release then leaves the lock taken there in place: exit 2 as journal-unclassifiable before any
+                # recovery write, naming both locations, never exit 0 with the transaction reported recovered (red
+                # when the journal path is not bound to the journal reconcile listed once the lock is taken)
+                real_acquire = journal.acquire_lock
+                unbound = "{} no longer resolves to the journal directory this run listed and holds".format(j_rel)
+                unobserved = "{}/lock stays could not be observed".format(j_rel)
+
+                def swap_then_acquire(journal_root, session_id):
+                    os.rename(journal_root, str(journal_root) + ".aside")
+                    os.mkdir(journal_root)
+                    return real_acquire(journal_root, session_id)
+
+                def unswap(root):
+                    """The journal reconcile listed put back at its path, the one put there removed; True when
+                    it still holds an open transaction or a lock (no recovery write landed in it)."""
+                    shutil.rmtree(os.path.join(root, j_rel))
+                    os.rename(os.path.join(root, j_rel + ".aside"), os.path.join(root, j_rel))
+                    return not journal_clean(root)
+                opened = not journal_clean(swapped)
+                with mock.patch.object(journal, "acquire_lock", swap_then_acquire), \
+                        mock.patch.object(journal, "release_lock", release_unreadable):
+                    rc, out = run(swapped)
+                left = os.path.lexists(os.path.join(swapped, j_rel, "lock"))
+                if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_UNCLASSIFIABLE) in out
+                        and unbound in out and unobserved in out
+                        and "transaction {}: rolled-back".format(rid) not in out and left and unswap(swapped)):
+                    failures.append("adopt reconcile over a journal swapped before its lock is taken: rc={!r} "
+                                    "(expected 2 + REFUSED (journal-unclassifiable) before any recovery write, both "
+                                    "locations named; {})".format(rc, out.strip()))
+
+                # the same swap after a concurrent reconcile recovered every transaction, so nothing is left to
+                # recover once the lock is taken: exit 2 as journal-unclassifiable, never exit 0 saying the journal
+                # lock this run took is released while it stays (red when the journal path is not bound to the
+                # journal reconcile listed once the lock is taken)
+                nested = []
+
+                def first_then_swap(journal_root, session_id):
+                    if not nested:
+                        with mock.patch.object(journal, "acquire_lock", real_acquire), \
+                                mock.patch.object(journal, "release_lock", real_release):
+                            nested.append(adopt.reconcile_report(swapped_idle))
+                    return swap_then_acquire(journal_root, session_id)
+                opened = not journal_clean(swapped_idle)
+                with mock.patch.object(journal, "acquire_lock", first_then_swap), \
+                        mock.patch.object(journal, "release_lock", release_unreadable):
+                    rc, out = run(swapped_idle)
+                left = os.path.lexists(os.path.join(swapped_idle, j_rel, "lock"))
+                if not (opened and nested != [] and rc == EXIT_MALFORMED
+                        and "REFUSED ({})".format(adopt.RECONCILE_UNCLASSIFIABLE) in out and unbound in out
+                        and unobserved in out and "nothing to reconcile" not in out and left):
+                    failures.append("adopt reconcile with nothing left to recover over a journal swapped before its "
+                                    "lock is taken: rc={!r} (expected 2 + REFUSED (journal-unclassifiable), both "
+                                    "locations named; {})".format(rc, out.strip()))
+
+                # a directory put at the journal lock's name after the release removed the lock this run took: an
+                # entry that is not a regular file is never read as a lock taken since, so exit 2 as recovery-failed
+                # saying whether the lock stays could not be observed, never exit 0 (red when that entry is judged
+                # by its inode)
+                def release_then_directory(journal_root):
+                    real_release(journal_root)
+                    os.mkdir(os.path.join(journal_root, "lock"))
+                opened = not journal_clean(dirlock)
+                with mock.patch.object(journal, "release_lock", release_then_directory):
+                    rc, out = run(dirlock)
+                if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out
+                        and "recovery finished (" in out and unobserved in out
+                        and "journal lock is not a regular file" in out
+                        and os.path.isdir(os.path.join(dirlock, j_rel, "lock"))):
+                    failures.append("adopt reconcile over a finished recovery whose release leaves a directory at the "
+                                    "journal lock's name: rc={!r} (expected 2 + REFUSED (recovery-failed), whether "
+                                    "the lock stays named as not observed; {})".format(rc, out.strip()))
             finally:
                 shutil.rmtree(rbase, ignore_errors=True)
             return None
