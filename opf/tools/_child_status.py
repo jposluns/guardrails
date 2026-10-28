@@ -169,13 +169,14 @@ def run_child(args, stdin=""):
     return result.returncode, result.stdout, result.stderr
 
 
-def through_bash(disposition, argv, stdin="", cwd=None):
+def through_bash(disposition, argv, stdin="", cwd=None, pass_fds=()):
     """Run argv under the trampoline's disposition ("ignore" or "default") as the child of bash, which reads its
-    exit status: (status as bash read it or None, stdout without bash's status line, stderr)."""
+    exit status, with pass_fds left open at their own numbers: (status as bash read it or None, stdout without
+    bash's status line, stderr)."""
     command = [sys.executable, "-I", "-B", "-c", TRAMPOLINE, disposition, "bash", "-c", BASH_READER, "bash"]
     try:
         result = subprocess.run(command + list(argv), input=stdin, capture_output=True, text=True,
-                                timeout=CHILD_TIMEOUT, env=child_env(), cwd=cwd)
+                                timeout=CHILD_TIMEOUT, env=child_env(), cwd=cwd, pass_fds=pass_fds)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, "launch failed ({})".format(type(exc).__name__), ""
     head, _, last = result.stdout.rstrip("\n").rpartition("\n")

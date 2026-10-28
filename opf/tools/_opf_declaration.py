@@ -537,14 +537,20 @@ def main():
 # it carries no guard call, and its vectors launch no child (that gate's self-test runs it under a
 # process-creation audit hook that records the _posixsubprocess.fork_exec event too, so the multiprocessing
 # launches are recorded, and records an import of _interpreters as a launch, as the hook cannot see a
-# subinterpreter's own launches; the hook writes each launch to the output as it happens, the report prints at
-# exit, after the exit handlers and thread joins, and the self-test fails on a launch in either, so a launch from
-# a finalizer as the modules are torn down, after the report, fails it too; the audit records accidental launches
-# by the audited self-test until the interpreter clears its audit hooks late in teardown (a finalizer that runs
-# after that, as one reached only from the codec search registry does, is not seen), and code that deliberately
-# evades an in-process hook (clearing or forging its record, unregistering or reordering its handlers, os._exit
-# after forging, ctypes or a native extension, a subinterpreter not made through _interpreters) is outside what
-# it can see).
+# subinterpreter's own launches; the hook writes each launch as it happens to a private record stream, a pipe the
+# self-test passes to the driver, which holds it at a descriptor of its own before the self-test runs and checks
+# that descriptor's identity at each launch, so a launch while fd 1 or fd 2 is closed or points at /dev/null is
+# recorded too, and a launch whose record cannot be written ends the run with a failing status before that launch
+# runs; the report prints on stdout at exit, after the exit handlers and thread joins, and the self-test fails on
+# a launch in either, so a launch from a finalizer as the modules are torn down, after the report, fails it too;
+# the audit records accidental launches by the audited self-test until the interpreter clears its audit hooks late
+# in teardown (a finalizer that runs after that, as one reached only from an interpreter-state registry does: the
+# codec search and error registries, at-fork hooks, sys.monitoring callbacks, gc callbacks, warnings filters, is
+# not seen); a launch made below Python (a native extension, ctypes, a Tcl exec through tkinter) is not recorded;
+# and code that deliberately evades an in-process hook (clearing the hooks below Python, rewriting the driver's own
+# state so the record goes elsewhere, which closing or redirecting the record descriptor alone does not do, as
+# that ends the run, forging or unregistering the report, a subinterpreter not made through _interpreters) is
+# outside what it can see).
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
