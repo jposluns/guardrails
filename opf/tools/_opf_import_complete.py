@@ -53,8 +53,7 @@ adoption run `run_id`, in four legs, each reporting under one SourceResult:
     doctor keeps its own findings; another result type, an absent roster check, a check id outside that
     roster, or an entry other than PASS is CANNOT-EVALUATE naming it. Green needs a doctor result that
     grades that full active-imported roster, which no doctor run over a store this tooling validates today
-    produces (the imported series is inactive for every such store, and three of its four checks are not
-    yet graded, so the whole-store validator routes them to CANNOT-EVALUATE on an active store). The
+    produces (the imported series is inactive for every such store). The
     evaluator trusts the caller-supplied doctor run it is given: the exact type and the roster are a shape
     bar on that run's result, not an authentication of the run.
 
