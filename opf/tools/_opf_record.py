@@ -34,10 +34,10 @@ maintainer's ratification of `decided/proposed`) may supersede the current resol
 act: --supersedes PD-n appends the `supersedes` link to the record's `links` (spec 8.5). Before anything is
 planned further, the target must be a pending_decision seated once in the index or the archive, schema-valid,
 at unqualified `decided` (so never the record itself, which is not yet decided), and the head of its chain (no
-pending_decision already links `supersedes` to it, so the chain never forks; an importer-authored one's link
-removes no current authority, spec 8.6, so it never makes its target a non-head), and its own chain must not lead
-back to the record (no cycle); these target checks read the chain rule's record set below, so a decided chain
-head rotated to the archive can be superseded. --supersedes is refused on every other transition, a
+pending_decision not authored by an importer already links `supersedes` to it, so the chain never forks; an
+importer-authored one's link removes no current authority, spec 8.6, and a row whose actor kind is not exactly
+`importer` counts), and its own chain must not lead back to the record (no cycle); these target checks read
+the chain rule's record set below, so a decided chain head rotated to the archive can be superseded. --supersedes is refused on every other transition, a
 `/proposed` landing included: the doctor counts a `supersedes` link from a proposal too, so it would leave the
 superseded chain with no current resolution. Every landing at unqualified `decided`, with or without
 --supersedes, then recomputes the doctor's own chain rule (_opf_check.decision_chains, C-DECISION-CHAINS) over
@@ -1333,13 +1333,16 @@ def _require_chain_head(rows, target, rel):
     """The superseded resolution must be the head of its chain: no pending_decision not authored by an
     importer already supersedes it (_superseders), so the new link never forks the chain into two current
     resolutions (spec 8.5, C-DECISION-CHAINS). The refusal names the chain's one current effective
-    resolution (_chain_current), a head this check accepts, as the target to supersede instead; a chain
-    with none or several names no target."""
+    resolution (_chain_current), the head this check accepts in its place, and says the other target checks
+    and the chain rule still apply to it: that resolution can still lead back to the record (a cycle) or
+    fail schema validation, so the name never promises that a supersede of it plans. A chain with none or
+    several names no target."""
     held = _superseders(rows, target)
     if held:
         current = _chain_current(rows, target)
         if len(current) == 1:
-            remedy = "Supersede {}, the chain's one current effective resolution, instead".format(current[0])
+            remedy = ("{} is the chain's one current effective resolution, the head this check accepts in its "
+                      "place (the other target checks and the chain rule still apply to it)".format(current[0]))
         else:
             remedy = ("The chain has {} current effective resolutions ({}) under the doctor's chain rule "
                       "(C-DECISION-CHAINS), so no target is named in its place".format(
@@ -4258,8 +4261,12 @@ def _self_test_supersession(check, plan, post, full, now):
     # counts the importer-authored superseder again), and superseding PD-2 instead still refuses, PD-1 and
     # PD-3 both current (red when the chain rule is dropped). A maintainer superseder still makes its target
     # a non-head (red when the head check counts no superseder), and that refusal names the chain's one
-    # current resolution, which then plans as the target (red when the remedy names none). Each revert
-    # replaces one module attribute and is restored after its row.
+    # current resolution, which here then plans as the target (red when the remedy names none). With PD-1
+    # and PD-2 both importer-authored, PD-2 superseding PD-1, a maintainer PD-3 superseding PD-1 plans and
+    # is then the chain's one current resolution under the doctor (red when the head check counts every
+    # superseder). A superseder whose actor kind is a lookalike, absent or unreadable still counts,
+    # fail-closed (red when the exemption reads those as `importer`). Each revert replaces one module
+    # attribute and is restored after its rows.
     module = sys.modules[__name__]
     mine = {"kind": "maintainer"}
     stuck = [pd(1, "decided", actor=mine), pd(2, "decided", links=[("supersedes", "PD-1")], actor={"kind": "importer"}),
@@ -4287,7 +4294,8 @@ def _self_test_supersession(check, plan, post, full, now):
 
     def remedy_accepted():
         named = _refuses(lambda: plan(m_argv, rows=forked, counters=counters),
-                         "Supersede PD-3, the chain's one current effective resolution, instead; fail-closed")
+                         "PD-3 is the chain's one current effective resolution, the head this check accepts in "
+                         "its place (the other target checks and the chain rule still apply to it); fail-closed")
         try:
             p, c, op = plan(sup + ["PD-3"], rows=forked, counters=counters)
             planned = (op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-3"}]
@@ -4296,12 +4304,48 @@ def _self_test_supersession(check, plan, post, full, now):
             planned = False
         return named and planned
 
+    imported = {"kind": "importer"}
+    all_imported = [pd(1, "decided", actor=imported),
+                    pd(2, "decided", links=[("supersedes", "PD-1")], actor=imported), pd(3, "open", actor=mine)]
+
+    def imported_chain_plans():
+        try:
+            p, c, op = plan(s_argv, rows=all_imported, counters=counters)
+            planned = op.new_model["record"]
+            return (planned[:2] == all_imported[:2] and planned[2]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}]
+                    and post(p, c, s_argv) is None and _chain_current(planned, "PD-3") == ["PD-3"])
+        except RecordError:
+            return False
+
+    no_actor = {k: v for k, v in pd(2, "open", links=[("supersedes", "PD-1")]).items() if k != "actor"}
+    odd_kinds = (("a lookalike kind", pd(2, "open", links=[("supersedes", "PD-1")], actor={"kind": "Importer"})),
+                 ("an absent actor", no_actor),
+                 ("an unreadable actor", pd(2, "open", links=[("supersedes", "PD-1")], actor="importer")))
+
+    def odd_kind_refused(row):
+        return _refuses(lambda: plan(s_argv, rows=[pd(1, "decided", actor=mine), row, pd(3, "open", actor=mine)],
+                                     counters=counters), "is already superseded by PD-2; exactly one")
+
+    def loose_superseders(rows, target):
+        def kind(r):
+            actor = r.get("actor")
+            return actor.get("kind") if isinstance(actor, dict) else actor
+        return [r.get("id") for r in rows if isinstance(r, dict) and str(kind(r) or "importer").lower() != "importer"
+                and {"rel": SUPERSEDES, "id": target} in (r.get("links") or [])]
+
     check("a decide superseding the chain's current resolution, superseded only by an importer-authored "
           "decision, plans with both untouched", stuck_plans())
+    check("a maintainer decide superseding an importer-authored PD-1 that an importer-authored PD-2 supersedes "
+          "plans, and the doctor's chain view then has one current resolution, the new decision",
+          imported_chain_plans())
+    for label, row in odd_kinds:
+        check("a superseder with {} still makes its target a non-head, fail-closed".format(label),
+              odd_kind_refused(row))
     check("a decide superseding that importer-authored decision still refuses (a second current resolution)",
           second_head_refused())
     check("a maintainer superseder still makes its target a non-head", maintainer_fork_refused())
-    check("the head-check refusal names the chain's one current resolution, a target that plans",
+    check("the head-check refusal names the chain's one current resolution with its scope, here a target "
+          "that plans",
           remedy_accepted())
     check("the head-check refusal of a chain with no current resolution names no target",
           _refuses(lambda: plan(m_argv, rows=base + [pd(3, "open", links=[("supersedes", "PD-1")])],
@@ -4313,6 +4357,15 @@ def _self_test_supersession(check, plan, post, full, now):
         "rel": SUPERSEDES, "id": target} in (r.get("links") or [])]
     try:
         check("red on revert: a head check counting every superseder refuses the stuck chain", not stuck_plans())
+        check("red on revert: a head check counting every superseder refuses the importer-authored chain",
+              not imported_chain_plans())
+    finally:
+        module._superseders = head_rule
+    module._superseders = loose_superseders
+    try:
+        for label, row in odd_kinds:
+            check("red on revert: a head check exempting {} lets the fork through".format(label),
+                  not odd_kind_refused(row))
     finally:
         module._superseders = head_rule
     module._require_one_current_resolution = lambda ctx, rows, rid, rel: None
