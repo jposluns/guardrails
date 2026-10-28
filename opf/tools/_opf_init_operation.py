@@ -47,8 +47,8 @@ The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), 
   5. Plan and provenance. The provenance source_digest is sha256 over the canonical JSON of the
      sorted (path, content-digest) roster EXCLUDING init.toml; init.toml is TOML through
      _opf_emit.emit_checked; the plan_digest is sha256 over the canonical JSON of the plan WITHOUT
-     its plan_digest member. The base spec_version bump, init.toml's C-CONTAINMENT membership, and the
-     `opf upgrade` route live in _opf_store, _opf_check, and opf.py. A completed adoption is
+     its plan_digest member. The base spec_version bump and init.toml's C-CONTAINMENT membership live
+     in _opf_store and _opf_check; this tooling defines no store upgrade. A completed adoption is
      re-validated for HEALTH (it may carry legitimate later edits); a partial operation is held to
      BYTE-EXACT dedupe against its immutable plan.
   6. Newest ancestral counters. The reader consumes ONE pinned evidence commit, which must lie on
@@ -90,9 +90,13 @@ ALREADY-INITIALIZED are library milestones and never map to coupled-init exit 0;
 for a fully evaluated, NON-mutating assessment that reports findings; every REFUSED, FAILED, or
 CANNOT-EVALUATE result maps to exit 2.
 
-DISCLOSED RESIDUALS: the git ignore-eligibility preflight D2a runs is not repeated here (it is a
-staging precondition, PR5); the adoption observer that distinguishes a first adoption from a
-committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
+DISCLOSED RESIDUALS: the git ignore-eligibility preflight is the one shared check plain `opf init` runs
+(_opf_write_guard.init_ignore_refusal), applied here by _refuse_ignored_destinations under the held
+mutex on both the fresh path (before the plan is persisted) and the resume path (once the recorded plan
+validates), so its own disclosed residual holds here too (an ignore input git cannot read is read as
+no rule, as git add reads it, and is not refused); the adoption observer that distinguishes a first
+adoption from a committed deletion is not part of this layer, so this layer refuses an existing store it did
+not itself record; a
 same-uid writer racing the held mutex can still change a destination between the final check and a
 later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
 foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly
@@ -190,6 +194,49 @@ BOOTSTRAP_SOURCE_ROSTER = tuple(sorted(
     + tuple("{}/{}.index.toml".format(_MACHINE_HOME, t) for t in _INDEX_TYPES)))
 COUNTERS_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_check.COUNTERS_NAME)
 _MANIFEST_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_store.MANIFEST_NAME)
+# The homes-2 managed-block carrier (spec 4.2), a bootstrap source only of a generation-2 plan.
+GITIGNORE_RELPATH = "{}/.gitignore".format(_opf_store.WORKING_DIRNAME)
+
+
+def bootstrap_source_roster(manifest_model):
+    """The bootstrap SOURCE roster (store-relative, sorted, init.toml excluded) a plan built from
+    `manifest_model` creates: BOOTSTRAP_SOURCE_ROSTER, plus one empty imported leaf per enabled type
+    while the model's imported series is active, plus .working/.gitignore when the model grades at
+    homes generation 2 (spec 4.2). The default model adds nothing, so its roster is the constant."""
+    extra = {"{}/{}".format(_MACHINE_HOME, name)
+             for name in _opf_init.imported_leaf_documents(manifest_model)}
+    if _opf_store.homes_generation(manifest_model) == 2:
+        extra.add(GITIGNORE_RELPATH)
+    return tuple(sorted(set(BOOTSTRAP_SOURCE_ROSTER) | extra))
+
+
+def _bootstrap_manifest(homes2):
+    """The plan's manifest text: the default builder call, or the explicit homes-2 declaration."""
+    return _opf_init.build_manifest(homes2=True) if homes2 else _opf_init.build_manifest()
+
+
+def plan_generation(sources):
+    """The homes generation a plan's S list was built for: 2 only while this tooling supports homes
+    2 and the manifest entry's payload is byte for byte the homes-2 bootstrap manifest, else 1. Byte
+    equality with the builder parses nothing; a missing or malformed entry reads as generation 1,
+    whose roster and payload checks then refuse it exactly as before."""
+    if _opf_store.SUPPORTED_HOMES < 2 or type(sources) is not list:
+        return 1
+    entry = next((s for s in sources if type(s) is dict and s.get("path") == _MANIFEST_RELPATH), None)
+    if entry is None or type(entry.get("payload")) is not str:
+        return 1
+    try:
+        data = base64.b64decode(entry["payload"].encode("ascii"), validate=True)
+        homes2 = _bootstrap_manifest(True).encode("utf-8")
+    except (binascii.Error, UnicodeEncodeError, ValueError, _opf_init.InitError):
+        return 1
+    return 2 if data == homes2 else 1
+
+
+def _plan_manifest_model(plan):
+    """The manifest model of a plan's own generation, for its roster and counters namespaces."""
+    return _opf_init._manifest_model(homes2=plan_generation(plan["sets"]["S"]) == 2)
+
 
 _OP_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -1014,20 +1061,29 @@ def staging_name(relpath, operation_id):
 
 
 def _effect_order(paths):
-    """The canonical creation order: the machine-store sources (sorted, init.toml last among them,
-    so the provenance names a complete source set on disk before itself), then CHANGELOG.md, then
-    the store pointer LAST (the pointer promises a store, so it appears only once the store exists)."""
+    """The canonical creation order: .working/.gitignore FIRST when a generation-2 plan creates it
+    (its ignore rules stand before any store file exists), then the machine-store sources (sorted,
+    init.toml last among them, so the provenance names a complete source set on disk before itself),
+    then CHANGELOG.md, then the store pointer LAST (the pointer promises a store, so it appears only
+    once the store exists). A path it cannot place raises, never silently dropped; every caller
+    refuses a path outside its roster before ordering."""
+    head = [p for p in (GITIGNORE_RELPATH,) if p in paths]
     store = sorted(p for p in paths if p.startswith(_MACHINE_HOME + "/") and p != PROVENANCE_RELPATH)
     tail = [p for p in (PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL) if p in paths]
-    return store + tail
+    unplaced = sorted(set(paths) - set(head + store + tail))
+    if unplaced:
+        raise InitOperationError("the canonical creation order cannot place {}".format(unplaced))
+    return head + store + tail
 
 
 def build_source_payloads(*, operation_id, binding, head, first_adoption, inventory_digest_value,
-                          create_changelog, seed=None):
+                          create_changelog, seed=None, homes2=False):
     """The exact bytes of every planned source {store-relative path: bytes}, init.toml included:
     the D1 builders' documents (counters seeded from a validated ancestral seed when one is given),
     the `dir:.` store pointer, CHANGELOG.md when the plan creates it, and the provenance computed
-    over all of them EXCLUDING itself."""
+    over all of them EXCLUDING itself. `homes2` (explicit, never a default) builds the homes-2
+    manifest; its plan also creates .working/.gitignore with the rendered managed block and, while
+    the imported series is active, the empty imported leaves and their zero counter rows (spec 4.2)."""
     counters_seed = None
     if seed is not None:
         reason = seed_permanence_refusal(seed)
@@ -1035,17 +1091,21 @@ def build_source_payloads(*, operation_id, binding, head, first_adoption, invent
             raise InitOperationError(reason)
         counters_seed = dict(seed.counters)
     try:
+        model = _opf_init._manifest_model(homes2=homes2)
         documents = {
-            "manifest.toml": _opf_init.build_manifest(),
-            "counters.toml": _opf_init.build_counters(seed=counters_seed),
+            "manifest.toml": _bootstrap_manifest(homes2),
+            "counters.toml": _opf_init.build_counters(seed=counters_seed, manifest=model),
             "version.toml": _opf_init.build_version(),
             "worklog.toml": _opf_init.build_worklog(),
         }
         for tname in _opf_init.INDEX_TYPES:
             documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
+        documents.update(_opf_init.imported_leaf_documents(model))
     except _opf_init.InitError as exc:
         raise InitOperationError("a bootstrap builder refused: {}".format(exc))
     payloads = {"{}/{}".format(_MACHINE_HOME, n): t.encode("utf-8") for n, t in documents.items()}
+    if _opf_store.homes_generation(model) == 2:
+        payloads[GITIGNORE_RELPATH] = _opf_store.render_homes_gitignore().encode("utf-8")
     payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
         {"store": {"target": "dir:."}}).encode("utf-8")
     if create_changelog:
@@ -1133,7 +1193,7 @@ def compute_plan_digest(plan):
 
 def build_init_plan(*, operation_id, binding, head, inventory_digest_value, application_time,
                     existing_changelog=None, seed=None, admitted=(), working_mode=None,
-                    coupled=False):
+                    coupled=False, homes2=False):
     """Produce the immutable opf.init.plan/v1 envelope (a pure producer): returns (plan model, exact
     canonical bytes). `existing_changelog` is None when CHANGELOG.md is absent (the plan creates it)
     or its observed {path, mode, size, digest} entry, preserved in E. `seed` is a validated
@@ -1144,12 +1204,14 @@ def build_init_plan(*, operation_id, binding, head, inventory_digest_value, appl
     operation preserves it rather than planning its own); `coupled` records that the operation id
     was caller-minted and bound into a coupled adoption's own durable intent, so the plan carries
     the coupled recovery policy and is NEVER resumed (its adoption transaction reverses a partial
-    operation instead; spec 14.2). The result is re-validated by validate_init_plan."""
+    operation instead; spec 14.2). `homes2` builds the generation-2 plan (build_source_payloads);
+    the default builds generation 1 exactly as before. The result is re-validated by
+    validate_init_plan."""
     first_adoption = seed is None
     payloads = build_source_payloads(
         operation_id=operation_id, binding=binding, head=head, first_adoption=first_adoption,
         inventory_digest_value=inventory_digest_value,
-        create_changelog=existing_changelog is None, seed=seed)
+        create_changelog=existing_changelog is None, seed=seed, homes2=homes2)
     sources = []
     for path in _effect_order(payloads):
         data = payloads[path]
@@ -1295,7 +1357,8 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
     sources = sets["S"]
     if type(sources) is not list:
         _plan_bad("S must be a list")
-    roster = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH}
+    # The roster of the plan's own generation (plan_generation: byte equality with a builder).
+    roster = set(bootstrap_source_roster(_plan_manifest_model(plan))) | {PROVENANCE_RELPATH}
     if CHANGELOG_RELPATH not in e_paths:
         roster.add(CHANGELOG_RELPATH)
     paths = [s.get("path") if type(s) is dict else None for s in sources]
@@ -1369,9 +1432,17 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
 
 def _validate_plan_payloads(plan, payloads, counters_basis):
     """Each payload equals what the D1 builders produce (the counters from its recorded basis), and
-    the provenance validates against the plan's own basis and the recomputed source digest."""
+    the provenance validates against the plan's own basis and the recomputed source digest. A
+    generation-2 plan is held to its own builders' bytes: the homes-2 manifest, the rendered
+    .working/.gitignore block, each empty imported leaf, and counters carrying its imported rows."""
+    homes2 = plan_generation(plan["sets"]["S"]) == 2
+    try:
+        model = _opf_init._manifest_model(homes2=homes2)
+        leaves = _opf_init.imported_leaf_documents(model)
+    except _opf_init.InitError as exc:
+        _plan_bad("the plan's generation has no bootstrap builder ({})".format(exc))
     fixed = {
-        "{}/manifest.toml".format(_MACHINE_HOME): _opf_init.build_manifest(),
+        "{}/manifest.toml".format(_MACHINE_HOME): _bootstrap_manifest(homes2),
         "{}/version.toml".format(_MACHINE_HOME): _opf_init.build_version(),
         "{}/worklog.toml".format(_MACHINE_HOME): _opf_init.build_worklog(),
         _opf_store.POINTER_REL: _opf_emit.emit_checked({"store": {"target": "dir:."}}),
@@ -1379,6 +1450,10 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
     for tname in _opf_init.INDEX_TYPES:
         fixed["{}/{}{}".format(_MACHINE_HOME, tname, _opf_check.INDEX_SUFFIX)] = \
             _opf_init.build_index(tname)
+    for name, text in leaves.items():
+        fixed["{}/{}".format(_MACHINE_HOME, name)] = text
+    if _opf_store.homes_generation(model) == 2:
+        fixed[GITIGNORE_RELPATH] = _opf_store.render_homes_gitignore()
     if CHANGELOG_RELPATH in payloads:
         fixed[CHANGELOG_RELPATH] = _CHANGELOG_PAYLOAD.decode("ascii")
     for path, text in fixed.items():
@@ -1396,7 +1471,7 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
     if kind == "zero":
         if counters_basis != {"kind": "zero"} or not plan["first_adoption"]:
             _plan_bad("a zero counters basis belongs to a first adoption only")
-        expected = _opf_init.build_counters()
+        expected = _opf_init.build_counters(manifest=model)
     elif kind == "ancestral":
         if set(counters_basis) != {"kind", "module_counters", "commit", "blob", "path",
                                    "content_digest"} or plan["first_adoption"]:
@@ -1412,7 +1487,7 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
                 and all(v == 0 for v in counters_basis["module_counters"].values())):
             _plan_bad("the ancestral counters evidence is malformed")
         try:
-            expected = _opf_init.build_counters(seed=counters.get("counters"))
+            expected = _opf_init.build_counters(seed=counters.get("counters"), manifest=model)
         except _opf_init.InitError as exc:
             _plan_bad("the counters payload is not a complete seeded ledger ({})".format(exc))
     else:
@@ -2033,8 +2108,9 @@ def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
             manifest.findings))
     baseline, importer, _module = _roster_namespaces()
     counters = tomllib.loads(on_disk[COUNTERS_RELPATH].decode("utf-8"))
-    _hw, findings = validate_counters(counters, known_namespaces=baseline,
-                                      optional_namespaces=importer)
+    _hw, findings = validate_counters(
+        counters, known_namespaces=baseline, optional_namespaces=importer,
+        imported_namespaces=_opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
     if findings:
         raise InitOperationError("the published counters are not valid ({})".format(findings))
     if views is None:
@@ -2097,8 +2173,9 @@ def _health_check(root, root_fd, plan, binding):
         # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key;
         # MemoryError: a many-part key under a memory limit.
         raise InitOperationError("the completed adoption's counters are not TOML")
-    _hw, findings = validate_counters(counters, known_namespaces=baseline,
-                                      optional_namespaces=importer)
+    _hw, findings = validate_counters(
+        counters, known_namespaces=baseline, optional_namespaces=importer,
+        imported_namespaces=_opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
     if findings:
         raise InitOperationError("the completed adoption's counters are invalid ({})".format(
             findings))
@@ -2125,6 +2202,9 @@ def _health_check(root, root_fd, plan, binding):
         raise InitOperationError("the completed adoption's current sources are unhealthy "
                                  "(checks {}; details {}; unattributed {}; triage {})".format(
                                      bad, details, health.unattributed, health.triage))
+    # A generation-2 adoption's managed block is current health too: a removed or drifted block
+    # refuses here rather than reporting ALREADY-INITIALIZED (containment never reads the file).
+    _verify_homes_gitignore(root, plan)
 
 
 # --- the operation: select, plan or resume, journal, attach, verify, finalize (plan steps 1-10) ----
@@ -2376,7 +2456,7 @@ def _planned_view_targets():
 
 
 def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None,
-                admitted_dirs=()):
+                admitted_dirs=(), homes2=False):
     """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
     resolvable or partial store, every destination and staging name absent, no destination already
     tracked, and CHANGELOG.md either absent (created) or a plain file (preserved in E). Without
@@ -2386,7 +2466,9 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
     in the plan's E set so every later check and resume re-verifies them. With `ancestral` (a pinned
     evidence commit, PR4's selection) the counters are seeded from the validated snapshot and the
     plan records it. `operation_id` is a caller-minted id (the coupled adoption binds it into its
-    own durable intent BEFORE this operation runs); None mints a fresh one."""
+    own durable intent BEFORE this operation runs); None mints a fresh one. `homes2` plans
+    generation 2 (build_init_plan), whose .working/.gitignore installation the read-only inspection
+    must admit before the plan is persisted (_inspect_homes_gitignore)."""
     import uuid
     root, root_fd = run.root, run.root_fd
     for pointer in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL):
@@ -2446,7 +2528,11 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                 raise InitOperationError("admitted .working file {} does not match its plan-bound "
                                          "mode, size and digest; foreign content is never adopted "
                                          "by init".format(path))
-        planned = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
+        try:
+            roster = bootstrap_source_roster(_opf_init._manifest_model(homes2=homes2))
+        except _opf_init.InitError as exc:
+            raise InitOperationError("a bootstrap builder refused: {}".format(exc))
+        planned = set(roster) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
         planned |= _planned_view_targets()
         clash = sorted(set(want_files) & planned)
         if clash:
@@ -2502,7 +2588,7 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                                 inventory_digest_value=inventory_digest(model),
                                 application_time=_utc_now(), existing_changelog=changelog,
                                 seed=seed, admitted=admitted, working_mode=working_mode,
-                                coupled=operation_id is not None)
+                                coupled=operation_id is not None, homes2=homes2)
     if admitted:
         # Admitted frozen sources may legitimately be git-tracked, so the tracked-destination
         # pathspec never sweeps the whole .working: the planned destinations are enumerated exactly
@@ -2526,7 +2612,43 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
                                  "present only in the worktree or index is never re-initialized "
                                  "over".format(tracked))
     _refuse_ignored_destinations(git, binding, plan)
+    if plan_generation(plan["sets"]["S"]) == 2:
+        _inspect_homes_gitignore(root, plan)
     return plan, raw
+
+
+def _inspect_homes_gitignore(root, plan):
+    """Generation 2, fresh path only: the read-only .working/.gitignore installation inspection
+    (spec 4.2: effective ignore rules and the index are inspected first), under the held mutex
+    before the plan is persisted, so a refusal records no operation and writes nothing. Init is
+    create-only: the inspector must plan exactly the plan's payload from an absent file. Any hold
+    is REFUSED, naming each; a state the inspection cannot evaluate is CANNOT-EVALUATE."""
+    try:
+        planned, holds, prestate = _opf_write_guard.inspect_homes_gitignore(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise InitOperationError(str(exc), CANNOT_EVALUATE)
+    if holds:
+        raise InitOperationError("the {} installation is held: {}".format(
+            GITIGNORE_RELPATH, "; ".join(holds)))
+    if prestate is not None or planned != plan_payloads(plan)[GITIGNORE_RELPATH]:
+        raise InitOperationError("the {} inspection did not plan the bootstrap block for an absent "
+                                 "file; init is create-only".format(GITIGNORE_RELPATH))
+
+
+def _verify_homes_gitignore(root, plan):
+    """Generation 2, every attempt once the sources are verified and the completed rerun's health
+    check (_health_check): the post-write effectiveness re-check of the installed managed block
+    (spec 4.2). A finding is REFUSED, naming each; a state the check cannot evaluate is
+    CANNOT-EVALUATE. A generation-1 plan has no such file."""
+    if plan_generation(plan["sets"]["S"]) != 2:
+        return
+    try:
+        findings = _opf_write_guard.verify_homes_gitignore_effective(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise InitOperationError(str(exc), CANNOT_EVALUATE)
+    if findings:
+        raise InitOperationError("the installed {} is not effective: {}".format(
+            GITIGNORE_RELPATH, "; ".join(findings)))
 
 
 def _refuse_ignored_destinations(git, binding, plan):
@@ -2668,8 +2790,24 @@ def _resume_binding_or_refuse(plan, op_id, ancestral, admitted, operation_id, ad
                                  "content is admitted")
 
 
+def _generation_or_refuse(plan, homes2):
+    """A resume or a completed rerun keeps its recorded plan's homes generation (plan_generation):
+    `homes2` must name exactly that generation, else the call refuses before any group runs or any
+    health is checked, so neither a homes-2 request against a generation-1 operation nor a default
+    request against a generation-2 one reports a generation it did not carry out. The completed
+    path's plan is not yet re-validated here, so a malformed S reads as generation 1 (its health
+    check then refuses it exactly as before)."""
+    sets = plan.get("sets") if type(plan) is dict else None
+    recorded = plan_generation(sets.get("S") if type(sets) is dict else None)
+    requested = 2 if homes2 else 1
+    if recorded != requested:
+        raise InitOperationError("the recorded operation is at homes generation {} and this call "
+                                 "requests generation {}; a resume or rerun never changes its "
+                                 "plan's generation".format(recorded, requested))
+
+
 def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
-                       operation_id=None, admitted_dirs=None):
+                       operation_id=None, admitted_dirs=None, homes2=False):
     """Run (or resume) the PR3a/PR3b init operation on the EXPLICIT absolute product root and return
     an InitResult; never raises for an expected outcome. Takes the shared mutex before any write
     (pre-store holder), re-observes the binding and HEAD under it (a pre-lock observation never
@@ -2693,9 +2831,21 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
     resumed (its adoption transaction reverses a partial one); `admitted` and `admitted_dirs`
     are REFUSED without it (they are the coupled seam's bindings, never a plain init's). A plain RESUME must carry the SAME
     ancestral, admitted and operation_id bindings its recorded plan carries, else it refuses
-    (_resume_binding_or_refuse)."""
+    (_resume_binding_or_refuse). `homes2` (explicit, never a default) plans a FRESH operation at
+    homes generation 2 (_fresh_plan) and is REFUSED up front, before the mutex and any branch, while
+    this tooling does not support homes 2; a resume or a completed rerun must name its recorded
+    plan's own generation, else it refuses (_generation_or_refuse); and every attempt of a
+    generation-2 plan, the completed rerun's health check included, re-checks the installed managed
+    block (_verify_homes_gitignore)."""
     result = InitResult()
     try:
+        if homes2 is not False and homes2 is not True:
+            raise InitOperationError("homes2 must be a boolean")
+        if homes2 and _opf_store.SUPPORTED_HOMES < 2:
+            # Before the mutex and before any branch: a fresh, resumed or completed operation alike
+            # never reports success for a homes-2 request this tooling cannot carry out.
+            raise InitOperationError("homes2 needs tooling that supports homes generation 2; "
+                                     "nothing is planned, resumed or checked")
         root = _abs_root(product_root)
         admitted = tuple(admitted) if admitted else ()
         reason = _bad_admitted(admitted)
@@ -2747,6 +2897,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
             raise InitOperationError("the product root changed identity after it was observed")
         kind, rep = _select(run, binding)
         if kind == "completed":
+            _generation_or_refuse(rep.plan, homes2)
             _health_check(root, run.root_fd, rep.plan, binding)
             result.status = ALREADY_INITIALIZED
             result.operation_id = rep.op_id
@@ -2755,7 +2906,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
             return result
         if kind == "fresh":
             plan, raw = _fresh_plan(run, binding, head, ancestral, git, admitted, operation_id,
-                                    admitted_dirs)
+                                    admitted_dirs, homes2)
             try:
                 run.sub = _opf_init_substrate.begin_operation(run.holder, raw)
             except _opf_init_substrate.InitSubstrateError as exc:
@@ -2773,6 +2924,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
                                           expected_head=head)
             _resume_binding_or_refuse(run.plan, rep.op_id, ancestral, admitted, operation_id,
                                       admitted_dirs)
+            _generation_or_refuse(run.plan, homes2)
             _refuse_ignored_destinations(git, binding, run.plan)
             run.phases = _phase_names(run.sub)
             if not run.phases:
@@ -2801,6 +2953,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         if "sources-ready" not in run.phases:
             _final_check(root, run.root_fd, run.plan, lease_held=True)
             run.record("sources-ready")
+        _verify_homes_gitignore(root, run.plan)
         views = plan_init_views(root, run.root_fd, run.plan, git)
         apply_init_views(run, views)
         try:
@@ -2898,6 +3051,19 @@ def _mk_plan(**over):
                 application_time="2026-01-02T03:04:05Z")
     args.update(over)
     return build_init_plan(**args)
+
+
+def _st_gates(thunk, spec=_opf_store.IMPORTED_SPEC_VERSION):
+    """Run `thunk` with homes 2 supported (and, unless `spec` is None, the imported series too),
+    restoring the shipped constants in finally: generation 2 is reached only inside a vector."""
+    saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+    _opf_store.SUPPORTED_HOMES = 2
+    if spec is not None:
+        _opf_store.SUPPORTED_SPEC_VERSION = spec
+    try:
+        return thunk()
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
 
 
 def _st_git_env(base):
@@ -3153,6 +3319,66 @@ def _read_plan(root):
         return ops, fh.read()
 
 
+def _homes2_plan_tests(plan, ok, refuses):
+    """The pure generation-2 plan vectors (spec 4.2): built only through the explicit homes2
+    input under raised gates (_st_gates), with its roster, creation order, payloads and counters
+    namespaces, and the refusals that hold each generation to its own exact roster. `plan` is
+    the self-test's default generation-1 plan."""
+    def resealed(source, change):
+        doc = json.loads(json.dumps(source))
+        change(doc)
+        doc["plan_digest"] = compute_plan_digest(doc)
+        return _opf_init_contract.canonical_json_bytes(doc)
+
+    gen2_leaves = sorted("{}/{}".format(_MACHINE_HOME, n)
+                         for n in _opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
+    ok("H2-gen1-roster-unchanged",
+       bootstrap_source_roster(_opf_init._manifest_model()) == BOOTSTRAP_SOURCE_ROSTER
+       and plan_generation(plan["sets"]["S"]) == 1
+       and _st_gates(lambda: plan_generation(plan["sets"]["S"])) == 1)
+    refuses("H2-homes2-refused-at-shipped-constants", lambda: _mk_plan(homes2=True),
+            needle="homes generation 2")
+    plan2, raw2 = _st_gates(lambda: _mk_plan(homes2=True))
+    paths2 = [s["path"] for s in plan2["sets"]["S"]]
+    payloads2 = plan_payloads(plan2)
+    ok("H2-plan-carries-gitignore", paths2[0] == GITIGNORE_RELPATH
+       and payloads2[GITIGNORE_RELPATH] == _opf_store.render_homes_gitignore().encode("utf-8")
+       and _st_gates(lambda: plan_generation(plan2["sets"]["S"])) == 2
+       and _st_gates(lambda: validate_init_plan(raw2, expected_binding=_mk_binding(),
+                                                expected_head=_mk_head()))["plan_digest"]
+       == plan2["plan_digest"], str(paths2[:2]))
+    ok("H2-plan-carries-imported-leaves", set(gen2_leaves) <= set(paths2)
+       and all(payloads2[p] in (b"record = []\nschema = 1\n", b"entry = []\nschema = 1\n")
+               for p in gen2_leaves)
+       and paths2[-3:] == [PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL]
+       and set(tomllib.loads(payloads2[COUNTERS_RELPATH].decode("utf-8"))["counters"])
+       == set(_opf_store.BASELINE_TYPES.values())
+       | {"imported:" + ns for ns in _opf_store.BASELINE_TYPES.values()})
+    plan2h, _raw2h = _st_gates(lambda: _mk_plan(homes2=True), spec=None)
+    paths2h = [s["path"] for s in plan2h["sets"]["S"]]
+    ok("H2-homes-only-no-leaves", paths2h[0] == GITIGNORE_RELPATH
+       and not set(gen2_leaves) & set(paths2h)
+       and plan_payloads(plan2h)[COUNTERS_RELPATH] == plan_payloads(plan)[COUNTERS_RELPATH])
+    refuses("H2-plan-missing-gitignore-refused", lambda: _st_gates(lambda: validate_init_plan(
+        resealed(plan2, lambda d: d["sets"]["S"].pop(0)))),
+        needle="S is not exactly the bootstrap source roster")
+    gitignore_entry = dict(plan2["sets"]["S"][0], staging=staging_name(GITIGNORE_RELPATH,
+                                                                       plan["operation_id"]))
+    # Homes-only gates keep the shipped spec_version pin, so the roster is the refusal under test.
+    refuses("H2-gen1-plan-with-gitignore-refused", lambda: _st_gates(lambda: validate_init_plan(
+        resealed(plan, lambda d: d["sets"]["S"].insert(0, gitignore_entry))), spec=None),
+        needle="S is not exactly the bootstrap source roster")
+    refuses("H2-gen2-plan-refused-at-shipped-constants", lambda: validate_init_plan(_raw2h),
+            needle="S is not exactly the bootstrap source roster")
+    refuses("H2-effect-order-refuses-unplaced", lambda: _effect_order({".working/other"}),
+            needle="cannot place")
+    ok("H2-checks-accept-imported-counters",
+       _st_gates(lambda: _opf_init.imported_counter_namespaces(_plan_manifest_model(plan2)))
+       == frozenset(_opf_store.BASELINE_TYPES.values())
+       and _st_gates(lambda: _opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
+       is None)
+
+
 def _run_self_test():
     return _opf_oplock._st_with_git_lifecycle(_run_self_test_isolated)
 
@@ -3356,6 +3582,12 @@ def _run_self_test_isolated():
                                          expected_head=_mk_head())["plan_digest"]
        == plan["plan_digest"])
 
+    # --- pure: the generation-2 plan (spec 4.2), reached only through the explicit homes2 input ----
+    try:
+        _homes2_plan_tests(plan, ok, refuses)
+    except Exception:
+        ok("H2-plan-harness", False, traceback.format_exc())
+
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-op-selftest-"))
     env = _st_git_env(base)
     saved = {}
@@ -3375,6 +3607,8 @@ def _run_self_test_isolated():
         tests_run.append("seam")
         _ignore_tests(base, env, ok)
         tests_run.append("ignore")
+        _homes2_tests(base, env, ok)
+        tests_run.append("homes2")
         import check_opf_init_qa
         ok("PR3a-QA-regressions", check_opf_init_qa.self_test() == 0)
     except Exception:
@@ -3391,13 +3625,198 @@ def _run_self_test_isolated():
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
     print("filesystem under test: {} (TMPDIR={})".format(base, os.environ.get("TMPDIR", "")))
-    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore"]:
+    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore", "homes2"]:
         sys.stderr.write("_opf_init_operation SELF-TEST: FAIL ({} of {})\n".format(
             len(failed), len(checks)))
         return 1
     print("_opf_init_operation SELF-TEST: PASS ({} checks)".format(len(checks)))
     return 0
 
+
+
+def _homes2_tests(base, env, ok):
+    """Generation-2 init over real git stores (spec 4.2), reached only through the explicit homes2
+    input with both gates raised inside each vector: the plan creates .working/.gitignore first, the
+    empty imported leaves and their zero counter rows; the read-only inspection gates the fresh path
+    before the plan is persisted (a hold or a plan that is not a create REFUSED and a cannot-evaluate
+    state CANNOT-EVALUATE, nothing written, no operation recorded); the post-write check runs on
+    every attempt and on the completed rerun's health check; a homes2 request at the shipped
+    constants, or a non-boolean homes2, is refused before the mutex on the fresh, resume and
+    completed paths, and a resume or rerun naming the other generation than its recorded plan's is
+    refused; and a default run never inspects, even with both gates raised. The inspection refuses
+    the self-test's ambient GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM overrides, so those two are unset
+    around the group."""
+    from unittest import mock
+    d = os.path.join(base, "homes2")
+    leaves = sorted(_opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def counting(real):
+        calls = []
+
+        def wrapped(*a, **k):
+            calls.append(a)
+            return real(*a, **k)
+        return wrapped, calls
+
+    def detail(res):
+        return (res.primary_failure or {}).get("detail", "")
+
+    def unsupported(root, **kw):
+        # A homes2 request at the shipped constants: REFUSED before the mutex is taken, with the
+        # worktree and the recorded operations unchanged. Returns (verdict, detail) for ok().
+        before, ops = _tree_snapshot(root), sub_ops(root)
+        acquire, acquired = counting(_opf_oplock.acquire_init_operation)
+        with mock.patch.object(_opf_oplock, "acquire_init_operation", acquire):
+            res = run_init_operation(root, homes2=True, **kw)
+        return (res.status == REFUSED and "homes2 needs tooling" in detail(res) and not acquired
+                and _tree_snapshot(root) == before and sub_ops(root) == ops,
+                "{} {} {}".format(res.status, res.primary_failure, len(acquired)))
+
+    def no_lease(snapshot):
+        # the lock's explicit recovery legitimately settles the killed holder's stale lease
+        return {rel: v for rel, v in snapshot.items() if rel != LEASE_RELPATH.replace("/", os.sep)}
+
+    def mismatched(root, homes2, spec=_opf_store.IMPORTED_SPEC_VERSION, **kw):
+        # A resume or completed rerun naming the other generation than its recorded plan's, with
+        # homes 2 supported: REFUSED with the worktree and the recorded operations unchanged.
+        before, ops = no_lease(_tree_snapshot(root)), sub_ops(root)
+        res = _st_gates(lambda: run_init_operation(root, homes2=homes2, **kw), spec=spec)
+        return (res.status == REFUSED and "never changes its plan's generation" in detail(res)
+                and no_lease(_tree_snapshot(root)) == before and sub_ops(root) == ops,
+                "{} {}".format(res.status, res.primary_failure))
+
+    saved = {k: os.environ.pop(k, None) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+    try:
+        # The fresh path at the shipped constants: a homes2 request, and a homes2 that is not a
+        # boolean (red when that check is dropped: 0 and None then run a default init), each refuse
+        # before the mutex with nothing written.
+        root = _plain_repo(os.path.join(d, "unsupported"), env)
+        ok("H2-fresh-unsupported-refused-up-front", *unsupported(root))
+        before = _tree_snapshot(root)
+        acquire, acquired = counting(_opf_oplock.acquire_init_operation)
+        outcomes = []
+        with mock.patch.object(_opf_oplock, "acquire_init_operation", acquire):
+            for bad in (1, 0, "yes", None):
+                res = run_init_operation(root, homes2=bad)
+                outcomes.append((bad, res.status, detail(res)))
+        ok("H2-run-homes2-non-boolean-refused", all(
+            status == REFUSED and "homes2 must be a boolean" in text
+            for _bad, status, text in outcomes)
+           and not acquired and _tree_snapshot(root) == before and sub_ops(root) == [],
+           str(outcomes))
+
+        root = _plain_repo(os.path.join(d, "fresh"), env)
+        inspect, inspected = counting(_opf_write_guard.inspect_homes_gitignore)
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", inspect), \
+                mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        snap = _tree_snapshot(root)
+        counters = snap.get(os.path.join(".working", "toml", "counters.toml"), (None, 0, b""))[2]
+        ok("H2-run-views-ready", res.status == VIEWS_READY and len(inspected) == 1
+           and len(verified) == 1
+           and snap.get(os.path.join(".working", ".gitignore"), (None,))[2:]
+           == (_opf_store.render_homes_gitignore().encode("utf-8"),)
+           and all(os.path.join(".working", "toml", n) in snap for n in leaves)
+           and b'"imported:BI" = 0' in counters, "{} {} {}".format(
+               res.status, res.primary_failure, (len(inspected), len(verified))))
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-rerun-already-initialized", res.status == ALREADY_INITIALIZED and len(verified) == 1,
+           "{} {} {}".format(res.status, res.primary_failure, len(verified)))
+        # The completed path keeps the recorded generation: a default rerun of this generation-2
+        # adoption refuses, and a homes2 rerun at the shipped constants refuses before the mutex.
+        ok("H2-completed-gen2-default-rerun-refused", *mismatched(root, False))
+        ok("H2-completed-unsupported-refused-up-front", *unsupported(root))
+        # A completed adoption whose managed block was removed is unhealthy: the rerun's health
+        # check runs the post-write check and refuses, never ALREADY-INITIALIZED, writing nothing.
+        _write(os.path.join(root, ".working", ".gitignore"), b"# adopter only\n")
+        before = _tree_snapshot(root)
+        res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-completed-block-removed-refused", res.status == REFUSED
+           and "not effective" in detail(res) and "homes-gitignore-block-missing" in detail(res)
+           and _tree_snapshot(root) == before, "{} {}".format(res.status, res.primary_failure))
+
+        # Init is create-only: an inspection that planned from a present file, or planned other
+        # bytes than the plan's payload, refuses like a hold (red when that arm is dropped).
+        rendered = _opf_store.render_homes_gitignore().encode("utf-8")
+        for label, effect, code, needle in (
+                ("hold", lambda *a, **k: (rendered, ["tracked-control-path: held"], None),
+                 REFUSED, "is held"),
+                ("cannot-evaluate", mock.Mock(side_effect=_opf_write_guard.WriteGuardError(
+                    "cannot run git")), CANNOT_EVALUATE, "cannot run git"),
+                ("present-file", lambda *a, **k: (rendered, [], b"# adopter\n"), REFUSED,
+                 "init is create-only"),
+                ("other-bytes", lambda *a, **k: (rendered + b"# extra\n", [], None), REFUSED,
+                 "init is create-only")):
+            root = _plain_repo(os.path.join(d, "inspect-" + label), env)
+            before = _tree_snapshot(root)
+            with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", effect):
+                res = _st_gates(lambda: run_init_operation(root, homes2=True))
+            ok("H2-inspector-{}-refuses".format(label), res.status == code
+               and needle in detail(res)
+               and _tree_snapshot(root) == before and sub_ops(root) == [],
+               "{} {}".format(res.status, res.primary_failure))
+
+        # The post-write check runs on the fresh attempt and again on its resume (the source-state
+        # milestone already recorded): a finding refuses with the plan kept, and the resume, naming
+        # its recorded generation-2 plan's generation, re-checks and completes. Before it, a default
+        # resume refuses (the other generation) and a homes2 resume at the shipped constants
+        # refuses before the mutex, each leaving the partial as it was.
+        root = _plain_repo(os.path.join(d, "verify"), env)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective",
+                               lambda *a, **k: ["homes-gitignore-ineffective: forced"]):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-verifier-finding-refuses", res.status == REFUSED
+           and "not effective" in detail(res)
+           and len(sub_ops(root)) == 1, "{} {}".format(res.status, res.primary_failure))
+        ok("H2-resume-gen2-default-refused", *mismatched(root, False))
+        ok("H2-resume-unsupported-refused-up-front", *unsupported(root))
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-verifier-runs-on-resume", res.status == VIEWS_READY and len(verified) == 1
+           and len(sub_ops(root)) == 1, "{} {} {}".format(res.status, res.primary_failure,
+                                                           len(verified)))
+
+        # A generation-1 partial (killed after its second source) and then its completed adoption:
+        # a homes2 resume or rerun refuses at the shipped constants (before the mutex) and with
+        # homes 2 supported (the recorded generation is 1; the homes-only gate keeps the shipped
+        # spec_version pin, so the generation is the refusal under test), while the default resume
+        # completes it.
+        root = _plain_repo(os.path.join(d, "gen1"), env)
+        _child(root, env, kill="source:2")
+        partial = sub_ops(root)
+        good, why = unsupported(root, recover=True)
+        ok("H2-resume-gen1-unsupported-refused-up-front", len(partial) == 1 and good, why)
+        ok("H2-resume-gen1-homes2-refused", *mismatched(root, True, spec=None, recover=True))
+        res = run_init_operation(root, recover=True)
+        ok("H2-resume-gen1-default-completes", res.status == VIEWS_READY
+           and sub_ops(root) == partial, "{} {}".format(res.status, res.primary_failure))
+        ok("H2-completed-gen1-unsupported-refused-up-front", *unsupported(root))
+        ok("H2-completed-gen1-homes2-refused", *mismatched(root, True, spec=None))
+
+        # A default run plans generation 1 even with both gates raised: no inspection, no
+        # post-write check, no .working/.gitignore and no imported leaf.
+        root = _plain_repo(os.path.join(d, "default"), env)
+        refuse = mock.Mock(side_effect=_opf_write_guard.WriteGuardError("must not be called"))
+        with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", refuse), \
+                mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", refuse):
+            res = _st_gates(lambda: run_init_operation(root))
+        snap = _tree_snapshot(root)
+        ok("H2-gen1-never-inspects", res.status == VIEWS_READY and refuse.call_count == 0
+           and os.path.join(".working", ".gitignore") not in snap
+           and not any(os.path.join(".working", "toml", n) in snap for n in leaves),
+           "{} {}".format(res.status, res.primary_failure))
+    finally:
+        for k, val in saved.items():
+            if val is not None:
+                os.environ[k] = val
 
 
 def _seam_tests(base, env, ok):
