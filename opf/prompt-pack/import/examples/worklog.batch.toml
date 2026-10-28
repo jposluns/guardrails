@@ -1,0 +1,14 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-journal.md"
+
+[[worklog]]
+key = "journal-entry-1"
+detail = "The footer summed the hidden rows twice; it now sums the visible rows only."
+history = [{field = "date", value = "2019-05-02"}]
+kind = "fixed"
+status = "recorded"
+summary = "Fixed the report footer total"
+title = "Report footer total fix"
+unrecorded = [{field = "date", reason = "ambiguous"}]
