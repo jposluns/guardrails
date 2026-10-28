@@ -67,7 +67,10 @@ or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_executi
 opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
 opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
 declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
-cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list.
+cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list. So, last, is
+any escape from the gate body: any BaseException other than a KeyboardInterrupt (re-raised unchanged) that
+leaves run() or the self-test, a SystemExit of any code or an error raised by a helper the gate calls included,
+ends the gate with exit 2 naming the cause, never with that SystemExit's code or a traceback's exit 1.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
@@ -1002,15 +1005,23 @@ def self_test(report_path=None):
              "tools/check_selftest_execution.py": "", "opf/tools/_opf_declaration.py": "",
              "opf/tools/_opf_store.py": "", "opf/tools/opf.py": ""}
     syntax_error, raises = "def broken(:\n", "raise RuntimeError('broken at import')\n"
+    # the guard in main() turns any escape from run() or the self-test into exit 2 by itself, so each revert of a
+    # guard inside them is applied to a copy of this gate with that guard in main() removed as well
+    main_try = "    try:\n        if (len(args) in (2, 3)"
+    main_guard = ("    except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit "
+                  "included\n        if isinstance(exc, KeyboardInterrupt):\n            raise\n")
+    at = source.find(main_guard)
+    removed_main = (source[:at] + source[source.find('    print("usage:', at):]).replace(
+        main_try, "    if True:\n        if (len(args) in (2, 3)")
 
     def launch(home, site, rel, text, args, narrowing, helpers=stubs, gate=None):
         """The (exit status, output) of a copy of this gate (or `gate`) in a scratch tree of the stub `helpers` at
         `home`, the helper `rel` holding `text`, launched with `args`; with `narrowing`, the guard at `site`
-        replaced by it."""
+        replaced by it, and the guard in main() removed."""
         for stub_rel, stub in dict(helpers, **{rel: text}).items():
             (home / stub_rel).parent.mkdir(parents=True, exist_ok=True)
             (home / stub_rel).write_text(stub, encoding="utf-8")
-        gate = source.replace(guards[site], narrowing) if narrowing else gate or source
+        gate = removed_main.replace(guards[site], narrowing) if narrowing else gate or source
         (home / "tools" / "check_opf_declaration.py").write_text(gate, encoding="utf-8")
         done = subprocess.run([sys.executable, "-I", "-B", str(home / "tools" / "check_opf_declaration.py")] + args,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
@@ -1106,7 +1117,7 @@ def self_test(report_path=None):
     # with a SystemExit(0) or a bare sys.exit(), exits 2; with the _bootstrap() call moved out of its guard the
     # SystemExit escapes and the self-test exits 0
     bootstrap_guard = "    try:\n        bootstrapped = opf._bootstrap()\n"
-    outside = source.replace(bootstrap_guard, "    bootstrapped = opf._bootstrap()\n    try:\n        pass\n")
+    outside = removed_main.replace(bootstrap_guard, "    bootstrapped = opf._bootstrap()\n    try:\n        pass\n")
     with_opf = dict(stubs, **{"opf/tools/opf.py": (OPF_TOOLS / "opf.py").read_text(encoding="utf-8")})
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
@@ -1127,6 +1138,42 @@ def self_test(report_path=None):
         found, output = bootstrapping[kind, removed]
         check(check_id, source.count(bootstrap_guard) == 1 and found == rc
               and (removed or "CANNOT EVALUATE" in output and "bootstrapped (SystemExit" in output), (found, output))
+
+    # and so is any escape from the gate body once the helpers are loaded: a copy of this gate in a scratch tree of
+    # stub helpers, one helper function raising a SystemExit(0) or a RuntimeError when the gate calls it during
+    # run() or the self-test, exits 2; with the guard in main() removed the SystemExit escapes and the gate exits 0,
+    # and the RuntimeError escapes and it exits 1
+    tree = dict(stubs, **dict((rel, "") for rel in (DECLARATION_REL, VERSION_REL) + DOC_SURFACES))
+    with_vectors = dict(stubs, **{"opf/tools/opf.py": "def _bootstrap():\n    return 0\n"})
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        escaping = {}
+        for kind, helpers, text, args in (
+            ("run-exit-0", tree, "def parse_declaration(data):\n    raise SystemExit(0)\n", []),
+            ("self-test-exit-0", with_vectors,
+             "SHIPPED_DECLARATION_BYTES = b''\n\n\ndef run_vector(vector):\n    raise SystemExit(0)\n", ["--self-test"]),
+            ("run-error", tree, "def parse_declaration(data):\n    raise RuntimeError('raised by a helper call')\n", []),
+        ):
+            for removed in (False, True):
+                escaping[kind, removed] = launch(Path(tmp, "escape-{}-{}".format(kind, int(removed))), None,
+                                                 "opf/tools/_opf_declaration.py", text, args, None, helpers,
+                                                 removed_main if removed else None)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, kind, removed, rc, cause in (
+        ("live/run-helper-call-system-exit-0-cannot-evaluate", "run-exit-0", False, 2,
+         "escaped the gate body (SystemExit: 0)"),
+        ("revert/main-guard-removed-run-system-exit-0-red", "run-exit-0", True, 0, ""),
+        ("live/self-test-helper-call-system-exit-0-cannot-evaluate", "self-test-exit-0", False, 2,
+         "escaped the gate body (SystemExit: 0)"),
+        ("revert/main-guard-removed-self-test-system-exit-0-red", "self-test-exit-0", True, 0, ""),
+        ("live/run-helper-call-error-cannot-evaluate", "run-error", False, 2,
+         "escaped the gate body (RuntimeError: raised by a helper call)"),
+        ("revert/main-guard-removed-run-error-red", "run-error", True, 1, "RuntimeError: raised by a helper call"),
+    ):
+        found, output = escaping[kind, removed]
+        check(check_id, source.count(main_try) == 1 and source.count(main_guard) == 1 and found == rc
+              and cause in output and (removed or "CANNOT EVALUATE" in output), (found, output))
     check("live/real-tree-passes", run(ROOT) == 0)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
@@ -1160,13 +1207,20 @@ def main(argv=None):
         print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
             type(_HELPER_ERROR).__name__, _HELPER_ERROR), file=sys.stderr)
         return 2
-    if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
-            and args[:-2] in ([], ["--self-test"])):
-        return self_test(args[-1])
-    if args == ["--self-test"]:
-        return self_test()
-    if not args:
-        return run(ROOT)
+    try:
+        if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
+                and args[:-2] in ([], ["--self-test"])):
+            return self_test(args[-1])
+        if args == ["--self-test"]:
+            return self_test()
+        if not args:
+            return run(ROOT)
+    except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit included
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        print("opf-declaration: CANNOT EVALUATE: an exception escaped the gate body ({}: {})".format(
+            type(exc).__name__, exc), file=sys.stderr)
+        return 2
     print("usage: check_opf_declaration.py [--self-test | [--self-test] --execution-report ABS_PATH]",
           file=sys.stderr)
     return 2
