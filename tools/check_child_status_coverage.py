@@ -15,7 +15,10 @@ with exit 2). This gate holds where it runs:
      hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
      top level and AST-identical (ast.dump, docstrings included) to the canonical text.
   3. entries: each CLI copy's __main__ body is exactly sys.exit(_child_status_refusal_exit("<basename>") or
-     main()), the canonical file's entry ends in that line, and each dispatcher's main() holds HOOK_BLOCK as the
+     main()), except that of each SELF_TEST_COPIES entry (the three opf/tools self_test modules above), which
+     is exactly opf.py's canonical --self-test statement then that line, with the guard call
+     _child_status_refusal_exit("<basename>") as the first statement of its self_test() after the docstring;
+     the canonical file's entry ends in that line, and each dispatcher's main() holds HOOK_BLOCK as the
      statements right after its is_fail_open assignment.
   4. launchers: the first run_gate line of tools/run_all_checks.sh and of opf/tools/run_all_checks.sh is the
      probe, and no line above it names Python (read in line order through check_ci_parity.read_runner_text).
@@ -182,6 +185,14 @@ HOOK_ARGS = ["-I", HOOK_TARGET]
 # copies and the two dispatcher copies.
 SELF_ENTRIES = frozenset((CANONICAL_REL, COVERAGE_REL) + tuple(rel for rel, _name in CLI_COPIES) + HOOK_COPIES)
 CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
+# The CLI copies that are opf/tools self_test modules: opf.py's aggregator requires their __main__ block to start
+# with its canonical --self-test statement (SELF_TEST_ENTRY, opf.py's _ENTRY_STATEMENT), so their __main__ body is
+# exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
+# self_test() after its docstring, so the --self-test path refuses too.
+SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
+                    "opf/tools/_opf_import_complete.py")
+SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
+SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS"
 HOOK_BLOCK = """unobservable = _child_status_refusal()
 if unobservable is not None:
@@ -508,6 +519,24 @@ def cli_entry_finding(rel, tree, name, exact=True):
             or (exact and len(block.body) != 1)):
         return "{}: its __main__ entry is not {}{}".format(rel, "exactly " if exact else "ending in ",
                                                           CLI_ENTRY.format(name))
+    return None
+
+
+def self_test_entry_finding(rel, tree, name):
+    """None when the module's __main__ body is exactly SELF_TEST_ENTRY then the CLI entry line and its one top-level
+    self_test() starts, after any docstring, with the guard call naming it."""
+    block = tree.body[-1] if tree.body and check_entry_guard._is_guard(tree.body[-1]) else None
+    want = [ast.dump(statement) for statement in ast.parse(SELF_TEST_ENTRY + CLI_ENTRY.format(name)).body]
+    if block is None or [ast.dump(statement) for statement in block.body] != want:
+        return "{}: its __main__ entry is not exactly the --self-test statement then {}".format(
+            rel, CLI_ENTRY.format(name))
+    tests = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "self_test"]
+    body = tests[0].body if len(tests) == 1 else []
+    if body and ast.get_docstring(tests[0], clean=False) is not None:
+        body = body[1:]
+    guard = ast.dump(ast.parse(SELF_TEST_GUARD.format(name)).body[0])
+    if not body or ast.dump(body[0]) != guard:
+        return "{}: its self_test() does not start with {}".format(rel, SELF_TEST_GUARD.format(name))
     return None
 
 
@@ -1083,7 +1112,8 @@ def evaluate(root, residual=None, direct_check=None):
     for rel, name in CLI_COPIES:
         tree = _parse(_read(root, rel), rel)
         findings.extend(copy_findings(rel, tree, tmpl, CANONICAL_NAMES))
-        finding = cli_entry_finding(rel, tree, name)
+        finding = (self_test_entry_finding(rel, tree, name) if rel in SELF_TEST_COPIES
+                   else cli_entry_finding(rel, tree, name))
         findings.extend([finding] if finding else [])
     hook_trees = []
     for rel in HOOK_COPIES:
@@ -1250,6 +1280,13 @@ def _inputs():
                                       "            return 0\n        signal.signal(signal.SIGCHLD,")),
             ("hook-block-gone", _swap(hook, "    unobservable = _child_status_refusal()\n", "    unobservable = None\n"))):
         trees[key] = ast.parse(source)
+    # A self_test module whose __main__ block starts with the CLI entry line (no canonical --self-test statement
+    # first), and one whose self_test() lost its guard call.
+    state_rel = "opf/tools/_opf_adopt_state.py"
+    state, state_guard = real[state_rel], "    " + SELF_TEST_GUARD.format("_opf_adopt_state.py") + "\n"
+    trees.update((rel, ast.parse(real[rel])) for rel in SELF_TEST_COPIES)
+    trees["state-entry-bare"] = ast.parse(_swap(state, "    " + SELF_TEST_ENTRY.replace("\n    ", "\n        "), ""))
+    trees["state-guard-gone"] = ast.parse(_swap(state, state_guard, ""))
     probe_line = RUNNER_PROBES[0][1] + "\n"
     opf_probe = 'run_gate "child-status"                python3 -I -B "$here/_child_status.py"\n'
     quality = real[WORKFLOWS_REL + "/quality.yml"]
@@ -1491,7 +1528,12 @@ def _vectors(module, trees, texts, canonical_tree):
                                                      for finding in copies("hook-drift", m.HOOK_NAMES))),
         ("entries/real-entries-pass", lambda: m.cli_entry_finding("opf", trees["opf"], "opf.py") is None
          and m.cli_entry_finding("canonical", canonical_tree, "_child_status.py", exact=False) is None
-         and m.hook_block_finding("hook", trees["hook"]) is None),
+         and m.hook_block_finding("hook", trees["hook"]) is None
+         and all(m.self_test_entry_finding(rel, trees[rel], Path(rel).name) is None for rel in m.SELF_TEST_COPIES)),
+        ("entries/self-test-entry-shape", lambda: m.self_test_entry_finding(
+            "state", trees["state-entry-bare"], "_opf_adopt_state.py") is not None),
+        ("entries/self-test-guard-missing", lambda: m.self_test_entry_finding(
+            "state", trees["state-guard-gone"], "_opf_adopt_state.py") is not None),
         ("entries/cli-line-shape", lambda: m.cli_entry_finding("opf", trees["opf-entry-bare"], "opf.py") is not None),
         ("entries/cli-extra-statement",
          lambda: m.cli_entry_finding("opf", trees["opf-entry-extra"], "opf.py") is not None),
@@ -1646,6 +1688,10 @@ MUTANTS = (
      "copies/missing-copy-is-finding"),
     ("cli-entry-call", "or ast.dump(block.body[-1]) != want", "or False", "entries/cli-line-shape"),
     ("cli-entry-exact", "or (exact and len(block.body) != 1)", "or False", "entries/cli-extra-statement"),
+    ("self-test-entry", "if block is None or [ast.dump(statement) for statement in block.body] != want:",
+     "if block is None:", "entries/self-test-entry-shape"),
+    ("self-test-guard", "    if not body or ast.dump(body[0]) != guard:\n", "    if not body:\n",
+     "entries/self-test-guard-missing"),
     ("hook-block-compare", "    if got != want:\n", "    if False:\n", "entries/hook-block-shape"),
     ("runner-first", "if line.split() != probe_line.split():", "if False:", "launchers/runner-first-gate"),
     ("runner-prelude", "        if _names_python(line):\n            return", "        if False:\n            return",
@@ -1946,7 +1992,8 @@ def self_test(lane, report_path=None):
         vectors = _vectors(this, trees, texts, canonical_tree)
         for check_id, _kind in (("copies/real-copies-identical", 0), ("copies/drift-is-finding", 0),
                                 ("copies/missing-copy-is-finding", 0), ("copies/hook-drift-is-finding", 0),
-                                ("entries/real-entries-pass", 0), ("entries/cli-line-shape", 0),
+                                ("entries/real-entries-pass", 0), ("entries/self-test-entry-shape", 0),
+                                ("entries/self-test-guard-missing", 0), ("entries/cli-line-shape", 0),
                                 ("entries/cli-extra-statement", 0), ("entries/hook-block-shape", 0),
                                 ("entries/hook-block-missing", 0), ("launchers/real-launchers-pass", 0),
                                 ("launchers/runner-first-gate", 0), ("launchers/opf-runner-first-gate", 0),

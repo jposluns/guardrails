@@ -2693,6 +2693,8 @@ expected-check-ids = [
   "copies/missing-copy-is-finding",
   "copies/hook-drift-is-finding",
   "entries/real-entries-pass",
+  "entries/self-test-entry-shape",
+  "entries/self-test-guard-missing",
   "entries/cli-line-shape",
   "entries/cli-extra-statement",
   "entries/hook-block-shape",

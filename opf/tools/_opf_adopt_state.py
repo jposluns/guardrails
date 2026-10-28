@@ -569,6 +569,7 @@ def self_test():
     """Fail-closed vectors over throwaway temporary product trees: the adoption bundles carry plans the real
     planner froze and approvals the real capture produced, and every verdict is read from the C-CONTAINMENT
     report the doctor itself builds. Every write lands under its own TemporaryDirectory."""
+    _child_status_refusal_exit("_opf_adopt_state.py")
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -1876,18 +1877,18 @@ def _self_test_checks():
 
 
 def main():
-    if sys.argv[1:] == ["--self-test"]:
-        return self_test()
     print("usage: _opf_adopt_state.py --self-test (a library module; C-CONTAINMENT in `opf doctor` reads it)",
           file=sys.stderr)
     return 2
 
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
-# tools/check_child_status_coverage.py pins this copy to by AST. It runs at the entry line, not inside
-# self_test() or main(), so the import _opf_check and opf.py make of this module runs nothing. Its
-# self-test launches git and reads each exit status, so under an ignored SIGCHLD it would read a
-# failing child as a pass; it refuses at its entry line instead, before main() runs.
+# tools/check_child_status_coverage.py pins this copy to by AST. Its self-test launches git and reads
+# each exit status, so under an ignored SIGCHLD it would read a failing child as a pass. The guard runs
+# as the first statement of self_test(), before any launch, and at the entry line before main(); the
+# entry line comes after the --self-test statement that opf.py requires first in the __main__ block.
+# The import _opf_check and opf.py make of this module runs nothing; opf.py's opf-adopt-state leg calls
+# self_test() in process, so the guard runs there too, after opf.py's own guard at its entry line.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
@@ -1940,4 +1941,6 @@ def _child_status_refusal_exit(name):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(_child_status_refusal_exit("_opf_adopt_state.py") or main())

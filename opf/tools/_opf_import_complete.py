@@ -939,6 +939,7 @@ def self_test():
     validator's own type), except in doctor-real-store-doctor-cannot, which runs store_doctor() without
     observations, and the duck-typed and subclass vectors. Exit 0 all pass, 1 a failed check, 2 a harness
     error."""
+    _child_status_refusal_exit("_opf_import_complete.py")
     from unittest import mock
     here = sys.modules[__name__]
     results = []
@@ -1603,10 +1604,12 @@ def main():
 
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
-# tools/check_child_status_coverage.py pins this copy to by AST. It runs at the entry line, not inside
-# self_test() or main(), so an import of this module runs nothing. Its self-test reads child exit
-# statuses through the modules it imports, so under an ignored SIGCHLD it would read a failing child
-# as a pass; it refuses at its entry line instead, before main() runs.
+# tools/check_child_status_coverage.py pins this copy to by AST. The modules it imports hold child launch
+# and wait calls, so under an ignored SIGCHLD a failing child they start would read as a pass. Its
+# self-test starts no child itself; the guard still runs as the first statement of self_test(), so a
+# launch added there later is covered, and at the entry line before main(); the entry line comes after
+# the --self-test statement that opf.py requires first in the __main__ block. An import of this module
+# runs nothing.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
@@ -1659,4 +1662,6 @@ def _child_status_refusal_exit(name):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(_child_status_refusal_exit("_opf_import_complete.py") or main())
