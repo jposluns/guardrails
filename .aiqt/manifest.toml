@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f1fada9863239fbc2b8b432156b19e1927839c7bfe26776cae338e81219f7c7c"
+tree-sha256 = "9127a1224d987de3cb4a6d1d9731938c08c8367fee59b5208fdbc9979a3b3578"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 497071
-sha256 = "a5cb650d87a97031672cdd430ff6d44b0e1c2ff3694436eeea414689b540cd75"
+bytes = 500025
+sha256 = "93c785bfedb6266c21175bb8037d6e63d169f63df470d9ca30117508b6497ef3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2816,8 +2816,8 @@ sha256 = "a7c9bbe6a6145fc5de1a77bed4954b4e758b57702b430ef70b414d65dc2ec945"
 
 [[sources]]
 path = "opf/tools/_opf_import_complete.py"
-bytes = 101904
-sha256 = "46415ce59b92435c2977bebfaede123a0792bae5065f575c07f0fe414b38cf62"
+bytes = 101771
+sha256 = "218e5d5961332696bfc333a37a44e9c8e7a3734da94d7a0e3de0f8802c5fc9dd"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
@@ -3401,8 +3401,8 @@ sha256 = "8e1c6b93ccceb818cb6ccc411c8945591c1ab34d187ec38b3607fdee17ceece9"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 180869
-sha256 = "b6330787ab0e285f7addad4fb1410307b386913fd070b564177718f850900eed"
+bytes = 180909
+sha256 = "3ae4e648048c19b254110b7a31917bc2f73f5c9dd904852190c2ec9af300683b"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3541,13 +3541,13 @@ sha256 = "70cfd07cbabd684ff0a8f009d81ba5582bcb2643f84fe1e8b6c739d455118e78"
 
 [[sources]]
 path = "tools/check_opf_enforce_platforms.py"
-bytes = 70812
-sha256 = "81aa8f6297d4d5c1c1fd7a30ce325635f2a577d0065706c8f5393c65fa4cbb7f"
+bytes = 70808
+sha256 = "c1bfcfd49e043c76dabc8e5aa4a946e0dd0231899174cc581eebdecb8b627316"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 336911
-sha256 = "f815657db6c53b4deca937f15f95cc5c3a92146909fe3738bb243146c292c95e"
+bytes = 337029
+sha256 = "88e7e6e68b5257fccd4b48ad30d023d4ffb7b334968ef36866d87658df4623f0"
 
 [[sources]]
 path = "tools/check_overclaim.py"
