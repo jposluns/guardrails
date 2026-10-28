@@ -94,7 +94,7 @@ from _opf_schema import (  # noqa: E402
 from _opf_release import (  # noqa: E402
     validate_version, validate_worklog, _entries_by_id,
     check_frozen_coverage, check_ids_partition, check_rotation_only_released, _verify_append_only, _wl_num,
-    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS,
+    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS, RELEASE_OPTIONAL_KEYS, _imported_row_findings,
 )
 
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
@@ -245,7 +245,9 @@ def imported_series_active(manifest_data):
     its emptied-roster tripwire; and the observer's prior imported baseline (_opf_observe._reconstruct_prior,
     which reads _reconstruct_imported only where it holds) and the record counter proof
     (_opf_record._counter_state) read it too. So they cannot disagree on which stores carry
-    the imported series or on the imported managed set."""
+    the imported series or on the imported managed set. homes2_carries_imported_series, asserted by
+    the self-test at the shipped constants, makes this flag read exactly the homes-2 grade
+    (homes_generation >= 2) on every tooling that can ship homes 2."""
     return (_opf_store.homes_generation(manifest_data) >= 2
             and _opf_store.imported_series_declared(manifest_data))
 
@@ -294,6 +296,35 @@ def imported_content_checks_landed():
         return False
     return all(ids <= set(required_checks(h, imported=True))
                for h in range(1, _opf_store.SUPPORTED_HOMES + 1))
+
+
+def homes2_carries_imported_series():
+    """The tooling-side coupling of the homes-2 and imported-series activations (spec 4.2/8.2),
+    asserted by the self-test at the SHIPPED constants: a tooling that activates homes 2
+    (_opf_store.SUPPORTED_HOMES at or above 2) must also support the imported series
+    (_opf_store.imported_series_supported, the ONE support comparison), since the series activates
+    only inside the 2.0.0 / homes = 2 declaration. Under this coupling imported_series_active reads
+    exactly the homes-2 grade (_opf_store.homes_generation >= 2) for every manifest: the graded
+    declaration is HOMES2_SPEC_VERSION, at or above IMPORTED_SPEC_VERSION, so the declared arm holds,
+    and this predicate supplies the support arm. C-CONTAINMENT's registration, its tripwire and the
+    write guard therefore open on every graded homes-2 store, and raising SUPPORTED_HOMES without
+    SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION fails the suite instead of shipping a
+    homes-2 store whose imported leaves grade as unregistered strays. True while homes 2 is inactive
+    (SUPPORTED_HOMES exactly 1). Reads every constant through the _opf_store module (never this
+    module's by-value SUPPORTED_SPEC_VERSION import) and fails closed: a SUPPORTED_HOMES that is
+    missing, not an int (a bool included) or below 1, or a SUPPORTED_SPEC_VERSION or
+    IMPORTED_SPEC_VERSION that is missing, not a string, or not a bare SemVer, answers False rather
+    than raising."""
+    homes = getattr(_opf_store, "SUPPORTED_HOMES", None)
+    if type(homes) is not int or homes < 1:
+        return False
+    if homes < 2:
+        return True
+    for name in ("SUPPORTED_SPEC_VERSION", "IMPORTED_SPEC_VERSION"):
+        version = getattr(_opf_store, name, None)
+        if not isinstance(version, str) or _opf_store._parse(version) is None:
+            return False
+    return _opf_store.imported_series_supported()
 
 
 # --- source-integrity vs deliverable-drift partition (PR-C, the render --write source gate) ---------
@@ -540,7 +571,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed", "required", "migration_incomplete")
+                 "unattributed", "required", "migration_incomplete", "toml_reads")
 
     def __init__(self):
         self.findings = []
@@ -553,6 +584,7 @@ class _Report:
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
         self.required = REQUIRED_CHECKS   # the closed roster; homes 2 or an imported series widens it
         self.migration_incomplete = []    # bounded adoption-state paths: reported, never a status change
+        self.toml_reads = {}              # relpath -> the raw bytes _read_toml read (the first read per path)
 
     def require_homes(self, homes, imported=False):
         # Bind the roster to the store's homes generation and imported-series activation once the manifest
@@ -753,9 +785,13 @@ def _rel(*parts):
 def _read_toml(root_fd, relpath, rep):
     """Read a contained TOML file beneath root_fd. Returns (data, "ok"|"absent"|"error"); on a StoreError
     (unreadable, unparseable, a refused symlink) it records a CANNOT-EVALUATE naming the input and returns
-    (None, "error"). Absence is (None, "absent") and left to the caller to grade."""
+    (None, "error"). Absence is (None, "absent") and left to the caller to grade. The bytes of a file read
+    are kept on the report (the first read per path; the worklog ledger reads in _gather_worklog feed the
+    same cache), so the canonical-bytes leg proves the bytes the checks graded and never reads them again
+    (the manifest and each worklog ledger are read once per validation; store discovery reads the
+    manifest separately, before it)."""
     try:
-        data = _read_toml_contained(root_fd, relpath)
+        found = _read_toml_contained(root_fd, relpath, with_raw=True)
     except StoreError as exc:
         rep.cant("cannot read {}: {}".format(relpath, exc))
         return None, "error"
@@ -765,8 +801,10 @@ def _read_toml(root_fd, relpath, rep):
         # rather than escaping validate_store. Mirrors U7's _read_toml guard (guard-input-soundness; B5).
         rep.cant("cannot read {} ({})".format(relpath, exc))
         return None, "error"
-    if data is None:
+    if found is None:
         return None, "absent"
+    raw, data = found
+    rep.toml_reads.setdefault(relpath, raw)
     return data, "ok"
 
 
@@ -1543,13 +1581,18 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
     failure still permits archive diagnostics. An entry the map leaves out (not a table, no well-formed
     WL id, or a reused id) puts "worklog" in `unread` (when given), since its links are then never read;
     a caller that gets None back adds it the same way."""
+    # The ledger bytes feed the report's read cache, so the canonical-bytes leg proves the exact bytes
+    # graded here and never reads the file again (one content read per worklog path per run).
+    def note_read(read_rel, raw):
+        rep.toml_reads.setdefault(read_rel, raw)
+
     try:
         if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
-            data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
+            data = _opf_worklog.load_archive_worklog_at(root_fd, relpath, on_read=note_read)
         else:
             data = _opf_worklog.load_worklog_at(
                 root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict,
-                supported_profiles=supported_profiles, manifest_model=manifest_model)
+                supported_profiles=supported_profiles, manifest_model=manifest_model, on_read=note_read)
         st = "absent" if data is None else "present"
     except _opf_worklog.ManifestShapeError as exc:
         if propagate_manifest_failure:
@@ -1839,6 +1882,25 @@ def _archive_unmanaged(rep, partial_active, path):
     else:
         rep.finding("C-ARCHIVE-ENUM: unregistered path {!r} in the archive tree is neither an OPF-managed "
                     "archive artefact nor a <YYYY> bucket (spec 12/14.2)".format(path))
+
+
+def _archive_triaged_file(archive_rel, path):
+    """Whether _validate_archive routes the file `path` under `archive_rel` through _archive_unmanaged: a
+    file directly under archive/, any file beneath a bucket subdirectory, or a bucket file that is neither
+    archive.toml, worklog.toml nor a <type>.index.toml. Every other archive file (a bucket's manifest,
+    worklog or index, whatever the bucket's name) is never only triaged there: it is graded, or named in a
+    finding or a CANNOT-EVALUATE, at any import status."""
+    parts = path[len(archive_rel) + 1:].split("/")
+    if len(parts) != 2:
+        return True
+    return parts[1] not in (ARCHIVE_MANIFEST_NAME, WORKLOG_NAME) and not parts[1].endswith(INDEX_SUFFIX)
+
+
+def _archive_triaged_dir(archive_rel, path):
+    """Whether _validate_archive grades the directory `path` under `archive_rel` as one path through
+    _archive_unmanaged without listing it: a subdirectory of a bucket, or any directory beneath one. The
+    archive root and each bucket directly under it are listed there, so neither is."""
+    return path != archive_rel and len(path[len(archive_rel) + 1:].split("/")) >= 2
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
@@ -2455,12 +2517,17 @@ class _TeeReport:
     """Forwards a finding or CANNOT-EVALUATE to the report unchanged, under whichever check is current, and
     keeps a copy in `emitted`, so a second check that the spec gives the same obligation (C-IMPORTED-IDS
     over the imported series' own id grading, spec 8.2/8.3) replays exactly what the ONE grading emitted
-    rather than grading it again."""
+    rather than grading it again. Its toml_reads is the report's own read cache, so a TOML read through
+    the tee (_read_toml) feeds that cache exactly as a direct read does, never failing on a missing one."""
     __slots__ = ("_rep", "emitted")
 
     def __init__(self, rep):
         self._rep = rep
         self.emitted = []
+
+    @property
+    def toml_reads(self):
+        return self._rep.toml_reads
 
     def finding(self, msg):
         self._rep.finding(msg)
@@ -3574,11 +3641,13 @@ def _check_evidence(root_fd, homes, rep):
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
 # `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
+# `managed_dir` is the manifest-derived half of the walk's directory test (a directory it enters rather
+# than grading as one unregistered path), shared with the canonical-bytes leg.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
      "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes",
-     "worklog_errors"))
+     "worklog_errors", "managed_dir"))
 
 
 def classify_containment(manifest_data, machine_rel):
@@ -3670,13 +3739,20 @@ def classify_containment(manifest_data, machine_rel):
     homes = _opf_store.homes_generation(manifest_data)
     control_roots = _opf_store.store_control_roots(homes)
     evidence_roots = (_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL) if homes >= 2 else ()
+    # Homes 2 registers .working/.gitignore, the managed-block carrier, as a managed control file
+    # (spec 4.2), recognized by its exact path alone: containment never reads it, so its content is
+    # not graded here, and drift of the block is the writer's post-write check
+    # (_opf_write_guard.verify_homes_gitignore_effective). A legacy store grades it as before.
+    control_files = frozenset({WORKING_DIRNAME + "/.gitignore"}) if homes >= 2 else frozenset()
 
     def managed_leaf(p):
-        # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, or a declared
-        # store-scope view target. It deliberately EXCLUDES the `_under_any(p, unmanaged)` clause so the
-        # collision check can ask whether an unmanaged declaration names a managed leaf without the
-        # declaration trivially matching itself (F2).
+        # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, a declared
+        # store-scope view target, or a homes-2 control file. It deliberately EXCLUDES the
+        # `_under_any(p, unmanaged)` clause so the collision check can ask whether an unmanaged
+        # declaration names a managed leaf without the declaration trivially matching itself (F2).
         if p in view_targets:
+            return True
+        if p in control_files:
             return True
         prefix = mrel + "/"
         if p.startswith(prefix):
@@ -3752,13 +3828,28 @@ def classify_containment(manifest_data, machine_rel):
                 "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
         else:
             valid_unmanaged.append(u)
+    # The legacy store registers only the imports tree; homes 2 also registers the staging tree (spec 4.2).
+    staged_roots = (imports_root, _opf_store.STAGING_REL) if homes >= 2 else (imports_root,)
+
+    def managed_dir(full):
+        # A directory the walk enters as a managed namespace rather than grading as one unregistered path:
+        # the machine-store root, a staged root and its run interior, the generation-2 worklog directory, a
+        # per-record type-body dir, or an ancestor of a store-scope view target. The adoption namespaces an
+        # adopting store adds come from the adoption state, so _check_containment adds them itself.
+        if full == mrel or _under_any(full, staged_roots):
+            return True
+        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
+            return worklog2
+        if layout == "per-record" and full in perrecord_body_dirs:
+            return True
+        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
 
     return ContainmentClassification(
         view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
         colliding=colliding, managed_file=managed_file, layout=layout,
         perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
         control_roots=control_roots, evidence_roots=evidence_roots, homes=homes,
-        worklog_errors=worklog_errors)
+        worklog_errors=worklog_errors, managed_dir=managed_dir)
 
 
 # The legacy import staging area `<machine>/imports` (`.working/toml/imports` under the default layout): where
@@ -3792,6 +3883,122 @@ def _adoption_state(root_fd, machine_rel, in_repo, rep):
         rep.cant("C-CONTAINMENT: the adoption state cannot be read ({}); fail-closed".format(
             _safe_display(repr(exc))))
         return None
+
+
+def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, import_status):
+    """C-CONTAINMENT's canonical-bytes leg, run by the driver right after _check_containment and attributed
+    to the same check: a machine-store TOML file must be the canonical emission of its own parsed content,
+    the byte-reproduction rule each sanctioned writer re-proves before a rewrite (spec 5.7, 9.2). A hand
+    edit that leaves the content readable (an appended comment, re-flowed formatting) is therefore a
+    finding here, at the next doctor run and over a pre-commit snapshot, rather than passing until the
+    next write refuses it. A file an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic
+    string passes, as it does for the writers (_opf_emit.matches_store_bytes). A file whose bytes a check
+    already read (rep.toml_reads: _read_toml and the worklog ledger reads) is proven from those same bytes
+    and never read again, so the manifest and each worklog ledger keep one content read per validation
+    (store discovery reads the manifest separately, before it); a file no check read is read here, once.
+    The walk covers only the machine store, never the evidence homes or the journals beside it. NOT every
+    machine-store TOML file is graded, by design: a path under a valid [unmanaged] declaration and the
+    legacy imports staging are skipped (_check_containment grades the declaration, never the files under
+    it, and refuses the staging area); during a partial import substantiated by an active imports/<run-id>
+    run (the same predicate _check_containment and _validate_archive use) only the stray paths those walks
+    triage are skipped: outside the archive tree, a file outside the classifier's managed set (the
+    containment walk's stray, which it triages, or in an adopting store grades as a finding that already
+    fails the store), and inside it, a path _validate_archive routes through _archive_unmanaged
+    (_archive_triaged_file). A directory either walk grades as one such path without listing it (outside
+    the archive, one the classifier's managed_dir does not admit; inside it, a bucket subdirectory,
+    _archive_triaged_dir) is not entered, since every file beneath it is such a stray, so a symlink, a
+    listing fault or deep nesting inside it cannot turn the store CANNOT-EVALUATE. A triaged stray is
+    therefore never a canonical-bytes finding, while a bucket's archive.toml, worklog.toml and
+    <type>.index.toml, which _validate_archive grades, keep this check during the partial import. A file
+    that cannot be read or parsed is left to the check that reads it, EXCEPT init.toml, whose only reader
+    is this leg, so its faults are graded here (unreadable is a CANNOT-EVALUATE, unparseable a finding),
+    never a silent pass. A non-canonical managed or archived file is advised to be restored from the
+    integration base; an unregistered stray has no base version, so its finding advises removal or
+    re-admission through opf instead. It proves serialization only: a hand edit that leaves canonical
+    bytes is not detected here."""
+    cls = classify_containment(manifest_data, machine_rel)
+    skipped = tuple(cls.valid_unmanaged) + (_legacy_import_staging(machine_rel)[0],)
+    partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep,
+                                                                           cls.homes)
+    init_rel = _rel(machine_rel, INIT_PROVENANCE_NAME)
+
+    def walk(reldir, depth):
+        if depth > _CONTAINMENT_MAX_DEPTH:
+            rep.cant("C-CONTAINMENT: directory nesting under {!r} exceeds the containment-walk ceiling of "
+                     "{}; its TOML files are not proven canonical (fail-closed)".format(
+                         _safe_display(reldir), _CONTAINMENT_MAX_DEPTH))
+            return
+        subdirs, files = _list_dir(root_fd, reldir, rep)
+        if subdirs is None and files is None:
+            return
+        for f in files:
+            full = reldir + "/" + f
+            if not f.endswith(".toml") or _under_any(full, skipped):
+                continue
+            managed = cls.managed_file(full)
+            archived = _under_any(full, (cls.archive_root,))
+            if partial_active and (_archive_triaged_file(cls.archive_root, full) if archived else not managed):
+                # Under a substantiated partial import, skip only the strays those walks own: outside the
+                # archive, a file the containment walk triages (or, adopting, reports as a finding); inside
+                # it, a path _validate_archive sends to _archive_unmanaged. A bucket's archive.toml,
+                # worklog.toml and <type>.index.toml are graded there, so they keep this check.
+                continue
+            raw = rep.toml_reads.get(full)
+            try:
+                if raw is None:
+                    raw = _opf_store._read_store_bytes_contained(root_fd, full)
+            except (StoreError, _journal.JournalError) as exc:
+                if full == init_rel:
+                    rep.cant("C-CONTAINMENT: machine-store file {!r} cannot be read ({}); no other check "
+                             "reads it, so its canonical form cannot be evaluated (spec 5.7/9.2)".format(
+                                 full, _safe_display(str(exc))))
+                continue     # unreadable: graded by the check that reads it (see the docstring)
+            if raw is None:
+                continue     # gone between the listing and the read: absence is never graded here
+            try:
+                # The bytes a check already graded (or this leg's own single read), parsed afresh (never
+                # the shared model a check may hold), so a file is never read twice in one run.
+                model = _opf_store._parse_store_toml(full, raw)
+            except (StoreError, _journal.JournalError) as exc:
+                if full == init_rel:
+                    rep.finding("C-CONTAINMENT: machine-store file {!r} cannot be parsed ({}), so no "
+                                "sanctioned writer produced it and no other check grades it "
+                                "(spec 5.7/9.2)".format(full, _safe_display(str(exc))))
+                continue     # unparseable: graded by the check that reads it (see the docstring)
+            try:
+                fresh = _opf_emit.emit_checked(model).encode("utf-8")
+            except _opf_emit.EmitError as exc:
+                rep.finding("C-CONTAINMENT: machine-store file {!r} holds content the canonical emitter "
+                            "cannot write ({}), so no sanctioned writer produced it (spec 5.7/9.2)".format(
+                                full, _safe_display(str(exc))))
+                continue
+            if not _opf_emit.matches_store_bytes(raw, fresh):
+                if managed or archived:
+                    rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form "
+                                "(it carries comments or non-canonical serialization, which no sanctioned "
+                                "writer produces); restore it from the integration base and redo the "
+                                "change through opf (spec 5.7/9.2)".format(full))
+                else:
+                    rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form "
+                                "(it carries comments or non-canonical serialization, which no sanctioned "
+                                "writer produces); it is an unregistered path with no base version, so "
+                                "remove it or re-admit its content through opf (spec 14.2, 5.7/9.2)".format(
+                                    full))
+        for d in subdirs:
+            full = reldir + "/" + d
+            if _under_any(full, skipped):
+                continue
+            if partial_active and (_archive_triaged_dir(cls.archive_root, full)
+                                   if _under_any(full, (cls.archive_root,)) else not cls.managed_dir(full)):
+                # Under a substantiated partial import, a directory those walks grade as one path without
+                # listing it is not entered either: outside the archive, one the containment walk does not
+                # enter (it triages it, or, adopting, reports it as a finding); inside it, a bucket
+                # subdirectory (_archive_unmanaged). Every file beneath it is a stray the file test above
+                # already skips, so listing it could only add a CANNOT-EVALUATE that grading never needs.
+                continue
+            walk(full, depth + 1)
+
+    walk(machine_rel, 0)
 
 
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
@@ -3839,11 +4046,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
             rep.cant("C-CONTAINMENT: [unmanaged] path {!r} declares {!r}, {}".format(
                 u, legacy_rel, legacy_review))
     mrel = machine_rel
-    view_targets = cls.view_targets
     valid_unmanaged = cls.valid_unmanaged
     managed_file = cls.managed_file
-    layout = cls.layout
-    perrecord_body_dirs = cls.perrecord_body_dirs
     archive_root = cls.archive_root
     imports_root = cls.imports_root
     staging_root = _opf_store.STAGING_REL
@@ -3911,16 +4115,9 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, staged_roots) or full in adoption_dirs:
-            return True
-        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
-            try:
-                return _opf_worklog.generation(manifest_data) == 2
-            except _opf_worklog.WorklogError:
-                return False
-        if layout == "per-record" and full in perrecord_body_dirs:
-            return True
-        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
+        # The manifest-derived namespaces are the classifier's (cls.managed_dir, which the canonical-bytes
+        # leg shares); an adopting store's adoption namespaces are added here.
+        return full in adoption_dirs or cls.managed_dir(full)
 
     def walk(reldir, depth):
         if depth > _CONTAINMENT_MAX_DEPTH:
@@ -4052,15 +4249,16 @@ def _check_lease(root_fd, machine_rel, rep):
 
 def _wellformed_release_row(row):
     """True when `row` is a structurally well-formed release row: the per-row shape validate_version
-    enforces (keys EXACTLY RELEASE_KEYS, a valid SemVer version, an RFC 3339 date, a well-formed
-    worklog_span, and a sha256 coverage_digest). Cross-row tiling, uniqueness, and monotonicity are NOT
+    enforces (keys EXACTLY RELEASE_KEYS plus any RELEASE_OPTIONAL_KEYS, a valid SemVer version, an RFC
+    3339 date, a well-formed worklog_span, a sha256 coverage_digest, and the optional imported flag under
+    the shared _imported_row_findings rule). Cross-row tiling, uniqueness, and monotonicity are NOT
     applied: this decides only whether an INJECTED prior row can serve as the append-only immutability
     baseline, so a well-formed row that merely DIFFERS from the current ledger still reaches the graded
     rewrite check (a real history rewrite), while a dict of garbage keys is a malformed observation routed
     to CANNOT-EVALUATE rather than a false rewrite finding (F5; guard-input-soundness)."""
     if not isinstance(row, dict):
         return False
-    if set(row) != RELEASE_KEYS:
+    if set(row) - RELEASE_OPTIONAL_KEYS != RELEASE_KEYS:
         return False
     if parse_semver(row.get("version")) is None:
         return False
@@ -4070,6 +4268,8 @@ def _wellformed_release_row(row):
     if _parse_span(row.get("worklog_span"), scratch, "prior release row") is False or scratch:
         return False
     if not _valid_digest(row.get("coverage_digest")):
+        return False
+    if _imported_row_findings(row, "prior release row"):
         return False
     return True
 
@@ -4886,6 +5086,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # 4.2): the flag stays False until activation raises both SUPPORTED_HOMES and
     # SUPPORTED_SPEC_VERSION.
     _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, in_repo=in_repo)
+    _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, import_status)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -5774,6 +5975,129 @@ def self_test():
         junk = run(clean_machine(), working={"junk.md": "x\n"})
         check("undeclared-file-invalid", junk.status == INVALID)
         check("undeclared-file-named", any("C-CONTAINMENT" in f for f in junk.findings))
+        # The canonical-bytes leg: a machine-store TOML file that still parses but is not the canonical
+        # emission of its own content (a comment appended to the manifest, a trailing blank line in a nested
+        # archive file) is a named C-CONTAINMENT finding, while a file holding a literal U+2028 inside a basic
+        # string, the spelling an earlier emitter wrote, still passes. Flip: dropping the leg's call from the
+        # driver turns both findings VALID.
+        _canon = "is not in canonical emitted form"
+        _cm = clean_machine()
+        _cm["manifest.toml"] = _opf_emit.emit(_cm["manifest.toml"]) + "# a hand comment\n"
+        _cmr = run(_cm)
+        check("canonical-manifest-comment-invalid", _cmr is not None and _cmr.status == INVALID)
+        check("canonical-manifest-comment-named",
+              _cmr is not None and _cmr.checks.get("C-CONTAINMENT") == "FINDING"
+              and len(_cmr.findings) == 1 and "'.working/toml/manifest.toml'" in _cmr.findings[0]
+              and _canon in _cmr.findings[0])
+        _ca = clean_machine()
+        _ca["archive/2026/worklog.toml"] = _opf_emit.emit(_ca["archive/2026/worklog.toml"]) + "\n"
+        _car = run(_ca)
+        check("canonical-archive-blank-line-named",
+              _car is not None and _car.status == INVALID
+              and any("'.working/toml/archive/2026/worklog.toml'" in m and _canon in m
+                      for m in _car.by_check.get("C-CONTAINMENT", [])))
+        _cl = clean_machine()
+        _cl_dn = dict(dn(1, "BI-1"), summary="done" + chr(0x2028) + "now")
+        _cl_text = _opf_emit.emit(idx([_cl_dn]))
+        _cl["done.index.toml"] = _cl_text.replace("\\u2028", chr(0x2028))
+        _cl_obs = copy.deepcopy(clean_prior())
+        _cl_obs["prior"]["digests"]["DN-1"] = _record_digest(_cl_dn)
+        _clr = run(_cl, obs=_cl_obs)
+        check("canonical-prior-separator-spelling-valid",
+              _cl["done.index.toml"] != _cl_text and _clr is not None and _clr.status == VALID)
+        # One content read per path: the leg proves the manifest and each worklog ledger from the bytes
+        # the grading checks already read (rep.toml_reads), so one validation reads each of those files'
+        # content exactly once. Flip: dropping the byte reuse in the leg, or the worklog read routing in
+        # _gather_worklog, makes a second read appear here.
+        _rcres = resolve_store(build(clean_machine()))
+        _rcounts = {}
+        _real_bytes_read = _opf_store._read_store_bytes_contained
+
+        def _counting_bytes_read(fd, relpath, allowance=None):
+            _rcounts[relpath] = _rcounts.get(relpath, 0) + 1
+            return _real_bytes_read(fd, relpath, allowance)
+
+        _opf_store._read_store_bytes_contained = _counting_bytes_read
+        try:
+            _rcv = validate_store(_rcres, observations=clean_prior())
+        finally:
+            _opf_store._read_store_bytes_contained = _real_bytes_read
+        check("canonical-single-read-per-path",
+              _rcv is not None and _rcv.status == VALID
+              and _rcounts.get(".working/toml/manifest.toml") == 1
+              and _rcounts.get(".working/toml/worklog.toml") == 1
+              and _rcounts.get(".working/toml/archive/2026/worklog.toml") == 1)
+        # init.toml's ONLY reader is this leg, so its faults are graded here rather than left to a check
+        # that never comes: a canonical file passes, an unparseable one is a named finding, an unreadable
+        # one a named CANNOT-EVALUATE. Flip: the former silent "graded elsewhere" skip read all three as
+        # the canonical case.
+        _ciok = clean_machine()
+        _ciok["init.toml"] = {"schema": 1}
+        _ciokr = run(_ciok)
+        check("canonical-init-canonical-valid", _ciokr is not None and _ciokr.status == VALID)
+        _cibad = clean_machine()
+        _cibad["init.toml"] = "= not toml\n"
+        _cibadr = run(_cibad)
+        check("canonical-init-unparseable-named",
+              _cibadr is not None and _cibadr.status == INVALID
+              and any("'.working/toml/init.toml'" in m and "cannot be parsed" in m
+                      for m in _cibadr.by_check.get("C-CONTAINMENT", [])))
+        _cird = clean_machine()
+        _cird["init.toml"] = {"schema": 1}
+        _real_bytes_read2 = _opf_store._read_store_bytes_contained
+
+        def _failing_bytes_read(fd, relpath, allowance=None):
+            if relpath.endswith("/init.toml"):
+                raise StoreError("synthetic unreadable init.toml")
+            return _real_bytes_read2(fd, relpath, allowance)
+
+        _opf_store._read_store_bytes_contained = _failing_bytes_read
+        try:
+            _cirdr = run(_cird)
+        finally:
+            _opf_store._read_store_bytes_contained = _real_bytes_read2
+        check("canonical-init-unreadable-cant",
+              _cirdr is not None and _cirdr.status == CANNOT_EVALUATE
+              and any("'.working/toml/init.toml'" in m and "cannot be read" in m
+                      for m in _cirdr.cannot_evaluate))
+        # The emitter-refusal finding: parseable content the canonical emitter cannot write (a nested
+        # array) is a named finding, since no sanctioned writer could have produced the file. Flip:
+        # reducing the EmitError branch to a bare continue drops the named finding.
+        _ce = clean_machine()
+        _ce["emitref.toml"] = "a = [[1]]\n"
+        _cer = run(_ce)
+        check("canonical-emitter-refusal-named",
+              _cer is not None and _cer.status == INVALID
+              and any("'.working/toml/emitref.toml'" in m and "canonical emitter cannot write" in m
+                      for m in _cer.by_check.get("C-CONTAINMENT", [])))
+        # The skip list: a TOML file under a VALID [unmanaged] declaration, and the legacy imports
+        # staging interior, are _check_containment's to grade, never canonical-bytes findings. Flip:
+        # emptying the skip list turns the unmanaged store INVALID and names the staging interior file.
+        _cun = clean_machine()
+        _cun["manifest.toml"] = base_manifest()
+        _cun["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/vendorarea"]}
+        _cun["vendorarea/notes.toml"] = "a = 1 # a hand comment\n"
+        _cunr = run(_cun)
+        check("canonical-unmanaged-skip-valid", _cunr is not None and _cunr.status == VALID)
+        _cst = clean_machine()
+        _cst["imports/old/run.toml"] = "a = 1 # a hand comment\n"
+        _cstr = run(_cst)
+        check("canonical-legacy-staging-skip-ungraded",
+              _cstr is not None
+              and any("'.working/toml/imports'" in m for m in _cstr.findings + _cstr.cannot_evaluate)
+              and not any("imports/old/run.toml" in m for m in _cstr.findings))
+        # A non-canonical stray at steady state is still a canonical finding, but one that never advises
+        # restoring an integration-base version the stray does not have; a registered file (the manifest
+        # vector above) keeps the restore advice.
+        _cj = clean_machine()
+        _cj["junk.toml"] = "a = 1 # a hand comment\n"
+        _cjr = run(_cj)
+        check("canonical-stray-no-base-advice",
+              _cjr is not None and _cjr.status == INVALID
+              and any("'.working/toml/junk.toml'" in m and _canon in m
+                      and "integration base" not in m and "no base version" in m
+                      for m in _cjr.by_check.get("C-CONTAINMENT", []))
+              and any("unregistered path '.working/toml/junk.toml'" in m for m in _cjr.findings))
         # A partial import SUBSTANTIATED by an active imports/<run-id> run triages stray paths (VALID):
         # the stray junk and the active run interior both land in triage, never a finding (codex-2).
         RUNID = "imp-20260601T000000Z-0123456789abcdef"
@@ -5783,6 +6107,116 @@ def self_test():
         partial = run(pm, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
+        # The same substantiated partial with a NON-CANONICAL stray TOML file in the machine store: the
+        # containment walk only TRIAGES the stray, so the canonical-bytes leg leaves it alone too and the
+        # store stays VALID with the stray in triage. Flip: dropping the leg's import-status exemption
+        # turns this store INVALID on the triaged path.
+        _cp = clean_machine()
+        _cp["manifest.toml"] = base_manifest()
+        _cp["manifest.toml"]["opf"]["import_status"] = "partial"
+        _cp["legacy.toml"] = "a = 1 # a hand comment\n"
+        _cpr = run(_cp, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
+        check("canonical-partial-stray-triaged-valid",
+              _cpr is not None and _cpr.status == VALID
+              and any("'.working/toml/legacy.toml'" in t for t in _cpr.triage))
+        # The exemption covers only what those walks triage. Under the same substantiated partial, a
+        # bucket's worklog.toml and archive.toml are graded by _validate_archive, never triaged, so a
+        # non-canonical one is still the named canonical-bytes finding, while a non-index stray file in a
+        # bucket (an _archive_unmanaged path) stays in triage and the store VALID. Flip: widening the
+        # exemption back to every file outside the classifier's managed set turns the first two VALID;
+        # dropping it turns the third INVALID.
+        def _partial_archive(rel, edit):
+            pa = clean_machine()
+            pa["manifest.toml"] = base_manifest()
+            pa["manifest.toml"]["opf"]["import_status"] = "partial"
+            pa[rel] = edit(pa.get(rel))
+            return run(pa, working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+
+        for label, rel, edit in (
+                ("worklog-blank-line", "archive/2026/worklog.toml", lambda m: _opf_emit.emit(m) + "\n"),
+                ("manifest-comment", "archive/2026/archive.toml",
+                 lambda m: _opf_emit.emit(m) + "# a hand comment\n")):
+            _par = _partial_archive(rel, edit)
+            check("canonical-partial-archive-{}-invalid".format(label),
+                  _par is not None and _par.status == INVALID
+                  and any("'.working/toml/{}'".format(rel) in m and _canon in m
+                          and "integration base" in m
+                          for m in _par.by_check.get("C-CONTAINMENT", [])))
+        _pas = _partial_archive("archive/2026/notes.toml", lambda _m: "a = 1 # a hand comment\n")
+        check("canonical-partial-archive-stray-triaged-valid",
+              _pas is not None and _pas.status == VALID
+              and any("'.working/toml/archive/2026/notes.toml'" in t for t in _pas.triage))
+        # The archive scope itself, path by path: a bucket's manifest, worklog and index (in any bucket
+        # name) are graded; a file directly under archive/, a non-index bucket file and anything beneath a
+        # bucket subdirectory are the _archive_unmanaged paths.
+        _ar = ".working/toml/archive"
+        check("canonical-archive-triage-scope",
+              not any(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
+                  "2026/archive.toml", "2026/worklog.toml", "2026/finding.index.toml", "x/worklog.toml",
+                  "2026/junk.index.toml"))
+              and all(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
+                  "notes.toml", "2026/notes.toml", "2026/sub/archive.toml", "2026/sub/deeper/worklog.toml",
+                  "2026/archive.toml.toml")))
+        # A stray DIRECTORY under the same substantiated partial: the containment walk grades an
+        # unregistered directory, and the archive walk a bucket subdirectory, as one triaged path and never
+        # lists it, so the leg does not enter it either. A symlink inside it, a chain deeper than the walk
+        # ceiling, or a listing failure leaves the store VALID with the directory in triage. Flip: entering
+        # every directory again turns each of these CANNOT-EVALUATE.
+        def _partial_stray_dir(rel, shape):
+            sd = clean_machine()
+            sd["manifest.toml"] = base_manifest()
+            sd["manifest.toml"]["opf"]["import_status"] = "partial"
+            sd[rel + "/notes.toml"] = "a = 1 # a hand comment\n"
+            sd_root = build(sd, working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+            sd_dir = sd_root / ".working" / "toml" / rel
+            if shape == "symlink":
+                os.symlink("nowhere", str(sd_dir / "link"))
+            elif shape == "deep":
+                for _ in range(_CONTAINMENT_MAX_DEPTH + 16):
+                    sd_dir = sd_dir / "d"
+                sd_dir.mkdir(parents=True)
+            sd_res = resolve_store(sd_root)
+            if shape != "unlistable":
+                return validate_store(sd_res, observations=clean_prior())
+            from unittest.mock import patch as _sd_patch
+            sd_rel, real_list = ".working/toml/" + rel, _list_contained
+
+            def refused_list(fd, reldir):
+                if reldir == sd_rel:
+                    raise StoreError("synthetic unlistable stray directory")
+                return real_list(fd, reldir)
+
+            with _sd_patch.dict(globals(), {"_list_contained": refused_list}):
+                return validate_store(sd_res, observations=clean_prior())
+
+        for label, rel, shape in (
+                ("stray-dir-symlink", "stray", "symlink"), ("stray-dir-deep", "stray", "deep"),
+                ("stray-dir-unlistable", "stray", "unlistable"),
+                ("bucket-subdir-symlink", "archive/2026/stray", "symlink"),
+                ("bucket-subdir-deep", "archive/2026/stray", "deep"),
+                ("bucket-subdir-unlistable", "archive/2026/stray", "unlistable")):
+            _psd = _partial_stray_dir(rel, shape)
+            check("canonical-partial-{}-valid".format(label),
+                  _psd is not None and _psd.status == VALID and not _psd.cannot_evaluate
+                  and any("'.working/toml/{}'".format(rel) in t for t in _psd.triage))
+        # The directory exemption covers only those triaged directories: under the same substantiated
+        # partial, a per-record type-body directory is a managed namespace the containment walk enters, so a
+        # non-canonical record body inside it is still the named finding; and the archive root and each
+        # bucket are listed by the archive walk, so the leg enters them too. Flip: skipping every directory
+        # under the partial turns the body store VALID.
+        _pb = copy.deepcopy(pr_machine)
+        _pb["manifest.toml"]["opf"]["import_status"] = "partial"
+        _pb["finding/FN-1.toml"] = _opf_emit.emit(fn(1)) + "# a hand comment\n"
+        _pbr = run(_pb, product=pr_product, obs=pr_obs,
+                   working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+        check("canonical-partial-managed-dir-entered",
+              _pbr is not None and _pbr.status == INVALID
+              and any("'.working/toml/finding/FN-1.toml'" in m and _canon in m
+                      for m in _pbr.by_check.get("C-CONTAINMENT", [])))
+        check("canonical-archive-dir-triage-scope",
+              not any(_archive_triaged_dir(_ar, _ar + p) for p in ("", "/2026", "/x"))
+              and all(_archive_triaged_dir(_ar, _ar + "/" + p)
+                      for p in ("2026/sub", "2026/sub/deeper", "x/sub")))
         # Staged ids join the C-ID-SPACE uniqueness union under a substantiated partial (spec 11: uniqueness
         # across active, archive, and staging). Containment only triages the run interior there, so a
         # staged BI-1 duplicating committed BI-1 is caught by the staged-id enumeration alone; without
@@ -5857,10 +6291,10 @@ def self_test():
         gone = "imports/{}/candidate/backlog_item.index.toml".format(RUNID)
         real_reader = _read_toml_contained
 
-        def vanishing_reader(fd, relpath):
+        def vanishing_reader(fd, relpath, **kwargs):
             if relpath.endswith(gone):
                 return None
-            return real_reader(fd, relpath)
+            return real_reader(fd, relpath, **kwargs)
 
         globals()["_read_toml_contained"] = vanishing_reader
         try:
@@ -6055,6 +6489,15 @@ def self_test():
         _is2_h2_clean = run(copy.deepcopy(_is2_h2))
         check("containment-homes2-pair-clean-valid",
               _is2_h2_clean is not None and _is2_h2_clean.status == VALID)
+        # At the shipped constants the 2.0.0 / homes = 2 pair grades at generation 1, so its
+        # .working/.gitignore is an unregistered stray like any other unenumerated path (red when the
+        # control-file registration ignores the graded generation).
+        _is2_gi_legacy = run(copy.deepcopy(_is2_h2),
+                             working={".gitignore": _opf_store.render_homes_gitignore()})
+        check("containment-gitignore-stray-at-generation-1",
+              _is2_gi_legacy is not None and _is2_gi_legacy.status == INVALID
+              and any("C-CONTAINMENT" in f and ".working/.gitignore" in f and "unregistered" in f
+                      for f in _is2_gi_legacy.findings))
         _is2_h2["worklog.imported.toml"] = "deliberately invalid TOML ["
         _is2_h2["backlog_item.imported.index.toml"] = "garbage = ["
         _is2_h2_run = run(_is2_h2)
@@ -6181,6 +6624,15 @@ def self_test():
                   and _is2_act_run.status == (CANNOT_EVALUATE if _imp_pending else VALID)
                   and _is2_act_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
                   and pending_only(_is2_act_run))
+            # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) and grades
+            # none of its content: a drifted managed block is no C-CONTAINMENT finding (red when the
+            # registration is dropped, the file then being an unregistered stray, and red when drift
+            # grading is added here, since the writer's post-write check owns drift).
+            _is2_gi_run = run(copy.deepcopy(_is2_act), obs=_is2_prior(), working={
+                ".gitignore": "# adopter\n# >>> opf-managed >>>\n/imported/\n# <<< opf-managed <<<\n"})
+            check("containment-homes2-gitignore-content-not-graded",
+                  _is2_gi_run is not None and not _is2_gi_run.findings
+                  and _is2_gi_run.checks.get("C-CONTAINMENT") == "PASS" and pending_only(_is2_gi_run))
             # The roster of an activated 2.0.0 store is the homes-2 roster plus the four imported
             # checks (spec 4.2 / 8.3), in that order, and the report carries exactly it: the three not
             # yet landed are CANNOT-EVALUATE by reconciliation, never silently absent (red when the
@@ -6295,6 +6747,25 @@ def self_test():
                   and not any(_SCHEMA_DEFERRAL in m for m in _v_run.cannot_evaluate)
                   and _v_run.status == VALID
                   and tuple(_v_run.checks) == _h2_roster + IMPORTED_CHECKS)
+            # The canonical-bytes leg over an ACTIVATED imported leaf: the same conforming store with a
+            # comment appended to backlog_item.imported.index.toml is the one named canonical-bytes
+            # finding, with the restore advice of a managed file, while every imported check still runs
+            # to PASS. The imported id grading reads the leaves through a _TeeReport, so this is red when
+            # the tee does not forward the report's read cache (the run then fails closed with every later
+            # check, C-CONTAINMENT and the C-IMPORTED-* checks included, never run) and when the leg is
+            # dropped from the driver (VALID).
+            _vc = copy.deepcopy(_v)
+            _vc["backlog_item.imported.index.toml"] = (
+                _opf_emit.emit(_vc["backlog_item.imported.index.toml"]) + "# a hand comment\n")
+            _vc_run = act_run(_vc)
+            check("canonical-imported-leaf-comment-named-when-activated",
+                  _vc_run is not None and _vc_run.status == INVALID and pending_only(_vc_run)
+                  and len(_vc_run.findings) == 1
+                  and "'.working/toml/backlog_item.imported.index.toml'" in _vc_run.findings[0]
+                  and _canon in _vc_run.findings[0] and "integration base" in _vc_run.findings[0]
+                  and _vc_run.checks.get("C-CONTAINMENT") == "FINDING"
+                  and all(_vc_run.checks.get(cid) == "PASS" for cid in IMPORTED_CHECKS)
+                  and tuple(_vc_run.checks) == _h2_roster + IMPORTED_CHECKS)
             # An omitted non-exempt field with no missingness row is an INVALID finding naming the
             # leaf, the row and the field (red when rows are deferred, which reads CANNOT-EVALUATE,
             # or not validated, which reads PASS).
@@ -6763,7 +7234,8 @@ def self_test():
                   and any("C-CONTAINMENT" in f and "worklog.imported.toml" in f and "unregistered" in f
                           for f in _h1_run.findings))
             # The pure flag over its arms, the support threshold sampled just below, at, and just
-            # above IMPORTED_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
+            # above IMPORTED_SPEC_VERSION, and the support level also sampled at the homes-2 spec
+            # version HOMES2_SPEC_VERSION: True only for the 2.0.0 / homes = 2 pair with both
             # tooling gates raised (red when either arm, or the threshold, moves).
             _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
             _flag_rows = (
@@ -6772,7 +7244,9 @@ def self_test():
                 (2, "1.3.0", {"opf": {"spec_version": "1.3.0"}}, False),
                 (2, "1.3.0", {"opf": {"spec_version": "1.3.0", "homes": 2}}, False),
                 (2, "1.3.0", {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}}, False),
-                (2, "1.3.0", None, False))
+                (2, "1.3.0", None, False),
+                (2, _opf_store.HOMES2_SPEC_VERSION, _pair, True),
+                (2, _opf_store.HOMES2_SPEC_VERSION, {"opf": {"spec_version": "1.3.0"}}, False))
             _flag_got = []
             for _fh, _fv, _fm, _want in _flag_rows:
                 _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = _fh, _fv
@@ -7103,6 +7577,78 @@ def self_test():
             _icc_g["required_checks"] = _icc_prev_rc
             _icc_g["REQUIRED_CHECKS"] = _icc_prev_req
             _icc_g["HOMES2_CHECKS"] = _icc_prev_h2
+        # The homes-2 / imported-series coupling at the SHIPPED constants (red when SUPPORTED_HOMES
+        # reaches 2 while SUPPORTED_SPEC_VERSION stays below IMPORTED_SPEC_VERSION): under it
+        # imported_series_active reads exactly the homes-2 grade, so a homes-2 store never ships with
+        # its imported leaves graded as unregistered strays. The SAME predicate is then exercised
+        # under controlled constants (both restored in finally; no store fixture runs inside this
+        # block). A probe that raises reads "raised", never False, so an exception never passes as a
+        # fail-closed answer.
+        check("homes2-carries-imported-series-at-shipped-constants", homes2_carries_imported_series())
+        _h2c_prev_ssv = _opf_store.SUPPORTED_SPEC_VERSION
+        _h2c_prev_homes = _opf_store.SUPPORTED_HOMES
+        _h2c_missing = object()
+
+        def _h2c_probe(homes, support):
+            _opf_store.SUPPORTED_HOMES = homes
+            if support is _h2c_missing:
+                if hasattr(_opf_store, "SUPPORTED_SPEC_VERSION"):
+                    del _opf_store.SUPPORTED_SPEC_VERSION
+            else:
+                _opf_store.SUPPORTED_SPEC_VERSION = support
+            try:
+                return homes2_carries_imported_series()
+            except Exception:  # noqa: BLE001  a raise is its own result, never a False
+                return "raised"
+
+        try:
+            # Homes 2 or later without imported-series support refuses (red when the predicate
+            # stops consulting the support comparison).
+            check("homes2-imported-coupling-refuses-unsupported",
+                  all(_h2c_probe(_h2c_h, _h2c_v) is False
+                      for _h2c_h, _h2c_v in ((2, "1.2.0"), (2, "1.2.99"), (3, "1.2.0"))))
+            # Homes 2 with support at, above, and well above IMPORTED_SPEC_VERSION is admitted (red
+            # when the support comparison is narrowed to a window below the homes-2 spec version).
+            check("homes2-imported-coupling-admits-supported",
+                  all(_h2c_probe(2, _h2c_v) is True
+                      for _h2c_v in ("1.3.0", "1.3.1", _opf_store.HOMES2_SPEC_VERSION)))
+            # While homes 2 is inactive the coupling defers, whatever the support (red when the
+            # homes-1 deferral is dropped).
+            check("homes2-imported-coupling-defers-below-homes2", _h2c_probe(1, "1.2.0") is True)
+            # A malformed SUPPORTED_HOMES (a bool, a string, None, a float, or below 1) or a
+            # malformed or missing SUPPORTED_SPEC_VERSION at homes 2 answers False and never raises
+            # (red when either guard is dropped).
+            _h2c_bad = ([_h2c_probe(_h2c_h, "1.3.0") for _h2c_h in (True, "2", None, 0, -1, 2.0)]
+                        + [_h2c_probe(2, _h2c_v)
+                           for _h2c_v in ("one.three", None, 130, "1.3.0\n", "", _h2c_missing)])
+            check("homes2-imported-coupling-malformed-fails-closed",
+                  len(_h2c_bad) == 12 and all(_h2c_r is False for _h2c_r in _h2c_bad))
+            # Under each coupled pair of constants the flag equals the homes-2 grade on every manifest
+            # shape; the control at homes 2 without support grades the pair 2, leaves it inactive,
+            # and reads the coupling False (red when the flag reads the homes-2 grade alone, or when
+            # the support threshold moves above the homes-2 spec version).
+            _h2c_pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+            _h2c_manifests = (
+                _h2c_pair, {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}},
+                {"opf": {"homes": 2}}, {"opf": {"spec_version": "1.3.0", "homes": 2}},
+                {"opf": {"spec_version": "1.3.0", "homes": 1}},
+                {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": True}},
+                {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": "2"}},
+                {"opf": {}}, {"opf": []}, {}, None)
+            _h2c_agree = []
+            for _h2c_h, _h2c_v in ((1, "1.2.0"), (2, "1.3.0"), (2, _opf_store.HOMES2_SPEC_VERSION)):
+                _h2c_agree.append(
+                    _h2c_probe(_h2c_h, _h2c_v) is True
+                    and all(imported_series_active(_h2c_m) is (_opf_store.homes_generation(_h2c_m) >= 2)
+                            for _h2c_m in _h2c_manifests))
+            _h2c_control = _h2c_probe(2, "1.2.0")
+            check("imported-active-is-homes2-grade-when-coupled",
+                  _h2c_agree == [True, True, True] and _h2c_control is False
+                  and _opf_store.homes_generation(_h2c_pair) == 2
+                  and imported_series_active(_h2c_pair) is False)
+        finally:
+            _opf_store.SUPPORTED_SPEC_VERSION = _h2c_prev_ssv
+            _opf_store.SUPPORTED_HOMES = _h2c_prev_homes
         # The per-series id grading (spec 8.2/8.3), keyed on imported_series_active alone: the graded 2.0.0 /
         # homes = 2 declaration and this tooling's imported-series support. BOTH tooling gates are patched
         # inside the block (the check_opf_homes per-vector idiom), SUPPORTED_HOMES to 2 and
@@ -9984,6 +10530,82 @@ def self_test():
         rp["prior"]["releases"][0]["coverage_digest"] = "sha256:" + "c" * 64
         rpr = run(clean_machine(), obs=rp)
         check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
+
+        # --- the optional imported release-row flag (spec 6.1, 14.3): C-VERSION-LEDGER and the prior-row
+        # check admit it as exactly true on an empty span, and the composed ledger readers (the changelog
+        # gates and the view planner) apply the same rule; the whole-store vector below grades a store
+        # with an imported row VALID end to end.
+        imp_empty = compute_span_digest(full_wl, None)
+
+        def imp_row(version, imported=True):
+            r = {"version": version, "date": "2025-01-01T00:00:00Z", "worklog_span": [],
+                 "coverage_digest": imp_empty}
+            if imported is not None:
+                r["imported"] = imported
+            return r
+
+        def imp_run(rows, prior_rows):
+            m = clean_machine()
+            m["version.toml"]["release"] = rows + m["version.toml"]["release"]
+            o = copy.deepcopy(clean_prior())
+            o["prior"]["releases"] = prior_rows + o["prior"]["releases"]
+            return run(m, obs=o)
+
+        def verdicts(r, *cids):
+            return None if r is None else tuple(r.checks.get(c) for c in cids)
+
+        hist = ("C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION")
+        _imp = imp_run([imp_row("0.9.0")], [imp_row("0.9.0")])
+        check("rel-imported-doctor-accepted", verdicts(_imp, "C-VERSION-LEDGER") == ("PASS",))
+        check("prior-imported-row-wellformed", verdicts(_imp, *hist) == ("PASS",) * 3)
+        # A flag outside the value rule is a C-VERSION-LEDGER finding naming the rule, and the same row in
+        # the prior is a malformed observation, so the history checks cannot evaluate.
+        _impv = imp_run([imp_row("0.9.0", 1)], [imp_row("0.9.0", 1)])
+        check("rel-imported-doctor-int1-refused",
+              verdicts(_impv, "C-VERSION-LEDGER") == ("FINDING",)
+              and any("exactly true" in f for f in _impv.findings)
+              and verdicts(_impv, *hist) == (CANNOT_EVALUATE,) * 3
+              and any("malformed" in m for m in _impv.cannot_evaluate))
+        # The prior-row check applies the value and span rules of validate_version at their boundaries.
+        check("prior-row-imported-admitted", _wellformed_release_row(imp_row("0.9.0")))
+        check("prior-row-imported-false-refused", not _wellformed_release_row(imp_row("0.9.0", False)))
+        check("prior-row-imported-int1-refused", not _wellformed_release_row(imp_row("0.9.0", 1)))
+        check("prior-row-imported-nonempty-span-refused", not _wellformed_release_row(
+            dict(imp_row("0.9.0"), worklog_span=["WL-1", "WL-1"],
+                 coverage_digest=compute_span_digest(full_wl, (1, 1)))))
+        check("prior-row-plain-still-wellformed", _wellformed_release_row(imp_row("0.9.0", None)))
+        # The flag MUST NOT be added to or removed from an existing row (spec 6.1): with both ledgers
+        # admitted, C-HISTORY-APPEND-ONLY reads either change as a rewrite.
+        for _imp_label, _imp_cur, _imp_prior in (("added-to", True, None), ("removed-from", None, True)):
+            _impr = imp_run([imp_row("0.9.0", _imp_cur)], [imp_row("0.9.0", _imp_prior)])
+            check("history-flag-{}-existing-row-finding".format(_imp_label),
+                  verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
+                  and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
+        # WHOLE STORE, end to end: a store with a declared VERSION view whose ledger and prior carry an
+        # imported row, with the changelog tiling all three releases, grades VALID with no finding and no
+        # cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the changelog gates, the
+        # view planner behind C-VIEW-DRIFT, and the history checks, so the vector is red when ANY of them
+        # refuses the flag.
+        _e2e_cl = make_changelog(["1.1.0", "1.0.0", "0.9.0"])
+        _e2e_dig = freeze_digests(_e2e_cl, ["1.1.0", "1.0.0", "0.9.0"])
+        _e2e = clean_machine()
+        _e2e["manifest.toml"] = base_manifest(views={"VERSION": {
+            "kind": "deterministic", "sources": ["version"], "target": "VERSION"}})
+        _e2e["version.toml"]["release"] = [imp_row("0.9.0")] + _e2e["version.toml"]["release"]
+        _e2e["version.toml"]["summary"] = [
+            {"covers": "0.9.0", "status": "published", "digest": _e2e_dig["0.9.0"]},
+            {"covers": "1.0.0", "status": "published", "digest": _e2e_dig["1.0.0"]},
+            {"covers": "1.1.0", "status": "published", "digest": _e2e_dig["1.1.0"]},
+            {"covers": "unreleased", "status": "working"}]
+        _e2e_obs = copy.deepcopy(clean_prior())
+        _e2e_obs["prior"]["releases"] = [imp_row("0.9.0")] + _e2e_obs["prior"]["releases"]
+        _e2e_run = run(_e2e, product={"VERSION": "1.1.0\n", "CHANGELOG.md": _e2e_cl}, obs=_e2e_obs)
+        check("rel-imported-doctor-whole-store-valid",
+              _e2e_run is not None and _e2e_run.status == VALID
+              and not _e2e_run.findings and not _e2e_run.cannot_evaluate
+              and _e2e_run.checks.get("C-CHANGELOG-GATES") == "PASS"
+              and _e2e_run.checks.get("C-VIEW-DRIFT") == "PASS"
+              and _e2e_run.checks.get("C-VERSION-LEDGER") == "PASS")
 
         # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
         b5 = clean_machine()

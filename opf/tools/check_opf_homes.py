@@ -57,8 +57,10 @@ sentences are pinned the same way over tag-stripped text (_SURFACE), outside the
 and the self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test
 red; each sentence of the disclosure page's retired fresh-only item, the quickstart's retired
 conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
-rows and counts, and those three files' wording of the removed section 9.2 remedy adoption, is searched over
-its whole file's normalized text and is red wherever it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
+rows and counts, those three files' wording of the removed section 9.2 remedy adoption, and the
+disclosure and record-indexes pages' description of a store upgrade the reference tooling no longer
+defines, is searched over its whole file's normalized text and is red wherever it lands
+(_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
 deleted sentence restored there stays green.
 
@@ -359,6 +361,7 @@ _CONTRACT = {
         'Init, and any upgrade, MUST render this managed block into .working/.gitignore from the topology constants: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
         'Installation MUST inspect effective ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed untracking change, never silent index mutation.',
         _D('The block travels with the store and joins the indexed-ignore candidate set.'),
+        'At homes 2 an implementation MUST register .working/.gitignore by its exact path as a managed control file that containment recognizes as OPF control area; containment never reads it for drift, and the doctor does not yet grade drift of its managed block.',
         _D('Gitignore is not access control: git add -f can stage ignored state.'),
         'Journals are machine-local even after completion; a clone without them cannot recover those transactions, and requested recovery MUST fail closed on a missing journal.',
         _D('Containment and doctor exclude journals and make no recovery claim, with one exception: the doctor reads the reservations under journals/<kind>/allocations/ read-only, and only for the section 8.2 counter checks; any other journal content, a rogue file included, is outside their coverage.'),
@@ -466,7 +469,12 @@ _CONTRACT = {
         _D("A write that would grow a store file past the store reader's size cap refuses instead, before anything is written, so an upgrade or record operation never rewrites a readable store into one the reader refuses."),
         _D('The DECISIONS.toml machine projection (section 10.5) takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered from a record holding either character differs from the current render in exactly that spelling, and the byte-level view-drift gate reports it as drifted until one re-render re-spells it.'),
         _D('A projection over records holding neither character renders byte-identically, so a store without these characters sees no drift.'),
-        _D('A hand edit or hand merge that leaves canonical bytes passes it undetected, so this integration-base rule is a separate requirement that the precondition does not enforce.'),
+        _D('opf doctor, and the pre-commit hook that runs it, also refuses a machine-store TOML file that is not in canonical form, at every run rather than only before a write: such a file is a C-CONTAINMENT finding, with the same allowance for a literal U+2028 or U+2029.'),
+        _D('It leaves out a path under a valid [unmanaged] declaration (the containment walk grades the declaration, never the files under it), the legacy import staging area, which the containment walk grades, and a file it cannot read or parse, which the check that reads it grades (except init.toml, which no other check reads, so an unreadable one cannot be evaluated and an unparseable one is a finding).'),
+        _D('During a partial import backed by an active import run, it also leaves out the stray paths the containment and archive walks triage there (section 14.2): a file outside the managed set and outside the archive tree (which, in an adopting store, the containment walk reports as a finding instead), and, within the archive tree, a file directly under archive/, a file under a bucket subdirectory, or a bucket file other than archive.toml, worklog.toml and a <type>.index.toml.'),
+        _D('Nor does it enter, there, a directory beneath which it leaves out every path: outside the archive tree, a directory that is not a managed namespace derived from the manifest (a per-record type directory, the generation-2 worklog directory or an ancestor of a store-scope view target), and, within it, a bucket subdirectory, so a symlink, an unreadable directory or deep nesting beneath one does not stop the store being evaluated.'),
+        _D("A bucket's archive.toml, worklog.toml and <type>.index.toml are checked at every import status."),
+        _D('A hand edit or hand merge that leaves canonical bytes passes both the precondition and doctor undetected, so the integration-base rule above is a separate requirement that neither enforces.'),
         _D('A merge that resolves without a conflict yet duplicates an ID is caught by opf doctor, which checks store-wide ID uniqueness and that every ID lies within its counter (section 8.2).'),
         'A collision MUST NOT be resolved by decrementing a counter or reusing an ID.',
     ),
@@ -761,6 +769,7 @@ _CONTRACT = {
         'A store that omits [opf].homes, or declares any value other than the integer 2, MUST be refused.',
         _D('This specification defines no earlier base version, so this section defines no upgrade into 2.0.0; its rules bind each later base-schema version bump.'),
         'Every later base-schema version bump MUST keep every manifest discoverable through the exact base discovery token opf (section 4.5).',
+        _D('No later base version exists, so the reference tooling defines no store upgrade (section 16.1).'),
         "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
         _D('Every requirement of this section on an upgrade, its deltas, preconditions, refusals, and remedies binds every implementation that provides opf upgrade.'),
         "Every implementation MUST apply the version ceiling's refusal at the end of this section.",
@@ -986,6 +995,7 @@ _CONTRACT = {
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.'),
         _D('The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification, and its opf upgrade and opf record refuse such a store.'),
+        _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
         _D("A runtime check is the step of the implementation that, in a run, reads the declaration and gates that run's store operations, the emitter is the step of the implementation that writes the conformance reports section 16 describes, never a store-file emitter such as the canonical new-document emitter, and a documented run of the runtime check and the emitter need not resolve a store."),
@@ -1406,8 +1416,9 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # They are not specification sentences, so the section 2 keyword lint does not read them. The
 # quickstart, the disclosure page, the adopt page, the adoption guide, the record-indexes page
 # and the core-files page state the one implementation model, the 2.0.0 file baseline, the
-# reference tooling's grading of a 2.0.0 manifest with homes = 2, what its scaffold still
-# writes, and where its 1.2.0 behaviour diverges from the specification. The self-test pins
+# reference tooling's grading of a 2.0.0 manifest with homes = 2, that it defines no store
+# upgrade, what its scaffold still writes, and where its 1.2.0 behaviour diverges from the
+# specification. The self-test pins
 # this registry's shape, so dropping an entry turns the self-test red.
 _SURFACE = {
     QUICKSTART: (
@@ -1420,6 +1431,7 @@ _SURFACE = {
         'This supersedes the earlier aiqt-opf token; the interim devprocess token and [devprocess] table are retired by the OPFiles rebrand.',
         "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: counters never restart, so record ids are never reissued).",
         'opf adopt is the path for re-adopting any prior ancestry.',
+        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     DISCLOSURE: (
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
@@ -1428,6 +1440,7 @@ _SURFACE = {
         'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
         'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     ADOPT_PAGE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1439,6 +1452,7 @@ _SURFACE = {
         'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
         'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
         'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
+        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     ADOPT_GUIDE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1446,6 +1460,7 @@ _SURFACE = {
         'It does not yet implement spec 2.0.0, the only base version the standard defines.',
         'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
+        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     RECORD_INDEXES: (
         "Created by opf init (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by opf render (DONE.md and the mirror) and validated by opf doctor (schema, uniqueness, the one-to-one receipt link).",
@@ -1468,8 +1483,9 @@ _SURFACE = {
 # record-indexes page's deleted importer-only legacy_fragment rows and counts, retired with the reserved
 # unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
 # record-indexes page's wording of the removed section 9.2 remedy adoption, retired with it (spec
-# 9.2 defines no path for a manifest below 2.0.0). Each sentence present in its file's normalized
-# text is a finding.
+# 9.2 defines no path for a manifest below 2.0.0), and the disclosure and record-indexes pages'
+# description of a store upgrade the reference tooling no longer defines. Each sentence present in
+# its file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1486,6 +1502,7 @@ _SURFACE_RETIRED = {
         'A class claim is self-asserted until validation tooling ships.',
         'a 1.2.0 store is one the section 9.2 validation refusals refuse, so an adoption over it is a first adoption under section 14.1, never a re-adoption.',
         "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
+        'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
     ),
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
@@ -1493,6 +1510,7 @@ _SURFACE_RETIRED = {
         '+ 1 importer-only',
         'one importer-only type, and two reserved names or namespaces',
         "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
+        'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
     ),
 }
 
@@ -2416,6 +2434,20 @@ def boundary_self_test():
                 check("unmanaged-collision-" + operand,
                       lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
                       and not doctor.classify_containment(m, machine).valid_unmanaged)
+        # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
+        # path only, so an [unmanaged] declaration of it collides like any managed path.
+        control = ".working/.gitignore"
+        check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
+        check("classifier-gitignore-legacy-stray",
+              lambda: not doctor.classify_containment(manifest, machine).managed_file(control))
+        check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
+              and not cls2.managed_file(".working/staging/.gitignore"))
+        altered = dict(manifest2, unmanaged={"paths": [control]})
+        check("unmanaged-collision-" + control,
+              lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+              and not doctor.classify_containment(m, machine).valid_unmanaged)
+    check("classifier-gitignore-inert-declaration",
+          lambda: not doctor.classify_containment(manifest2, machine).managed_file(".working/.gitignore"))
     for home in homes[1:]:
         for operand in (home, home + "/child"):
             check("unmanaged-legacy-valid-" + operand, lambda o=operand: doctor.classify_containment(
@@ -5260,9 +5292,10 @@ def _self_test_vectors():
               lambda: refuses(lambda: store.evidence_inventory("import", import_run, bad)))
     check("inventory-run-refusal", lambda: refuses(lambda: store.evidence_inventory("import", "adopt" + suffix)))
 
-    # Real discovery, including legacy-token upgrade discovery and an arbitrary custom machine name.
+    # Real discovery, including an arbitrary custom machine name. Only the opf token is a match: a manifest
+    # whose base table declares the retired devprocess token is no match under any machine name.
     with tempfile.TemporaryDirectory(prefix="opf-homes-") as tmp:
-        for token in (store.STANDARD_TOKEN, store.PRIOR_STANDARD_TOKEN):
+        for token in (store.STANDARD_TOKEN, "devprocess"):
             for name in ("imports", "imported", "archive", "staging", "journals", "toml", "custom"):
                 root = Path(tmp) / token / name
                 machine = root / ".working" / name
@@ -5273,9 +5306,12 @@ def _self_test_vectors():
                 try:
                     def discovery():
                         try:
-                            status, found, _ = store.discover_machine_store(fd, root, accept_tokens=(token,))
+                            status, found, _ = store.discover_machine_store(fd, root)
                         except store.StoreError:
-                            return name in ("imports", "imported", "archive", "staging", "journals")
+                            return (token == store.STANDARD_TOKEN
+                                    and name in ("imports", "imported", "archive", "staging", "journals"))
+                        if token != store.STANDARD_TOKEN:
+                            return status == "present" and found is None
                         return name in ("toml", "custom") and status == "one" and found == name
                     check("discovery-{}-{}".format(token, name), discovery)
                 finally:
@@ -5292,7 +5328,7 @@ def _self_test_vectors():
     _gitignore_reconciliation_self_test(check)
 
     # OPF-D2B PR3a (decision 5): the base spec_version bump 1.1.0 -> 1.2.0 is an intended change
-    # (init.toml provenance, with a tested opf upgrade route), no longer inert.
+    # (init.toml provenance), no longer inert; this tooling defines no store upgrade.
     check("inert-version", lambda: store.SUPPORTED_SPEC_VERSION == "1.2.0")
     check("inert-homes", lambda: store.SUPPORTED_HOMES == 1
           and store.homes_generation({"opf": {"homes": 2}}) == 1)
@@ -5397,10 +5433,10 @@ def _self_test_vectors():
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (9, 6, 9, 5, 7, 4))
+          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 9, 5) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])

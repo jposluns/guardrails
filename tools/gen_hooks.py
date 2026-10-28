@@ -81,7 +81,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-from _standards import dir_chain_or_absent, dir_or_absent  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The nested plugin surface, as repo-root-relative forward-slash paths. hooks/ under the plugin root is
@@ -556,13 +556,14 @@ def build_desired(root, src_dir):
         raise ValueError("{} exists but holds no manifest.toml".format(src_dir))
     plugin, hooks = load_manifest(manifest_path)
     rules_dir = root / ".aiqt" / "core" / "rules"
-    # dir_or_absent (not is_dir or dir_present): a corpus that is there but cannot be read as a directory (a
+    # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
     # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
     # root) is never read; a symlink to a directory inside the root is read.
-    present, problem = dir_or_absent(rules_dir, root)
+    # dir_present, bound beneath root, then judges every component above it the same way.
+    _present, problem = dir_or_absent(rules_dir, root)
     if problem is not None:
         raise ValueError("cannot validate manifest rules ids: {} {} (cannot evaluate)".format(rules_dir, problem))
-    if not present:
+    if not dir_present(rules_dir, root=root):
         raise ValueError("cannot validate manifest rules ids: no {} to load".format(rules_dir))
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in load_corpus(rules_dir)}
     script_text = script_src.read_text(encoding="utf-8")  # FileNotFoundError -> OSError, fail-closed
@@ -591,11 +592,14 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
         # is there but cannot be read as a directory, must fail closed as exit 2, not read as an absent
         # manifest (which would prune the whole surface as orphans). A symlink to a directory inside the
         # root is read.
-        present, problem = dir_or_absent(src_dir, root)
+        # Then dir_present, bound beneath root, judges every component above it the same way, so
+        # a .aiqt that is dangling, not a directory or a symlink resolving outside the root fails
+        # closed too, never read as an absent manifest.
+        _present, problem = dir_or_absent(src_dir, root)
         if problem is not None:
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
-        if present:
+        if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
             if project_ids and authoring_tree(root):
                 _plugin, hooks = load_manifest(src_dir / "manifest.toml")

@@ -59,7 +59,7 @@ import json as _stdlib_json  # noqa: E402,F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
-from _standards import dir_or_absent  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
+from _standards import dir_or_absent, dir_present  # noqa: E402  fail-closed absence probes (raise on an unreadable parent)
 
 POLICY_PATH = ".aiqt/char-policy.json"
 _SKIP = [".git", "node_modules", "__pycache__"]
@@ -294,12 +294,13 @@ def scope_paths(root, policy):
             # dir_or_absent raises on an unreadable parent and walk_files on an unlistable subtree (exit 2); a
             # tree that is there but cannot be read as a directory (a regular file, or a symlink that is
             # dangling, whose target is not a directory or resolves outside root) is exit 2, never skipped. A
-            # symlink to a directory inside root is walked.
+            # symlink to a directory inside root is walked. dir_present then raises on such a component above
+            # it below root, or an unreadable one (exit 2).
             if tree != ".":
-                present, problem = dir_or_absent(base, root)
+                _present, problem = dir_or_absent(base, root)
                 if problem is not None:
                     raise NotADirectoryError(f"the scoped tree {tree} {problem}")
-                if not present:
+                if not dir_present(base, root=root):
                     continue
             found = sorted(walk_files(base, frozenset(entry.get("skip", ())), suffixes=set(entry["suffixes"])))
         for path in found:
