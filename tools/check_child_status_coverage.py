@@ -32,10 +32,12 @@ with exit 2). This gate holds where it runs:
      _child_status_refusal_exit("<basename>"); the canonical file's entry ends in that line, each
      SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical
      --self-test statement and then that line (a direct --self-test launch of it is unguarded; the self-test runs
-     that launch under a process-creation audit hook, with _posixsubprocess.fork_exec wrapped so the
-     multiprocessing launches are recorded too, and fails on any launch recorded; a launch made below Python,
-     through ctypes or a native extension, or through a fork_exec other than the wrapped module attribute, is not
-     recorded), each ENTRY_COPIES file
+     that launch under a process-creation audit hook that records the _posixsubprocess.fork_exec event too, so
+     the multiprocessing launches are recorded, and records an import of _interpreters as a launch, as the hook
+     cannot see a subinterpreter's own launches; the report prints at exit, after the exit handlers and thread
+     joins, and the self-test fails on any launch recorded; a launch made below Python, through ctypes or a
+     native extension, a subinterpreter made other than through _interpreters, and a launch from a daemon thread
+     after the report prints are not recorded), each ENTRY_COPIES file
      (tools/check_opf_declaration.py, whose entry raises its own exit rather than calling sys.exit) has the
      __main__ body exactly the single call _entry(), and _entry bound exactly once at module scope (the same
      count), by one undecorated top-level def with no parameters whose first statement is exactly
@@ -1481,51 +1483,60 @@ LOCAL_BINDINGS = ("def _local_bindings():\n    _entry = _child_status_refusal_ex
                   "                  for _entry, _child_status_refusal_exit in ()]\n")
 # The process-creation audit: the driver runs the script named by its first argument as __main__, with the rest
 # as its arguments, under an audit hook that records every launch event (the events os.fork, os.forkpty,
-# os.posix_spawn and os.posix_spawnp, subprocess.Popen, os.system, os.exec* and os.spawn* raise), and prints
-# them with the script's exit status as its last stdout line. _posixsubprocess.fork_exec raises no event, and
-# multiprocessing launches through it (the forkserver and spawn start methods, the resource tracker,
-# multiprocessing.util.spawnv_passfds), so the driver also replaces that module attribute with a wrapper that
-# records the call and then makes it (AUDIT_WRAP). A launch made below Python (ctypes, a native extension) or
-# through a fork_exec other than that attribute is not recorded. The control script takes one route by name
-# and launches through it; the self-test runs it once per AUDIT_CONTROL_LAUNCHES row, each run recording that
-# row's event (os.spawnv raises os.fork on POSIX; the exec names a path that does not exist, so it fails after
-# its event).
-AUDIT_WRAP = "_posixsubprocess.fork_exec = _fork_exec\n"
-AUDIT_DRIVER = '''import _posixsubprocess
+# os.posix_spawn and os.posix_spawnp, subprocess.Popen, os.system, os.exec* and os.spawn* raise, and
+# _posixsubprocess.fork_exec, which multiprocessing launches through: the forkserver and spawn start methods,
+# the resource tracker, multiprocessing.util.spawnv_passfds, whichever module object holds it). The hook is the
+# main interpreter's only and does not see a subinterpreter's own launches, so the first import of
+# _interpreters (concurrent.interpreters builds on it; an import before the hook counts too) is recorded as a
+# launch. The report, the script's exit status and the launches, is the driver's last stdout line; the driver
+# registers its printer as an exit handler before the script runs, so it prints after the script's own exit
+# handlers and after the thread joins at exit, and a launch from either is in it. A launch made below Python
+# (ctypes, a native extension), a subinterpreter made other than through _interpreters, and a launch from a
+# daemon thread after the report prints are not recorded. The control script takes one route by name and
+# launches through it; the self-test runs it once per AUDIT_CONTROL_LAUNCHES row, each run recording that row's
+# event (os.spawnv raises os.fork on POSIX; the exec names a path that does not exist, so it fails after its
+# event).
+AUDIT_FORK_EXEC = '"_posixsubprocess.fork_exec", '
+AUDIT_INTERPRETERS = '''    elif event == "import" and args[0] == INTERPRETERS:
+        seen.append("import " + INTERPRETERS)
+'''
+AUDIT_AT_EXIT = "atexit.register(_report)\n"
+AUDIT_DRIVER = '''import atexit
 import json
 import runpy
 import sys
 
-LAUNCHES = ("os.exec", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn", "os.startfile", "os.system",
-            "subprocess.Popen")
-seen = []
-fork_exec = _posixsubprocess.fork_exec
+LAUNCHES = (''' + AUDIT_FORK_EXEC + '''"os.exec", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn",
+            "os.startfile", "os.system", "subprocess.Popen")
+INTERPRETERS = "_interpreters"
+seen = ["import " + INTERPRETERS] if INTERPRETERS in sys.modules else []
+code = None
 
 
 def _audit(event, args):
     if event in LAUNCHES:
         seen.append(event)
+''' + AUDIT_INTERPRETERS + '''
 
-
-def _fork_exec(*args, **kwargs):
-    seen.append("_posixsubprocess.fork_exec")
-    return fork_exec(*args, **kwargs)
+def _report():
+    print("AUDITED " + json.dumps({"code": code, "launches": seen}))
 
 
 sys.addaudithook(_audit)
-''' + AUDIT_WRAP + '''sys.argv = sys.argv[1:]
+''' + AUDIT_AT_EXIT + '''sys.argv = sys.argv[1:]
 try:
     runpy.run_path(sys.argv[0], run_name="__main__")
     code = 0
 except SystemExit as exc:
     code = exc.code
-print("AUDITED " + json.dumps({"code": code, "launches": seen}))
 '''
-AUDIT_CONTROL = '''import multiprocessing
+AUDIT_CONTROL = '''import atexit
+import multiprocessing
 import multiprocessing.util
 import os
 import subprocess
 import sys
+import threading
 
 child = [sys.executable, "-I", "-B", "-c", "pass"]
 
@@ -1560,13 +1571,39 @@ def program():
         pass
 
 
+def passfds():
+    os.waitpid(multiprocessing.util.spawnv_passfds(os.fsencode(sys.executable), child, ()), 0)
+
+
+def reimported():
+    # spawnv_passfds imports _posixsubprocess again, so its fork_exec comes from a new module object.
+    del sys.modules["_posixsubprocess"]
+    passfds()
+
+
+def late():
+    # The main thread is marked done at exit, before the joins: this launch comes after the script returns.
+    threading.main_thread().join()
+    os.system("exit 0")
+
+
+def interpreter():
+    from concurrent import interpreters
+    created = interpreters.create()
+    try:
+        created.exec("import os\\nos.system('exit 0')")
+    finally:
+        created.close()
+
+
 ROUTES = {"fork": fork, "forkpty": forkpty,
           "posix_spawn": lambda: os.waitpid(os.posix_spawn(sys.executable, child, dict(os.environ)), 0),
           "subprocess": lambda: subprocess.run(child, check=True), "system": lambda: os.system("exit 0"),
           "spawnv": lambda: os.spawnv(os.P_WAIT, sys.executable, child), "exec": program,
           "forkserver": lambda: process("forkserver"), "spawn": lambda: process("spawn"),
-          "spawnv_passfds": lambda: os.waitpid(multiprocessing.util.spawnv_passfds(os.fsencode(sys.executable),
-                                                                                   child, ()), 0)}
+          "spawnv_passfds": passfds, "reimported_fork_exec": reimported,
+          "atexit": lambda: atexit.register(os.system, "exit 0"),
+          "late_thread": lambda: threading.Thread(target=late).start(), "subinterpreter": interpreter}
 
 # A multiprocessing child imports this file again as __mp_main__; the guard keeps it from launching.
 if __name__ == "__main__":
@@ -1577,7 +1614,9 @@ AUDIT_CONTROL_LAUNCHES = (("fork", "os.fork"), ("forkpty", "os.forkpty"), ("posi
                           ("subprocess", "subprocess.Popen"), ("system", "os.system"), ("spawnv", "os.fork"),
                           ("exec", "os.exec"), ("forkserver", "_posixsubprocess.fork_exec"),
                           ("spawn", "_posixsubprocess.fork_exec"),
-                          ("spawnv_passfds", "_posixsubprocess.fork_exec"))
+                          ("spawnv_passfds", "_posixsubprocess.fork_exec"),
+                          ("reimported_fork_exec", "_posixsubprocess.fork_exec"), ("atexit", "os.system"),
+                          ("late_thread", "os.system"), ("subinterpreter", "import _interpreters"))
 # A self-test launch that starts a forkserver child first and then runs the script named by its first argument,
 # with the rest as its arguments: the audit must report it.
 AUDIT_MULTIPROCESSING_TARGET = '''import multiprocessing
@@ -2585,10 +2624,14 @@ def _behaviour(probe, base):
 
     # The --self-test statement of opf/tools/_opf_declaration.py runs before its guard, so that launch is unguarded:
     # run it under the process-creation audit, which must record no launch; the same self-test behind a
-    # multiprocessing launch, which the audit must report and the audit without its fork_exec wrap does not; and
-    # the control once per route, each run recording that route's launch.
+    # multiprocessing launch, which the audit must report and the audit without the fork_exec event does not; the
+    # control once per route, each run recording that route's launch; and the exit, late-thread and
+    # subinterpreter routes under an audit that prints its report when the script returns or does not record the
+    # _interpreters import, which must each miss them.
     driver = _copy("audit/driver.py", base, AUDIT_DRIVER)
-    unwrapped = _copy("audit/unwrapped.py", base, AUDIT_DRIVER.replace(AUDIT_WRAP, ""))
+    no_fork_exec = _copy("audit/no_fork_exec.py", base, _swap(AUDIT_DRIVER, AUDIT_FORK_EXEC, ""))
+    at_return = _copy("audit/at_return.py", base, _swap(AUDIT_DRIVER, AUDIT_AT_EXIT, "") + "_report()\n")
+    no_interpreters = _copy("audit/no_interpreters.py", base, _swap(AUDIT_DRIVER, AUDIT_INTERPRETERS, ""))
 
     def audited(*argv, script=driver):
         got = via("default", python + [str(script)] + list(argv), cwd=str(ROOT))
@@ -2607,16 +2650,25 @@ def _behaviour(probe, base):
     out.append(("behaviour/audit-reports-multiprocessing-launch", got[0] == 0 and isinstance(report, dict)
                 and report.get("code") == 0 and "_posixsubprocess.fork_exec" in report.get("launches", ())
                 and "opf declaration self-test: PASS" in got[1], got))
-    got, report = audited(target, declaration, "--self-test", script=unwrapped)
-    out.append(("revert/audit-fork-exec-unwrapped-red", got[0] == 0 and report == {"code": 0, "launches": []}
-                and "opf declaration self-test: PASS" in got[1], got))
-    control, missed = str(_copy("audit/launches.py", base, AUDIT_CONTROL)), []
+    got, report = audited(target, declaration, "--self-test", script=no_fork_exec)
+    control = str(_copy("audit/launches.py", base, AUDIT_CONTROL))
+    again, again_report = audited(control, "reimported_fork_exec", script=no_fork_exec)
+    out.append(("revert/audit-fork-exec-unrecorded-red", got[0] == 0 and report == {"code": 0, "launches": []}
+                and "opf declaration self-test: PASS" in got[1] and again[0] == 0
+                and again_report == {"code": 0, "launches": []}, (got, again)))
+    missed = []
     for route, event in AUDIT_CONTROL_LAUNCHES:
         got, report = audited(control, route)
         if not (got[0] == 0 and isinstance(report, dict) and report.get("code") == 0
                 and event in report.get("launches", ())):
             missed.append((route, event, got))
     out.append(("control/audit-sees-every-launch", not missed, missed))
+    late = [audited(control, route, script=at_return) for route in ("atexit", "late_thread")]
+    out.append(("revert/audit-report-at-return-red", all(got[0] == 0 and report == {"code": 0, "launches": []}
+                                                         for got, report in late), late))
+    got, report = audited(control, "subinterpreter", script=no_interpreters)
+    out.append(("revert/audit-subinterpreter-unrecorded-red", got[0] == 0
+                and report == {"code": 0, "launches": []}, got))
     return out
 
 
@@ -2801,8 +2853,10 @@ def self_test(lane, report_path=None):
                                 ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0),
                                 ("behaviour/opf-declaration-self-test-launches-nothing", 0),
                                 ("behaviour/audit-reports-multiprocessing-launch", 0),
-                                ("revert/audit-fork-exec-unwrapped-red", 0),
-                                ("control/audit-sees-every-launch", 0)):
+                                ("revert/audit-fork-exec-unrecorded-red", 0),
+                                ("control/audit-sees-every-launch", 0),
+                                ("revert/audit-report-at-return-red", 0),
+                                ("revert/audit-subinterpreter-unrecorded-red", 0)):
             check(check_id, behaviour.get(check_id, (False, "not run"))[0], behaviour.get(check_id, (False, None))[1])
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

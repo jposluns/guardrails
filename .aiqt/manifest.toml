@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e0419a77e33e545e7687d494aa2a9edd7c03395149d6c3e5c051ee1a7df852e1"
+tree-sha256 = "90fbe2226ca799f4a5122741f76b5b0b3bf5b8dee2d68c369c7edead70ea5fdf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 501427
-sha256 = "38bd1e92694c60b4ccbac34e74a29a4c81a321d1dba286127ee623f469b03f5b"
+bytes = 501686
+sha256 = "9e2b559bb6c370bd0c4f694fa10e0b44569de9450322841b6f567617d651428b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2726,8 +2726,8 @@ sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
-bytes = 14478
-sha256 = "ebb4dd9cc25b39746ee43e3c8589a99475c23684eea8399074a185cb8d99edce"
+bytes = 14561
+sha256 = "4ac25e838c760afcf77bf1a241d88627ce6cc2e71a57cac08c1326559126c1f0"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -2801,8 +2801,8 @@ sha256 = "f0af62092b6f19027077007b611f3e864a0aa15d2519cddeefe7504dccd78197"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
-bytes = 26898
-sha256 = "950ee6e535dc3b16d13875b5a3b59f1741963412c5782c19785c0761fd726438"
+bytes = 27156
+sha256 = "b2fe992fecb9b5e6388fc7742f003827730bceed3db15dbb42ed9f892e9867a3"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -3421,8 +3421,8 @@ sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 185667
-sha256 = "a8f068a89dc7b0e23125b65cbf802b059a55e0b857c1332b8c4a377959dd7fc0"
+bytes = 188748
+sha256 = "ba5c4a1296d7524a3e649f62f1a9e981fa6ba4c03cbd687567ae9deec4734553"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3881,8 +3881,8 @@ sha256 = "d80f5404136ec56fc23b12b4742f6719ca23520cec6d55a9ae8d592d0f216e0b"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 153534
-sha256 = "fd17d732373068b99539faf322e3f123a84a39b3d4a6ca5370233cfe063a6271"
+bytes = 153622
+sha256 = "88289bce3ac80f27a7f4a9506ccbdc9186a35399f4094dc4276f053633929c53"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

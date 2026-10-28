@@ -2880,8 +2880,10 @@ expected-check-ids = [
   "revert/runner-probe-removed-red",
   "behaviour/opf-declaration-self-test-launches-nothing",
   "behaviour/audit-reports-multiprocessing-launch",
-  "revert/audit-fork-exec-unwrapped-red",
+  "revert/audit-fork-exec-unrecorded-red",
   "control/audit-sees-every-launch",
+  "revert/audit-report-at-return-red",
+  "revert/audit-subinterpreter-unrecorded-red",
   "live/real-tree-passes",
 ]
 
