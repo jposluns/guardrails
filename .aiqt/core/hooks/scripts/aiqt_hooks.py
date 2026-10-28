@@ -2315,7 +2315,11 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
     record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
     a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
-    list) passes it; the default False keeps every record."""
+    list) passes it; the default False keeps every record.
+
+    Inside _CommandReading the command reading follows the readings above, the segments of each read from its
+    command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
+    WORDS, above _COMMAND_LEAD_WORDS); outside it nothing is added."""
     try:
         readings = _lex_readings(command, partial, locale, skip_empty)
     except _UncertainHashError as exc:
@@ -2337,9 +2341,12 @@ def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
     prefix without a second pass over that text, unless the error marks a reading that failed to lex
     (reading_failed), where a partial lex recovers every reading's segments and the caller must lex partially
     in full (_gate_recovered_sink); exc must come from a lex of this same command with this locale and
-    skip_empty, whose state the fork carries."""
+    skip_empty, whose state the fork carries. Inside _CommandReading the command reading of the recovered
+    segments follows them (_with_command_readings)."""
     lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
-    readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+    readings = _with_command_readings(
+        _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
+        skip_empty)
     return ([seg for segs, _complete, _open in readings for seg in segs],
             all(done for _segs, done, _open in readings), readings[-1][2])
 
@@ -2375,9 +2382,11 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     Raises _UncertainHashError beyond that bound, at a '#' in or right after a backquote substitution,
     and when a reading fails to lex for another reason after an uncertain '#' was read (a ValueError the
     plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
-    another reason returns its recovered segments, as a partial lex does."""
+    another reason returns its recovered segments, as a partial lex does. Inside _CommandReading the command
+    reading of each reading it changes follows the list, on both exits (_with_command_readings)."""
     if _SubstHeredocs.main_lex:
-        return [_main_reading(command, partial, locale, skip_empty)]
+        return _with_command_readings([_main_reading(command, partial, locale, skip_empty)], partial, locale,
+                                      skip_empty)
     readings = []
     misread = False
     pending = [({}, None)]
@@ -2405,7 +2414,9 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
         else:
             readings.append(lexed)
             misread = misread or body
-    return _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings
+    return _with_command_readings(
+        _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings, partial,
+        locale, skip_empty)
 
 
 def _hash_reading_with(reading, at, comment):
@@ -2782,6 +2793,314 @@ def _segments(command, locale=False, skip_empty=False):
     each line with it set and unset. skip_empty is passed to _lex_command, for a caller that reads nothing
     from a segment with no word and no redirect."""
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale, skip_empty=skip_empty)]
+
+
+# A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS AND IN ITS BACKQUOTES. The lexer splits a command at its separators
+# and keeps the words of each segment in order, so a reserved word that opens or continues a compound command
+# stays at the head of the argv of the segment it begins ('if git diff; then' reads ['if', 'git', 'diff'], and
+# 'for x do git diff; done' reads ['for', 'x', 'do', 'git', 'diff']), and an unquoted backquote substitution is
+# text glued into the words around it, split where its body holds a separator ('x=`make | head`' reads
+# ['x=`make'] and ['head`']). A guard that finds its command word at the head of a segment, or behind the few
+# words its own finder passes over, does not see the command there. The command reading adds, for a guard that
+# asks for it (_CommandReading), one more reading of the command after the lexer's own readings: each segment
+# read from its command word, past the reserved words before it (_command_start, _read_past), and the commands
+# of each backquote substitution, its body lexed as a command line of its own, before the segment that opens it
+# (_read_segments). The lexer's own readings come first and unchanged, so a guard that judges every segment it
+# is given decides at least as strictly as without the reading, the contract the readings of an uncertain '#'
+# keep (_lex_command). Outside _CommandReading every lex returns what it returned before this reading existed.
+#
+# NOT READ, disclosed: a '$(...)' substitution inside a double-quoted string (the word reader skips it whole,
+# _read_word), the command an eval word or an sh -c or bash -c string holds (one the shell builds at run time
+# from a word's text), and a backquote body nested more than _SUBSTITUTION_DEPTH deep. OVER-READ, the safe
+# direction: a quoted reserved word ("'if' git diff" runs a command named if) is passed over as an unquoted one
+# is, a backquote in text that bash reads as data (inside a '${...}' operand, or in a '#' comment the scan does
+# not place) is read as a substitution, and the bodies of one segment's substitutions, and the readings of a
+# body's uncertain '#', are read together in the one added reading, so a guard that reads segments in order can
+# read a sequence no single reading of the body holds.
+#
+# The words _command_start passes over at the head of a segment: the reserved words that can stand right before
+# a command word. 'time' (with its -p and a '--'), 'coproc' (with the NAME of a named coprocess), 'function NAME'
+# and 'for NAME do' or 'select NAME do' are read there too (_command_start).
+_COMMAND_LEAD_WORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "while", "until"))
+# The reserved words that open a compound command: 'coproc NAME' followed by one names a coprocess whose body
+# comes after NAME (coproc C { git diff; }), while 'coproc' followed by any other word runs that word.
+_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
+# How many backquote bodies deep the command reading reads a nested substitution (_read_commands).
+_SUBSTITUTION_DEPTH = 16
+# The characters at which the backquote scan (_backquote_bodies) decides something: a backslash, a quote, a
+# backquote, a '#', a parenthesis, a closing brace, and a '$' that opens an ANSI-C quote, a '$(' or a '${'.
+_BACKQUOTE_SCAN_RE = re.compile(r"[\\'\"`#()}]|\$[('{]")
+# The end of a backquote body: the next backslash (which escapes the character after it) or backquote.
+_BACKQUOTE_CLOSE_RE = re.compile(r"[\\`]")
+# A backslash that escapes a '$', a backquote or a backslash inside a backquote body, which bash removes
+# before it runs the body.
+_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([$`\\])")
+
+
+class _CommandReading:
+    """A context in which a lex adds the command reading after its own readings (A COMMAND'S SUBJECT PAST ITS
+    COMPOUND WORDS, above _COMMAND_LEAD_WORDS, and _with_command_readings); outside it every lex returns what it
+    returns without that reading. added counts the segments the command reading added in the context's lexes,
+    and the context object holds that count once it exits, so a caller can tell the lexer's own segments from
+    the added ones (diff_source_pretool). depth counts the backquote bodies being lexed inside one another
+    (_read_commands). It restores the previous setting on exit, as _WordSpellings does."""
+
+    on = False
+    added = 0
+    depth = 0
+
+    def __enter__(self):
+        self.was = (_CommandReading.on, _CommandReading.added)
+        _CommandReading.on = True
+        _CommandReading.added = 0
+        return self
+
+    def __exit__(self, *exc_info):
+        self.added = _CommandReading.added
+        _CommandReading.on, _CommandReading.added = self.was
+        return False
+
+
+def _command_start(argv):
+    """The index of the command word of a segment whose words are argv, past what can stand before it at the
+    head of a segment: the reserved words of _COMMAND_LEAD_WORDS ('!', '{', if, then, elif, else, do, while,
+    until) in any number and order, 'time' with a -p and a '--' after it, 'coproc' with the NAME of a named
+    coprocess (one a compound opener follows, _COMPOUND_OPENERS), 'function NAME', and 'for NAME do' or
+    'select NAME do' (a loop with no 'in' list, whose body starts in the same segment). 0 for a segment that
+    starts with its command word or holds no word. A loop header with a list ('for x in a b', 'select x in a')
+    and a case header ('case $x in') run no command: their words are a name and a list, so they read
+    len(argv). Only an index is returned, so the caller slices every list parallel to argv and keeps their
+    records (_read_past)."""
+    n = len(argv)
+    i = 0
+    while i < n:
+        word = argv[i]
+        if word in _COMMAND_LEAD_WORDS:
+            i += 1
+        elif word == "time":
+            i += 1
+            if i < n and argv[i] == "-p":
+                i += 1
+            if i < n and argv[i] == "--":
+                i += 1
+        elif word == "coproc":
+            i += 2 if i + 2 < n and argv[i + 2] in _COMPOUND_OPENERS else 1
+        elif word == "function":
+            i += 2
+        elif word in ("for", "select"):
+            if i + 2 >= n or argv[i + 2] != "do":
+                return n
+            i += 3
+        elif word == "case":
+            return n
+        else:
+            break
+    return min(i, n)
+
+
+def _read_past(seg):
+    """seg read from its command word (_command_start): seg itself when it starts there, else a copy whose argv,
+    argv_opaque and argv_leading_tilde hold the words from the command word on, every other field (its
+    redirects, raw text, separator and opaque flag) unchanged. Where seg's argv carries the spelling records of a
+    lex inside _WordSpellings, the copy's argv is a _SpelledWords holding the records of the words it keeps, so
+    a reader of the record (_git_local_alias, _git_alias_defined_at) reads the copy as it reads a segment the
+    lexer built; a copy with no word keeps a plain empty list, as the lexer gives a segment with none."""
+    argv = seg.argv
+    start = _command_start(argv)
+    if not start:
+        return seg
+    words = argv[start:]
+    spelling = getattr(argv, "spelling", None)
+    if spelling is not None and words:
+        words = _SpelledWords(words, spelling[start:])
+    return seg._replace(argv=words, argv_opaque=seg.argv_opaque[start:],
+                        argv_leading_tilde=seg.argv_leading_tilde[start:])
+
+
+def _backquote_bodies(text):
+    """The outermost backquote command substitutions of text, one reading of a command as the lexer read it
+    (_read_segments): a list of (start, body) pairs in text order, start the index of the opening backquote and
+    body the text up to the closing one with each backslash that escapes a '$', a backquote or a backslash
+    removed, as bash removes it before it runs the body (so a substitution nested in it, its backquotes escaped
+    once, opens when the body is read). A backquote opens one unquoted or inside a double-quoted string, never
+    inside a single-quoted or ANSI-C $'...' string or after a backslash, and the body ends at the next backquote
+    no backslash escapes, or at the end of text. A '#' at the start of a word (at the start of text, or after a
+    blank, a newline or one of ; & | < >) outside every quote and every parenthesis or '${' the scan holds open
+    starts a comment to the end of its line, whose backquotes open nothing; any other '#' is text, so a
+    backquote after a '#' whose reading depends on context is read, an over-read in the safe direction. A
+    double-quoted string is read as one level: a quote inside a '$(...)' it holds ends it here, which can only
+    move where a backquote is read, never hide the text from the scan. Linear in the length of text."""
+    bodies = []
+    n = len(text)
+    i = 0
+    quoted = False  # inside a double-quoted string
+    parens = 0      # parentheses, and '$(' openers, open outside double quotes
+    braces = 0      # '${' openers open outside double quotes
+    while True:
+        match = _BACKQUOTE_SCAN_RE.search(text, i)
+        if match is None:
+            return bodies
+        i = match.start()
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif c == '"':
+            quoted = not quoted
+            i += 1
+        elif c == "`":
+            end = i + 1
+            while True:
+                close = _BACKQUOTE_CLOSE_RE.search(text, end)
+                if close is None:
+                    end = n
+                    break
+                end = close.start()
+                if text[end] == "`":
+                    break
+                end += 2
+            bodies.append((i, _BACKQUOTE_ESCAPE_RE.sub(r"\1", text[i + 1:min(end, n)])))
+            i = end + 1
+        elif quoted:
+            i += 1
+        elif c == "'":
+            close = text.find("'", i + 1)
+            if close < 0:
+                return bodies
+            i = close + 1
+        elif c == "$" and text[i + 1] == "'":
+            i += 2
+            while i < n and text[i] != "'":
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+        elif c == "$" or c == "(":
+            if text[i + 1:i + 2] == "{" and c == "$":
+                braces += 1
+            else:
+                parens += 1
+            i += 2 if c == "$" else 1
+        elif c == ")":
+            parens = max(parens - 1, 0)
+            i += 1
+        elif c == "}":
+            braces = max(braces - 1, 0)
+            i += 1
+        elif not parens and not braces and (i == 0 or text[i - 1] in " \t\n;&|<>"):
+            newline = text.find("\n", i)
+            if newline < 0:
+                return bodies
+            i = newline
+        else:
+            i += 1
+
+
+def _read_segments(segments, locale=False, skip_empty=False):
+    """The command reading of one reading of a command (A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS, above
+    _COMMAND_LEAD_WORDS): segments, that reading's _Segment records in order, each read from its command word
+    (_read_past), with the commands of each backquote substitution the reading's text holds (_backquote_bodies,
+    read by _read_commands) inserted before the record that opens it, so a pipe or separator between that
+    record and its neighbours keeps its place. The text is rebuilt from the records' raw text and separators
+    rather than taken from the command, so it is this reading's text: the body of a quoted here-document,
+    which no record holds, is not in it, and a body the lexer split at a separator inside it ('x=`make | head`')
+    is read whole. Returns segments itself, the same list, when the reading changes nothing, so a caller can
+    tell (is) that it adds nothing; locale and skip_empty are passed to the lex of each body."""
+    bodies = ()
+    if any("`" in seg.raw for seg in segments):
+        bodies = _backquote_bodies("".join([seg.raw + seg.sep_after for seg in segments]))
+    out = []
+    changed = False
+    at = 0
+    index = 0
+    for seg in segments:
+        end = at + len(seg.raw)
+        while index < len(bodies) and bodies[index][0] < end:
+            commands = _read_commands(bodies[index][1], locale, skip_empty)
+            out.extend(commands)
+            changed = changed or bool(commands)
+            index += 1
+        read = _read_past(seg)
+        out.append(read)
+        changed = changed or read is not seg
+        at = end + len(seg.sep_after)
+    return out if changed else segments
+
+
+def _read_commands(body, locale=False, skip_empty=False):
+    """The commands of a backquote substitution's body for the command reading (_read_segments): the body lexed
+    as a command line of its own and partially (what the lexer recovers before a construct it cannot read, as
+    _lex_command's partial mode returns it), each of the body's readings read as _read_segments reads one, its
+    own nested substitutions included, in turn. A body _SUBSTITUTION_DEPTH bodies deep or deeper reads nothing,
+    and so does one the lexer recovers nothing of. The lex is one the guard does not make for itself, so it
+    leaves the state a guard reads around its own lex as it found it: the stops a partial lex records
+    (_LexStops), the places a lex records (_LexPlaces) and the count of here-document floors
+    (_SubstHeredocs.reads); and it is made with the command reading off, so the body's own readings are not
+    returned beside its read ones (each read one holds every segment of the reading it reads)."""
+    if _CommandReading.depth >= _SUBSTITUTION_DEPTH:
+        return []
+    saved = (_CommandReading.on, _LexStops.at, _LexPlaces.spans, _SubstHeredocs.reads)
+    _CommandReading.on = False
+    _CommandReading.depth += 1
+    _LexStops.at = None
+    _LexPlaces.spans = None
+    try:
+        try:
+            readings = [segs for segs, _complete, _open in _lex_readings(body, True, locale, skip_empty)]
+        except _UncertainHashError as exc:
+            readings = [_lex_resume_partial(body, exc, locale, skip_empty)[0]]
+        out = []
+        for segs in readings:
+            out.extend(_read_segments(segs, locale, skip_empty))
+        return out
+    except ValueError:
+        return []
+    finally:
+        _CommandReading.on, _LexStops.at, _LexPlaces.spans, _SubstHeredocs.reads = saved
+        _CommandReading.depth -= 1
+
+
+def _with_command_readings(readings, partial, locale=False, skip_empty=False):
+    """readings, the list of one lex's readings of a command as _lex_readings returns it (one entry per reading:
+    its segments, or in partial mode its (segments, complete, in_progress)), followed inside _CommandReading by
+    the command reading of each reading it changes (_read_segments), and readings itself outside it. An added
+    reading keeps the partial-mode flags of the reading it reads, and in partial mode, where any reading is
+    added, the last reading follows the added ones again, so the list still ends with the segments of the last
+    reading, and the complete and in_progress flags _lex_command returns are the ones it returns without the
+    command reading. The segments added are counted in _CommandReading.added."""
+    if not _CommandReading.on:
+        return readings
+    added = []
+    for reading in readings:
+        segments = reading[0] if partial else reading
+        read = _read_segments(segments, locale, skip_empty)
+        if read is not segments:
+            added.append((read,) + tuple(reading[1:]) if partial else read)
+    if not added:
+        return readings
+    if partial:
+        added.append(readings[-1])
+    _CommandReading.added += sum(len(reading[0] if partial else reading) for reading in added)
+    return readings + added
+
+
+def _lex_command_read(command, partial=False, locale=False, skip_empty=False):
+    """_lex_command with the command reading (_CommandReading): the segments of the lexer's own readings, then
+    those of the command reading of each reading it changes (_with_command_readings)."""
+    with _CommandReading():
+        return _lex_command(command, partial, locale, skip_empty)
+
+
+def _segments_read(command, locale=False, skip_empty=False):
+    """_segments with the command reading (_CommandReading): the (argv, sep_after) of each segment
+    _lex_command_read returns, read through _segments itself."""
+    with _CommandReading():
+        return _segments(command, locale, skip_empty)
+
+
+def _lex_readings_read(command, partial=False, locale=False, skip_empty=False):
+    """_lex_readings with the command reading: the lexer's own readings, then the command reading of each one it
+    changes (_with_command_readings), each still its own entry, so a guard that reads one reading at a time
+    never reads a sequence across two."""
+    with _CommandReading():
+        return _lex_readings(command, partial, locale, skip_empty)
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -3721,7 +4040,11 @@ def diff_source_pretool(data):
     quotes, a compound, an extra option, a dynamic redirect, a non-pager pipe) is a console-readability
     CONVENTION, not a hazard, so it ALLOWS with an informational note rather than prompting. Across a compound
     or multiple producers, a CONFIRMED console dump anywhere still DENIES (deny outranks the allow-note), so a
-    multi-command form is never admitted on one safe segment when another is a confirmed dump. A command
+    multi-command form is never admitted on one safe segment when another is a confirmed dump. A producer
+    behind the reserved words of a compound command ('if git diff', '{ git diff; }', 'for x do git diff') or
+    inside a backquote substitution is also read as its own command (the command reading, _CommandReading), so
+    a confirmed dump there DENIES as the bare form does; the closed proofs read the lexer's own segments only,
+    so an added segment never earns one. A command
     carrying a '#' whose comment reading depends on context (the shared lexer's comment rule) is judged on
     the segments of both readings of each such '#'; one the lexer cannot judge that way (_UncertainHashError)
     DENIES an apparent producer its text names (_hash_doubt_names) as a possible dump rather than taking the
@@ -3747,7 +4070,12 @@ def diff_source_pretool(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
     reads = _SubstHeredocs.reads
     try:
-        segments = _lex_command(command)
+        # The command reading (_CommandReading) adds, after the lexer's own segments, a producer behind a
+        # reserved word or inside a backquote substitution read as its own command: possibles and the dump
+        # test below read every segment, while the closed proofs read the lexer's own segments alone (own), so
+        # an added segment can deny or note but never earn a proof.
+        with _CommandReading() as reading:
+            segments = _lex_command(command)
     except _UncertainHashError:
         # The fallback would only note an apparent producer; one behind a '#' whose comment reading the
         # lexer could not judge under both readings is treated as the confirmed console dump it may be, and
@@ -3764,6 +4092,7 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
+    own = segments[:len(segments) - reading.added]
     # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
     # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
     possibles = [(index, seg) for index, seg in enumerate(segments)
@@ -3773,7 +4102,7 @@ def diff_source_pretool(data):
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
     if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
                          or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-                         or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+                         or _diff_proof_realfile(own) or _diff_proof_pager(own)):
         if _SubstHeredocs.reads != reads:
             return _diff_source_fallback(command)
         return _allow()
@@ -4388,8 +4717,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
             # skip_empty: this reader decides on each segment's words, and the equality below lets one
             # reading serve for both locales by comparing the kept (argv, sep_after) records, so nothing
             # it reads comes from a segment with no word and no redirect; a long run of separators builds
-            # and feeds it no record.
-            segments = _segments(command, locale=locale, skip_empty=True)
+            # and feeds it no record. The command reading (_CommandReading) adds each segment read from its
+            # command word and the commands of each backquote substitution, so a git command behind 'for NAME
+            # do', which the finder below does not pass over, or inside backquotes is read too.
+            segments = _segments_read(command, locale=locale, skip_empty=True)
         except ValueError as exc:
             error = error or exc
             continue
@@ -6365,7 +6696,10 @@ def git_explicit_binding(data):
     ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY a PUBLISH ('git push') in the SAME command
     DENIES-and-educates - the breadth selector sweeps in unrelated modified/untracked content and the push
     then publishes it irreversibly, so it is not waved through. A plain 'git commit -m' and a scoped
-    'git add <path>' are not breadth and are unaffected. It never asks. A '#' whose comment reading the
+    'git add <path>' are not breadth and are unaffected. It never asks. The command reading (_CommandReading)
+    is one more reading after the lexer's own, judged on its own like them: each segment read from its command
+    word, past a compound command's reserved words ('if git add -A && git push; then', '{ ...; }'), with the
+    commands of each backquote substitution before the segment that opens it. A '#' whose comment reading the
     shared lexer CAN judge under both readings is judged one reading at a time, because both scans here are
     order-sensitive: the strictest decision across the readings stands (a deny on any reading, then the
     first reading's note), and the breadth-then-push or cd-then-mutation order is never read across a
@@ -6400,8 +6734,11 @@ def git_explicit_binding(data):
         # state (a breadth stage before a push, a directory change before a mutation) that is real only
         # within one reading, so each reading is judged on its own and the strictest decision across the
         # readings stands (a deny on any reading wins, then the first reading's note); state carried over
-        # a reading boundary would invent a sequence no single reading holds.
-        readings = _lex_readings(command, skip_empty=True)
+        # a reading boundary would invent a sequence no single reading holds. The command reading
+        # (_CommandReading) is one more reading of its own, after the lexer's: each segment read from its
+        # command word, past a compound command's reserved words, with the commands of each backquote
+        # substitution, so a breadth stage and a push inside a compound or a substitution are read in order.
+        readings = _lex_readings_read(command, skip_empty=True)
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -6504,14 +6841,12 @@ def git_stash_ref(data):
     options or assignments are not resolved. Simple quote fragments ARE decoded by the shared lexer;
     fragmentation/obfuscation that does not resolve to recognized command/verb tokens is not covered.
     The shared segmenter splits ordinary separators (`;`, `|`, `&&`, `||`, newlines) and `(...)`
-    subshells but does NOT structurally parse `{...}` brace groups or shell control-flow
-    constructs, so a bare pop/apply is missed only when an UNPEELED brace or shell-keyword token
-    occupies the command-word position of `git`'s segment: for example a `{` group opener, or a
-    control keyword such as `if`, `elif`, `else`, `while`, `until`, `then`, or `do` immediately
-    preceding `git` in the same segment (these examples are illustrative, not exhaustive); a `git
-    stash pop` that a `;` or newline delimits into its own segment IS seen and warns. git_discard's
-    generic fallback may still note the missed same-segment form, and extending the shared segmenter
-    to those forms is a family-wide follow-on.
+    subshells, and the command reading (_CommandReading) reads each segment from its command word,
+    past the reserved words a compound command puts before it (a `{` group opener, `!`, `if`,
+    `then`, `elif`, `else`, `do`, `while`, `until`, `time`, `coproc`, `function NAME`, `for NAME do`,
+    _command_start), and reads the commands of each backquote substitution, so a bare pop/apply
+    there warns as a bare one does. Still not read: a `$(...)` inside a double-quoted string, and a
+    command an eval word or an `sh -c` string holds.
     Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
     value-taking option can make its value look like an operand and falsely allow; re-validate on a
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
@@ -6549,8 +6884,10 @@ def git_stash_ref(data):
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
-        # and no redirect is not built at all.
-        segments = _segments(command, skip_empty=True)
+        # and no redirect is not built at all. The command reading (_CommandReading) adds each segment read
+        # from its command word, past a compound command's reserved words, and the commands of each backquote
+        # substitution, so '{ git stash pop; }' and 'if git stash pop; then :; fi' are read as git commands.
+        segments = _segments_read(command, skip_empty=True)
     except _UncertainHashError:
         # A stash verb behind a '#' whose comment reading the lexer could not judge under both readings keeps
         # the note it would earn, and so does a command whose quoting the fallback text does not decode,
@@ -9464,7 +9801,9 @@ def _uncertain_line_lossy(command):
     found = []
     for line in _join_continuations(command)[0].split("\n"):
         try:
-            line_segments = _segments(line, skip_empty=True)  # a segment with no word names no verb
+            # A segment with no word names no verb; the command reading (_CommandReading) also names a verb
+            # behind a compound command's reserved words or inside a backquote substitution.
+            line_segments = _segments_read(line, skip_empty=True)
         except ValueError:
             continue  # a line the lexer cannot read alone contributes no name
         for tokens, _sep in line_segments:
@@ -12411,7 +12750,10 @@ def branch_root(data):
     a hazard class (an orphan/unrooted branch dispatches work onto a retired root), so a confirmed orphan
     start DENIES, and a form this guard cannot prove rooted (an ambiguous/--orphan creation form, a
     dir-change or ambient repository-view override, an unresolved ancestry) also DENIES-and-educates
-    fail-safe, naming the reachable correct action. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
+    fail-safe, naming the reachable correct action. A creation behind the reserved words of a compound command
+    ('if git switch --orphan x', '{ git checkout --orphan x; }', 'for y do git switch --orphan x') or inside a
+    backquote substitution is read as its own command too (the command reading, _CommandReading), after the
+    lexer's own segments and with their spelling records. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
     command-local '-C <dir>'/'--work-tree' redirect that RESOLVES to a concrete directory has its ancestry
     checked THERE (the -C fleet convention is honoured, not blocked): a rooted start ALLOWS, while a target
     that is not a rooted repository DENIES fail-safe via the ancestry-unknown path ('-C $VAR', '-C
@@ -12464,9 +12806,11 @@ def branch_root(data):
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
         # and no redirect is not built at all, here, in the partial reread or in main's floor reread. Each lex
-        # records each word's spelling for the git alias reading below (_WordSpellings).
+        # records each word's spelling for the git alias reading below (_WordSpellings), and adds the command
+        # reading (_CommandReading): each segment read from its command word, past a compound command's
+        # reserved words, its spelling records kept, and the commands of each backquote substitution.
         with _WordSpellings():
-            segments = _segments(command, skip_empty=True)
+            segments = _segments_read(command, skip_empty=True)
     except ValueError as exc:
         # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
         # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
@@ -12497,7 +12841,7 @@ def branch_root(data):
         try:
             with _WordSpellings(), _LexStops() as stops:
                 segments = [(seg.argv, seg.sep_after)
-                            for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+                            for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
         except ValueError:
             if named:
                 return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
@@ -12510,7 +12854,7 @@ def branch_root(data):
         # segments main's partial lex recovers, past the body, are judged too.
         with _SubstHeredocFloor(), _WordSpellings():
             segments = segments + [(seg.argv, seg.sep_after)
-                                   for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+                                   for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
@@ -15275,6 +15619,9 @@ def commit_msg_subst(data):
     recognized git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or
     $( command substitution (a command-injection hazard the shell runs before git sees the argument). Hooks
     never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>.
+    A git commit behind the reserved words of a compound command ('if git commit ...', '{ git commit ...; }',
+    'time -p git commit ...', 'for x do git commit ...') or inside a backquote substitution is read as its own
+    command too (the command reading, _CommandReading), after the lexer's own segments.
     Behind a '#' whose comment reading the shared lexer cannot judge under both readings, the raw fallback
     reads _hash_doubt_scan, and a command whose quoting that scan does not decode (_hash_doubt_opaque)
     DENIES. Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION
@@ -15301,8 +15648,10 @@ def commit_msg_subst(data):
     reads = _SubstHeredocs.reads
     try:
         # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
-        # none, so no such segment is built (_lex_command's skip_empty).
-        segments = _lex_command(command, skip_empty=True)
+        # none, so no such segment is built (_lex_command's skip_empty). The command reading (_CommandReading)
+        # adds each segment read from its command word, past a compound command's reserved words, and the
+        # commands of each backquote substitution, so a commit inside 'if ...; then' or backquotes is read.
+        segments = _lex_command_read(command, skip_empty=True)
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -20288,9 +20637,11 @@ def orch_truncation_guard(data):
     # judged on the segments of both readings, so a '| head' that either reading reaches denies. A parse
     # error falls through to the unprovable allow-note below (nothing proven), except at such a '#' the
     # lexer cannot judge under both readings: that '#' is exactly where one reading ends the line and the
-    # other reads on into a possible '| head', so it denies.
+    # other reads on into a possible '| head', so it denies. The command reading (_CommandReading) adds the
+    # commands of each backquote substitution, read whole, so a pipe into a sink inside one ('x=`make | head`',
+    # which the lexer splits at the '|' into words that keep the backquotes) is read as a pipe too.
     try:
-        _segs = _segments(command)
+        _segs = _segments_read(command)
     except _UncertainHashError:
         return _deny(
             "AIQT rules trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness): this "

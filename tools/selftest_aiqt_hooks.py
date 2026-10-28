@@ -2381,7 +2381,14 @@ def _test_git_stash_ref(failures):
             ("(sr-w24) parse failure with visible relocation notes", 'cd /abs && git stash pop "unbalanced'),
             ("(sr-w25) here-string beside stash pop notes", "git stash pop <<<x"),
             ("(sr-w26) here-string + quote-fragmented stash notes", "git st'ash' pop <<<x"),
-            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x")):
+            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x"),
+            # A bare pop/apply behind a compound command's reserved words is read from its command word (the
+            # command reading, _CommandReading), so the former disclosed lexical bound notes.
+            ("(sr-a36) brace group is read through to its pop and notes", "{ git stash pop; }"),
+            ("(sr-a37) brace group with option is read through and notes", "{ git stash apply --index; }"),
+            ("(sr-a38) shell-keyword block is read through and notes", "if true; then git stash pop; fi"),
+            ("(sr-a39) shell-keyword condition position is read through and notes",
+             "if git stash pop; then :; fi")):
         expect_warn(label, command)
 
     for label, command in (
@@ -2422,11 +2429,7 @@ def _test_git_stash_ref(failures):
              'git add -A && git push "unbalanced'),
             ("(sr-a40) parse failure naming no stash", "wc -l <<<x"),
             ("(sr-a41) parse failure with a quoted commit message naming no stash",
-             'git commit -m "fix bug" <<<x'),
-            ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
-            ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
-            ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
-            ("(sr-a39) shell-keyword condition position is a disclosed bound", "if git stash pop; then :; fi")):
+             'git commit -m "fix bug" <<<x')):
         expect_silent(label, command)
 
     # The shared lexer keeps an unquoted brace-bearing ref as one positional token.
@@ -19639,10 +19642,11 @@ def _main_isolated(monitor):
                  'git commit -m "unbalanced', "allow")
         cmexpect("(cm-ad) present non-Bash tool allows",
                  'git commit -m "x `y`"', "allow", tool="Read")
-        # DISCLOSED residuals: the lexer does not parse through a reserved-word compound to its inner
-        # command, and an unquoted pre-subcommand $( fragments the git invocation into separate segments.
-        cmexpect("(cm-residual-compound) reserved-word compound allows (documented residual)",
-                 'if git commit -m "$(x)"; then :; fi', "allow")
+        # A git commit behind a compound command's reserved word is read from its command word (the command
+        # reading, _CommandReading), so the former reserved-word compound residual now denies. DISCLOSED
+        # residual: an unquoted pre-subcommand $( fragments the git invocation into separate segments.
+        cmexpect("(cm-residual-compound) reserved-word compound is read through to its commit and denies",
+                 'if git commit -m "$(x)"; then :; fi', "deny")
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
@@ -19651,6 +19655,146 @@ def _main_isolated(monitor):
                      {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "deny")
         cmdataexpect("(cm-af) missing tool_name denies",
                      {"hook_event_name": "PreToolUse", "tool_input": {"command": "ls"}}, "deny")
+
+        # === The command reading (_CommandReading): a guard's subject behind a compound command's reserved
+        # words, or inside a backquote substitution, is read as its own command, in a reading the lexer adds
+        # after its own, so a wrapped form decides at least as strictly as the bare form. crd-bare pins each
+        # bare shape; crd-<guard>-<wrapper>-<shape> pins each wrapped form the lexer's own reading decided
+        # more loosely than the bare one (a wrapped form it already decided as strictly has no row here: the
+        # guard's own rows pin it, cm-wrap-negation among them); crd-control pins inputs the reading must not
+        # move; crd-read, crd-spell and crd-off pin the reader itself.
+        crd_wrappers = (
+            ("bang", "! {}"), ("if", "if {}; then :; fi"), ("then", "if true; then {}; fi"),
+            ("elif", "if false; then :; elif {}; then :; fi"), ("else", "if false; then :; else {}; fi"),
+            ("do", "while false; do {}; done"), ("while", "while {}; do :; done"),
+            ("until", "until {}; do :; done"), ("brace", "{{ {}; }}"), ("time-p", "time -p {}"),
+            ("coproc", "coproc {}"), ("function", "function f {{ {}; }}"), ("for-do", "for x do {}; done"),
+            ("select-do", "select x in a; do {}; done"), ("backquote", "x=`{}`"))
+        crd_all = frozenset(wrapper for wrapper, _template in crd_wrappers)
+        # (guard, shape, bare command, its decision, the wrappers the lexer's own reading already decided so)
+        crd_shapes = (
+            ("commit_identity", "author", 'git commit --author="Claude <c@example.invalid>" -m x', "deny",
+             crd_all - {"for-do", "backquote"}),
+            ("commit_identity", "env", "GIT_AUTHOR_NAME=Claude git commit -m x", "deny", crd_all - {"backquote"}),
+            ("commit_msg_subst", "paren", 'git commit -m "a$(id)"', "deny", frozenset(("bang",))),
+            ("commit_msg_subst", "backquote", 'git commit -m "`id`"', "deny", frozenset(("bang",))),
+            ("branch_root", "checkout", "git checkout --orphan nb", "deny", frozenset()),
+            ("branch_root", "switch", "git switch --orphan nb", "deny", frozenset()),
+            ("diff_source_pretool", "diff", "git diff", "deny", frozenset()),
+            ("diff_source_pretool", "show", "git show HEAD", "deny", frozenset()),
+            ("git_explicit_binding", "publish", "git add -A && git push origin feature", "deny", frozenset()),
+            ("git_stash_ref", "pop", "git stash pop", "allow-note", frozenset()))
+        # Every name this section binds carries the crd_ prefix, so no later row reads a name it rebinds (the
+        # expect helper above reads handler).
+        for crd_guard, crd_shape, crd_bare, crd_want, crd_already in crd_shapes:
+            crd_handler = getattr(aiqt_hooks, crd_guard)
+            crd_got = _decision(crd_handler, crd_bare)
+            if crd_got != crd_want:
+                failures.append("(crd-bare-{}-{}) {!r}: expected {}, got {}".format(
+                    crd_guard, crd_shape, crd_bare, crd_want, crd_got))
+            for crd_wrapper, crd_template in crd_wrappers:
+                if crd_wrapper in crd_already:
+                    continue
+                # A backquote nested in the backquote wrapper is escaped, as bash needs it.
+                crd_command = crd_template.format(
+                    crd_bare.replace("`", "\\`") if crd_wrapper == "backquote" else crd_bare)
+                crd_got = _decision(crd_handler, crd_command)
+                if crd_got != crd_want:
+                    failures.append("(crd-{}-{}-{}) {!r}: expected {} as the bare form decides, got {}"
+                                    .format(crd_guard, crd_wrapper, crd_shape, crd_command, crd_want, crd_got))
+        crd_guards = ("commit_identity", "commit_msg_subst", "branch_root", "gate_weakening", "diff_source_pretool",
+                      "protected_line", "git_discard", "git_explicit_binding", "git_stash_ref", "bash_absolute_paths")
+        # (control, each guard that does not allow it silently with its decision); every other guard allows it.
+        crd_controls = (
+            ("echo if then", {}),
+            ("echo do done fi esac", {}),
+            ("git log --oneline -- if then do", {"diff_source_pretool": "allow-note"}),
+            ('echo "git commit --no-verify -m x"', {"gate_weakening": "deny", "protected_line": "deny"}),
+            ("echo 'git push --force origin main'", {"gate_weakening": "deny", "protected_line": "deny"}),
+            ("echo '`git diff`'", {"gate_weakening": "deny", "diff_source_pretool": "allow-note"}),
+            ("cat <<'EOF'\nif true; then git commit --no-verify -m x; fi\nEOF", {"gate_weakening": "deny"}))
+        for crd_number, (crd_command, crd_decided) in enumerate(crd_controls, 1):
+            for crd_guard in crd_guards:
+                crd_want = crd_decided.get(crd_guard, "allow")
+                crd_got = _decision(getattr(aiqt_hooks, crd_guard), crd_command)
+                if crd_got != crd_want:
+                    failures.append("(crd-control-{}-{}) {!r}: expected {}, got {}"
+                                    .format(crd_guard, crd_number, crd_command, crd_want, crd_got))
+
+        def crd_pairs(crd_list):
+            return [(list(crd_seg.argv), crd_seg.sep_after) for crd_seg in crd_list]
+
+        crd_starts = (
+            (["if", "git", "diff"], 1), (["then", "git", "diff"], 1), (["!", "{", "git", "x"], 2),
+            (["while", "until", "git"], 2), (["time", "-p", "--", "git"], 3), (["coproc", "C", "{", "git"], 3),
+            (["coproc", "git", "x"], 1), (["function", "f", "{", "git"], 3), (["function"], 1),
+            (["for", "x", "do", "git", "diff"], 3), (["select", "x", "do", "git"], 3),
+            (["for", "x", "in", "a", "b"], 5), (["select", "x", "in", "a"], 4), (["case", "x", "in", "x"], 4),
+            (["git", "diff"], 0), ([], 0), (["done"], 0))
+        for crd_argv, crd_want in crd_starts:
+            crd_got = aiqt_hooks._command_start(crd_argv)
+            if crd_got != crd_want:
+                failures.append("(crd-read-start) _command_start({!r}): expected {}, got {}".format(
+                    crd_argv, crd_want, crd_got))
+        crd_bodies = (
+            ("a `b` 'c `d`' \"e `f`\" \\`g\\` # `h`", [(2, "b"), (17, "f")]),
+            ("x=`a \\`b\\` \\\\ \\$c`", [(2, "a `b` \\ $c")]),
+            ("echo $'`a`' `b", [(12, "b")]),
+            ("x=$( echo #`a`\n) ${y:- #`b`}", [(11, "a"), (24, "b")]))
+        for crd_text, crd_want in crd_bodies:
+            crd_got = aiqt_hooks._backquote_bodies(crd_text)
+            if crd_got != crd_want:
+                failures.append("(crd-read-bodies) _backquote_bodies({!r}): expected {!r}, got {!r}".format(
+                    crd_text, crd_want, crd_got))
+        crd_reads = (
+            ("if git diff; then :; fi", [(["git", "diff"], ";"), ([":"], ";"), (["fi"], "")]),
+            ("x=`make | head`",
+             [(["make"], "|"), (["head"], ""), (["x=`make"], "|"), (["head`"], "")]),
+            ('echo "`git diff`"', [(["git", "diff"], ""), (["echo", "`git diff`"], "")]))
+        for crd_command, crd_want in crd_reads:
+            crd_got = crd_pairs(aiqt_hooks._read_segments(aiqt_hooks._lex_command(crd_command)))
+            if crd_got != crd_want:
+                failures.append("(crd-read-segments) _read_segments of {!r}: expected {!r}, got {!r}".format(
+                    crd_command, crd_want, crd_got))
+        for crd_command in ("echo '`git diff`'", "git log # `git diff`", "git diff | less", "echo if then"):
+            crd_lexed = aiqt_hooks._lex_command(crd_command)
+            if aiqt_hooks._read_segments(crd_lexed) is not crd_lexed:
+                failures.append("(crd-read-unchanged) _read_segments of {!r} added a reading".format(crd_command))
+        crd_nested = crd_pairs(aiqt_hooks._lex_command_read("echo `echo \\`git diff\\``"))
+        if (["git", "diff"], "") not in crd_nested:
+            failures.append("(crd-read-nested) a backquote nested in a backquote body was not read: {!r}".format(
+                crd_nested))
+        for crd_command in ("{ git $X push; }", "if true; then git $X push; fi", "x=`git $X push`"):
+            with aiqt_hooks._WordSpellings():
+                crd_lexed = aiqt_hooks._lex_command_read(crd_command)
+            crd_read = [crd_seg.argv for crd_seg in crd_lexed if list(crd_seg.argv[:1]) == ["git"]]
+            if not (crd_read and all(isinstance(crd_argv, aiqt_hooks._SpelledWords)
+                                     and len(crd_argv.spelling) == len(crd_argv)
+                                     and aiqt_hooks._git_local_alias(crd_argv) for crd_argv in crd_read)):
+                failures.append("(crd-spell) {!r}: the read segment lost its spelling record: {!r}".format(
+                    crd_command, [(type(crd_argv).__name__, list(crd_argv)) for crd_argv in crd_read]))
+        for crd_command in ("if git diff; then :; fi", "x=`make | head`", "for x do git diff; done",
+                            "{ git stash pop; }"):
+            crd_own = crd_pairs(aiqt_hooks._lex_command(crd_command))
+            crd_read = crd_pairs(aiqt_hooks._lex_command_read(crd_command))
+            if not (len(crd_read) > len(crd_own) and crd_read[:len(crd_own)] == crd_own
+                    and not aiqt_hooks._CommandReading.on and (["git", "diff"], ";") not in crd_own
+                    and (["git", "stash", "pop"], ";") not in crd_own and (["make"], "|") not in crd_own):
+                failures.append("(crd-off-full) {!r}: outside _CommandReading the lex must hold only the lexer's own "
+                                "segments, the read lex them first: own {!r}, read {!r}".format(
+                                    crd_command, crd_own, crd_read))
+        for crd_command in ("if git diff; then cat <<<x", "{ git stash pop; } && cat <<<x; ls"):
+            crd_own = aiqt_hooks._lex_command(crd_command, partial=True)
+            crd_read = aiqt_hooks._lex_command_read(crd_command, partial=True)
+            if not (crd_read[1:] == crd_own[1:] and len(crd_read[0]) > len(crd_own[0])):
+                failures.append("(crd-off-partial) {!r}: the partial flags moved under the command reading: own {!r}, "
+                                "read {!r}".format(crd_command, crd_own[1:], crd_read[1:]))
+        try:
+            aiqt_hooks._lex_command_read('if git diff "unbalanced')
+        except ValueError:
+            pass
+        if aiqt_hooks._CommandReading.on:
+            failures.append("(crd-off-restore) _CommandReading stayed on after a lex that raised")
 
         # === L11: git_discard redirect regression locks (prsunc) - a redirect is still non-pristine ->
         # ASK; no redirect may become a new ALLOW, and the clean-parse lossy scan sees redirect-free argv ==
