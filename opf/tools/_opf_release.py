@@ -586,6 +586,25 @@ def _imported_row_findings(row, where):
     return findings
 
 
+def _imported_prefix_findings(releases):
+    """The findings for the position of imported release rows (spec 6.1, 14.3): imported-flagged rows
+    form a prefix of the ledger, before any witnessed row. One finding for each imported row that comes
+    after the first row without the flag; empty when every imported row leads. `releases` is the list of
+    release-row tables; a row counts as imported only when its flag is exactly true (any other value is
+    already a finding of _imported_row_findings and ends the prefix like a witnessed row)."""
+    findings = []
+    witnessed = None                      # the 1-based position of the first row without the flag
+    for i, row in enumerate(releases):
+        imported = row.get("imported") is True
+        if not imported and witnessed is None:
+            witnessed = i + 1
+        elif imported and witnessed is not None:
+            findings.append("release #{}: an imported row must come before every witnessed row; release #{} "
+                            "is witnessed (imported rows form a prefix of the ledger, spec 6.1)".format(
+                                i + 1, witnessed))
+    return findings
+
+
 def validate_version(data):
     """Validate a parsed version.toml (spec 6.1). Returns a VersionValidation. CANNOT-EVALUATE when the
     input is not a table; INVALID when a well-formed table violates the ledger schema; VALID otherwise.
@@ -593,7 +612,8 @@ def validate_version(data):
     span shape + tiling, digest format) and the summary rows (covers token, status, digest presence,
     superseded_by), but leaves the changelog FACTS gates (tile-the-ledger-exactly, heading 1:1, freeze
     recompute) to U5 and the coverage-digest recompute to `check_frozen_coverage`. The optional
-    `imported` release-row flag (spec 6.1, 14.3) is graded by _imported_row_findings."""
+    `imported` release-row flag (spec 6.1, 14.3) is graded by _imported_row_findings, and its position
+    (imported rows form a prefix of the ledger) by _imported_prefix_findings."""
     if not isinstance(data, dict):
         return VersionValidation(CANNOT_EVALUATE, ["version.toml is not a table"])
 
@@ -660,6 +680,8 @@ def validate_version(data):
 
     # Spans must tile the released worklog exactly (contiguous, non-overlapping, from WL-1; spec 6.1).
     _tile_releases([r for r in releases if isinstance(r, dict)], findings)
+    # Imported rows sit only as a prefix of the ledger, before any witnessed row (spec 6.1).
+    findings.extend(_imported_prefix_findings([r for r in releases if isinstance(r, dict)]))
 
     _validate_summaries(summaries, ledger_versions, findings)
 
@@ -2111,6 +2133,30 @@ def self_test():
     check("cut-never-sets-imported-flag",
           _imp_cut.status == VALID and "imported" not in _imp_cut.version_data["release"][-1]
           and [r.get("imported") for r in _imp_cut.version_data["release"]] == [True, True, None, None])
+    # Imported rows form a prefix of the ledger, before any witnessed row (spec 6.1). The rule is pinned at
+    # its boundary: an imported row just after the first witnessed row is refused, and so is one after an
+    # interleaved witnessed row; every imported row before the first witnessed row, or a ledger of imported
+    # rows only, is valid.
+    _imp_wit = dict(vok["release"][0])
+
+    def imp_prefix(rows):
+        return validate_version({"schema": 1, "release": rows})
+
+    def prefix_findings(v):
+        return [f for f in v.findings if "prefix of the ledger" in f]
+
+    _imp_after = imp_prefix([_imp_wit, imp_row("1.1.0")])
+    check("rel-imported-after-witnessed-refused",
+          _imp_after.status == INVALID and len(prefix_findings(_imp_after)) == 1
+          and prefix_findings(_imp_after)[0].startswith("release #2:"))
+    _imp_inter = imp_prefix([imp_row("0.9.0"), _imp_wit, imp_row("1.1.0")])
+    check("rel-imported-interleaved-refused",
+          _imp_inter.status == INVALID and len(prefix_findings(_imp_inter)) == 1
+          and prefix_findings(_imp_inter)[0].startswith("release #3:"))
+    check("rel-imported-prefix-valid",
+          imp_prefix([imp_row("0.8.0"), imp_row("0.9.0"), _imp_wit]).status == VALID)
+    check("rel-all-imported-valid",
+          imp_prefix([imp_row("0.8.0"), imp_row("0.9.0")]).status == VALID)
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
