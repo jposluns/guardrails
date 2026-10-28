@@ -492,6 +492,7 @@ _CONTRACT = {
         _D('- imported: optional boolean, permitted only as true and only on a historical release recorded under section 14.3.'),
         'On an imported-flagged row, date carries the source-recorded release date rather than a clock read at a witnessed release cut, worklog_span MUST be empty, and the row rests on imported provenance.',
         'A witnessed release cut MUST NOT set the flag, and the flag MUST NOT be added to or removed from an existing row.',
+        'Imported-flagged rows MUST form a prefix of the ledger, before any witnessed row, and a writer and a validator MUST both enforce it.',
         'Release rows MUST be append-only and immutable once written.',
         'Spans MUST be contiguous and non-overlapping across consecutive releases, in ID order, so the released worklog tiles exactly and the unreleased tail is everything after the last span.',
         _D('The ledger also carries the summary rows that back the public changelog.'),
