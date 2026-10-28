@@ -69,7 +69,7 @@ def fixtures():
         d2a[home + name + ".index.toml"] = builders.build_index(name).encode()
     check(operation.PROVENANCE_RELPATH not in d2a, "fixture/d2a-no-provenance")
     old = dict(d2a)
-    old[p0.MANIFEST_PATH] = old[p0.MANIFEST_PATH].replace(b'"1.2.0"', b'"1.1.0"')
+    old[p0.MANIFEST_PATH] = old[p0.MANIFEST_PATH].replace(b'"2.0.0"', b'"1.1.0"')
     result = operation.InitResult()
     result.status = operation.VIEWS_READY
     run = types.SimpleNamespace(result=result, plan=plan, phases=[], checks=[], back=None)
@@ -187,81 +187,74 @@ def vectors(f):
         lambda m: m.validate_compatibility(manifest, provenance=b"not toml"),
         "REFUSED", "COMPATIBILITY")
     def older_version_refused(m):
-        # The refusal names the manifest path and the declared spec_version, states that no store
-        # upgrade reaches spec_version 2.0.0, and states the hand step (spec 9.2), pinned whole:
+        # The refusal names the manifest path and the declared spec_version, states that it names no
+        # version this specification defines, and states the hand step (spec 9.2), pinned whole:
         # rewording it, dropping any of them, or offering an upgrade again, is red.
         got = m.validate_compatibility(old[p0.MANIFEST_PATH])
         check([f[2] for f in got.findings] == [
-            "{0} declares spec_version '1.1.0'; this bootstrap requires 1.2.0: no store upgrade "
-            "reaches spec_version 2.0.0, and this bootstrap does not operate on a store at another "
-            "version; to adopt its tree instead, "
-            "first move {0} aside by hand: its files are then ordinary foreign content for a first "
-            "adoption".format(p0.MANIFEST_PATH)],
+            "{0} declares spec_version '1.1.0', below 2.0.0, which names no version this "
+            "specification defines; to adopt its tree instead, first move {0} aside by hand: its "
+            "files are then ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH)],
             "compat/older-version-refused/message")
         return got
     add("compat/older-version-refused", older_version_refused, "REFUSED", "VERSION")
 
-    def version_refusal(name, variant, message):
+    def pinned_refusal(name, variant, code, message):
         # Pinned whole, like compat/older-version-refused: collapsing these refusals back into one
-        # shared hand-step message is red.
+        # shared hand-step message is red. Another message fails under the case's own identity, so
+        # a source reversion that changes only the message is red on revert too.
         def case(m, variant=variant, message=message):
             got = m.validate_compatibility(variant)
-            check([f[2] for f in got.findings] == [message], "compat/" + name + "/message")
+            check([f[2] for f in got.findings] == [message], "compat/" + name)
             return got
-        add("compat/" + name, case, "REFUSED", "VERSION")
+        add("compat/" + name, case, "REFUSED", code)
 
-    # Each non-1.2.0 declaration gets its own pinned refusal: only a declaration below 2.0.0 is an
-    # older store and gets the hand step (spec 9.2); a newer, malformed or missing declaration is
-    # never offered it.
-    check(manifest.count(b'spec_version = "1.2.0"\n') == 1, "fixture/manifest-version-line")
-    version_refusal("newer-no-hand-step", manifest.replace(b'"1.2.0"', b'"2.0.0"'),
-                    "{} declares spec_version '2.0.0'; this bootstrap requires 1.2.0: a store "
-                    "declaring 2.0.0 or above is a store at a later version, never foreign "
-                    "content; use the tooling that implements it (fail-closed)".format(
-                        p0.MANIFEST_PATH))
-    version_refusal("between-gets-hand-step", manifest.replace(b'"1.2.0"', b'"1.3.0"'),
-                    "{0} declares spec_version '1.3.0'; this bootstrap requires 1.2.0: no store "
-                    "upgrade reaches spec_version 2.0.0, and this bootstrap does not operate on a "
-                    "store at another version; to "
-                    "adopt its tree instead, first move {0} aside by hand: its files are then "
-                    "ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH))
-    version_refusal("malformed-version", manifest.replace(b'"1.2.0"', b'"x.y"'),
-                    "{} declares spec_version 'x.y', which is not a bare SemVer; this bootstrap "
-                    "requires 1.2.0 (fail-closed)".format(p0.MANIFEST_PATH))
-    version_refusal("missing-version", manifest.replace(b'spec_version = "1.2.0"\n', b''),
-                    "{} declares no spec_version; this bootstrap requires 1.2.0 "
-                    "(fail-closed)".format(p0.MANIFEST_PATH))
-    version_refusal("missing-opf-table", manifest.replace(b'[opf]\n', b'[other]\n'),
-                    "{} has no [opf] table; this bootstrap requires spec_version 1.2.0 "
-                    "(fail-closed)".format(p0.MANIFEST_PATH))
-    def homes(m):
-        # Verify the generation fence even if a later resolver activates generation 2.
-        from unittest.mock import patch
-        with patch.object(m.store, "SUPPORTED_HOMES", 2):
-            return m.validate_compatibility(manifest)
-    add("compat/homes-fence", homes, "REFUSED", "HOMES")
-
-    def generation2(change=None, spec=True, homes2=True):
-        # A generation-2 plan exists only under raised gates, patched inside the case and restored
-        # on exit, so the shared fixture and every default case stay at the shipped constants.
-        def case(m):
-            from unittest.mock import patch
-            with patch.object(m.store, "SUPPORTED_HOMES", 2), patch.object(
-                    m.store, "SUPPORTED_SPEC_VERSION",
-                    m.store.IMPORTED_SPEC_VERSION if spec else m.store.SUPPORTED_SPEC_VERSION):
-                built, data = operation.build_init_plan(
-                    operation_id=OP_ID, binding=plan["binding"], head=plan["head"],
-                    inventory_digest_value=plan["inventory_digest"],
-                    application_time=plan["application_time"], homes2=homes2)
-                return m.validate_plan(data if change is None else altered(change, built))
-        return case
-    add("accept/homes2-plan", generation2())
-    add("refuse/homes2-missing-gitignore", generation2(
-        lambda d: d["sets"]["S"].pop(0) if d["sets"]["S"][0]["path"] == ".working/.gitignore"
-        else None), "REFUSED", "UNCLASSIFIED")
-    add("refuse/gen1-imported-leaf", generation2(
-        lambda d: d["sets"]["S"].insert(-3, {"path": ".working/toml/backlog_item.imported.index.toml"}),
-        spec=False, homes2=False), "REFUSED", "UNCLASSIFIED")
+    # Each declaration other than 2.0.0 gets its own pinned refusal: only a declaration below 2.0.0
+    # (the earlier 1.2.0 and 1.3.0 included) names no version the specification defines and gets the
+    # hand step (spec 9.2); a later (2.0.1 is just above the accepted 2.0.0), malformed or missing
+    # declaration is never offered it.
+    check(manifest.count(b'spec_version = "2.0.0"\n') == 1, "fixture/manifest-version-line")
+    check(manifest.count(b'\nhomes = 2\n') == 1, "fixture/manifest-homes-line")
+    for name, later in (("newer-no-hand-step", "2.0.1"), ("major-newer-no-hand-step", "3.0.0")):
+        pinned_refusal(name, manifest.replace(b'"2.0.0"', '"{}"'.format(later).encode()), "VERSION",
+                       "{} declares spec_version '{}'; this bootstrap requires 2.0.0: a store "
+                       "declaring a later version is a store at a later version, never foreign "
+                       "content; use the tooling that implements it (fail-closed)".format(
+                           p0.MANIFEST_PATH, later))
+    for earlier in ("1.2.0", "1.3.0", "1.99.99"):
+        pinned_refusal("below-gets-hand-step-" + earlier,
+                       manifest.replace(b'"2.0.0"', '"{}"'.format(earlier).encode()), "VERSION",
+                       "{0} declares spec_version '{1}', below 2.0.0, which names no version this "
+                       "specification defines; to adopt its tree instead, first move {0} aside by "
+                       "hand: its files are then ordinary foreign content for a first "
+                       "adoption".format(p0.MANIFEST_PATH, earlier))
+    pinned_refusal("malformed-version", manifest.replace(b'"2.0.0"', b'"x.y"'), "VERSION",
+                   "{} declares spec_version 'x.y', which is not a bare SemVer; this bootstrap "
+                   "requires 2.0.0 (fail-closed)".format(p0.MANIFEST_PATH))
+    pinned_refusal("missing-version", manifest.replace(b'spec_version = "2.0.0"\n', b''), "VERSION",
+                   "{} declares no spec_version; this bootstrap requires 2.0.0 "
+                   "(fail-closed)".format(p0.MANIFEST_PATH))
+    pinned_refusal("missing-opf-table", manifest.replace(b'[opf]\n', b'[other]\n'), "VERSION",
+                   "{} has no [opf] table; this bootstrap requires spec_version 2.0.0 "
+                   "(fail-closed)".format(p0.MANIFEST_PATH))
+    # At 2.0.0 the [opf].homes declaration must be exactly the integer 2 (a missing key, another
+    # integer, a string or a boolean is the HOMES refusal), whatever homes_generation would grade.
+    pinned_refusal("homes-missing", manifest.replace(b'\nhomes = 2\n', b'\n'), "HOMES",
+                   "{} declares no [opf].homes; this bootstrap requires the integer 2 "
+                   "(fail-closed)".format(p0.MANIFEST_PATH))
+    pinned_refusal("homes-fence", manifest.replace(b'\nhomes = 2\n', b'\nhomes = 1\n'), "HOMES",
+                   "{} declares [opf].homes 1; this bootstrap requires the integer 2 "
+                   "(fail-closed)".format(p0.MANIFEST_PATH))
+    for name, value in (("three", b"3"), ("string", b'"2"'), ("bool", b"true")):
+        add("compat/homes-" + name, lambda m, v=value: m.validate_compatibility(
+            manifest.replace(b'\nhomes = 2\n', b'\nhomes = ' + v + b'\n')), "REFUSED", "HOMES")
+    # The default plan is the spec_version 2.0.0, homes 2 plan: it creates .working/.gitignore
+    # first and the empty imported leaves, so a plan without the managed block, or with a leaf
+    # outside the roster, is unclassified.
+    check(plan["sets"]["S"][0]["path"] == ".working/.gitignore", "fixture/plan-gitignore-first")
+    plan_case("refuse/homes2-missing-gitignore", lambda d: d["sets"]["S"].pop(0), "UNCLASSIFIED")
+    plan_case("refuse/foreign-imported-leaf", lambda d: d["sets"]["S"].insert(
+        -3, {"path": ".working/toml/unknown_type.imported.index.toml"}), "UNCLASSIFIED")
     for name, value in (("missing", None), ("empty", b""), ("not-object", b"[]\n"),
                         ("duplicate", b'{"schema":1,"schema":1}\n'), ("truncated", raw[:-4])):
         add("input/" + name, lambda m, v=value: m.validate_plan(v),
@@ -305,7 +298,7 @@ REVERSIONS = (
      'True', "refuse/unclassified-S"),
     ("generation-roster",
      'set(operation.bootstrap_source_roster(operation._plan_manifest_model(plan)))',
-     'set(operation.BOOTSTRAP_SOURCE_ROSTER)', "accept/homes2-plan"),
+     'set(operation.BOOTSTRAP_SOURCE_ROSTER)', "accept/plan"),
     ("view-roster", 'sets["V"] == views', 'True', "refuse/unclassified-V"),
     ("plan-version", '_version(doc, PLAN_FORMATS, "plan")', 'pass', "refuse/plan-version-unknown"),
     ("outcome-version", '_version(doc, OUTCOME_FORMATS, "outcome")', 'pass',
@@ -321,8 +314,13 @@ REVERSIONS = (
      'True', "refuse/coupled-as-source"),
     ("F19", 'set(staged_paths) <= sources', 'True', "refuse/staged-V"),
     ("optional-provenance", 'if provenance is not None:', 'if True:', "compat/d2a-retained"),
-    ("homes", 'store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1',
+    ("homes", 'type(homes) is int and homes == store.HOMES and store.homes_generation(manifest) == 2',
      'True', "compat/homes-fence"),
+    ("homes-present", '_require("homes" in base,', '_require(True,', "compat/homes-missing"),
+    ("version-floor", '_require(raw_version == required,', '_require(True,',
+     "compat/below-gets-hand-step-1.2.0"),
+    ("version-ceiling", 'if parsed > store._parse(required):', 'if False:',
+     "compat/newer-no-hand-step"),
     ("source-result", 'type(value) is int and value in (0, 2)',
      'False', "accept/source-only-zero"),
     ("completed-generator", 'if completed:', 'if False:', "accept/completed-recorded-generator"),

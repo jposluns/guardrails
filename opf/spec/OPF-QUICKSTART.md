@@ -66,9 +66,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
    `worklog.imported.toml`, all empty to start; specification sections 4, 8 and 9 give the full
-   file baseline. The reference tooling's `opf init` does not scaffold this store yet: its
-   scaffold still writes a 1.2.0 store, a format the specification's validation refuses
-   (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+   file baseline. The reference tooling's `opf init` scaffolds this store: base 2.0.0 with
+   `homes = 2`. A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
    `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
@@ -171,10 +170,11 @@ Scaffolding, validation, rendering, and migration tooling ships in later release
 then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
 so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
 section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
-defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
-grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
-VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
-and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
+defines, and the reference tooling initializes and validates base 2.0.0 stores with `homes = 2`.
+Its `opf adopt plan`, `approve` and `status` run at base 2.0.0 without reading the adoption journal,
+and `status` says the journal is not read; `opf adopt apply` and `reconcile` refuse at base 2.0.0
+until the adoption journal moves to its specification section 4.2 home. The reference tooling
+defines no store upgrade: `opf upgrade`
 refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling requires Python 3.14 or newer.

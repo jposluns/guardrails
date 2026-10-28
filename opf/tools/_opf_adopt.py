@@ -972,7 +972,8 @@ def validate_op(row, homes=1):
     known op but a missing/unknown field or a malformed field shape is INVALID. `homes` is the store's
     active homes generation: a legacy store (1, the default) keeps its legacy op-level disposition with no
     control-area refusal; in homes 2 an operand that equals, contains, or lies within a store control
-    root is INVALID. An adoption plan refuses the control area in every generation (spec 14.2), which
+    root is INVALID, save a move-file destination strictly beneath the Move archive root
+    (_control_operand_findings). An adoption plan refuses the control area in every generation (spec 14.2), which
     validate_plan decides over the whole plan, since only there are its own preservation copies and Move
     archive destinations known."""
     if not isinstance(row, dict):
@@ -1004,19 +1005,26 @@ def _control_operand_findings(name, row, homes):
     mutation operands. Members are relative to their op's target or store_root, so their composed
     destinations are checked as well as ordinary file operands. Evidence receipts and retire
     preimages are not plan operands: the apply engine derives them from the homes constructors
-    through the capability-bound journal API, so a plan row naming a control home is refused."""
+    through the capability-bound journal API, so a plan row naming a control home is refused. The one
+    admitted operand is a move-file destination strictly beneath the Move archive root, where a Move
+    files its source away (spec 14.2); like protected_destination's exemptions it matches only an exact,
+    normalized spelling, so the Move root itself, a `..` or other non-canonical spelling, and every other
+    operand overlapping a control root stay refused."""
     import posixpath
     from _opf_store import store_control_roots, overlaps_home
-    operands = [row[f] for f in row if _FIELD_KINDS.get(f) == "filepath" and isinstance(row[f], str)]
+    operands = [(f, row[f]) for f in row if _FIELD_KINDS.get(f) == "filepath" and isinstance(row[f], str)]
     root = row.get(_MEMBER_ROOTS.get(name, ""))
     if isinstance(root, str):
         for member in row.get("members", []) if isinstance(row.get("members"), list) else []:
             if isinstance(member, dict) and isinstance(member.get("path"), str):
-                operands.append(posixpath.join(root, member["path"]))
+                operands.append(("members", posixpath.join(root, member["path"])))
     findings = []
-    for operand in operands:
+    for field, operand in operands:
+        moved = (name == "move-file" and field == "destination" and _is_contained_filepath(operand)
+                 and _in_move_archive(operand, "."))
         try:
-            if any(overlaps_home(operand, home) for home in store_control_roots(homes)):
+            if any(overlaps_home(operand, home) for home in store_control_roots(homes)
+                   if not (moved and home == ARCHIVE_REL)):
                 raise ValueError("adoption operand overlaps reserved store control area: {!r}".format(operand))
         except ValueError as exc:
             findings.append(str(exc))
@@ -2829,6 +2837,31 @@ def self_test():
     check("plan-v2-homes2-ordinary-sources-valid", validate_plan(full, homes=2).status == VALID)
     check("plan-v2-homes2-control-source-refused", validate_plan(ctrl, homes=2).status == INVALID)
     check("plan-v2-legacy-control-source-refused", validate_plan(ctrl).status == INVALID)
+    # 14f-ii: homes 2 admits a move-file destination strictly beneath the Move archive root (spec 14.2), on
+    # its exact normalized spelling only. The Move root itself, a sibling or another archive path, a `..`,
+    # `.` or empty-segment spelling, and that same path as a move source or another op's operand are refused
+    # by the control-operand rule itself, so each vector reads that rule's own finding.
+    check("plan-v2-homes2-move-beneath-moved-root-valid", _mutated(full, in_moved, True, homes=2) == VALID)
+    check("plan-v2-homes2-move-onto-moved-root-invalid", _mutated(full, lambda p: (
+        p["ops"][0].update(destination=ARCHIVE_REL + "/moved"),
+        p["sources"][2].update(preservation=ARCHIVE_REL + "/moved")), True, homes=2) == INVALID)
+    _overlap = "adoption operand overlaps reserved store control area: {!r}".format
+    _move_to = lambda dest: dict(full["ops"][0], destination=dest)  # noqa: E731
+    check("op-homes2-move-beneath-moved-root-valid", validate_op(_move_to(_in_moved), homes=2).status == VALID)
+    for label, dest in (("moved-root", ARCHIVE_REL + "/moved"),
+                        ("moved-sibling-prefix", ARCHIVE_REL + "/moved2/MOVE.md"),
+                        ("archive-outside-moved", ARCHIVE_REL + "/elsewhere/MOVE.md"),
+                        ("archive-root-file", ARCHIVE_REL + "/MOVE.md"),
+                        ("dotdot-into-control", ARCHIVE_REL + "/moved/../staging/x"),
+                        ("dotdot-into-archive", ARCHIVE_REL + "/moved/../adoption/x"),
+                        ("dot-segment", ARCHIVE_REL + "/moved/./MOVE.md"),
+                        ("repeated-slash", ARCHIVE_REL + "/moved//MOVE.md")):
+        check("op-homes2-move-{}-refused".format(label),
+              _overlap(dest) in validate_op(_move_to(dest), homes=2).findings)
+    check("op-homes2-move-source-beneath-moved-root-refused", _overlap(_in_moved) in validate_op(
+        dict(full["ops"][0], source=_in_moved), homes=2).findings)
+    check("op-homes2-create-beneath-moved-root-refused", _overlap(_in_moved) in validate_op(
+        {"op": "create-file", "path": _in_moved, "content_digest": _D5}, homes=2).findings)
     # 14g: derive_effects composes render-views members under a non-root store root only, adds a migrate
     # source's archive copy and later removal, and adds nothing for a plain move beyond its op row.
     _member = [{"path": "rules.toml", "digest": _D5}]

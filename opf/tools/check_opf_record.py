@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T115)
+  check_opf_record.py --self-test                    the fixture suite (T1-T116)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -78,9 +78,6 @@ Each case runs on its own copy of that template; the root is removed in a finall
       next run reconciles (flip: drop the intervening-edit check)
   T14 create with an unknown or path-like --type refuses with the enabled-baseline-types message, not an
       operand read failure (flip: skip the --type check before the operand read)
-  T15 a run whose journal lock release fails after COMPLETE still renders, runs doctor, and reports, and
-      says the lock may be left; the next run reconciles the leftover lock and names the COMPLETE
-      transaction without claiming render and doctor never ran (flip: the old never-ran outcome text)
   T16 the proposing transition writes the pre-proposal state into the record's own proposed_from field;
       a maintainer rejection restores exactly that recorded state and removes the field; a forged
       proposing worklog line (its FROM state rewritten canonically, committed with its views, doctor
@@ -112,13 +109,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the options are silently ignored)
 
   T19 a publication's journal transaction name is the homes record- grammar
-      record-<YYYYMMDD>T<HHMMSS>Z-<hash16> (flip: mint the legacy dotted name); an interrupted
-      transaction under the LEGACY dotted name an earlier build minted is still reconciled, at kill
-      points on both sides of COMPLETE (flip: a recovery that enumerates only grammar-named
-      transactions)
-  T20 a legacy .aiqt/record/journal on a homes-2 store is refused by name and never recovered,
-      with the .aiqt subtree byte-unchanged and no typed journal home created (flip: probe the
-      generation as 1, under which the legacy journal is reconciled in place)
+      record-<YYYYMMDD>T<HHMMSS>Z-<hash16> (flip: mint the legacy dotted name)
+  T20 (T20b) a 2.0.0 store carrying a leftover .aiqt/record/journal and its lock records exit 0: the
+      leftover is neither read, recovered nor refused, and the .aiqt subtree stays byte-identical
+      (flip: the homes-2 reconcile refuses the legacy journal again)
   T21 a direct homes-2 _publish, its reservation published first under the same held capability and
       run id, lands ONE capability-bound transaction in .working/journals/record/journal under that run
       id with its projection at txn_record("record", <rid>), the operands rewritten, and nothing under
@@ -141,11 +135,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T5-flip FLIP_T5 stays a genuine discriminator against the current _publish signature: applied in a
       killed child it performs its unjournaled counters write and dies at the kill point, never at
       an earlier signature error
-  T24 a manifest the journal-home probe cannot read leaves the generation unknowable, so a store
-      carrying a legacy .aiqt/record/journal refuses fail-closed with the .aiqt subtree
-      byte-unchanged, and a store carrying none keeps the homes-1 broken-manifest behaviour
-      (flip: probe the failure as generation 1, under which the legacy journal is reconciled in
-      place)
+  T24 (T24b) an unreadable manifest with an open typed-home transaction and a leftover .aiqt journal
+      lock: the typed transaction is reconciled, the next run refuses at _load_manifest, the .aiqt
+      bytes stay identical and no journal lstat names a .aiqt path (flip: the probe lstats the legacy
+      journal on a failed manifest read and routes the run to it)
   T25 the homes-2 recovery plan is derived under the HELD operation capability: a peer publication
       attempted right after the operand check is refused by the capability, or its completed bytes
       survive reconciliation (flip: derive the plan before the acquisition, under which the peer's
@@ -154,18 +147,20 @@ Each case runs on its own copy of that template; the root is removed in a finall
       reconciled by the next run: the confirmed-dead leftovers are cleared, the missing projection
       is published, and the operands keep the poststate (flip: a projection never reads as missing,
       under which that state is never reconciled)
-  T27 the homes-1 success report carries no journal_rel key and its commit advice names the legacy
-      journal home, byte-shape-identical to the pre-D build (flip: re-add the key)
+  T27 (T27b) the homes-2 success report carries journal_rel naming the typed journal home, and its
+      commit advice names that home (flip: the report without journal_rel)
   T28 spec 15 records that a no-follow existence probe of a former .aiqt/ location, used only to
       refuse, is not a read (flip: read the spec with the sentence removed)
   T29 the gate runs inside the OPF git lifecycle: a git launch that strips every GIT_* variable, as
       the operation capability's rev-parse does, still runs with the system-config pins, and every
       fixture git call carries the three no-maintenance pins (flip: launch git past the lifecycle's
       wrapper, keeping only the GIT_CONFIG_NOSYSTEM pin so the flip itself reads no system config)
-  T30 a readable manifest declaring homes 2 that this tooling does not activate (no activation
-      patches) refuses BEFORE any reconciliation: the legacy leftover lock, the .aiqt subtree and
-      every other byte unchanged (flip: probe the generation alone, under which the legacy journal
-      is reconciled in place)
+  T30 (T30b) a readable manifest that is not the 2.0.0 / homes = 2 baseline (spec_version 1.2.0,
+      homes absent, homes = 1, homes = 3) refuses at the admission probe BEFORE any reconciliation of
+      its open typed-home transaction: journal, operands, lease and capability byte-identical (flip:
+      the probe returns the typed home for any readable manifest); (T30c) a record create on a fresh
+      init store keeps every "imported:<NS>" counter row byte-identical (flip: the counter-state proof
+      built without the imported namespaces, which refuses the run)
   T31 a homes-2 run killed while holding the capability with no journal work left for recovery
       (before the journal home existed, a nothing-opened transaction, or COMPLETE with its
       projection) is reconciled by the next run: the confirmed-dead lease and active record are
@@ -203,9 +198,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the acquisition already removed beside its journal-and-operands wording (flip: as T39)
   T41 each residual list states exactly when another run is needed, marks the refused-leftover list
       not exhaustive, names a refusal's removals and the homes-2 owning checkout, and the held plan
-      reopens the journal home only when present; a homes-1 record run never reclaims a dead
-      capability holder, and a live holder that releases normally lets the next run continue (flip:
-      read the texts with those statements removed)
+      reopens the journal home only when present; a live holder that releases normally lets the next
+      run continue (flip: read the texts with those statements removed)
   T42 a recovery acquisition whose lease publication fails after the active record's published names
       its own unlinks (that publication's retired staging name and the unwind's removal of the new
       active record), never "removed nothing" (flips: the staging retirement, or the unwind's removal,
@@ -224,15 +218,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       removed)
   T47 the no-pending reclaimed outcome names the grammar exclusion and speaks for the journal's commit,
       never for the operands' current bytes (flips: either sentence reverted)
-  T48 the homes-1 journal-prepare refusal says preparation may have created the journal directories
-      (flip: the unqualified "nothing written")
   T49 the record guard's introduction says capability recovery may remove a dead holder's records
       even with no journal work pending (flip: read the text with that sentence removed)
-  T50 a homes-1 leftover journal lock over a COMPLETE transaction whose operand was restored to its
-      prestate keeps the restored bytes and speaks for the journal's commit, never certifying the
-      publication as present in the working tree (flip: the reviewed head's present-in-the-tree text)
-  T51 the homes-1 journal-lock refusals (a held lock, a failed lock acquisition) after journal
-      preparation created the directories say so, never "nothing written" (flip: the unqualified text)
   T52 the governing rule and a direct homes-2 publication refused before its transaction opened
       promise no reconciliation of work never left: the rule scopes the leftovers to what a run left,
       the refusal says any journal work left is for the next trigger, none when it failed before its
@@ -243,12 +230,6 @@ Each case runs on its own copy of that template; the root is removed in a finall
       projection (flips: the reviewed head's outcome; its introduction)
   T54 this header describes every test in TESTS and never claims T46 names every case (flip: the
       reviewed head's T46 line)
-  T55 a homes-1 journal lock release that unlinks the lock and then fails says the lock may be left,
-      never that it is left in place, and the next run reconciles nothing (flip: the reviewed head's
-      left-in-place text)
-  T56 a homes-1 run killed after its preimage capture, before INTENT, leaves its lock over a
-      nothing-opened transaction; the leftover-lock outcome says no transaction was open, never that
-      every transaction was already terminal (flip: the reviewed head's head clause)
   T57 a homes-1 publication failing after INTENT retains its lock and says the transaction is left
       for the next run's reconciliation as far as each step succeeds, never that the next run
       reconciles it; an intervening edit then refuses that reconciliation (flip: the reviewed head's
@@ -257,16 +238,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       leftover that acquisition removes, refuses once naming the removal and reclaiming no record,
       the re-run then proceeding, and the residual lists and the recovery docstring state that
       reporting (flip: the silent continue of the fix-9 head)
-  T59 a homes-1 recovery whose lease acquisition fails after creating the lease says only that no
-      operand, journal entry or journal lock was written, beside the write guard's left-lease report,
-      never "Nothing was written" (flip: the reviewed head's unscoped sentence)
-  T60 a failed lease or single-writer-claim release says the record may be left in place, scoped to
-      what the release verifiably did (an absent or replaced lease is refused as not this run's own,
-      and an unlinked record's directory fsync can fail after the unlink), never that it is LEFT in
-      place (flip: the left-in-place text)
-  T61 a journal lock acquisition failing after its O_EXCL create refuses saying the created lock may
-      be left in place for the next run's reconciliation, never through the cli's cannot-evaluate
-      backstop with no mention of it (flip: the refusal without the disclosure)
+  T60 a failed operation capability release beside a recovery refusal is surfaced, and a failed
+      single-writer-claim release beside a failed publication says its records may be left in place,
+      scoped to what the release verifiably did (a removal's directory fsync can fail after the
+      unlink); neither says it is LEFT in place (flip: the left-in-place text)
   T62 a success-report emission that fails after the single-writer claim's release succeeded is not
       reported as a lease-release failure: the refusal says the release succeeded and only the
       report's output failed, the transaction stays COMPLETE and the lease absent, and the next run
@@ -275,32 +250,27 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the write running inside the cleanup region (flip: the fix-10 head's write before it)
   T64 a diagnostic print that itself fails never displaces the governing failure: a lease-release
       failure (an error or an interrupt) and an emission failure each still govern the exit, and a
-      recovery refusal survives a lease-release failure of either kind (flips: the fix-11 head's
-      unprotected _conclude prints; its recovery-lease release handler)
+      capability recovery refusal survives a capability release failure of either kind (flips: the
+      fix-11 head's unprotected _conclude prints; a capability recovery release handler catching
+      OpLockError alone, with an unprotected print)
   T65 a SIGINT delivered by a line trace immediately before the _conclude call still releases the
       single-writer claim exactly once, with the interrupt governing the exit: the release mark is
       set inside _conclude, never by the caller before the call (flip: a release mark that reads as
       already set, the fix-11 head's caller-side premature mark)
-  T66 a homes-1 journal-lock release that raises an interrupt while the publication failed and its
-      transaction reads rolled-back leaves the rolled-back refusal governing the exit, the release
-      failure surfaced beside it (flip: the reviewed head's narrow release handler, which the
-      interrupt passes through)
-  T67 the record CLI invoked inside an embedding caller's except block, with the journal-lock
-      release raising a non-ordinary error on the clean exit, fails as the run's own failure (exit
-      2, no success report), exactly as outside the handler: the cleanup reads the run's own
-      recorded failure, never sys.exc_info() (flip: the fix-13 head's cleanup, whose ambient
-      sys.exc_info() read takes the caller's handled exception for a refusal in flight and reports
-      success over the swallowed release failure)
+  T66 a homes-2 publication that fails while the operation capability's release raises an interrupt
+      leaves the publication refusal governing the exit, the release failure surfaced beside it and
+      the capability lease left (flip: _publish_homes2 releasing the capability in its own cleanup
+      under the narrow OpLockError handler, which the interrupt passes through)
+  T67 the record CLI invoked inside an embedding caller's except block, with the operation
+      capability's release raising a non-ordinary error on the clean exit, fails as the run's own
+      failure (exit 2, no success report), exactly as outside the handler (flip: a clean-exit release
+      whose ambient sys.exc_info() read takes the caller's handled exception for a failure in flight
+      and reports success over the swallowed release failure)
   T68 the single-writer release mark is copied before the lease acquisition, so an ordinary
       allocation failure at that copy can never land between the acquisition and the protected
       region: a trap that fails the copy only once the lease is held never fires and the run
       records (flip: the fix-13 head's ordering, whose post-acquisition copy fails and strands the
       just-acquired lease)
-  T69 the homes-1 publication's journal root descriptor is closed exactly once on every exit: a
-      non-ordinary clean-exit journal-lock release failure inside an embedding caller's except block,
-      and an allocation failure at the lock token, each leave no journal descriptor open, the original
-      failure governing the exit (flip: the fix-14 head's _publish, whose token allocation precedes its
-      cleanup region and whose release handler's re-raise skips the trailing close)
   T70 an acquisition whose lease publication fails, and whose removal-report tagging then fails with
       a MemoryError, still unwinds in full: no descriptor it adopted survives, it leaves no capability
       record, and the anchor is free, so the next acquisition succeeds; untrapped, the original
@@ -374,38 +344,26 @@ Each case runs on its own copy of that template; the root is removed in a finall
       refused by the planner's own record validation, so the labelled step assertion turns red: the
       planner writes no delivery bundle, so the send is refused; the rejection of sent/proposed keeps
       the bundle; the rejection of acknowledged/proposed keeps the receipt keys)
-  T74 recovery applies the spec 5.7 never-seize and dead-run release clauses: a leftover lease whose
-      holder is confirmed dead on this host is released through the reconciliation itself, in the same
-      run, and the outcome names it;
-      a LIVE local holder, a confirmed-dead holder on another host, a dead holder under a non-closed
-      payload schema, a malformed oversized payload with a valid 64 KiB prefix, an EPERM liveness probe,
-      and another verb's dead holder each refuse before any recovery write with every byte intact (never
-      seized); and a refusal recovery raises after a release still carries the released-lease report
-      beside the scoped no-journal-no-operand sentence (flips: the plain atomic recovery claim; the
-      unscoped nothing-written sentence; and one flip per never-seize guard: liveness probe dropped, host
-      binding dropped, closed-payload validation dropped, the bounded prefix read restored, EPERM read as
-      dead, verb binding dropped)
-  T75 two concurrent REAL recoveries: with recovery A paused between its passed ownership compare and
-      its unlink of the dead run's leftover lease, recovery B refuses at the exclusive examination lock
-      and writes nothing, so two recoveries can never both release, re-claim, and recover (never-seize
-      across the recovery path itself; flip, applied inside the children: the examination serialization
-      made a no-op, restoring the reviewed head's race, under which B's deferred unlink seizes A's live
-      lease and both enter journal recovery)
-  T76 an examination lock failure is diagnosed as what it is: a HELD lock (EWOULDBLOCK/EAGAIN) refuses
-      naming a concurrent reconciliation, and ENOLCK, ENOTSUP, EINVAL or EBADF refuses naming a lock
-      failure, never a concurrent reconciliation; each refuses with every byte untouched (flip: the
-      round-2 broad catch, under which every flock failure reads as a concurrent reconciliation)
-  T77 every failure after the leftover lease's release carries the released-lease report, whatever its
-      type: an EMFILE on the retried O_EXCL claim, a JournalError reopening the lease directory, and an
-      interrupt (the report attached as a note) (flip: the round-2 retry, which appended the report to a
-      WriteGuardError alone)
-  T78 with homes 2 activated as the record verb will run once activation admits it (SUPPORTED_HOMES = 2,
-      no spec_version gate), a committed store declaring homes = 2 at the base spec_version 1.2.0, fresh
-      or holding a legacy leftover lock, is refused at the journal-home probe before any reconciliation
-      or write: every byte untouched, no journal home chosen, the store graded generation 1 (flips: the
-      retired HOMES2_SPEC_VERSION patch, under which the verb reads that store as generation 2 and
-      chooses the typed journal home; the generation-only probe of T30, under which the run publishes
-      into the legacy journal on the fresh store and reconciles the leftover in place)
+  T74 recovery applies the spec 5.7 never-seize and dead-run release clauses through the operation
+      capability: a leftover capability whose holder is confirmed dead on this host is released through
+      the reconciliation itself, in the same run, and the outcome names it; a malformed oversized lease
+      with a valid 64 KiB prefix and an EPERM liveness probe each refuse before any recovery write with
+      every byte intact (never seized); and a refusal recovery raises after a release still carries the
+      released-lease report beside the scoped no-journal-no-operand sentence (flips: the plain
+      acquisition without recovery; the unscoped nothing-written sentence; EPERM read as dead)
+  T75 two concurrent REAL recoveries: with recovery A paused between its passed liveness gate and its
+      unlink of the dead run's leftover lease, recovery B refuses at the operation capability's anchor
+      (contention) and writes nothing, so two recoveries can never both release, re-claim, and recover
+      (never-seize across the recovery path itself; flip, applied inside the children: the anchor flock
+      made a no-op, under which both recoveries pass the gate and race the same records)
+  T76 a recovery acquisition's anchor flock failure is diagnosed as what it is: a HELD anchor
+      (EWOULDBLOCK/EAGAIN) refuses naming contention, and ENOLCK, ENOTSUP, EINVAL or EBADF refuses naming
+      the flock failure, never contention; each refuses with every byte untouched (flip: a broad catch,
+      under which every flock failure reads as contention)
+  T77 every failure after the recovery acquisition removed a confirmed-dead holder's capability records
+      carries that removal's report, whatever its type: an EMFILE, a JournalError and an OpLockError from
+      its own lease publication, and an interrupt (the report attached as a note) (flip: a refusal that
+      drops the removal report)
   T79 a homes-2 run killed after its reservation and before its publication leaves the reservation
       standing and the operands at the prestate; after the confirmed-dead reclaim, the next create
       derives ABOVE the orphaned reservation (the reserved numbers are never issued again), its own
@@ -594,15 +552,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
       decide superseding an importer-authored resolution still records, the target's bytes unchanged and
       the store doctor VALID (flips: the operand's author check removed, so the refusals publish; the
       check applied to the --supersedes target too, so the remedy refuses)
-  T96 a malformed lease is present, so it is held: a create refuses exit 2 with the held-lease refusal,
-      the lease not deleted and every byte untouched (flip: an acquisition that reads a lease it cannot
-      parse as absent and removes it)
-  T97 a store below its git repository root, with a foreign held lease, reaches the held-lease refusal
-      naming the holder, never the dirty-store refusal; the lease and every byte untouched (flip: the
-      lease exclusion compares porcelain paths without the store's prefix strip)
-  T98 a FIFO at the lease path refuses promptly in a bounded child, naming a present non-regular lease;
-      the FIFO and every byte untouched (flip: the held-lease message opens the lease without
-      O_NONBLOCK, so the child blocks past its bound)
+  T96 a malformed lease is present, so it is held: a create refuses exit 2 with the capability
+      recovery's held refusal (a lone lease carries no owner identity), the lease not deleted and every
+      byte untouched (flip: an acquisition that reads a lease it cannot parse as absent and removes it)
+  T97 a store below its git repository root, with a foreign held lease, reaches the capability
+      recovery's held refusal, never the dirty-store refusal, and the cleanliness gate driven directly
+      excludes that lease; the lease and every byte untouched (flip: the lease exclusion compares
+      porcelain paths without the store's prefix strip)
+  T98 a FIFO at the lease path refuses promptly in a bounded child, naming a lease that is not a regular
+      file; the FIFO and every byte untouched (flip: the capability's stale-record classification opens
+      the lease without O_NONBLOCK before its type check, so the child blocks past its bound)
   T99 a canonical, uncommitted counters edit refuses exit 2 before mutation, naming the path and advising
       commit or move aside with no restore command; every byte, the index and HEAD untouched (flip: the
       cleanliness gate as a no-op)
@@ -619,29 +578,29 @@ Each case runs on its own copy of that template; the root is removed in a finall
       every ignored record admitted as dirt)
   T104 declared unmanaged, ignored content inside .working is outside the planned scope: the create
       records and the bytes survive (flip: the store scope widened to all of .working)
-  T105 a store nested under a real non-UTF-8 directory name with an ignored, untracked operand, view
-      destination, or collapsed .working ancestor refuses exit 2 naming the destination; every byte, the
-      index and HEAD untouched (flip: the lossy prefix round trip with its silent non-match fallback)
+  T105 a store nested under a real non-UTF-8 directory name refuses exit 2 at the operation capability's
+      control-root resolution, every byte, the index and HEAD untouched; the cleanliness gate driven
+      directly refuses an ignored, untracked operand, view destination, or collapsed .working ancestor
+      naming the destination (flip: the lossy prefix round trip with its silent non-match fallback)
   T106 an absent ignored view destination, and an absent ignored product destination (the root VERSION
       view), each refuse exit 2 naming the path, every byte untouched (flip: the ignore probe for absent
       destinations as a no-op)
-  T107 an ignored lease, and a directory lease (untracked, or ignored), each get the never-seize
-      refusal, never the dirty-store remedy, the lease and every byte untouched (flip: a lease exclusion
-      that excludes nothing)
+  T107 an ignored lease, and a directory lease (untracked, or ignored), each get the capability
+      recovery's never-seize refusal, never the dirty-store remedy, and the cleanliness gate driven
+      directly excludes each; the lease and every byte untouched (flip: a lease exclusion that excludes
+      nothing)
   T108 a lease committed at HEAD and deleted in the worktree refuses exit 2 naming the TRACKED lease and
       spec 5.7, every byte untouched (flip: the old exclusion dropping every record on the lease path)
   T109 a view under an external normalizing clean filter (the git-lfs shape) reads dirty in the racy-clean
       window because the probe never runs the filter: the create refuses exit 2 naming the git-lfs-shape
       filter and settling the worktree, every byte untouched (flip: no filter neutralization)
   T110 receipt-repair (spec 8.8), the maintainer's reviewed repair of a ratified item with no receipt, over a
-      committed BI-1 a reviewed hand edit put at unqualified done (the C-RECEIPTS finding at rest), with
-      homes 2 activated as T79 does: the repair records exit 0 with exactly one receipt_of receipt and its
-      own worklog entry, the backlog index bytes unchanged and no status change, its run's reservation
-      claiming exactly the receipt's and the entry's numbers, doctor VALID, and a second repair refuses
-      (flip: no reservation published, which the publication boundary refuses); at homes 1, with no
-      reservation home, it refuses exit 2 before any file but the manifest is read, every byte untouched
-      (flips: the homes guard dropped; the request check's homes refusal dropped, so the planner refuses
-      only after the operand reads); an item whose only receipt is importer-authored takes the clean
+      committed BI-1 a reviewed hand edit put at unqualified done (the C-RECEIPTS finding at rest), the
+      setup runs' typed record home removed first: the repair records exit 0 with exactly one receipt_of
+      receipt and its own worklog entry, the backlog index bytes unchanged and no status change, its run's
+      reservation claiming exactly the receipt's and the entry's numbers, doctor VALID, and a second
+      repair refuses (flip: no reservation published, which the publication boundary refuses); an item
+      whose only receipt is importer-authored takes the clean
       receipt beside it, doctor VALID (flip: the writer's receipt join counting importer-authored
       receipts); and a kill at each journal step of its three-operand publication, every hook
       kill_points(3) names but after-lock, which a homes-2 publication never reaches (that run records),
@@ -673,6 +632,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       one holding it at active, refuses exit 2 at the committed-row check read again under the held lease,
       every byte untouched, no reservation and no transaction (flip: the held re-check dropped, so the
       repair publishes over a prior commit that does not hold the item and records exit 0)
+  T116 _publish_homes2 with no capability takes and releases its own; a refused publication whose
+      release raises KeyboardInterrupt still refuses with its own refusal, the release attempted once
+      and surfaced (flip: the self-acquired release catching OpLockError only)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -706,7 +668,6 @@ import secrets
 import select
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import tempfile
@@ -750,8 +711,9 @@ GIT_NO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "mai
 
 
 def kill_points(n):
-    """The journal engine's injection hooks, in order, over one transaction of n operands."""
-    points = ["after-lock"] + ["after-preimage-{}".format(i) for i in range(n)]
+    """The journal engine's injection hooks, in order, over one transaction of n operands. The
+    capability-bound publication takes no journal lock, so the engine's after-lock hook never fires."""
+    points = ["after-preimage-{}".format(i) for i in range(n)]
     points += ["after-preimages", "torn:INTENT", "after-publish-INTENT"]
     for i in range(n):
         points += ["torn-payload:{}".format(i), "after-apply-{}".format(i)]
@@ -1416,7 +1378,7 @@ def t4_allocation(fx):
     after = model(root, COUNTERS)["counters"]
     assert ids == ["BI-1", "BI-2"], ids
     assert after["BI"] == prior["BI"] + 2 and after["WL"] == prior["WL"] + 2, (prior, after)
-    assert schema.check_monotonic(prior, after) == [], (prior, after)
+    assert schema.check_monotonic(prior, after, imported_series=True) == [], (prior, after)
     assert {k: v for k, v in after.items() if k not in ("BI", "WL")} == {
         k: v for k, v in prior.items() if k not in ("BI", "WL")}
     entries = model(root, WORKLOG)["entry"]
@@ -1458,11 +1420,11 @@ sys.exit(opf.main(["record"] + sys.argv[2:] + ["--root", sys.argv[1]]))
 _t5_flip = [""]
 FLIP_T5 = """
 _journaled = record._publish
-def _publish(ctx, plan, subcommand, cap=None):
+def _publish(ctx, plan, subcommand, cap=None, run_id=None):
     counters = plan.operands[0]
     (Path(ctx.res.store_root) / counters.rel).write_bytes(counters.new_raw)
     plan.operands = plan.operands[1:]
-    return _journaled(ctx, plan, subcommand, cap=cap)
+    return _journaled(ctx, plan, subcommand, cap=cap, run_id=run_id)
 record._publish = _publish
 """
 
@@ -1474,7 +1436,7 @@ record._publish = _publish
 # unjournaled counters write already turns the FIRST scenario red before the handoff matrix runs).
 FLIP_T5_HANDOFF = """
 _journaled = record._publish
-def _publish(ctx, plan, subcommand, cap=None):
+def _publish(ctx, plan, subcommand, cap=None, run_id=None):
     operands = list(plan.operands)
     for operand in operands:
         if operand.rel.endswith("/handoff.index.toml"):
@@ -1482,7 +1444,7 @@ def _publish(ctx, plan, subcommand, cap=None):
             operands.remove(operand)
             plan.operands = operands
             break
-    return _journaled(ctx, plan, subcommand, cap=cap)
+    return _journaled(ctx, plan, subcommand, cap=cap, run_id=run_id)
 record._publish = _publish
 """
 
@@ -1528,10 +1490,11 @@ def child(env, root, args, kill=None, flip="", timeout=180):
 
 
 def journal_states(root, rel=None):
-    """{transaction name: state} of the journal home `rel`. The empty map means ONLY confirmed absence
-    (FileNotFoundError: the home or an ancestor is absent); a regular file, a symlink or an unreadable
-    entry at the home is a harness fault (Harness, exit 2), never read as an empty journal."""
-    rel = record.JOURNAL_REL if rel is None else rel
+    """{transaction name: state} of the journal home `rel`, by default the typed record journal. The
+    empty map means ONLY confirmed absence (FileNotFoundError: the home or an ancestor is absent); a
+    regular file, a symlink or an unreadable entry at the home is a harness fault (Harness, exit 2),
+    never read as an empty journal."""
+    rel = TYPED_JOURNAL if rel is None else rel
     jroot = Path(root) / rel
     try:
         jr_fd = journal.open_journal_root_from_path(str(root), rel)
@@ -1761,14 +1724,15 @@ def _t5_matrix(fx, label, base, args, operands):
             seen = _clean_current_handoffs(interim[HO_INDEX])
             assert seen <= 1, (T5_TWO_CURRENT, point, seen)
         result = record_cli(env, root, CREATE)
-        refused(result, "was reconciled")
-        assert "leftover single-writer lease" in result[2], ("T5 the released leftover lease is named",
-                                                             point, result[2][-1200:])
+        # A kill before INTENT leaves no record journal work, so only the dead holder's records are
+        # reclaimed; either lead names that reclaim first.
+        refused(result, "before this operation: recovery cleared the operation capability's lease and "
+                        "active record")
         assert not (Path(root) / LEASE).exists(), ("T5 the leftover lease and recovery's own are released",
                                                    point)
         states = journal_states(root)
         assert not any(s == "open" for s in states.values()), ("T5 every transaction terminal", point, states)
-        assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T5 the journal lock released", point)
+        assert not (Path(root) / record.JOURNAL_REL).exists(), ("T5 no legacy journal is written", point)
         now = {rel: read(root, rel) for rel in operands}
         complete = any(s == "complete" for name, s in states.items() if name not in retained)
         assert now == (post if complete else pre), (
@@ -1792,23 +1756,23 @@ def t9_lease(fx):
     # On success the lease is released BEFORE the report: observe stdout at the moment of release.
     root = fx.case("t9-order")
     seen = []
-    original = guard.release_lease
+    original = record._opf_oplock.release_operation
 
-    def observing(root_fd, machine_rel, payload, verb):
+    def observing(cap):
         seen.append(sys.stdout.getvalue())
-        return original(root_fd, machine_rel, payload, verb)
+        return original(cap)
 
-    with patch.object(guard, "release_lease", observing):
+    with patch.object(record._opf_oplock, "release_operation", observing):
         out = recorded(record_cli(env, root, CREATE))
     assert len(seen) == 1 and "recorded" not in seen[0], ("T9 nothing reported before release", seen)
     assert "BI-1" in out and not (Path(root) / LEASE).exists(), "T9 reported after the lease is gone"
     # A failed release reports no success.
     root = fx.case("t9-release-fails")
 
-    def failing(*_args):
-        raise guard.WriteGuardError("synthetic release failure")
+    def failing(_cap):
+        raise record._opf_oplock.OpLockError("synthetic release failure")
 
-    with patch.object(guard, "release_lease", failing):
+    with patch.object(record._opf_oplock, "release_operation", failing):
         result = record_cli(env, root, CREATE)
     refused(result, "synthetic release failure")
     assert "reached doctor-VALID, but the lease release failed" in result[2], result[2][-800:]
@@ -1818,7 +1782,7 @@ def t9_lease(fx):
     with ticking():
         step(fx, root, CREATE, "BI-1")
         step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
-        with patch.object(guard, "release_lease", failing):
+        with patch.object(record._opf_oplock, "release_operation", failing):
             result = record_cli(env, root, ["transition", "BI-1", "done"] + ASSISTANT)
     refused(result, "synthetic release failure")
     err = result[2]
@@ -1830,7 +1794,7 @@ def flip_t9():
     def report_then_release(ctx, lease, report, released):
         released[0] = True
         record._emit_success(report)
-        record._release(ctx, lease)
+        record._release_guard(ctx, lease)
     return patch.object(record, "_conclude", report_then_release)
 
 
@@ -1903,10 +1867,12 @@ def t12_recovery_lease(fx):
     try:
         peer = guard.acquire_lease(root_fd, MACH, "upgrade")
         try:
-            refused_untouched(env, root, CREATE, "runs only under the single-writer lease")
+            refused_untouched(env, root, CREATE, "runs only under the operation capability")
             assert read(root, LEASE) == peer, "T12 the peer's lease is intact, never seized"
         finally:
-            guard.release_lease(root_fd, MACH, peer, "upgrade")
+            # A seized lease is the assertion's red above, never a harness fault here.
+            if (Path(root) / LEASE).exists() and read(root, LEASE) == peer:
+                guard.release_lease(root_fd, MACH, peer, "upgrade")
     finally:
         os.close(root_fd)
     refused(record_cli(env, root, CREATE), "was reconciled")
@@ -1914,7 +1880,15 @@ def t12_recovery_lease(fx):
 
 
 def flip_t12():
-    return patch.object(record, "_with_recovery_lease", lambda ctx, pending, recover: recover())
+    """A recovery acquisition that removes a present lease first, so recovery runs beside the live peer."""
+    original = record._opf_oplock.acquire_operation
+
+    def seizing(store_root, operation, holder=None, recover=False):
+        if recover:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(os.path.join(store_root, LEASE))
+        return original(store_root, operation, holder=holder, recover=recover)
+    return patch.object(record._opf_oplock, "acquire_operation", seizing)
 
 
 def t13_intervening_edit(fx):
@@ -3397,14 +3371,15 @@ def flip_t89_reject_guard():
 def t8_collision(fx):
     env = fx.env
     root = fx.case("t8-collision")
-    env.git(root, "branch", "peer")
+    # The parallel branch lives in a second checkout of the same commit: the homes-2 id reservations
+    # are local to a checkout, so a branch of this one would claim BI-2, never the colliding BI-1.
+    peer = fx.case("t8-collision-peer", root)
     with ticking():
         step(fx, root, ["create", "--type", "backlog_item", "--title", "alpha"] + ASSISTANT, "BI-1 alpha")
         doctor_valid(env, root)
-        env.git(root, "checkout", "-q", "peer")
-        step(fx, root, ["create", "--type", "backlog_item", "--title", "beta"] + ASSISTANT, "BI-1 beta")
-        doctor_valid(env, root)
-    env.git(root, "checkout", "-q", "main")
+        step(fx, peer, ["create", "--type", "backlog_item", "--title", "beta"] + ASSISTANT, "BI-1 beta")
+        doctor_valid(env, peer)
+    env.git(root, "fetch", "-q", str(peer), "+main:refs/heads/peer")
     assert env.run_git(root, "merge", "--no-edit", "peer").returncode != 0, "T8 the store paths conflict"
     conflicted = env.git(root, "diff", "--name-only", "--diff-filter=U").split()
     assert BI_INDEX in conflicted, conflicted
@@ -3431,44 +3406,6 @@ def flip_t8():
     return patch.object(opf_check, "check_unique_ids", lambda ids: [])
 
 
-# --- T15: a journal lock left after COMPLETE, then its reconciliation ----------------------------------------
-
-# Inside the child: the journal lock release fails after the transaction reached COMPLETE, so the run goes
-# on to render, run doctor, and report, leaving its journal lock behind.
-FAILING_LOCK_RELEASE = """
-import _journal
-def _failing_release(journal_root):
-    raise _journal.JournalError("synthetic journal lock release failure")
-_journal.release_lock = _failing_release
-"""
-
-
-def t15_leftover_lock(fx):
-    env = fx.env
-    root = fx.case("t15-leftover-lock")
-    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-    assert proc.returncode == 0 and '"event": "recorded"' in proc.stdout, (proc.returncode, proc.stderr[-800:])
-    assert "could not be released" in proc.stderr, ("T15 the retained lock is surfaced", proc.stderr[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T15 the journal lock is left"
-    result = record_cli(env, root, CREATE)
-    refused(result, "was reconciled")
-    err = result[2]
-    assert "is COMPLETE" in err and "not recorded by the journal" in err, err[-1200:]
-    assert "never run" not in err and "never ran" not in err, ("T15 no claim that render and doctor did not "
-                                                             "run", err[-1200:])
-    assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), "T15 the leftover lock is reconciled"
-
-
-def flip_t15():
-    original = record._leftover_lock_outcome
-
-    def claims_never_ran(owner, states):
-        line = original(owner, states)
-        head, sep, _rest = line.partition("so its publication was applied when it committed")
-        return head + sep + ", with its render and final doctor never run" if sep else line
-    return patch.object(record, "_leftover_lock_outcome", claims_never_ran)
-
-
 def flip_t1():
     return patch.object(record, "_require_canonical", lambda operand: None)
 
@@ -3483,80 +3420,9 @@ import re
 import _opf_store
 
 
-class _Homes2SpecGate:
-    """The record module's view of _opf_store with ONE name moved: SUPPORTED_SPEC_VERSION reads as
-    HOMES2_SPEC_VERSION, so _load_manifest's spec_version gate (it admits only SUPPORTED_SPEC_VERSION,
-    1.2.0) admits the real homes-2 declaration pair. Every other name, validate_manifest,
-    homes_generation, HOMES2_SPEC_VERSION and SUPPORTED_HOMES included, is read through to the real
-    module at each access, so a patch on _opf_store still reaches the record module. The move also
-    inverts that gate: under it the record verb refuses EVERY 1.2.0 store (the store declares
-    spec_version '1.2.0', not the tooling's 2.0.0), so only a store declaring the pair is exercised
-    through it, and a vector about a 1.2.0 store runs without it (T78)."""
-
-    def __getattr__(self, name):
-        if name == "SUPPORTED_SPEC_VERSION":
-            return _opf_store.HOMES2_SPEC_VERSION
-        return getattr(_opf_store, name)
-
-
-def _self_test_homes2_active(root):
-    """Activate homes 2 over a fixture store: the manifest on disk declares the real homes-2 pair,
-    spec_version HOMES2_SPEC_VERSION (2.0.0) and homes = 2, which the shipped validate_manifest accepts
-    as it stands. Only what this build still needs to exercise homes 2 is patched: SUPPORTED_HOMES = 2
-    (homes_generation activates nothing while it is 1), and the record module's spec_version gate
-    through _Homes2SpecGate (_load_manifest refuses any spec_version but 1.2.0, the real pair
-    included). validate_manifest, homes_generation and HOMES2_SPEC_VERSION are the shipped ones. The
-    manifest bytes are restored on exit."""
-    import contextlib
-    import tomllib
-    from unittest.mock import patch
-    resolution = _opf_store.resolve_store(root)
-    path = Path(resolution.store_root) / resolution.machine_rel / _opf_store.MANIFEST_NAME
-    original = path.read_bytes()
-    model = tomllib.loads(original.decode("utf-8"))
-    model["opf"]["homes"] = 2
-    model["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
-
-    @contextlib.contextmanager
-    def active():
-        path.write_text(emit.emit_checked(model), encoding="utf-8")
-        try:
-            with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
-                    patch.object(record, "_opf_store", _Homes2SpecGate()):
-                yield
-        finally:
-            path.write_bytes(original)
-    return active()
-
 RECORD_RUN_RE = r"record-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
 TYPED_JOURNAL = ".working/journals/record/journal"
 RECORD_OPERANDS = (COUNTERS, BI_INDEX, WORKLOG)
-
-# Inside a killed child: the transaction is minted under the LEGACY dotted name an earlier build used,
-# so recovery of that shape stays exercised end to end.
-LEGACY_NAME_FLIP = """
-import os, time
-record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + "." + str(time.time_ns()) + "." + lock_id
-"""
-
-# Inside a killed child: activate homes 2 exactly as _self_test_homes2_active does (the manifest on
-# disk already declares the real pair, spec_version 2.0.0 and homes = 2; these are the two remaining
-# module patches, SUPPORTED_HOMES and the record spec_version gate of _Homes2SpecGate; both stay
-# necessary until activation flips SUPPORTED_HOMES, since homes_generation activates nothing at 1 and
-# _load_manifest admits only the shipped SUPPORTED_SPEC_VERSION). The claim itself runs the REAL
-# homes-2 seam: the reservation scan, the spec 8.2 derivation, and the run id reservation published
-# before the publication.
-HOMES2_CHILD_FLIP = """
-import _opf_store
-_opf_store.SUPPORTED_HOMES = 2
-class _Homes2SpecGate:
-    def __getattr__(self, name):
-        if name == "SUPPORTED_SPEC_VERSION":
-            return _opf_store.HOMES2_SPEC_VERSION
-        return getattr(_opf_store, name)
-record._opf_store = _Homes2SpecGate()
-"""
-
 
 def subtree(root, prefix):
     return dict((k, v) for k, v in snapshot(root).items() if k == prefix or k.startswith(prefix + "/"))
@@ -3564,7 +3430,10 @@ def subtree(root, prefix):
 
 def t19_run_id_grammar(fx):
     """A publication's journal transaction name is the record run id in the homes grammar, and the
-    shared constructor accepts it verbatim."""
+    shared constructor accepts it verbatim. The minted id is judged first: a name outside the grammar
+    never reaches a publication, whose reservation refuses it."""
+    minted = record._record_run_id(os.urandom(16).hex())
+    assert re.fullmatch(RECORD_RUN_RE, minted), ("T19 the minted run id is in the homes grammar", minted)
     root = fx.case("t19-run-id")
     recorded(record_cli(fx.env, root, CREATE))
     names = list(journal_states(root))
@@ -3577,65 +3446,36 @@ def flip_t19():
         os.getpid(), datetime.datetime.now().microsecond, lock_id))
 
 
-def t19_legacy_name_recovery(fx):
-    """An interrupted transaction under the LEGACY dotted name is still reconciled: kill points before
-    apply, mid-apply, and at a torn COMPLETE, with the operands ending exactly at the prestate or
-    exactly at the poststate, the poststate iff COMPLETE."""
+def legacy_journal_leftover(root):
+    """A leftover .aiqt/record/journal holding a lock and an open-looking transaction directory, the
+    shape an earlier build left; at 2.0.0 OPF keeps no record state under .aiqt (spec 4.2)."""
+    legacy = Path(root) / record.JOURNAL_REL
+    (legacy / "record-create.1.1.leftover").mkdir(parents=True)
+    (legacy / "lock").write_bytes(b"pid = 1\ntoken = \"leftover\"\n")
+
+
+def t20b_legacy_journal_ignored(fx):
+    """A 2.0.0 store carrying a leftover .aiqt/record/journal and its lock records exit 0: the leftover
+    is neither read, recovered nor refused (spec 4.2), and the .aiqt subtree stays byte-identical (flip:
+    the homes-2 reconcile refuses the legacy journal again)."""
     env = fx.env
-    reference = fx.case("t19-legacy-reference")
-    proc = child(env, reference, CREATE)
-    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
-    post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
-    for hook in ("after-publish-INTENT", "after-apply-0", "torn:COMPLETE"):
-        root = fx.case("t19-legacy-" + hook.replace(":", "-"))
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        proc = child(env, root, CREATE, kill=hook, flip=LEGACY_NAME_FLIP)
-        assert proc.returncode == 137, ("T19 the child is killed at", hook, proc.stderr[-800:])
-        (Path(root) / LEASE).unlink()
-        refused(record_cli(env, root, CREATE), "was reconciled")
-        states = journal_states(root)
-        assert states and all(s != "open" for s in states.values()), ("T19 terminal", hook, states)
-        assert all(name.startswith("record-create.") for name in states), ("T19 the legacy name", states)
-        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        complete = any(s == "complete" for s in states.values())
-        assert now == (post if complete else pre), ("T19 prestate or poststate, poststate iff COMPLETE",
-                                                    hook, states)
+    root = fx.case("t20b-legacy-journal-ignored")
+    legacy_journal_leftover(root)
+    aiqt_before = subtree(root, ".aiqt")
+    recorded(record_cli(env, root, CREATE))
+    assert subtree(root, ".aiqt") == aiqt_before, "T20b the .aiqt subtree is byte-identical"
+    assert list(journal_states(root, TYPED_JOURNAL).values()) == ["complete"], \
+        "T20b the run journals at the typed home"
 
 
-def flip_t19_legacy():
-    """A recovery that enumerates only grammar-named transactions: the legacy-named interruption is
-    never reconciled."""
-    original = journal._journal_txn_dirs
+def flip_t20b():
+    """Refuse a legacy journal before the typed reconcile (the homes-2 build before the flip)."""
+    original = record._reconcile_journal
 
-    def grammar_only(jr_fd, journal_root):
-        return [t for t in original(jr_fd, journal_root) if re.fullmatch(RECORD_RUN_RE, t.name)]
-    return patch.object(journal, "_journal_txn_dirs", grammar_only)
-
-
-def t20_homes2_legacy_refused(fx):
-    """A legacy .aiqt/record/journal found on a homes-2 store is refused by name and never recovered: the
-    .aiqt subtree stays byte-unchanged (the T15 leftover lock included) and no typed journal home is
-    created."""
-    env = fx.env
-    root = fx.case("t20-homes2-legacy")
-    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T20 the legacy journal holds a leftover lock"
-    with _self_test_homes2_active(root):
-        aiqt_before = subtree(root, ".aiqt")
-        result = record_cli(env, root, CREATE)
-        refused(result, "legacy record journal")
-        assert "it is never recovered: homes 2 has no homes migration (spec 4.2)" in result[2] \
-            and "left unread and unchanged" in result[2] and "transports" not in result[2] \
-            and "in place" not in result[2], result[2][-800:]
-        assert subtree(root, ".aiqt") == aiqt_before, "T20 the .aiqt subtree is byte-unchanged"
-        assert not (Path(root) / ".working/journals").exists(), "T20 no typed journal home is created"
-
-
-def flip_t20():
-    """Probe the generation as 1 (the reviewed head's behaviour): the legacy journal is reconciled in
-    place and .aiqt changes."""
-    return patch.object(record, "_probe_homes", lambda ctx: 1)
+    def refusing(ctx):
+        record._refuse_legacy_journal(ctx)
+        original(ctx)
+    return patch.object(record, "_reconcile_journal", refusing)
 
 
 def t21_homes2_publish(fx):
@@ -3646,48 +3486,66 @@ def t21_homes2_publish(fx):
     projection, rewrites exactly the planned operands, and touches nothing under .aiqt."""
     env = fx.env
     root = fx.case("t21-homes2-publish")
-    with _self_test_homes2_active(root):
-        req = record.parse_request(CREATE + ["--root", str(root)])
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
-        try:
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            assert ctx.journal_rel == TYPED_JOURNAL, ("T21 the probed journal home", ctx.journal_rel)
-            record._load_manifest(ctx)
-            assert ctx.homes == 2, ("T21 the validated generation", ctx.homes)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
-            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
-            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
-            for op in plan.operands:
-                op.new_raw = record._emit_bytes(op.new_model)
-            run_id = record._record_run_id(os.urandom(16).hex())
-            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            try:
-                record._reserve_claim(ctx, plan, cap, run_id)
-                record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
-            finally:
-                record._opf_oplock.release_operation(cap)
-        finally:
-            os.close(root_fd)
-        assert not (Path(root) / ".aiqt").exists(), "T21 nothing under .aiqt"
-        states = journal_states(root, TYPED_JOURNAL)
-        names = list(states)
-        assert names == [run_id] and re.fullmatch(RECORD_RUN_RE, names[0]), ("T21 one grammar-named txn",
-                                                                             names, run_id)
-        assert states[names[0]] == "complete", states
-        projection = Path(root) / record._opf_store.txn_record("record", names[0])
-        assert projection.is_file(), "T21 the terminal projection is published"
+    req = record.parse_request(CREATE + ["--root", str(root)])
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        ctx = record.Context(res, str(root), root_fd)
+        ctx.journal_rel = record._record_journal_rel(record._probe_admission(ctx))
+        assert ctx.journal_rel == TYPED_JOURNAL, ("T21 the probed journal home", ctx.journal_rel)
+        record._load_manifest(ctx)
+        assert ctx.homes == 2, ("T21 the validated generation", ctx.homes)
+        ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+        ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+        ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+        operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+        plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
         for op in plan.operands:
-            assert read(root, op.rel) == op.new_raw, ("T21 the operand is rewritten", op.rel)
-        assert not (Path(root) / LEASE).exists(), "T21 the capability lease is released"
+            op.new_raw = record._emit_bytes(op.new_model)
+        run_id = record._record_run_id(os.urandom(16).hex())
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            record._reserve_claim(ctx, plan, cap, run_id)
+            record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
+        finally:
+            record._opf_oplock.release_operation(cap)
+    finally:
+        os.close(root_fd)
+    assert not (Path(root) / ".aiqt").exists(), "T21 nothing under .aiqt"
+    states = journal_states(root, TYPED_JOURNAL)
+    names = list(states)
+    assert names == [run_id] and re.fullmatch(RECORD_RUN_RE, names[0]), ("T21 one grammar-named txn",
+                                                                         names, run_id)
+    assert states[names[0]] == "complete", states
+    projection = Path(root) / record._opf_store.txn_record("record", names[0])
+    assert projection.is_file(), "T21 the terminal projection is published"
+    for op in plan.operands:
+        assert read(root, op.rel) == op.new_raw, ("T21 the operand is rewritten", op.rel)
+    assert not (Path(root) / LEASE).exists(), "T21 the capability lease is released"
 
 
 def flip_t21():
     return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
+
+
+def t27b_homes2_report(fx):
+    """The homes-2 success report carries journal_rel naming the typed journal home, and the commit
+    advice names that home, never the legacy one."""
+    out = recorded(record_cli(fx.env, fx.case("t27b-homes2-report"), CREATE))
+    report = json.loads(next(l for l in out.splitlines() if RECORDED_EVENT in l))
+    assert report.get("journal_rel") == TYPED_JOURNAL, ("T27b the typed journal_rel", sorted(report))
+    assert "the journal under {} is local recovery evidence".format(TYPED_JOURNAL) in out, out[-800:]
+    assert "the journal under {} ".format(record.JOURNAL_REL) not in out, out[-800:]
+
+
+def flip_t27b():
+    """Drop the journal_rel key from the report, so the advice falls back to the legacy home."""
+    original = record._emit_success
+
+    def without_journal_rel(report):
+        return original({k: v for k, v in report.items() if k != "journal_rel"})
+    return patch.object(record, "_emit_success", without_journal_rel)
 
 
 def t22_homes2_claim_reserves(fx):
@@ -3703,50 +3561,49 @@ def t22_homes2_claim_reserves(fx):
     of one case's branch reaches that case without an earlier success assertion ending the run first."""
     env = fx.env
     base = fx.case("t22-homes2-base")
-    with _self_test_homes2_active(base):
-        damaged_run = "record-20260927T000009Z-0000000000000009"
-        damaged = damaged_run + ".toml"
-        rel = "{}/{}".format(record._ALLOCATIONS_REL, damaged)
-        canonical = record._opf_journal.reservation_payload("record", damaged_run, "op", {"BI": 1})
-        for label, plant, needle in (
-                ("non-regular", lambda d: d.mkdir(), "cannot read the id reservation {} (contained path {!r} "
-                 "is not a regular file)".format(rel, rel)),
-                ("unreadable", lambda d: d.write_bytes(canonical), "cannot read the id reservation {} ([Errno {}] "
-                 "{}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
-                ("malformed", lambda d: d.write_bytes(b"not toml ["), "is malformed"),
-                ("wrong-type-string", lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
-                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
-                ("wrong-type-boolean", lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
-                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
-                ("conflicting", lambda d: d.write_bytes(record._opf_journal.reservation_payload(
-                    "record", "record-20260927T000008Z-0000000000000008", "op", {"BI": 1})),
-                 "conflicts with the exact canonical reservation"),
-                ("misnamed", lambda d: d.write_bytes(b"x"), "is not an id reservation")):
-            sub = fx.case("t22-homes2-" + label, base)
-            target = Path(sub) / record._ALLOCATIONS_REL / (
-                "junk.txt" if label == "misnamed" else damaged)
-            target.parent.mkdir(parents=True)
-            plant(target)
-            with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
-                refused_untouched(env, sub, CREATE, needle)
-        root = fx.case("t22-homes2-reserves", base)
-        pre_counters = model(root, COUNTERS)["counters"]
-        result = record_cli(env, root, CREATE)
-        recorded(result)
-        assert not (Path(root) / record.JOURNAL_REL).exists(), "T22 no legacy journal is created"
-        states = journal_states(root, TYPED_JOURNAL)
-        assert list(states.values()) == ["complete"], ("T22 one COMPLETE transaction", states)
-        (run_id,) = states
-        reservation = Path(root) / record._opf_store.allocation_record("record", run_id)
-        assert reservation.is_file(), "T22 the reservation is published under the run id"
-        payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
-        post_counters = model(root, COUNTERS)["counters"]
-        advance = dict((ns, n) for ns, n in post_counters.items() if pre_counters.get(ns) != n)
-        assert payload["kind"] == "record" and payload["run_id"] == run_id, payload
-        assert payload["claims"] == advance == {"BI": pre_counters["BI"] + 1,
-                                               "WL": pre_counters["WL"] + 1}, (payload, advance)
-        assert reservation.read_bytes() == record._opf_journal.reservation_payload(
-            "record", run_id, payload["operation_id"], payload["claims"]), "T22 canonical payload"
+    damaged_run = "record-20260927T000009Z-0000000000000009"
+    damaged = damaged_run + ".toml"
+    rel = "{}/{}".format(record._ALLOCATIONS_REL, damaged)
+    canonical = record._opf_journal.reservation_payload("record", damaged_run, "op", {"BI": 1})
+    for label, plant, needle in (
+            ("non-regular", lambda d: d.mkdir(), "cannot read the id reservation {} (contained path {!r} "
+             "is not a regular file)".format(rel, rel)),
+            ("unreadable", lambda d: d.write_bytes(canonical), "cannot read the id reservation {} ([Errno {}] "
+             "{}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
+            ("malformed", lambda d: d.write_bytes(b"not toml ["), "is malformed"),
+            ("wrong-type-string", lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
+             "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+            ("wrong-type-boolean", lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
+             "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+            ("conflicting", lambda d: d.write_bytes(record._opf_journal.reservation_payload(
+                "record", "record-20260927T000008Z-0000000000000008", "op", {"BI": 1})),
+             "conflicts with the exact canonical reservation"),
+            ("misnamed", lambda d: d.write_bytes(b"x"), "is not an id reservation")):
+        sub = fx.case("t22-homes2-" + label, base)
+        target = Path(sub) / record._ALLOCATIONS_REL / (
+            "junk.txt" if label == "misnamed" else damaged)
+        target.parent.mkdir(parents=True)
+        plant(target)
+        with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
+            refused_untouched(env, sub, CREATE, needle)
+    root = fx.case("t22-homes2-reserves", base)
+    pre_counters = model(root, COUNTERS)["counters"]
+    result = record_cli(env, root, CREATE)
+    recorded(result)
+    assert not (Path(root) / record.JOURNAL_REL).exists(), "T22 no legacy journal is created"
+    states = journal_states(root, TYPED_JOURNAL)
+    assert list(states.values()) == ["complete"], ("T22 one COMPLETE transaction", states)
+    (run_id,) = states
+    reservation = Path(root) / record._opf_store.allocation_record("record", run_id)
+    assert reservation.is_file(), "T22 the reservation is published under the run id"
+    payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
+    post_counters = model(root, COUNTERS)["counters"]
+    advance = dict((ns, n) for ns, n in post_counters.items() if pre_counters.get(ns) != n)
+    assert payload["kind"] == "record" and payload["run_id"] == run_id, payload
+    assert payload["claims"] == advance == {"BI": pre_counters["BI"] + 1,
+                                           "WL": pre_counters["WL"] + 1}, (payload, advance)
+    assert reservation.read_bytes() == record._opf_journal.reservation_payload(
+        "record", run_id, payload["operation_id"], payload["claims"]), "T22 canonical payload"
 
 
 UNREADABLE_RESERVATION = "synthetic unreadable id reservation"
@@ -3876,32 +3733,31 @@ def t23_homes2_crash(fx):
     COMPLETE, and .aiqt is never touched."""
     env = fx.env
     base = fx.case("t23-homes2-base")
-    with _self_test_homes2_active(base):
-        reference = fx.case("t23-homes2-reference", base)
-        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
-        assert not (Path(reference) / ".aiqt").exists(), "T23 the reference run touches nothing under .aiqt"
-        ref_states = journal_states(reference, TYPED_JOURNAL)
-        assert list(ref_states.values()) == ["complete"], ref_states
-        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
-        for hook in ("after-publish-INTENT", "torn-payload:1", "after-apply-2", "torn:COMPLETE"):
-            root = fx.case("t23-homes2-" + hook.replace(":", "-"), base)
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            proc = child(env, root, CREATE, kill=hook, flip=HOMES2_CHILD_FLIP)
-            assert proc.returncode == 137, ("T23 the child is killed at", hook, proc.stderr[-800:])
-            assert RECORDED_EVENT not in proc.stdout, ("T23 a killed run reports no id", hook)
-            assert (Path(root) / LEASE).exists(), ("T23 the dead run's capability lease is left", hook)
-            result = record_cli(env, root, CREATE)
-            refused(result, "was reconciled")
-            assert not (Path(root) / ".aiqt").exists(), ("T23 recovery touches nothing under .aiqt", hook)
-            states = journal_states(root, TYPED_JOURNAL)
-            assert states and all(s != "open" for s in states.values()), ("T23 terminal", hook, states)
-            assert all(re.fullmatch(RECORD_RUN_RE, name) for name in states), ("T23 grammar names", states)
-            now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            complete = any(s == "complete" for s in states.values())
-            assert now == (post if complete else pre), ("T23 prestate or poststate, poststate iff COMPLETE",
-                                                        hook, states)
-            assert not (Path(root) / LEASE).exists(), ("T23 the confirmed-dead lease is cleared", hook)
+    reference = fx.case("t23-homes2-reference", base)
+    proc = child(env, reference, CREATE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+    assert not (Path(reference) / ".aiqt").exists(), "T23 the reference run touches nothing under .aiqt"
+    ref_states = journal_states(reference, TYPED_JOURNAL)
+    assert list(ref_states.values()) == ["complete"], ref_states
+    post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+    for hook in ("after-publish-INTENT", "torn-payload:1", "after-apply-2", "torn:COMPLETE"):
+        root = fx.case("t23-homes2-" + hook.replace(":", "-"), base)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        proc = child(env, root, CREATE, kill=hook)
+        assert proc.returncode == 137, ("T23 the child is killed at", hook, proc.stderr[-800:])
+        assert RECORDED_EVENT not in proc.stdout, ("T23 a killed run reports no id", hook)
+        assert (Path(root) / LEASE).exists(), ("T23 the dead run's capability lease is left", hook)
+        result = record_cli(env, root, CREATE)
+        refused(result, "was reconciled")
+        assert not (Path(root) / ".aiqt").exists(), ("T23 recovery touches nothing under .aiqt", hook)
+        states = journal_states(root, TYPED_JOURNAL)
+        assert states and all(s != "open" for s in states.values()), ("T23 terminal", hook, states)
+        assert all(re.fullmatch(RECORD_RUN_RE, name) for name in states), ("T23 grammar names", states)
+        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        complete = any(s == "complete" for s in states.values())
+        assert now == (post if complete else pre), ("T23 prestate or poststate, poststate iff COMPLETE",
+                                                    hook, states)
+        assert not (Path(root) / LEASE).exists(), ("T23 the confirmed-dead lease is cleared", hook)
 
 
 def flip_t23():
@@ -3930,53 +3786,57 @@ def t5_flip_write(fx):
     assert any(s == "open" for s in states.values()), ("T5-flip the journaled remainder is open", states)
 
 
-def t24_broken_manifest(fx):
-    """A manifest the journal-home probe cannot read leaves the homes generation UNKNOWABLE (the two
-    generations share one layout), so a store carrying a legacy .aiqt/record/journal refuses
-    fail-closed BEFORE any legacy reconciliation write -- the .aiqt subtree stays byte-unchanged even
-    on a homes-2 store with a reconcilable leftover -- while a store carrying no legacy journal keeps
-    the homes-1 broken-manifest behaviour: the run proceeds to the manifest refusal itself, nothing
-    reconciled and nothing written."""
+def t24b_unreadable_manifest_typed_only(fx):
+    """An unreadable manifest with an open typed-home transaction and a leftover .aiqt/record/journal
+    lock: the admission probe takes the typed home without touching .aiqt, so the first run reconciles
+    the typed transaction and refuses, the next reaches _load_manifest and refuses the unreadable
+    manifest, the .aiqt bytes stay identical, and no journal lstat ever names a .aiqt path (flip: the
+    probe lstats the legacy journal on a failed read and routes to it when present)."""
     env = fx.env
-    root = fx.case("t24-broken-manifest")
-    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T24 a reconcilable legacy leftover exists"
+    root = fx.case("t24b-unreadable-manifest")
+    proc = child(env, root, CREATE, kill="after-apply-0")
+    assert proc.returncode == 137, ("T24b the child is killed", proc.returncode, proc.stderr[-800:])
+    assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
+        "T24b the typed interruption is open"
+    legacy_journal_leftover(root)
+    aiqt_before = subtree(root, ".aiqt")
     manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
     original_read = record._read_operand
+    original_lstat = record._journal._lstat_contained
+    lstats = []
 
     def failing_manifest_read(root_fd, rel):
         if rel == manifest_rel:
             raise record.RecordError("synthetic manifest read failure")
         return original_read(root_fd, rel)
 
-    with _self_test_homes2_active(root):
-        before = snapshot(root)
-        with patch.object(record, "_read_operand", failing_manifest_read):
-            result = record_cli(env, root, CREATE)
-        assert snapshot(root) == before, "T24 nothing is written on an unknowable generation"
-        refused(result, "homes generation cannot be told")
-    # With no legacy journal, the broken-manifest run keeps the homes-1 behaviour: it reaches the
-    # manifest read refusal itself.
-    root = fx.case("t24-no-legacy-journal")
-    before = snapshot(root)
-    with patch.object(record, "_read_operand", failing_manifest_read):
-        result = record_cli(env, root, CREATE)
-    assert snapshot(root) == before, "T24 bytes untouched without a legacy journal"
-    refused(result, "synthetic manifest read failure")
+    def observing_lstat(root_fd, rel, *args, **kwargs):
+        lstats.append(rel)
+        return original_lstat(root_fd, rel, *args, **kwargs)
+    with patch.object(record, "_read_operand", failing_manifest_read), \
+            patch.object(record._journal, "_lstat_contained", observing_lstat):
+        first = record_cli(env, root, CREATE)
+        refused(first, "was reconciled")
+        assert all(s != "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
+            "T24b the typed transaction is reconciled"
+        refused(record_cli(env, root, CREATE), "synthetic manifest read failure")
+    assert subtree(root, ".aiqt") == aiqt_before, "T24b the .aiqt bytes are identical"
+    assert not [p for p in lstats if str(p).startswith(".aiqt")], ("T24b no .aiqt path is lstat'd", lstats)
 
 
-def flip_t24():
-    """Probe a failed manifest read as generation 1 (the reviewed head's behaviour): the legacy
-    journal is reconciled in place and .aiqt changes."""
-    original = record._probe_homes
+def flip_t24b():
+    """The pre-admission probe: a failed manifest read lstats the legacy journal and, when present,
+    routes the run to it."""
+    original = record._probe_admission
 
-    def probe_as_1(ctx):
+    def legacy_on_failure(ctx):
         try:
-            return original(ctx)
+            record._read_operand(ctx.root_fd, ctx.rel(record._opf_store.MANIFEST_NAME))
         except record.RecordError:
-            return 1
-    return patch.object(record, "_probe_homes", probe_as_1)
+            if record._journal._lstat_contained(ctx.root_fd, record.JOURNAL_REL) is not None:
+                return 1
+        return original(ctx)
+    return patch.object(record, "_probe_admission", legacy_on_failure)
 
 
 def t25_plan_under_capability(fx):
@@ -3988,47 +3848,46 @@ def t25_plan_under_capability(fx):
     head instead rolled it back and erased it."""
     env = fx.env
     base = fx.case("t25-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t25-homes2-race", base)
-        proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 137, ("T25 the child is killed", proc.returncode, proc.stderr[-800:])
-        assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
-            "T25 the interruption is open"
-        peer = {"attempted": False, "published": False, "raw": None}
-        original_check = record._unexplained_operands
+    root = fx.case("t25-homes2-race", base)
+    proc = child(env, root, CREATE, kill="after-apply-0")
+    assert proc.returncode == 137, ("T25 the child is killed", proc.returncode, proc.stderr[-800:])
+    assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
+        "T25 the interruption is open"
+    peer = {"attempted": False, "published": False, "raw": None}
+    original_check = record._unexplained_operands
 
-        def racing_check(root_fd, jr_fd, txns):
-            problems = original_check(root_fd, jr_fd, txns)
-            if problems or peer["attempted"]:
-                return problems
-            peer["attempted"] = True
-            current = read(root, COUNTERS)
-            payload = current + b"# a peer publication landed between the check and the recovery\n"
-            op = {"op": "write", "path": COUNTERS,
-                  "poststate": {"kind": "file", "content-sha256": record._sha256(payload)},
-                  "source-poststate": {"kind": "file",
-                                       "mode": stat.S_IMODE((Path(root) / COUNTERS).lstat().st_mode),
-                                       "sha256": record._sha256(current)}}
-            try:
-                cap = record._opf_oplock.acquire_operation(str(root), record.VERB, recover=True)
-            except record._opf_oplock.OpLockError:
-                return problems     # the held capability excluded the peer: the check ran under it
-            try:
-                record._opf_journal.run_transaction(cap, "record", "record-20260927T000001Z-" + "0" * 16,
-                                                    [op], lambda o: payload)
-                peer["published"] = True
-                peer["raw"] = payload
-            finally:
-                record._opf_oplock.release_operation(cap)
+    def racing_check(root_fd, jr_fd, txns):
+        problems = original_check(root_fd, jr_fd, txns)
+        if problems or peer["attempted"]:
             return problems
+        peer["attempted"] = True
+        current = read(root, COUNTERS)
+        payload = current + b"# a peer publication landed between the check and the recovery\n"
+        op = {"op": "write", "path": COUNTERS,
+              "poststate": {"kind": "file", "content-sha256": record._sha256(payload)},
+              "source-poststate": {"kind": "file",
+                                   "mode": stat.S_IMODE((Path(root) / COUNTERS).lstat().st_mode),
+                                   "sha256": record._sha256(current)}}
+        try:
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB, recover=True)
+        except record._opf_oplock.OpLockError:
+            return problems     # the held capability excluded the peer: the check ran under it
+        try:
+            record._opf_journal.run_transaction(cap, "record", "record-20260927T000001Z-" + "0" * 16,
+                                                [op], lambda o: payload)
+            peer["published"] = True
+            peer["raw"] = payload
+        finally:
+            record._opf_oplock.release_operation(cap)
+        return problems
 
-        with patch.object(record, "_unexplained_operands", racing_check):
-            result = record_cli(env, root, CREATE)
-        assert peer["attempted"], "T25 the peer attempted its publication in the unheld window"
-        if peer["published"]:
-            assert read(root, COUNTERS) == peer["raw"], \
-                "T25 a peer publication that completed is never rolled back by reconciliation"
-        refused(result, "was reconciled")
+    with patch.object(record, "_unexplained_operands", racing_check):
+        result = record_cli(env, root, CREATE)
+    assert peer["attempted"], "T25 the peer attempted its publication in the unheld window"
+    if peer["published"]:
+        assert read(root, COUNTERS) == peer["raw"], \
+            "T25 a peer publication that completed is never rolled back by reconciliation"
+    refused(result, "was reconciled")
 
 
 def flip_t25():
@@ -4051,57 +3910,34 @@ def t26_complete_before_projection(fx):
     of leaving a state every later acquisition refuses."""
     env = fx.env
     base = fx.case("t26-homes2-base")
-    with _self_test_homes2_active(base):
-        reference = fx.case("t26-homes2-reference", base)
-        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode,
-                                                                        proc.stderr[-1600:])
-        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
-        root = fx.case("t26-homes2-complete", base)
-        proc = child(env, root, CREATE, kill="after-publish-COMPLETE", flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 137, ("T26 the child is killed", proc.returncode, proc.stderr[-800:])
-        states = journal_states(root, TYPED_JOURNAL)
-        assert list(states.values()) == ["complete"], ("T26 the durable COMPLETE", states)
-        (name,) = states
-        projection = Path(root) / record._opf_store.txn_record("record", name)
-        assert not projection.exists(), "T26 the crash landed before the projection"
-        assert (Path(root) / LEASE).exists(), "T26 the dead holder's lease is left"
-        result = record_cli(env, root, CREATE)
-        refused(result, "was reconciled")
-        assert "already terminal" in result[2], result[2][-800:]
-        assert projection.is_file(), "T26 the missing terminal projection is published"
-        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        assert now == post, "T26 the completed publication keeps its poststate"
-        assert not (Path(root) / LEASE).exists(), "T26 the confirmed-dead lease is cleared"
-        assert not (Path(root) / ".aiqt").exists(), "T26 nothing under .aiqt"
+    reference = fx.case("t26-homes2-reference", base)
+    proc = child(env, reference, CREATE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode,
+                                                                    proc.stderr[-1600:])
+    post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+    root = fx.case("t26-homes2-complete", base)
+    proc = child(env, root, CREATE, kill="after-publish-COMPLETE")
+    assert proc.returncode == 137, ("T26 the child is killed", proc.returncode, proc.stderr[-800:])
+    states = journal_states(root, TYPED_JOURNAL)
+    assert list(states.values()) == ["complete"], ("T26 the durable COMPLETE", states)
+    (name,) = states
+    projection = Path(root) / record._opf_store.txn_record("record", name)
+    assert not projection.exists(), "T26 the crash landed before the projection"
+    assert (Path(root) / LEASE).exists(), "T26 the dead holder's lease is left"
+    result = record_cli(env, root, CREATE)
+    refused(result, "was reconciled")
+    assert "already terminal" in result[2], result[2][-800:]
+    assert projection.is_file(), "T26 the missing terminal projection is published"
+    now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    assert now == post, "T26 the completed publication keeps its poststate"
+    assert not (Path(root) / LEASE).exists(), "T26 the confirmed-dead lease is cleared"
+    assert not (Path(root) / ".aiqt").exists(), "T26 nothing under .aiqt"
 
 
 def flip_t26():
     """A projection can never read as missing (the reviewed head's open-only trigger): the
     COMPLETE-before-projection state is never reconciled."""
     return patch.object(record, "_projection_missing", lambda ctx, name: False)
-
-
-def t27_homes1_report(fx):
-    """The homes-1 success report is byte-shape-identical to the pre-D build: it carries no
-    journal_rel key (the D-a2 rename is the only homes-1 change), and the commit advice still
-    names the legacy journal home."""
-    env = fx.env
-    root = fx.case("t27-homes1-report")
-    out = recorded(record_cli(env, root, CREATE))
-    line = next(l for l in out.splitlines() if RECORDED_EVENT in l)
-    report = json.loads(line)
-    assert "journal_rel" not in report, ("T27 no journal_rel on homes 1", sorted(report))
-    assert "the journal under {} is local recovery evidence".format(record.JOURNAL_REL) in out, out[-800:]
-
-
-def flip_t27():
-    """Re-add the journal_rel key to the homes-1 report (the reviewed head's shape)."""
-    original = record._emit_success
-
-    def with_journal_rel(report):
-        return original(dict(report, journal_rel=record.JOURNAL_REL))
-    return patch.object(record, "_emit_success", with_journal_rel)
 
 
 SPEC15_SENTENCE = ("A no-follow existence probe of a former `.aiqt/` location, used only to refuse "
@@ -4209,39 +4045,65 @@ def flip_t29():
 
 # --- T30, T31: the PR D fix-3 vectors --------------------------------------------------------------------
 
-def t30_unactivated_homes2(fx):
-    """A readable manifest declaring homes 2 while this tooling does not activate it (no activation
-    patches: SUPPORTED_HOMES is 1, so homes_generation reads it as 1) is refused BEFORE any
-    reconciliation or write, with the homes-2 spec_version and without it. The reviewed head probed
-    it as generation 1 and reconciled the legacy journal in place, removing its leftover lock."""
+def t30b_non_baseline_refused_first(fx):
+    """A readable manifest that is not the 2.0.0 / homes = 2 baseline (spec_version 1.2.0, homes absent,
+    homes = 1, homes = 3) is refused at the admission probe BEFORE any reconciliation, each store
+    holding an open typed-home transaction and its dead holder's lease: the journal, the operands, the
+    lease and the capability records stay byte-identical (flip: the probe returns the typed home for
+    any readable manifest, so the open transaction is reconciled)."""
     env = fx.env
     manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
-    for label, spec_version in (("pair", record._opf_store.HOMES2_SPEC_VERSION), ("current", None)):
-        root = fx.case("t30-unactivated-" + label)
-        proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (label, proc.returncode,
-                                                                        proc.stderr[-800:])
-        assert (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T30 a reconcilable legacy leftover",
-                                                                    label)
+    base = fx.case("t30b-non-baseline-base")
+    proc = child(env, base, CREATE, kill="after-apply-0")
+    assert proc.returncode == 137, ("T30b the child is killed", proc.returncode, proc.stderr[-800:])
+    assert any(s == "open" for s in journal_states(base, TYPED_JOURNAL).values()), \
+        "T30b the typed interruption is open"
+    for label, field, value in (("1.2.0", "spec_version", "1.2.0"), ("homes-absent", "homes", None),
+                                ("homes-1", "homes", 1), ("homes-3", "homes", 3)):
+        root = fx.case("t30b-" + label, base)
         manifest = model(root, manifest_rel)
-        manifest["opf"]["homes"] = 2
-        if spec_version is not None:
-            manifest["opf"]["spec_version"] = spec_version
+        if value is None:
+            del manifest["opf"][field]
+        else:
+            manifest["opf"][field] = value
         (Path(root) / manifest_rel).write_text(emit.emit_checked(manifest), encoding="utf-8")
-        assert record._opf_store.homes_generation(manifest) == 1, ("T30 homes 2 is not activated", label)
         before = snapshot(root)
         result = record_cli(env, root, CREATE)
-        assert snapshot(root) == before, ("T30 nothing is reconciled or written", label)
-        refused(result, "which this tooling does not activate")
+        assert snapshot(root) == before, ("T30b nothing is reconciled or written", label)
+        refused(result, "admits only spec_version {} with homes = {}".format(
+            record._opf_store.SPEC_VERSION, record._opf_store.HOMES))
 
 
-def flip_t30():
-    """Probe the generation alone (the reviewed head's behaviour): the unactivated homes-2
-    declaration reads as generation 1 and the legacy journal is reconciled in place."""
-    def generation_only(ctx):
-        manifest = record._read_operand(ctx.root_fd, ctx.rel(record._opf_store.MANIFEST_NAME)).model
-        return record._opf_store.homes_generation(manifest)
-    return patch.object(record, "_probe_homes", generation_only)
+def flip_t30b():
+    """The probe returns the typed home for any readable manifest."""
+    return patch.object(record, "_probe_admission", lambda ctx: record._opf_store.HOMES)
+
+
+def t30c_imported_rows_preserved(fx):
+    """A record create on a fresh init store keeps every "imported:<NS>" counter row byte-identical (the
+    verb never claims or rewrites one) and records (flip: the counter-state proof built without the
+    imported namespaces, which refuses the run)."""
+    env = fx.env
+    root = fx.case("t30c-imported-rows")
+    before = model(root, COUNTERS)["counters"]
+    imported = dict((k, v) for k, v in before.items() if k.startswith("imported:"))
+    assert imported, ("T30c the init store carries imported rows", sorted(before))
+    rows_before = [l for l in read(root, COUNTERS).splitlines() if b'"imported:' in l]
+    recorded(record_cli(env, root, CREATE))
+    after = model(root, COUNTERS)["counters"]
+    assert dict((k, v) for k, v in after.items() if k.startswith("imported:")) == imported, after
+    assert [l for l in read(root, COUNTERS).splitlines() if b'"imported:' in l] == rows_before, \
+        "T30c the imported rows are byte-identical"
+
+
+def flip_t30c():
+    """Validate the counters with imported_namespaces=None, as if the imported series were inactive."""
+    def without_imported(ctx, counters_model):
+        return record._opf_schema.validate_counters(
+            counters_model, known_namespaces=frozenset(ctx.types.values()),
+            optional_namespaces=frozenset(record._opf_store.IMPORTER_TYPES.values()),
+            imported_namespaces=None)
+    return patch.object(record, "_counter_state", without_imported)
 
 
 # Inside the killed child: the run holds the capability (it is past _acquire_guard) and dies before its
@@ -4267,45 +4129,44 @@ def t31_dead_capability(fx):
     records. A LIVE holder's capability is refused, never seized, and it releases cleanly."""
     env = fx.env
     base = fx.case("t31-homes2-base")
-    with _self_test_homes2_active(base):
-        reference = fx.case("t31-homes2-reference", base)
-        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
-        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
-        for label, kill, flip, want in (("no-journal", None, DIE_BEFORE_PUBLISH, []),
-                                        ("nothing-opened", "after-preimage-0", "", ["nothing-opened"]),
-                                        ("complete-projected", None, DIE_AT_RENDER, ["complete"])):
-            root = fx.case("t31-homes2-" + label, base)
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            proc = child(env, root, CREATE, kill=kill, flip=HOMES2_CHILD_FLIP + flip)
-            assert proc.returncode == 137, ("T31 the child is killed", label, proc.returncode,
-                                            proc.stderr[-800:])
-            assert (Path(root) / LEASE).exists(), ("T31 the dead holder's lease is left", label)
-            states = journal_states(root, TYPED_JOURNAL)
-            assert sorted(states.values()) == want, ("T31 no journal work for recovery", label, states)
-            assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
-                       for name, s in states.items() if s == "complete"), ("T31 the projection", label)
-            result = record_cli(env, root, CREATE)
-            refused(result, "were reclaimed before this operation")
-            assert "operation capability's lease and active record, left by an interrupted 'record' run " \
-                   "whose holder" in result[2], (label, result[2][-800:])
-            assert not (Path(root) / LEASE).exists(), ("T31 the confirmed-dead lease is cleared", label)
-            now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            assert now == (post if want == ["complete"] else pre), ("T31 prestate, or poststate iff "
-                                                                    "COMPLETE", label)
-            assert not (Path(root) / ".aiqt").exists(), ("T31 nothing under .aiqt", label)
-            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            record._opf_oplock.release_operation(cap)
-        root = fx.case("t31-homes2-live", reference)
+    reference = fx.case("t31-homes2-reference", base)
+    proc = child(env, reference, CREATE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+    post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+    for label, kill, flip, want in (("no-journal", None, DIE_BEFORE_PUBLISH, []),
+                                    ("nothing-opened", "after-preimage-0", "", ["nothing-opened"]),
+                                    ("complete-projected", None, DIE_AT_RENDER, ["complete"])):
+        root = fx.case("t31-homes2-" + label, base)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        proc = child(env, root, CREATE, kill=kill, flip=flip)
+        assert proc.returncode == 137, ("T31 the child is killed", label, proc.returncode,
+                                        proc.stderr[-800:])
+        assert (Path(root) / LEASE).exists(), ("T31 the dead holder's lease is left", label)
+        states = journal_states(root, TYPED_JOURNAL)
+        assert sorted(states.values()) == want, ("T31 no journal work for recovery", label, states)
+        assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
+                   for name, s in states.items() if s == "complete"), ("T31 the projection", label)
+        result = record_cli(env, root, CREATE)
+        refused(result, "were reclaimed before this operation")
+        assert "operation capability's lease and active record, left by an interrupted 'record' run " \
+               "whose holder" in result[2], (label, result[2][-800:])
+        assert not (Path(root) / LEASE).exists(), ("T31 the confirmed-dead lease is cleared", label)
+        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        assert now == (post if want == ["complete"] else pre), ("T31 prestate, or poststate iff "
+                                                                "COMPLETE", label)
+        assert not (Path(root) / ".aiqt").exists(), ("T31 nothing under .aiqt", label)
         cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-        try:
-            before = snapshot(root)
-            result = record_cli(env, root, CREATE)
-            assert snapshot(root) == before, "T31 a live holder's capability is never seized"
-            refused(result, "never seized")
-        finally:
-            record._opf_oplock.release_operation(cap)
-        assert not (Path(root) / LEASE).exists(), "T31 the live holder releases cleanly"
+        record._opf_oplock.release_operation(cap)
+    root = fx.case("t31-homes2-live", reference)
+    cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+    try:
+        before = snapshot(root)
+        result = record_cli(env, root, CREATE)
+        assert snapshot(root) == before, "T31 a live holder's capability is never seized"
+        refused(result, "never seized")
+    finally:
+        record._opf_oplock.release_operation(cap)
+    assert not (Path(root) / LEASE).exists(), "T31 the live holder releases cleanly"
 
 
 def flip_t31():
@@ -4351,35 +4212,34 @@ def t32_lone_active(fx):
     later acquisition refused the stale active record with no recovery."""
     env = fx.env
     base = fx.case("t32-homes2-base")
-    with _self_test_homes2_active(base):
-        reference = fx.case("t32-homes2-reference", base)
-        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
-        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
-        for label, flip, want in (("no-journal", REFUSE_PUBLISH, []),
-                                  ("complete-projected", "", ["complete"])):
-            root = fx.case("t32-homes2-" + label, base)
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + flip + DIE_BEFORE_ACTIVE_UNLINK)
-            assert proc.returncode == 137, ("T32 the child is killed in its release", label, proc.returncode,
-                                            proc.stderr[-800:])
-            assert not (Path(root) / LEASE).exists(), ("T32 the lease leg was removed", label)
-            assert active_record(root).is_file(), ("T32 the active record is left alone", label)
-            states = journal_states(root, TYPED_JOURNAL)
-            assert sorted(states.values()) == want, ("T32 no journal work for recovery", label, states)
-            assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
-                       for name, s in states.items() if s == "complete"), ("T32 the projection", label)
-            result = record_cli(env, root, CREATE)
-            refused(result, "were reclaimed before this operation")
-            assert "operation capability's active record, left by an interrupted 'record' run whose " \
-                   "holder" in result[2], (label, result[2][-800:])
-            assert not active_record(root).exists(), ("T32 the confirmed-dead active record is cleared", label)
-            now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            assert now == (post if want == ["complete"] else pre), ("T32 prestate, or poststate iff "
-                                                                    "COMPLETE", label)
-            assert not (Path(root) / ".aiqt").exists(), ("T32 nothing under .aiqt", label)
-            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            record._opf_oplock.release_operation(cap)
+    reference = fx.case("t32-homes2-reference", base)
+    proc = child(env, reference, CREATE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+    post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+    for label, flip, want in (("no-journal", REFUSE_PUBLISH, []),
+                              ("complete-projected", "", ["complete"])):
+        root = fx.case("t32-homes2-" + label, base)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        proc = child(env, root, CREATE, flip=flip + DIE_BEFORE_ACTIVE_UNLINK)
+        assert proc.returncode == 137, ("T32 the child is killed in its release", label, proc.returncode,
+                                        proc.stderr[-800:])
+        assert not (Path(root) / LEASE).exists(), ("T32 the lease leg was removed", label)
+        assert active_record(root).is_file(), ("T32 the active record is left alone", label)
+        states = journal_states(root, TYPED_JOURNAL)
+        assert sorted(states.values()) == want, ("T32 no journal work for recovery", label, states)
+        assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
+                   for name, s in states.items() if s == "complete"), ("T32 the projection", label)
+        result = record_cli(env, root, CREATE)
+        refused(result, "were reclaimed before this operation")
+        assert "operation capability's active record, left by an interrupted 'record' run whose " \
+               "holder" in result[2], (label, result[2][-800:])
+        assert not active_record(root).exists(), ("T32 the confirmed-dead active record is cleared", label)
+        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        assert now == (post if want == ["complete"] else pre), ("T32 prestate, or poststate iff "
+                                                                "COMPLETE", label)
+        assert not (Path(root) / ".aiqt").exists(), ("T32 nothing under .aiqt", label)
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        record._opf_oplock.release_operation(cap)
 
 
 def flip_t32():
@@ -4397,38 +4257,37 @@ def t33_journal_rederived_under_capability(fx):
     head planned from the stale absence, reported nothing open, and left the transaction open."""
     env = fx.env
     base = fx.case("t33-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t33-homes2-race", base)
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
-        peer = {"rc": None}
-        original_acquire = record._opf_oplock.acquire_operation
+    root = fx.case("t33-homes2-race", base)
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
+    peer = {"rc": None}
+    original_acquire = record._opf_oplock.acquire_operation
 
-        def acquire_after_peer(store_root, operation, holder=None, recover=False):
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-                peer["rc"] = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP).returncode
-            return original_acquire(store_root, operation, holder=holder, recover=recover)
+    def acquire_after_peer(store_root, operation, holder=None, recover=False):
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+            peer["rc"] = child(env, root, CREATE, kill="after-apply-0").returncode
+        return original_acquire(store_root, operation, holder=holder, recover=recover)
 
-        try:
-            assert not (Path(root) / TYPED_JOURNAL).exists(), "T33 no journal home at the trigger read"
-            with patch.object(record._opf_oplock, "acquire_operation", acquire_after_peer):
-                result = record_cli(env, root, CREATE)
-        finally:
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-        assert peer["rc"] == 137, ("T33 the peer is killed mid-apply before the acquisition", peer)
-        refused(result, "was reconciled")
-        states = journal_states(root, TYPED_JOURNAL)
-        assert states and all(s != "open" for s in states.values()), \
-            ("T33 the peer's open transaction is reconciled by this run", states)
-        assert "rolled BACK" in result[2], ("T33 the outcome names the rollback", result[2][-800:])
-        assert "no record journal work pending" not in result[2], \
-            ("T33 no outcome from the stale absence", result[2][-800:])
-        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        assert now == pre, "T33 the operands end at the prestate"
-        assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
-            "T33 the capability is released"
+    try:
+        assert not (Path(root) / TYPED_JOURNAL).exists(), "T33 no journal home at the trigger read"
+        with patch.object(record._opf_oplock, "acquire_operation", acquire_after_peer):
+            result = record_cli(env, root, CREATE)
+    finally:
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+    assert peer["rc"] == 137, ("T33 the peer is killed mid-apply before the acquisition", peer)
+    refused(result, "was reconciled")
+    states = journal_states(root, TYPED_JOURNAL)
+    assert states and all(s != "open" for s in states.values()), \
+        ("T33 the peer's open transaction is reconciled by this run", states)
+    assert "rolled BACK" in result[2], ("T33 the outcome names the rollback", result[2][-800:])
+    assert "no record journal work pending" not in result[2], \
+        ("T33 no outcome from the stale absence", result[2][-800:])
+    now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    assert now == pre, "T33 the operands end at the prestate"
+    assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
+        "T33 the capability is released"
 
 
 def flip_t33():
@@ -4509,35 +4368,34 @@ def t35_released_holder_not_reconciled(fx):
     interrupted run was reconciled."""
     env = fx.env
     base = fx.case("t35-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t35-homes2-released", base)
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
-        original_acquire = record._opf_oplock.acquire_operation
+    root = fx.case("t35-homes2-released", base)
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
+    original_acquire = record._opf_oplock.acquire_operation
 
-        def acquire_after_release(store_root, operation, holder=None, recover=False):
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-            return original_acquire(store_root, operation, holder=holder, recover=recover)
+    def acquire_after_release(store_root, operation, holder=None, recover=False):
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+        return original_acquire(store_root, operation, holder=holder, recover=recover)
 
-        try:
-            with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release):
-                result = record_cli(env, root, CREATE)
-        finally:
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-        assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
-            ("T35 no reconciliation is reported", result[2][-800:])
-        recorded(result)
-        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        assert now != pre, "T35 the run records"
-        states = journal_states(root, TYPED_JOURNAL)
-        assert list(states.values()) == ["complete"], ("T35 one COMPLETE transaction", states)
-        (t35_run,) = states
-        assert (Path(root) / record._opf_store.allocation_record("record", t35_run)).is_file(), \
-            "T35 the run reserves before publishing"
-        assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
-            "T35 the capability is released"
+    try:
+        with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release):
+            result = record_cli(env, root, CREATE)
+    finally:
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+    assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
+        ("T35 no reconciliation is reported", result[2][-800:])
+    recorded(result)
+    now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    assert now != pre, "T35 the run records"
+    states = journal_states(root, TYPED_JOURNAL)
+    assert list(states.values()) == ["complete"], ("T35 one COMPLETE transaction", states)
+    (t35_run,) = states
+    assert (Path(root) / record._opf_store.allocation_record("record", t35_run)).is_file(), \
+        "T35 the run reserves before publishing"
+    assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
+        "T35 the capability is released"
 
 
 def flip_t35():
@@ -4562,37 +4420,36 @@ def t36_journal_home_reopened(fx):
     through the stale descriptor, reported no transaction open, and left the transaction open."""
     env = fx.env
     base = fx.case("t36-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t36-homes2-replaced", base)
-        (Path(root) / TYPED_JOURNAL).mkdir(parents=True)
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
-        peer = {"rc": None}
-        original_acquire = record._opf_oplock.acquire_operation
+    root = fx.case("t36-homes2-replaced", base)
+    (Path(root) / TYPED_JOURNAL).mkdir(parents=True)
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
+    peer = {"rc": None}
+    original_acquire = record._opf_oplock.acquire_operation
 
-        def acquire_after_replacement(store_root, operation, holder=None, recover=False):
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-                os.rename(Path(root) / TYPED_JOURNAL, Path(root) / ".git" / "t36-journal-aside")
-                peer["rc"] = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP).returncode
-            return original_acquire(store_root, operation, holder=holder, recover=recover)
+    def acquire_after_replacement(store_root, operation, holder=None, recover=False):
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+            os.rename(Path(root) / TYPED_JOURNAL, Path(root) / ".git" / "t36-journal-aside")
+            peer["rc"] = child(env, root, CREATE, kill="after-apply-0").returncode
+        return original_acquire(store_root, operation, holder=holder, recover=recover)
 
-        try:
-            with patch.object(record._opf_oplock, "acquire_operation", acquire_after_replacement):
-                result = record_cli(env, root, CREATE)
-        finally:
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-        assert peer["rc"] == 137, ("T36 the peer is killed mid-apply before the acquisition", peer)
-        refused(result, "was reconciled")
-        states = journal_states(root, TYPED_JOURNAL)
-        assert states and all(s != "open" for s in states.values()), \
-            ("T36 the replacement home's open transaction is reconciled by this run", states)
-        assert "rolled BACK" in result[2], ("T36 the outcome names the rollback", result[2][-800:])
-        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        assert now == pre, "T36 the operands end at the prestate"
-        assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
-            "T36 the capability is released"
+    try:
+        with patch.object(record._opf_oplock, "acquire_operation", acquire_after_replacement):
+            result = record_cli(env, root, CREATE)
+    finally:
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+    assert peer["rc"] == 137, ("T36 the peer is killed mid-apply before the acquisition", peer)
+    refused(result, "was reconciled")
+    states = journal_states(root, TYPED_JOURNAL)
+    assert states and all(s != "open" for s in states.values()), \
+        ("T36 the replacement home's open transaction is reconciled by this run", states)
+    assert "rolled BACK" in result[2], ("T36 the outcome names the rollback", result[2][-800:])
+    now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    assert now == pre, "T36 the operands end at the prestate"
+    assert not (Path(root) / LEASE).exists() and not active_record(root).exists(), \
+        "T36 the capability is released"
 
 
 def flip_t36():
@@ -4650,19 +4507,18 @@ def t37_reclaim_names_operation(fx):
     was reconciled"."""
     env = fx.env
     base = fx.case("t37-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t37-homes2-ingest", base)
-        assert die_holding(env, root, "ingest") == 137, "T37 the ingest holder is killed holding it"
-        assert capability_records(root) == (True, True), "T37 its lease and active record are left"
-        result = record_cli(env, root, CREATE)
-        refused(result, "the operation capability records an interrupted run left were reclaimed before "
-                        "this operation")
-        err = result[2]
-        assert "interrupted opf record run" not in err, ("T37 never attributed to opf record", err[-800:])
-        assert "left by an interrupted 'ingest' run whose holder" in err, ("T37 the operation named", err[-800:])
-        assert "any journal work of the 'ingest' operation is not examined here" in err, err[-800:]
-        assert capability_records(root) == (False, False), "T37 the confirmed-dead records are cleared"
-        assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 no journal home is created"
+    root = fx.case("t37-homes2-ingest", base)
+    assert die_holding(env, root, "ingest") == 137, "T37 the ingest holder is killed holding it"
+    assert capability_records(root) == (True, True), "T37 its lease and active record are left"
+    result = record_cli(env, root, CREATE)
+    refused(result, "the operation capability records an interrupted run left were reclaimed before "
+                    "this operation")
+    err = result[2]
+    assert "interrupted opf record run" not in err, ("T37 never attributed to opf record", err[-800:])
+    assert "left by an interrupted 'ingest' run whose holder" in err, ("T37 the operation named", err[-800:])
+    assert "any journal work of the 'ingest' operation is not examined here" in err, err[-800:]
+    assert capability_records(root) == (False, False), "T37 the confirmed-dead records are cleared"
+    assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 no journal home is created"
 
 
 def flip_t37():
@@ -4684,32 +4540,31 @@ def t38_staging_removal_disclosed(fx):
     so. The reviewed head said "Nothing was written" after deleting the staging file."""
     env = fx.env
     base = fx.case("t38-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t38-homes2-lone-lease", base)
-        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-        lease_bytes = (Path(root) / LEASE).read_bytes()
-        record._opf_oplock.release_operation(cap)
-        (Path(root) / LEASE).write_bytes(lease_bytes)
-        staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
-        (Path(root) / MACH / staging).write_bytes(b"a torn lease publication")
+    root = fx.case("t38-homes2-lone-lease", base)
+    cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+    lease_bytes = (Path(root) / LEASE).read_bytes()
+    record._opf_oplock.release_operation(cap)
+    (Path(root) / LEASE).write_bytes(lease_bytes)
+    staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
+    (Path(root) / MACH / staging).write_bytes(b"a torn lease publication")
+    result = record_cli(env, root, CREATE)
+    refused(result, "a stale lease exists with no paired active record")
+    err = result[2]
+    assert "Nothing was written" not in err, ("T38 no nothing-written claim", err[-800:])
+    assert ("No record operand, record journal or projection was written, but before it failed the "
+            "acquisition removed lease staging leftover " + staging) in err, ("T38 the removal named",
+                                                                             err[-800:])
+    assert (Path(root) / LEASE).exists() and not (Path(root) / MACH / staging).exists(), \
+        "T38 the lone lease is kept and the staging leftover removed"
+    root = fx.case("t38-homes2-contended", base)
+    held = record._opf_oplock.acquire_operation(str(root), record.VERB)
+    try:
+        before = snapshot(root)
         result = record_cli(env, root, CREATE)
-        refused(result, "a stale lease exists with no paired active record")
-        err = result[2]
-        assert "Nothing was written" not in err, ("T38 no nothing-written claim", err[-800:])
-        assert ("No record operand, record journal or projection was written, but before it failed the "
-                "acquisition removed lease staging leftover " + staging) in err, ("T38 the removal named",
-                                                                                 err[-800:])
-        assert (Path(root) / LEASE).exists() and not (Path(root) / MACH / staging).exists(), \
-            "T38 the lone lease is kept and the staging leftover removed"
-        root = fx.case("t38-homes2-contended", base)
-        held = record._opf_oplock.acquire_operation(str(root), record.VERB)
-        try:
-            before = snapshot(root)
-            result = record_cli(env, root, CREATE)
-            assert snapshot(root) == before, "T38 a contended acquisition removes nothing"
-        finally:
-            record._opf_oplock.release_operation(held)
-        refused(result, "and the acquisition removed nothing (fail-closed)")
+        assert snapshot(root) == before, "T38 a contended acquisition removes nothing"
+    finally:
+        record._opf_oplock.release_operation(held)
+    refused(result, "and the acquisition removed nothing (fail-closed)")
 
 
 def flip_t38():
@@ -4733,23 +4588,22 @@ def t39_deletes_then_failure_disclosed(fx):
     never claiming nothing was written. The reviewed head said "Nothing was written" with both gone."""
     env = fx.env
     base = fx.case("t39-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t39-homes2-dead", base)
-        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_BEFORE_PUBLISH)
-        assert proc.returncode == 137, ("T39 the holder is killed", proc.returncode, proc.stderr[-800:])
-        assert capability_records(root) == (True, True), "T39 its lease and active record are left"
+    root = fx.case("t39-homes2-dead", base)
+    proc = child(env, root, CREATE, flip=DIE_BEFORE_PUBLISH)
+    assert proc.returncode == 137, ("T39 the holder is killed", proc.returncode, proc.stderr[-800:])
+    assert capability_records(root) == (True, True), "T39 its lease and active record are left"
 
-        def failing_publication(*a, **k):
-            raise _opf_oplock.OpLockError("synthetic publication failure after the recovery deletes")
-        with patch.object(_opf_oplock, "_create_control_file", failing_publication):
-            result = record_cli(env, root, CREATE)
-        refused(result, "synthetic publication failure after the recovery deletes")
-        err = result[2]
-        assert "Nothing was written" not in err, ("T39 no nothing-written claim", err[-800:])
-        assert ("before it failed the acquisition removed the stale operation capability lease and active "
-                "record of a holder its recovery gate confirmed dead (its recorded operation 'record')") \
-            in err, ("T39 the deletes named", err[-800:])
-        assert capability_records(root) == (False, False), "T39 both records were deleted"
+    def failing_publication(*a, **k):
+        raise _opf_oplock.OpLockError("synthetic publication failure after the recovery deletes")
+    with patch.object(_opf_oplock, "_create_control_file", failing_publication):
+        result = record_cli(env, root, CREATE)
+    refused(result, "synthetic publication failure after the recovery deletes")
+    err = result[2]
+    assert "Nothing was written" not in err, ("T39 no nothing-written claim", err[-800:])
+    assert ("before it failed the acquisition removed the stale operation capability lease and active "
+            "record of a holder its recovery gate confirmed dead (its recorded operation 'record')") \
+        in err, ("T39 the deletes named", err[-800:])
+    assert capability_records(root) == (False, False), "T39 both records were deleted"
 
 
 def t40_held_refusal_discloses(fx):
@@ -4759,23 +4613,22 @@ def t40_held_refusal_discloses(fx):
     and the edit is kept. The reviewed head said "Nothing was written" with both records gone."""
     env = fx.env
     base = fx.case("t40-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t40-homes2-edit", base)
-        proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 137, ("T40 the holder is killed mid-apply", proc.returncode,
-                                        proc.stderr[-800:])
-        edited = read(root, COUNTERS) + b"# an intervening edit\n"
-        (Path(root) / COUNTERS).write_bytes(edited)
-        result = record_cli(env, root, CREATE)
-        refused(result, "Nothing was written to the journal or to any operand; both are left exactly as found")
-        err = result[2]
-        assert ("Before this refusal, under the held capability, the recovery acquisition removed the stale "
-                "operation capability lease and active record of a holder its recovery gate confirmed dead") \
-            in err, ("T40 the removal named", err[-800:])
-        assert capability_records(root) == (False, False), "T40 the recovery acquisition cleared both records"
-        assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
-            "T40 the transaction is left open"
-        assert read(root, COUNTERS) == edited, "T40 the intervening edit is kept"
+    root = fx.case("t40-homes2-edit", base)
+    proc = child(env, root, CREATE, kill="after-apply-0")
+    assert proc.returncode == 137, ("T40 the holder is killed mid-apply", proc.returncode,
+                                    proc.stderr[-800:])
+    edited = read(root, COUNTERS) + b"# an intervening edit\n"
+    (Path(root) / COUNTERS).write_bytes(edited)
+    result = record_cli(env, root, CREATE)
+    refused(result, "Nothing was written to the journal or to any operand; both are left exactly as found")
+    err = result[2]
+    assert ("Before this refusal, under the held capability, the recovery acquisition removed the stale "
+            "operation capability lease and active record of a holder its recovery gate confirmed dead") \
+        in err, ("T40 the removal named", err[-800:])
+    assert capability_records(root) == (False, False), "T40 the recovery acquisition cleared both records"
+    assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
+        "T40 the transaction is left open"
+    assert read(root, COUNTERS) == edited, "T40 the intervening edit is kept"
 
 
 # Fix 6: what each residual list states, exactly (the reviewed head's lists overstated when another run
@@ -4806,9 +4659,8 @@ def t41_residuals_exact(fx):
     work for a later trigger): a possibly-live holder refuses until it releases normally or exits; the
     refused-leftover list is marked not exhaustive; a refusal names what the acquisition removed; a
     sibling's leftover is reclaimed only by a homes-2 run in its owning checkout; the held plan reopens
-    the journal home only when present. Two of those statements are exercised: a homes-1 record run
-    never reclaims a dead capability holder's records, and a live holder that releases normally lets
-    the next run continue."""
+    the journal home only when present. One of those statements is exercised: a live holder that
+    releases normally lets the next run continue."""
     module, guard, plan = fix6_texts()
     for pin in FIX6_BOTH + FIX6_MODULE:
         assert pin in module, ("T41 the module residual list states", pin)
@@ -4819,22 +4671,17 @@ def t41_residuals_exact(fx):
         assert retired not in module and retired not in guard and retired not in plan, \
             ("T41 the overstated wording is gone", retired)
     env = fx.env
-    root = fx.case("t41-homes1-owner")
-    assert die_holding(env, root, record.VERB) == 137, "T41 the capability holder is killed holding it"
-    result = record_cli(env, root, CREATE)
-    refused(result, "holds the single-writer lease")
-    assert capability_records(root) == (True, True), "T41 a homes-1 record run never reclaims the records"
+    # No homes-1 record run exists at 2.0.0; T31 covers a record run reclaiming a dead holder's records.
     base = fx.case("t41-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t41-homes2-live", base)
-        held = record._opf_oplock.acquire_operation(str(root), record.VERB)
-        try:
-            refused(record_cli(env, root, CREATE), "never seized")
-        finally:
-            record._opf_oplock.release_operation(held)
-        result = record_cli(env, root, CREATE)
-        assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], result[2][-800:]
-        recorded(result)
+    root = fx.case("t41-homes2-live", base)
+    held = record._opf_oplock.acquire_operation(str(root), record.VERB)
+    try:
+        refused(record_cli(env, root, CREATE), "never seized")
+    finally:
+        record._opf_oplock.release_operation(held)
+    result = record_cli(env, root, CREATE)
+    assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], result[2][-800:]
+    recorded(result)
 
 
 def flip_t41():
@@ -4872,35 +4719,34 @@ def t42_own_unlinks_disclosed(fx):
     head said "the acquisition removed nothing" after both unlinks."""
     env = fx.env
     base = fx.case("t42-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t42-homes2-unwind", base)
-        held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
-        original_acquire = record._opf_oplock.acquire_operation
-        original_publish = _opf_oplock._create_control_file
+    root = fx.case("t42-homes2-unwind", base)
+    held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
+    original_acquire = record._opf_oplock.acquire_operation
+    original_publish = _opf_oplock._create_control_file
 
-        def acquire_after_release(store_root, operation, holder=None, recover=False):
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-            return original_acquire(store_root, operation, holder=holder, recover=recover)
+    def acquire_after_release(store_root, operation, holder=None, recover=False):
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+        return original_acquire(store_root, operation, holder=holder, recover=recover)
 
-        def lease_publication_fails(dir_fd, name, *a, **k):
-            if name == opf_check.LEASE_NAME:
-                raise _opf_oplock.OpLockError("synthetic lease publication failure")
-            return original_publish(dir_fd, name, *a, **k)
-        try:
-            with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release), \
-                    patch.object(_opf_oplock, "_create_control_file", lease_publication_fails):
-                result = record_cli(env, root, CREATE)
-        finally:
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-        refused(result, "synthetic lease publication failure")
-        err = result[2]
-        assert "the acquisition removed nothing" not in err, ("T42 no removed-nothing claim", err[-800:])
-        assert re.search("but before it failed the acquisition removed " + own_staging_pattern(
-            _opf_oplock.ACTIVE_NAME, "active record") + re.escape("; its own new active record (unwind)"),
-            err), ("T42 both unlinks named", err[-800:])
-        assert capability_records(root) == (False, False), "T42 the unwind left no capability record"
+    def lease_publication_fails(dir_fd, name, *a, **k):
+        if name == opf_check.LEASE_NAME:
+            raise _opf_oplock.OpLockError("synthetic lease publication failure")
+        return original_publish(dir_fd, name, *a, **k)
+    try:
+        with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release), \
+                patch.object(_opf_oplock, "_create_control_file", lease_publication_fails):
+            result = record_cli(env, root, CREATE)
+    finally:
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+    refused(result, "synthetic lease publication failure")
+    err = result[2]
+    assert "the acquisition removed nothing" not in err, ("T42 no removed-nothing claim", err[-800:])
+    assert re.search("but before it failed the acquisition removed " + own_staging_pattern(
+        _opf_oplock.ACTIVE_NAME, "active record") + re.escape("; its own new active record (unwind)"),
+        err), ("T42 both unlinks named", err[-800:])
+    assert capability_records(root) == (False, False), "T42 the unwind left no capability record"
 
 
 def flip_t42_publication():
@@ -4926,42 +4772,41 @@ def t43_publish_names_removals(fx):
     lease is kept, the staging leftover is gone, and no journal home or operand is written. The reviewed
     head said "nothing written" after deleting the staging file."""
     root = fx.case("t43-homes2-publish")
-    with _self_test_homes2_active(root):
-        req = record.parse_request(CREATE + ["--root", str(root)])
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    req = record.parse_request(CREATE + ["--root", str(root)])
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        ctx = record.Context(res, str(root), root_fd)
+        ctx.journal_rel = record._record_journal_rel(record._probe_admission(ctx))
+        assert ctx.journal_rel == TYPED_JOURNAL, ("T43 the probed journal home", ctx.journal_rel)
+        record._load_manifest(ctx)
+        ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+        ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+        ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+        operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+        plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+        for op in plan.operands:
+            op.new_raw = record._emit_bytes(op.new_model)
+        run_id = record._record_run_id(os.urandom(16).hex())
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
         try:
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            assert ctx.journal_rel == TYPED_JOURNAL, ("T43 the probed journal home", ctx.journal_rel)
-            record._load_manifest(ctx)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
-            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
-            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
-            for op in plan.operands:
-                op.new_raw = record._emit_bytes(op.new_model)
-            run_id = record._record_run_id(os.urandom(16).hex())
-            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            try:
-                record._reserve_claim(ctx, plan, cap, run_id)
-                lease_bytes = (Path(root) / LEASE).read_bytes()
-            finally:
-                record._opf_oplock.release_operation(cap)
-            (Path(root) / LEASE).write_bytes(lease_bytes)
-            staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
-            (Path(root) / MACH / staging).write_bytes(b"a torn lease publication")
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            try:
-                record._publish(ctx, plan, "create", run_id=run_id)
-            except record.RecordError as exc:
-                message = str(exc)
-            else:
-                raise AssertionError("T43 the publication must refuse the stale lone lease")
+            record._reserve_claim(ctx, plan, cap, run_id)
+            lease_bytes = (Path(root) / LEASE).read_bytes()
         finally:
-            os.close(root_fd)
+            record._opf_oplock.release_operation(cap)
+        (Path(root) / LEASE).write_bytes(lease_bytes)
+        staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
+        (Path(root) / MACH / staging).write_bytes(b"a torn lease publication")
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        try:
+            record._publish(ctx, plan, "create", run_id=run_id)
+        except record.RecordError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("T43 the publication must refuse the stale lone lease")
+    finally:
+        os.close(root_fd)
     assert "stale operation record(s) under a free anchor (lease.toml)" in message, message
     assert "nothing written" not in message, ("T43 no blanket nothing-written claim", message)
     assert ("No record operand, record journal or projection was written, but before it failed the "
@@ -4986,21 +4831,20 @@ def t44_continuation_refusal_discloses(fx):
     takes it there. The reviewed head's refusal carried no report."""
     env = fx.env
     base = fx.case("t44-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t44-homes2-continuation", base)
-        assert die_holding(env, root, record.VERB) == 137, "T44 the capability holder is killed holding it"
-        assert capability_records(root) == (True, True), "T44 its lease and active record are left"
-        with patch.object(_opf_oplock, "_handoff",
-                          lambda cap, acquirer_pid: _opf_oplock._refuse_continuation(cap, acquirer_pid)):
-            result = record_cli(env, root, CREATE)
-        refused(result, "acquisition refused in a forked continuation")
-        err = result[2]
-        assert "and the acquisition removed nothing" not in err, ("T44 no removed-nothing claim", err[-800:])
-        assert re.search(re.escape(
-            "but before it failed the acquisition removed the stale operation capability lease and active "
-            "record of a holder its recovery gate confirmed dead (its recorded operation 'record'); ")
-            + own_staging_pattern(_opf_oplock.ACTIVE_NAME, "active record") + "; "
-            + own_staging_pattern(opf_check.LEASE_NAME, "lease"), err), ("T44 the removals named", err[-800:])
+    root = fx.case("t44-homes2-continuation", base)
+    assert die_holding(env, root, record.VERB) == 137, "T44 the capability holder is killed holding it"
+    assert capability_records(root) == (True, True), "T44 its lease and active record are left"
+    with patch.object(_opf_oplock, "_handoff",
+                      lambda cap, acquirer_pid: _opf_oplock._refuse_continuation(cap, acquirer_pid)):
+        result = record_cli(env, root, CREATE)
+    refused(result, "acquisition refused in a forked continuation")
+    err = result[2]
+    assert "and the acquisition removed nothing" not in err, ("T44 no removed-nothing claim", err[-800:])
+    assert re.search(re.escape(
+        "but before it failed the acquisition removed the stale operation capability lease and active "
+        "record of a holder its recovery gate confirmed dead (its recorded operation 'record'); ")
+        + own_staging_pattern(_opf_oplock.ACTIVE_NAME, "active record") + "; "
+        + own_staging_pattern(opf_check.LEASE_NAME, "lease"), err), ("T44 the removals named", err[-800:])
 
 
 def flip_t44():
@@ -5022,24 +4866,23 @@ def t45_unreported_removals_unknown(fx):
     nothing removed."""
     env = fx.env
     base = fx.case("t45-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t45-homes2-unreported", base)
-        assert die_holding(env, root, record.VERB) == 137, "T45 the capability holder is killed holding it"
-        original = record._opf_oplock.acquire_operation
+    root = fx.case("t45-homes2-unreported", base)
+    assert die_holding(env, root, record.VERB) == 137, "T45 the capability holder is killed holding it"
+    original = record._opf_oplock.acquire_operation
 
-        def unreported(store_root, operation, holder=None, recover=False):
-            if recover:
-                raise _opf_oplock.OpLockError("synthetic refusal carrying no removal report")
-            return original(store_root, operation, holder=holder, recover=recover)
-        with patch.object(record._opf_oplock, "acquire_operation", unreported):
-            result = record_cli(env, root, CREATE)
-        refused(result, "synthetic refusal carrying no removal report")
-        err = result[2]
-        assert "removed nothing" not in err, ("T45 no removed-nothing claim", err[-800:])
-        assert ("No record operand, record journal or projection was written; this error carries no report "
-                "of what the acquisition removed before it failed, so whether it removed anything is not "
-                "known here") in err, ("T45 the removals are said to be unknown", err[-800:])
-        assert capability_records(root) == (True, True), "T45 the records are left"
+    def unreported(store_root, operation, holder=None, recover=False):
+        if recover:
+            raise _opf_oplock.OpLockError("synthetic refusal carrying no removal report")
+        return original(store_root, operation, holder=holder, recover=recover)
+    with patch.object(record._opf_oplock, "acquire_operation", unreported):
+        result = record_cli(env, root, CREATE)
+    refused(result, "synthetic refusal carrying no removal report")
+    err = result[2]
+    assert "removed nothing" not in err, ("T45 no removed-nothing claim", err[-800:])
+    assert ("No record operand, record journal or projection was written; this error carries no report "
+            "of what the acquisition removed before it failed, so whether it removed anything is not "
+            "known here") in err, ("T45 the removals are said to be unknown", err[-800:])
+    assert capability_records(root) == (True, True), "T45 the records are left"
 
 
 def flip_t45():
@@ -5136,22 +4979,21 @@ def t46_disclosures_exact(fx):
             ("T46 the overstated wording is gone", retired)
     env = fx.env
     base = fx.case("t46-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t46-homes2-linked-staging", base)
-        try:
-            _opf_oplock.acquire_operation(str(root), record.VERB, recover="yes")
-        except _opf_oplock.OpLockError as exc:
-            assert not any(hasattr(exc, name) for name in REPORTS), "T46 a validation raise carries no report"
-        else:
-            raise AssertionError("T46 a non-bool recover must refuse")
-        assert die_holding(env, root, "ingest") == 137, "T46 the ingest holder is killed holding it"
-        staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
-        os.link(active_record(root), staging)
-        assert os.lstat(staging).st_nlink == 2, "T46 the staging name shares the active record's inode"
-        result = record_cli(env, root, CREATE)
-        refused(result, "the acquisition also removed active record staging leftover " + staging.name)
-        assert not os.path.lexists(staging) and capability_records(root) == (False, False), \
-            "T46 the multiply-linked staging name is removed and both records reclaimed"
+    root = fx.case("t46-homes2-linked-staging", base)
+    try:
+        _opf_oplock.acquire_operation(str(root), record.VERB, recover="yes")
+    except _opf_oplock.OpLockError as exc:
+        assert not any(hasattr(exc, name) for name in REPORTS), "T46 a validation raise carries no report"
+    else:
+        raise AssertionError("T46 a non-bool recover must refuse")
+    assert die_holding(env, root, "ingest") == 137, "T46 the ingest holder is killed holding it"
+    staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
+    os.link(active_record(root), staging)
+    assert os.lstat(staging).st_nlink == 2, "T46 the staging name shares the active record's inode"
+    result = record_cli(env, root, CREATE)
+    refused(result, "the acquisition also removed active record staging leftover " + staging.name)
+    assert not os.path.lexists(staging) and capability_records(root) == (False, False), \
+        "T46 the multiply-linked staging name is removed and both records reclaimed"
 
 
 def flip_t46():
@@ -5197,20 +5039,19 @@ def t47_reclaimed_outcome_scoped(fx):
     had not read."""
     env = fx.env
     base = fx.case("t47-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t47-homes2-complete", base)
-        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AT_RENDER)
-        assert proc.returncode == 137, ("T47 the child is killed at the render", proc.returncode,
-                                        proc.stderr[-800:])
-        result = record_cli(env, root, CREATE)
-        refused(result, "were reclaimed before this operation")
-        assert T47_GRAMMAR in result[2], ("T47 the grammar exclusion is named", result[2][-1200:])
-        assert T47_JOURNAL in result[2], ("T47 the outcome speaks for the journal, not current bytes",
-                                          result[2][-1200:])
-        assert "run opf doctor before relying on it" in result[2], \
-            ("T47 the doctor advice is kept", result[2][-800:])
-        for retired in T47_RETIRED:
-            assert retired not in result[2], ("T47 the overstated wording is gone", retired)
+    root = fx.case("t47-homes2-complete", base)
+    proc = child(env, root, CREATE, flip=DIE_AT_RENDER)
+    assert proc.returncode == 137, ("T47 the child is killed at the render", proc.returncode,
+                                    proc.stderr[-800:])
+    result = record_cli(env, root, CREATE)
+    refused(result, "were reclaimed before this operation")
+    assert T47_GRAMMAR in result[2], ("T47 the grammar exclusion is named", result[2][-1200:])
+    assert T47_JOURNAL in result[2], ("T47 the outcome speaks for the journal, not current bytes",
+                                      result[2][-1200:])
+    assert "run opf doctor before relying on it" in result[2], \
+        ("T47 the doctor advice is kept", result[2][-800:])
+    for retired in T47_RETIRED:
+        assert retired not in result[2], ("T47 the overstated wording is gone", retired)
 
 
 def _flip_reclaimed(new, old):
@@ -5229,44 +5070,6 @@ def flip_t47_grammar():
 def flip_t47_poststate():
     return _flip_reclaimed(T47_JOURNAL,
                            "Any publication a COMPLETE transaction made is present in the working tree")
-
-
-T48_QUALIFIED = ("preparation may already have created its directories, and no operand, journal entry "
-                 "or lock was written (fail-closed)")
-
-
-def t48_prepare_names_created(fx):
-    """The homes-1 journal-prepare refusal names what preparation may have done: ensure_journal_dirs
-    runs before open_journal_root_fd, so a failure there can follow the journal directories' creation,
-    and the refusal says so instead of the reviewed head's unqualified "nothing written". The operands
-    are untouched."""
-    env = fx.env
-    root = fx.case("t48-homes1-prepare")
-    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-    journal_dir = Path(root) / record.JOURNAL_REL
-    assert not journal_dir.exists(), "T48 no journal directory before the run"
-
-    def failing_open(root_fd, journal_rel):
-        raise journal.JournalError("synthetic journal open failure")
-    with patch.object(record._journal, "open_journal_root_fd", failing_open):
-        result = record_cli(env, root, CREATE)
-    refused(result, "cannot prepare the record journal " + record.JOURNAL_REL)
-    refused(result, T48_QUALIFIED)
-    assert "; nothing written (fail-closed)" not in result[2], \
-        ("T48 the unqualified wording is gone", result[2][-800:])
-    assert journal_dir.is_dir(), "T48 preparation created the journal directories before the refusal"
-    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T48 the operands are untouched"
-
-
-def flip_t48():
-    """Refuse with the reviewed head's unqualified nothing-written wording."""
-    fixed = record.RecordError
-
-    class Unqualified(fixed):
-        def __init__(self, *args):
-            super().__init__(*(a.replace(T48_QUALIFIED, "nothing written (fail-closed)")
-                               if isinstance(a, str) else a for a in args))
-    return patch.object(record, "RecordError", Unqualified)
 
 
 # Fix 8: the record guard's introduction no longer claims an absent home means nothing written.
@@ -5314,86 +5117,6 @@ def flip_t49():
 # nothing-opened one, promised the next run reconciles a retained transaction, said a released holder's
 # acquisition cleared nothing after it removed a staging leftover, and said "Nothing was written" beside
 # a recovery lease the failed acquisition had created).
-T50_JOURNAL = ("so its publication was applied when it committed; its operands' current bytes are not "
-               "re-checked by this recovery (unexplained operands are checked only for OPEN transactions)")
-T50_FIX8 = "so its publication is present in the working tree"
-
-
-def t50_leftover_lock_complete_scoped(fx):
-    """A homes-1 run whose journal lock release fails after COMPLETE (T15's child) leaves its lock; the
-    operator then restores the index to its pre-publication bytes. Recovery checks operands only for
-    OPEN transactions, so it keeps the restored bytes, and its outcome speaks for the journal's commit
-    instead of certifying the publication as present in the working tree."""
-    env = fx.env
-    root = fx.case("t50-leftover-lock-restored")
-    pre = read(root, BI_INDEX)
-    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T50 the journal lock is left"
-    assert read(root, BI_INDEX) != pre, "T50 the publication rewrote the index"
-    (Path(root) / BI_INDEX).write_bytes(pre)
-    result = record_cli(env, root, CREATE)
-    refused(result, "was reconciled")
-    err = result[2]
-    assert read(root, BI_INDEX) == pre, "T50 recovery keeps the restored bytes (not re-checked)"
-    assert "is COMPLETE, " + T50_JOURNAL in err, ("T50 the outcome speaks for the journal", err[-1200:])
-    assert T50_FIX8 not in err, ("T50 no present-in-the-tree certification", err[-1200:])
-    assert "run opf doctor before relying on it" in err, ("T50 the doctor advice is kept", err[-800:])
-
-
-def flip_t50():
-    """The leftover-lock outcome keeps the reviewed head's present-in-the-tree certification."""
-    fixed = record._leftover_lock_outcome
-
-    def reverted(owner, states):
-        return fixed(owner, states).replace(
-            T50_JOURNAL + ", and whether", T50_FIX8 + "; whether")
-    return patch.object(record, "_leftover_lock_outcome", reverted)
-
-
-T51_QUALIFIED = ("the journal preparation may already have created its directories, and no operand, "
-                 "journal entry or lock was written by this run (fail-closed)")
-
-
-def t51_lock_refusals_name_created(fx):
-    """The homes-1 journal-lock refusals follow ensure_journal_dirs, so on a store with no journal home
-    they follow the directories' creation: a lock read as held (a peer that took it after this run's
-    preparation) and a failed lock acquisition each say preparation may have created the directories,
-    never the reviewed head's unqualified "nothing written". The operands are untouched."""
-    env = fx.env
-    owner = dict(pid=os.getpid(), uid=os.getuid(), session="opf-record.peer", utc="2026-09-30T00:00:00Z")
-    owner["pid-start"] = ""
-
-    def failing_acquire(journal_root, session_id):
-        raise journal.JournalError("synthetic journal lock failure")
-    for label, target, replacement, needle in (
-            ("held", "read_lock_owner", lambda journal_root: dict(owner), "the record journal lock is held; "),
-            ("acquire", "acquire_lock", failing_acquire,
-             "cannot take the record journal lock (synthetic journal lock failure); ")):
-        root = fx.case("t51-homes1-lock-" + label)
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        journal_dir = Path(root) / record.JOURNAL_REL
-        assert not journal_dir.exists(), ("T51 no journal directory before the run", label)
-        with patch.object(record._journal, target, replacement):
-            result = record_cli(env, root, CREATE)
-        refused(result, needle + T51_QUALIFIED)
-        assert "nothing written" not in result[2], ("T51 the unqualified wording is gone", label,
-                                                    result[2][-800:])
-        assert journal_dir.is_dir(), ("T51 preparation created the journal directories", label)
-        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, ("T51 operands untouched", label)
-
-
-def flip_t51():
-    """Refuse with the reviewed head's unqualified nothing-written wording."""
-    fixed = record.RecordError
-
-    class Unqualified(fixed):
-        def __init__(self, *args):
-            super().__init__(*(a.replace(T51_QUALIFIED, "nothing written (fail-closed)")
-                               if isinstance(a, str) else a for a in args))
-    return patch.object(record, "RecordError", Unqualified)
-
-
 T52_TAIL = ("(an open transaction, or a terminal one missing its projection; none when it failed before its "
             "transaction opened) is left for the next opf record run's recovery trigger (fail-closed)")
 T52_FIX8 = "and the next opf record run reconciles the typed journal"
@@ -5413,57 +5136,56 @@ def t52_publication_refused_before_intent(fx):
         assert RULE_FIX8 not in text, ("T52 the unscoped rule is gone", where)
     env = fx.env
     root = fx.case("t52-homes2-pre-intent")
-    with _self_test_homes2_active(root):
-        req = record.parse_request(CREATE + ["--root", str(root)])
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    req = record.parse_request(CREATE + ["--root", str(root)])
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        ctx = record.Context(res, str(root), root_fd)
+        ctx.journal_rel = record._record_journal_rel(record._probe_admission(ctx))
+        assert ctx.journal_rel == TYPED_JOURNAL, ("T52 the probed journal home", ctx.journal_rel)
+        record._load_manifest(ctx)
+        ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+        ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+        ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+        operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+        plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+        for op in plan.operands:
+            op.new_raw = record._emit_bytes(op.new_model)
+        run_id = record._record_run_id(os.urandom(16).hex())
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
         try:
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            assert ctx.journal_rel == TYPED_JOURNAL, ("T52 the probed journal home", ctx.journal_rel)
-            record._load_manifest(ctx)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
-            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
-            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
-            for op in plan.operands:
-                op.new_raw = record._emit_bytes(op.new_model)
-            run_id = record._record_run_id(os.urandom(16).hex())
-            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            try:
-                record._reserve_claim(ctx, plan, cap, run_id)
-            finally:
-                record._opf_oplock.release_operation(cap)
-            reserved_bi = ctx.claims["BI"]
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            try:
-                with patch.object(journal, "_MAX_JOURNAL_READ_BYTES", 1):
-                    record._publish(ctx, plan, "create", run_id=run_id)
-            except record.RecordError as exc:
-                message = str(exc)
-            else:
-                raise AssertionError("T52 the over-budget publication must refuse")
+            record._reserve_claim(ctx, plan, cap, run_id)
         finally:
-            os.close(root_fd)
-        assert "journal-read cap" in message, ("T52 the engine's pre-INTENT budget refusal", message)
-        assert T52_TAIL in message, ("T52 the refusal scopes what it left", message)
-        assert T52_FIX8 not in message, ("T52 no promise of reconciliation", message)
-        assert capability_records(root) == (False, False), "T52 the publication released its capability"
-        states = journal_states(root, TYPED_JOURNAL)
-        assert all(s == "nothing-opened" for s in states.values()), ("T52 no transaction opened", states)
-        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T52 the operands are untouched"
-        rc, out, err = record_cli(env, root, CREATE)
-        assert "was reconciled" not in err and "were reclaimed" not in err, \
-            ("T52 the next run reconciles nothing", err[-800:])
-        # The refused publication's reservation stands (T79's orphan shape): the next run derives above
-        # it and records, the final doctor treating the reserved numbers as issued (no commit held them).
-        assert RECORDED_EVENT in out and rc == 0, \
-            ("T52 the next run records above the standing reservation", rc, err[-1600:])
-        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
-        assert "BI-{}".format(reserved_bi + 1) in rows and "BI-{}".format(reserved_bi) not in rows, \
-            ("T52 the reserved id is never issued", rows)
+            record._opf_oplock.release_operation(cap)
+        reserved_bi = ctx.claims["BI"]
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        try:
+            with patch.object(journal, "_MAX_JOURNAL_READ_BYTES", 1):
+                record._publish(ctx, plan, "create", run_id=run_id)
+        except record.RecordError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("T52 the over-budget publication must refuse")
+    finally:
+        os.close(root_fd)
+    assert "journal-read cap" in message, ("T52 the engine's pre-INTENT budget refusal", message)
+    assert T52_TAIL in message, ("T52 the refusal scopes what it left", message)
+    assert T52_FIX8 not in message, ("T52 no promise of reconciliation", message)
+    assert capability_records(root) == (False, False), "T52 the publication released its capability"
+    states = journal_states(root, TYPED_JOURNAL)
+    assert all(s == "nothing-opened" for s in states.values()), ("T52 no transaction opened", states)
+    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T52 the operands are untouched"
+    rc, out, err = record_cli(env, root, CREATE)
+    assert "was reconciled" not in err and "were reclaimed" not in err, \
+        ("T52 the next run reconciles nothing", err[-800:])
+    # The refused publication's reservation stands (T79's orphan shape): the next run derives above
+    # it and records, the final doctor treating the reserved numbers as issued (no commit held them).
+    assert RECORDED_EVENT in out and rc == 0, \
+        ("T52 the next run records above the standing reservation", rc, err[-1600:])
+    rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+    assert "BI-{}".format(reserved_bi + 1) in rows and "BI-{}".format(reserved_bi) not in rows, \
+        ("T52 the reserved id is never issued", rows)
 
 
 def flip_t52_message():
@@ -5504,26 +5226,25 @@ def t53_projection_existence_only(fx):
     assert T53_GUARD_FIX8 not in guard, "T53 the carries-its-projection introduction is gone"
     env = fx.env
     base = fx.case("t53-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t53-homes2-not-a-projection", base)
-        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AT_RENDER)
-        assert proc.returncode == 137, ("T53 the child is killed at the render", proc.returncode,
-                                        proc.stderr[-800:])
-        states = journal_states(root, TYPED_JOURNAL)
-        assert list(states.values()) == ["complete"], ("T53 the COMPLETE transaction", states)
-        (name,) = states
-        projection = Path(root) / record._opf_store.txn_record("record", name)
-        assert projection.is_file(), "T53 the projection was published"
-        projection.unlink()
-        projection.mkdir()
-        result = record_cli(env, root, CREATE)
-        refused(result, "were reclaimed before this operation")
-        err = result[2]
-        assert T47_GRAMMAR in err, ("T53 the outcome states existence only", err[-1200:])
-        assert "grammar carrying its projection" not in err, ("T53 no carrying-its-projection claim",
-                                                              err[-1200:])
-        assert projection.is_dir(), "T53 the non-projection entry is kept as found"
-        assert capability_records(root) == (False, False), "T53 the dead holder's records are reclaimed"
+    root = fx.case("t53-homes2-not-a-projection", base)
+    proc = child(env, root, CREATE, flip=DIE_AT_RENDER)
+    assert proc.returncode == 137, ("T53 the child is killed at the render", proc.returncode,
+                                    proc.stderr[-800:])
+    states = journal_states(root, TYPED_JOURNAL)
+    assert list(states.values()) == ["complete"], ("T53 the COMPLETE transaction", states)
+    (name,) = states
+    projection = Path(root) / record._opf_store.txn_record("record", name)
+    assert projection.is_file(), "T53 the projection was published"
+    projection.unlink()
+    projection.mkdir()
+    result = record_cli(env, root, CREATE)
+    refused(result, "were reclaimed before this operation")
+    err = result[2]
+    assert T47_GRAMMAR in err, ("T53 the outcome states existence only", err[-1200:])
+    assert "grammar carrying its projection" not in err, ("T53 no carrying-its-projection claim",
+                                                          err[-1200:])
+    assert projection.is_dir(), "T53 the non-projection entry is kept as found"
+    assert capability_records(root) == (False, False), "T53 the dead holder's records are reclaimed"
 
 
 def flip_t53_outcome():
@@ -5571,82 +5292,6 @@ def flip_t54():
                         lambda: original().replace(T54_T46, T54_FIX8))
 
 
-T55_MAY_BE_LEFT = ("it may be left in place (a failure after its unlink leaves it removed, not durably), and "
-                   "a lock left there is for the next opf record run's reconciliation")
-T55_FIX8 = "it is left in place, and the next opf record run reconciles it"
-
-
-def t55_lock_release_after_unlink(fx):
-    """A homes-1 journal lock release that unlinks the lock and then fails (its directory fsync) still
-    records, and says the lock MAY be left, never that it is left in place: the lock is gone, and the
-    next run reconciles nothing. The reviewed head said the lock was left in place and would be
-    reconciled."""
-    env = fx.env
-    root = fx.case("t55-lock-unlinked")
-    lock = Path(root) / record.JOURNAL_REL / "lock"
-
-    def unlinked_then_failing(journal_root):
-        os.unlink(os.path.join(str(journal_root), "lock"))
-        raise OSError(5, "synthetic journal directory fsync failure after the unlink")
-    with patch.object(record._journal, "release_lock", unlinked_then_failing):
-        result = record_cli(env, root, CREATE)
-    recorded(result)
-    err = result[2]
-    assert "could not be released (" in err, ("T55 the failed release is surfaced", err[-800:])
-    assert T55_MAY_BE_LEFT in err, ("T55 the lock may be left", err[-800:])
-    assert T55_FIX8 not in err, ("T55 no left-in-place claim", err[-800:])
-    assert not lock.exists(), "T55 the lock was unlinked"
-    fx.commit_all(root, "t55 record")
-    result = record_cli(env, root, CREATE)
-    assert "was reconciled" not in result[2], ("T55 the next run reconciles nothing", result[2][-800:])
-    recorded(result)
-
-
-def flip_t55():
-    """Print the reviewed head's left-in-place text."""
-    import builtins
-
-    def reverted(*args, **kwargs):
-        args = tuple(a.replace(T55_MAY_BE_LEFT, T55_FIX8) if isinstance(a, str) else a for a in args)
-        return builtins.print(*args, **kwargs)
-    return patch.object(record, "print", reverted, create=True)
-
-
-T56_HEAD = "a leftover journal lock of a dead run was released; no transaction was open"
-T56_FIX8 = "every transaction was already terminal"
-
-
-def t56_nothing_opened_not_terminal(fx):
-    """A homes-1 run killed after its preimage capture and before INTENT leaves its journal lock over a
-    nothing-opened transaction (not terminal); once its lease is released the next run reconciles the
-    lock and says no transaction was open and the dead run's transaction never opened, never that every
-    transaction was already terminal. The operands keep the prestate."""
-    env = fx.env
-    root = fx.case("t56-nothing-opened")
-    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-    proc = child(env, root, CREATE, kill="after-preimages")
-    assert proc.returncode == 137, ("T56 the child is killed before INTENT", proc.returncode, proc.stderr[-800:])
-    states = journal_states(root)
-    assert list(states.values()) == ["nothing-opened"], ("T56 a nothing-opened transaction", states)
-    (name,) = states
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T56 the dead run's lock is left"
-    (Path(root) / LEASE).unlink()
-    result = record_cli(env, root, CREATE)
-    refused(result, "was reconciled")
-    err = result[2]
-    assert T56_HEAD + ": the dead run's transaction " + name + " never opened, so it published nothing" in err, \
-        ("T56 no transaction was open", err[-1200:])
-    assert T56_FIX8 not in err, ("T56 no every-terminal claim", err[-1200:])
-    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T56 the operands keep the prestate"
-
-
-def flip_t56():
-    """The leftover-lock outcome keeps the reviewed head's every-terminal clause."""
-    fixed = record._leftover_lock_outcome
-    return patch.object(record, "_leftover_lock_outcome", lambda owner, states: fixed(owner, states).replace(
-        "released; no transaction was open", "released; " + T56_FIX8))
-
-
 # Inside the child: the publication fails after INTENT (an apply OSError, which the engine does not roll
 # back), so the transaction stays open and the journal lock is retained; the child then exits normally.
 FAILING_APPLY = """
@@ -5655,16 +5300,15 @@ def _failing_apply(root_fd, ops, staged_reader):
     raise OSError(5, "synthetic apply failure after INTENT")
 _journal.apply_ops = _failing_apply
 """
-T57_RETAINED = ("the journal lock is retained, leaving it for the next opf record run's reconciliation, which "
-                "acts on it only as far as each step succeeds (fail-closed)")
-T57_FIX8 = "the journal lock is retained so the next opf record run reconciles it (fail-closed)"
+T57_RETAINED = ("is left for the next opf record run's recovery trigger (fail-closed)")
+T57_FIX8 = "is reconciled by the next opf record run (fail-closed)"
 
 
 def t57_retained_not_promised(fx):
-    """A homes-1 publication failing after INTENT keeps its transaction open and its journal lock, and
-    says the transaction is left for the next run's reconciliation as far as each step succeeds, never
-    that the next run reconciles it: once the failed run has exited, an intervening operand edit makes
-    that next run refuse instead, the transaction still open and the edit kept."""
+    """A homes-2 publication failing after INTENT keeps its transaction open in the typed journal, and
+    says that journal work is left for the next run's recovery trigger, never that the next run
+    reconciles it: once the failed run has exited, an intervening operand edit makes that next run
+    refuse instead, the transaction still open and the edit kept."""
     env = fx.env
     root = fx.case("t57-apply-fails-live")
 
@@ -5672,7 +5316,7 @@ def t57_retained_not_promised(fx):
         raise OSError(5, "synthetic apply failure after INTENT")
     with patch.object(record._journal, "apply_ops", failing_apply):
         result = record_cli(env, root, CREATE)
-    refused(result, "the publication FAILED and its transaction ")
+    refused(result, "did not complete (store journal operation failed: [Errno 5] synthetic apply failure")
     assert T57_RETAINED in result[2], ("T57 the transaction is left, not promised", result[2][-800:])
     assert T57_FIX8 not in result[2], ("T57 no promise of reconciliation", result[2][-800:])
     root = fx.case("t57-apply-fails-exited")
@@ -5730,35 +5374,34 @@ def t58_released_holder_staging_reported(fx):
     assert T58_RETIRED not in recover, "T58 the cleared-nothing wording is gone"
     env = fx.env
     base = fx.case("t58-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t58-homes2-released-staging", base)
-        held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
-        staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
-        staging.write_bytes(b"a torn active record publication")
-        original_acquire = record._opf_oplock.acquire_operation
+    root = fx.case("t58-homes2-released-staging", base)
+    held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
+    staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
+    staging.write_bytes(b"a torn active record publication")
+    original_acquire = record._opf_oplock.acquire_operation
 
-        def acquire_after_release(store_root, operation, holder=None, recover=False):
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-            return original_acquire(store_root, operation, holder=holder, recover=recover)
-        try:
-            with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release):
-                result = record_cli(env, root, CREATE)
-        finally:
-            if held:
-                record._opf_oplock.release_operation(held.pop())
-        refused(result, "staging leftovers an interrupted publication left were removed before this "
-                        "operation: the recovery acquisition removed active record staging leftover ")
-        err = result[2]
-        assert not os.path.lexists(staging), "T58 the recovery acquisition removed the staging leftover"
-        assert staging.name in err, ("T58 the refusal names the removed leftover", err[-1200:])
-        assert "reclaiming no operation capability record" in err, ("T58 no reclaim is claimed", err[-1200:])
-        assert "nothing written" not in err, ("T58 no nothing-written wording beside the removal", err[-1200:])
-        assert capability_records(root) == (False, False), "T58 the capability is released"
-        result = record_cli(env, root, CREATE)
-        assert "staging leftover" not in result[2], ("T58 the re-run proceeds with no removal to name",
-                                                     result[2][-800:])
-        recorded(result)
+    def acquire_after_release(store_root, operation, holder=None, recover=False):
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+        return original_acquire(store_root, operation, holder=holder, recover=recover)
+    try:
+        with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release):
+            result = record_cli(env, root, CREATE)
+    finally:
+        if held:
+            record._opf_oplock.release_operation(held.pop())
+    refused(result, "staging leftovers an interrupted publication left were removed before this "
+                    "operation: the recovery acquisition removed active record staging leftover ")
+    err = result[2]
+    assert not os.path.lexists(staging), "T58 the recovery acquisition removed the staging leftover"
+    assert staging.name in err, ("T58 the refusal names the removed leftover", err[-1200:])
+    assert "reclaiming no operation capability record" in err, ("T58 no reclaim is claimed", err[-1200:])
+    assert "nothing written" not in err, ("T58 no nothing-written wording beside the removal", err[-1200:])
+    assert capability_records(root) == (False, False), "T58 the capability is released"
+    result = record_cli(env, root, CREATE)
+    assert "staging leftover" not in result[2], ("T58 the re-run proceeds with no removal to name",
+                                                 result[2][-800:])
+    recorded(result)
 
 
 def flip_t58():
@@ -5772,48 +5415,6 @@ def flip_t58():
             return None
         return result
     return patch.object(record, "_recover_capability_journal", reverted)
-
-
-T59_SCOPED = "No operand, journal entry or journal lock was written by this recovery (fail-closed)"
-
-
-def t59_recovery_lease_failure_scoped(fx):
-    """A homes-1 recovery whose lease acquisition fails AFTER the lease file was created (its payload
-    write fails) refuses with the write guard's own report that the lease is left in place, and the
-    recovery's sentence speaks only for operands, journal entries and the journal lock, never the
-    reviewed head's "Nothing was written" beside a created lease. The dead run's lock and the operands
-    are kept."""
-    env = fx.env
-    root = fx.case("t59-recovery-lease-created")
-    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
-    lock = Path(root) / record.JOURNAL_REL / "lock"
-    assert lock.exists() and not (Path(root) / LEASE).exists(), "T59 a leftover lock and no lease"
-    post = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-
-    def failing_write(fd, data):
-        raise OSError(5, "synthetic lease payload write failure")
-    with patch.object(journal, "_write_all", failing_write):
-        result = record_cli(env, root, CREATE)
-    refused(result, "needs reconciliation (a dead run's journal lock)")
-    err = result[2]
-    assert "lease is LEFT in place" in err, ("T59 the write guard reports the created lease", err[-800:])
-    assert T59_SCOPED in err, ("T59 the recovery's sentence is scoped", err[-800:])
-    assert "Nothing was written" not in err, ("T59 no nothing-written claim", err[-800:])
-    assert (Path(root) / LEASE).exists(), "T59 the failed acquisition created the lease"
-    assert lock.exists(), "T59 the leftover journal lock is kept"
-    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == post, "T59 the operands are untouched"
-
-
-def flip_t59():
-    """Refuse with the reviewed head's unscoped sentence."""
-    fixed = record.RecordError
-
-    class Unscoped(fixed):
-        def __init__(self, *args):
-            super().__init__(*(a.replace(T59_SCOPED, "Nothing was written (fail-closed)")
-                               if isinstance(a, str) else a for a in args))
-    return patch.object(record, "RecordError", Unscoped)
 
 
 # --- T60, T61: the PR D fix-10 vectors ------------------------------------------------------------------
@@ -5834,15 +5435,16 @@ T60_FIX9 = "it is LEFT in place (never seized, spec 5.7) and the failure above s
 
 
 def t60_release_failure_scoped(fx):
-    """A failed release beside a governing refusal says the record may be left in place, scoped to what
-    the release verifiably did, never the fix-9 head's it-is-LEFT-in-place certainty. Two legs: the
-    homes-1 recovery lease released after a recovery refusal (an intervening edit under a dead run's
-    open transaction), and the single-writer claim released after a failed publication. Each synthetic
-    release failure removes nothing, so the lease is in fact still present."""
+    """A failed release beside a governing refusal never claims the fix-9 head's it-is-LEFT-in-place
+    certainty, and the single-writer claim's says its records may be left, scoped to what the release
+    verifiably did. Two legs: the operation capability recovery took released after a recovery
+    refusal (an intervening edit under a dead run's open transaction), and the single-writer claim
+    released after a failed publication. Each synthetic release failure removes nothing, so the lease
+    is in fact still present."""
     env = fx.env
 
-    def failing_release(root_fd, machine_rel, expected_payload, verb):
-        raise guard.WriteGuardError("synthetic lease release failure")
+    def failing_release(_cap):
+        raise record._opf_oplock.OpLockError("synthetic lease release failure")
     root = fx.case("t60-recovery-release-fails")
     proc = child(env, root, CREATE, flip=FAILING_APPLY)
     assert proc.returncode == 2, ("T60 the child's publication fails after INTENT", proc.returncode,
@@ -5850,23 +5452,23 @@ def t60_release_failure_scoped(fx):
     assert list(journal_states(root).values()) == ["open"], "T60 the dead run's transaction is open"
     edited = read(root, COUNTERS) + b"# an intervening edit\n"
     (Path(root) / COUNTERS).write_bytes(edited)
-    with patch.object(record._opf_write_guard, "release_lease", failing_release):
+    with patch.object(record._opf_oplock, "release_operation", failing_release):
         result = record_cli(env, root, CREATE)
     refused(result, "cannot be reconciled without overwriting a change made since it was interrupted")
     err = result[2]
-    assert "additionally, releasing the lease failed (" in err, ("T60 the failure is surfaced", err[-1200:])
-    assert T60_LEASE_MAY in err, ("T60 the lease may be left", err[-1200:])
+    assert "additionally, releasing the operation capability failed (" in err, (
+        "T60 the failure is surfaced", err[-1200:])
     assert T60_FIX9 not in err, ("T60 no left-in-place certainty", err[-1200:])
     assert (Path(root) / LEASE).exists(), "T60 the recovery lease is in fact left"
     assert read(root, COUNTERS) == edited, "T60 the intervening edit is kept"
     root = fx.case("t60-publication-release-fails")
 
-    def failing_apply(root_fd, ops, staged_reader):
-        raise OSError(5, "synthetic apply failure after INTENT")
-    with patch.object(record._journal, "apply_ops", failing_apply), \
-            patch.object(record._opf_write_guard, "release_lease", failing_release):
+    def failing_run(*_args, **_kwargs):
+        raise journal.JournalError("synthetic publication failure after INTENT")
+    with patch.object(record._opf_journal, "run_transaction", failing_run), \
+            patch.object(record._opf_oplock, "release_operation", failing_release):
         result = record_cli(env, root, CREATE)
-    refused(result, "the publication FAILED and its transaction ")
+    refused(result, "did not complete (synthetic publication failure after INTENT)")
     err = result[2]
     assert "additionally, releasing the single-writer claim failed (" in err, \
         ("T60 the claim-release failure is surfaced", err[-1200:])
@@ -5887,46 +5489,6 @@ def flip_t60():
         args = tuple(back(a) if isinstance(a, str) else a for a in args)
         return builtins.print(*args, **kwargs)
     return patch.object(record, "print", reverted, create=True)
-
-
-T61_LOCK_MAY = ("the lock itself may be left in place (a failure after its O_EXCL create leaves the "
-                "created lock, which is for the next opf record run's reconciliation), and no operand "
-                "or journal entry was written by this run (fail-closed)")
-
-
-def t61_lock_create_failure_disclosed(fx):
-    """A homes-1 journal lock acquisition that fails AFTER its O_EXCL create (here the journal-root
-    fsync) leaves the created lock; the run refuses saying the lock itself may be left in place, never
-    through the cli's cannot-evaluate backstop, which said nothing about it (the fix-9 head). The
-    created lock is in fact present and the operands are untouched."""
-    env = fx.env
-    root = fx.case("t61-lock-created-then-fails")
-    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-    real = journal.acquire_lock
-
-    def created_then_failing(journal_root, session_id):
-        real(journal_root, session_id)
-        raise OSError(5, "synthetic journal-root fsync failure after the lock's create")
-    with patch.object(record._journal, "acquire_lock", created_then_failing):
-        result = record_cli(env, root, CREATE)
-    refused(result, "cannot take the record journal lock (")
-    err = result[2]
-    assert T61_LOCK_MAY in err, ("T61 the possibly-left lock is disclosed", err[-1200:])
-    assert "cannot evaluate: unexpected error" not in err, ("T61 never the backstop", err[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T61 the failed acquisition left the lock"
-    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T61 the operands are untouched"
-
-
-def flip_t61():
-    """Refuse without the possibly-left-lock disclosure (the fix-9 head routed this failure to the cli
-    backstop, which said nothing about the lock)."""
-    fixed = record.RecordError
-
-    class Undisclosed(fixed):
-        def __init__(self, *args):
-            super().__init__(*(a.replace(T61_LOCK_MAY, "nothing written (fail-closed)")
-                               if isinstance(a, str) else a for a in args))
-    return patch.object(record, "RecordError", Undisclosed)
 
 
 # --- T62, T63: the PR D fix-11 vectors ------------------------------------------------------------------
@@ -6042,7 +5604,7 @@ def _t64_failing_print(marker):
     return failing
 
 
-def _t64_refusing_recover():
+def _t64_refusing_recover(*_args):
     raise record.RecordError("the original t64 recovery refusal")
 
 
@@ -6050,16 +5612,16 @@ def t64_diagnostic_failure_never_governs(fx):
     """A diagnostic print that itself fails never displaces the governing failure (PR D fix 12): a
     lease-release failure still governs when the release-failure text cannot be written; an emission
     failure still governs when the emission-failure text cannot be written; a release interrupt
-    propagates over the failing diagnostic; and a recovery refusal survives a lease-release
-    KeyboardInterrupt, and an OSError whose surfacing print fails, unchanged. The fix-11 head
+    propagates over the failing diagnostic; and a capability recovery refusal survives a capability
+    release KeyboardInterrupt, and an OpLockError whose surfacing print fails, unchanged. The fix-11 head
     propagated the stderr failure (or the release interrupt) instead, leaving the refusal or the
     original failure only in __context__."""
     env = fx.env
     root = fx.case("t64-release-then-stderr")
 
-    def failing_release(*_args):
-        raise guard.WriteGuardError("synthetic release failure")
-    with patch.object(guard, "release_lease", failing_release), \
+    def failing_release(_cap):
+        raise record._opf_oplock.OpLockError("synthetic release failure")
+    with patch.object(record._opf_oplock, "release_operation", failing_release), \
             patch.object(record, "print", _t64_failing_print("the lease release failed"), create=True):
         result = record_cli(env, root, CREATE)
     refused(result, "synthetic release failure")
@@ -6080,11 +5642,11 @@ def t64_diagnostic_failure_never_governs(fx):
     assert not (Path(root) / LEASE).exists(), "T64 the lease was released before the emission"
     root = fx.case("t64-release-interrupt")
 
-    def interrupted_release(*_args):
+    def interrupted_release(_cap):
         raise KeyboardInterrupt
     caught = None
     try:
-        with patch.object(guard, "release_lease", interrupted_release), \
+        with patch.object(record._opf_oplock, "release_operation", interrupted_release), \
                 patch.object(record, "print", _t64_failing_print("the lease release failed"),
                              create=True):
             record_cli(env, root, CREATE)
@@ -6092,17 +5654,19 @@ def t64_diagnostic_failure_never_governs(fx):
         caught = exc
     assert caught is not None, "T64 the release interrupt governs, never the stderr failure"
     from types import SimpleNamespace
-    ctx = SimpleNamespace(root_fd=None, machine_rel=MACH)
-    for rel_exc in (KeyboardInterrupt(), OSError(5, "synthetic recovery release failure")):
-        def failing_rel(_ctx, _lease, exc=rel_exc):
+    ctx = SimpleNamespace(res=SimpleNamespace(store_root=str(fx.base)))
+    held = SimpleNamespace(recovered=[], recovered_operation=None, staging_removed=[])
+    for rel_exc in (KeyboardInterrupt(), record._opf_oplock.OpLockError("synthetic recovery release failure")):
+        def failing_rel(_cap, exc=rel_exc):
             raise exc
         outcome = None
-        with patch.object(guard, "acquire_lease", lambda *_a: object()), \
-                patch.object(record, "_release", failing_rel), \
-                patch.object(record, "print", _t64_failing_print("releasing the lease failed"),
+        with patch.object(record._opf_oplock, "acquire_operation", lambda *_a, **_k: held), \
+                patch.object(record, "_capability_recovery_plan", _t64_refusing_recover), \
+                patch.object(record._opf_oplock, "release_operation", failing_rel), \
+                patch.object(record, "print", _t64_failing_print("releasing the operation capability failed"),
                              create=True):
             try:
-                record._with_recovery_lease(ctx, "open transaction(s) t64", _t64_refusing_recover)
+                record._recover_capability_journal(ctx, ["t64"], [])
             except BaseException as exc:  # a displacing failure is reported by the assertion below
                 outcome = exc
         assert isinstance(outcome, record.RecordError) and \
@@ -6131,27 +5695,20 @@ def flip_t64_conclude():
 
 
 def flip_t64_recovery():
-    """The fix-11 head's _with_recovery_lease release handler: except Exception, so a release
-    interrupt displaces the refusal, and an unprotected surfacing print."""
-    def head_with_recovery_lease(ctx, pending, recover):
+    """The capability recovery's narrow release handler: OpLockError only, so a release interrupt
+    displaces the refusal, and an unprotected surfacing print."""
+    def head_recover(ctx, opened, unprojected):
+        cap = record._opf_oplock.acquire_operation(str(ctx.res.store_root), record.VERB, recover=True)
         try:
-            lease = guard.acquire_lease(ctx.root_fd, ctx.machine_rel, record.VERB)
-        except guard.WriteGuardError as exc:
-            raise record.RecordError("an interrupted opf record publication needs reconciliation "
-                                     "({}): {} (fail-closed)".format(pending, exc))
-        try:
-            result = recover()
-        except BaseException:
+            record._capability_recovery_plan(ctx)
+        finally:
             try:
-                record._release(ctx, lease)
-            except Exception as rel_exc:  # the head's width: an interrupt passes through
+                record._opf_oplock.release_operation(cap)
+            except record._opf_oplock.OpLockError as exc:  # the head's width: an interrupt passes through
                 prn = getattr(record, "print", print)
-                prn("opf record: additionally, releasing the lease failed ({}); it may be left in "
-                    "place, and the failure above still governs.".format(rel_exc), file=sys.stderr)
-            raise
-        record._release(ctx, lease)
-        return result
-    return patch.object(record, "_with_recovery_lease", head_with_recovery_lease)
+                prn("opf record: additionally, releasing the operation capability failed ({}); the failure "
+                    "above still governs.".format(exc), file=sys.stderr)
+    return patch.object(record, "_recover_capability_journal", head_recover)
 
 
 def t65_interrupt_before_conclude(fx):
@@ -6166,11 +5723,11 @@ def t65_interrupt_before_conclude(fx):
     env = fx.env
     root = fx.case("t65-sigint-before-conclude")
     releases = []
-    real = guard.release_lease
+    real = record._opf_oplock.release_operation
 
-    def counting(root_fd, machine_rel, payload, verb):
+    def counting(cap):
         releases.append(True)
-        return real(root_fd, machine_rel, payload, verb)
+        return real(cap)
     lines, start = inspect.getsourcelines(record._run_operation)
     offsets = [i for i, line in enumerate(lines) if "_conclude(" in line]
     assert len(offsets) == 1, ("T65 the one _conclude call in _run_operation", offsets)
@@ -6191,7 +5748,7 @@ def t65_interrupt_before_conclude(fx):
     try:
         sys.settrace(global_trace)
         try:
-            with patch.object(guard, "release_lease", counting):
+            with patch.object(record._opf_oplock, "release_operation", counting):
                 result = record_cli(env, root, CREATE)
         except KeyboardInterrupt as exc:
             caught = exc
@@ -6217,98 +5774,118 @@ def flip_t65():
 # --- T66: the PR D fix-13 vector ------------------------------------------------------------------------
 
 def t66_release_interrupt_never_displaces(fx):
-    """A homes-1 journal-lock release that raises KeyboardInterrupt while the publication failed and
-    its transaction reads rolled-back: the rolled-back refusal still governs the exit, the release
-    failure surfaced beside it and the unreleased lock left for reconciliation (PR D fix 13). On the
-    reviewed head the release handler caught only (JournalError, OSError), so the interrupt displaced
-    the refusal, which survived only in __context__."""
+    """A homes-2 publication that fails (its capability-bound transaction raises) while the operation
+    capability's release raises KeyboardInterrupt: the publication refusal still governs the exit,
+    the release failure is surfaced beside it, and the unreleased capability lease is left in place
+    (flip: _publish_homes2 releases the capability in its own cleanup under the narrow OpLockError
+    handler, so the interrupt displaces the refusal)."""
     env = fx.env
     root = fx.case("t66-release-interrupt")
 
     def failing_run(*_args, **_kwargs):
-        raise journal.JournalError("synthetic rolled-back publication failure")
+        raise journal.JournalError("synthetic publication failure")
 
-    def interrupted_release(_journal_root):
+    def interrupted_release(_cap):
         raise KeyboardInterrupt
     caught = result = None
     try:
-        with patch.object(journal, "run_transaction", failing_run), \
-                patch.object(journal, "classify_state", lambda *_a: "rolled-back"), \
-                patch.object(journal, "release_lock", interrupted_release):
+        with patch.object(record._opf_journal, "run_transaction", failing_run), \
+                patch.object(record._opf_oplock, "release_operation", interrupted_release):
             result = record_cli(env, root, CREATE)
     except KeyboardInterrupt as exc:
         caught = exc
-    assert caught is None, "T66 the rolled-back refusal governs, never the release interrupt"
-    refused(result, "the publication was refused and rolled back to the prestate")
+    assert caught is None, "T66 the publication refusal governs, never the release interrupt"
+    refused(result, "did not complete (synthetic publication failure)")
     err = result[2]
-    assert "could not be released (" in err, ("T66 the failed release is surfaced", err[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T66 the unreleased lock is left"
-    assert not (Path(root) / LEASE).exists(), "T66 the single-writer claim is released"
+    assert "additionally, releasing the single-writer claim failed (" in err, \
+        ("T66 the failed release is surfaced", err[-800:])
+    assert (Path(root) / LEASE).exists(), "T66 the unreleased capability lease is left"
 
 
 def flip_t66():
-    """The reviewed head's _publish release handler: (JournalError, OSError) only, so the release
-    interrupt passes through the finally and displaces the rolled-back refusal."""
-    def head_publish(ctx, plan, subcommand, cap=None):
-        if ctx.journal_rel != record.JOURNAL_REL:
-            return record._publish_homes2(ctx, plan, subcommand, cap)
-        root_fd = ctx.root_fd
-        journal_root = record._journal_root(ctx)
-        journal.require_containment()
-        journal.ensure_journal_dirs(root_fd, record.JOURNAL_REL)
-        jr_fd = journal.open_journal_root_fd(root_fd, record.JOURNAL_REL)
-        held = retain = False
-        token = os.urandom(16).hex()
+    """_publish_homes2 releasing the capability in its own cleanup with the narrow handler its
+    self-acquired path uses (OpLockError only), so the release interrupt passes through and displaces
+    the publication refusal."""
+    original = record._publish_homes2
+
+    def narrow_release(ctx, plan, subcommand, cap=None, run_id=None):
         try:
-            if journal.read_lock_owner(journal_root) is not None:
-                raise record.RecordError("the record journal lock is held (fail-closed)")
-            journal.acquire_lock(journal_root, "{}.{}".format(record.SESSION_ID, token))
-            held = True
-            ops, content = [], {}
-            for operand in plan.operands:
-                ops.append({"op": "write", "path": operand.rel,
-                            "poststate": {"kind": "file",
-                                          "content-sha256": record._sha256(operand.new_raw)},
-                            "source-poststate": {"kind": "file", "mode": operand.mode,
-                                                 "sha256": record._sha256(operand.raw)}})
-                content[operand.rel] = operand.new_raw
-            txn_id = record._record_run_id(token)
-            header = {"unit": record.SESSION_ID, "kind": "record-" + subcommand}
-            try:
-                journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
-                                        lambda op: content[op["path"]], record.SESSION_ID)
-            except (journal.JournalError, OSError) as exc:
-                state = journal.classify_state(jr_fd, journal_root / txn_id)
-                if state == "rolled-back":
-                    raise record.RecordError("the publication was refused and rolled back to the "
-                                             "prestate ({}); nothing recorded (fail-closed)".format(exc))
-                retain = True
-                raise record.RecordError("the publication FAILED ({})".format(exc))
+            return original(ctx, plan, subcommand, cap, run_id)
         finally:
-            if held and not retain:
+            if cap is not None:
                 try:
-                    journal.release_lock(journal_root)
-                except (journal.JournalError, OSError):  # the head's width: an interrupt passes through
+                    record._opf_oplock.release_operation(cap)
+                except record._opf_oplock.OpLockError:
                     pass
-            journal._close_fd_quietly(jr_fd)
-    return patch.object(record, "_publish", head_publish)
+    return patch.object(record, "_publish_homes2", narrow_release)
+
+
+def t116_own_capability_release_interrupt(fx):
+    """_publish_homes2 called with no capability takes and releases its own. When the publication
+    refuses (no planned claim, so no transaction opens) and that release raises KeyboardInterrupt,
+    the refusal still governs, the release is attempted exactly once, and its failure is surfaced
+    (flip: the self-acquired path's release caught only OpLockError, so the interrupt displaced the
+    refusal)."""
+    from types import SimpleNamespace
+    held = object()
+    releases = []
+
+    def interrupted_release(cap):
+        releases.append(cap)
+        raise KeyboardInterrupt
+    ctx = SimpleNamespace(res=SimpleNamespace(store_root=str(fx.base)), claims=None,
+                          journal_rel=".working/journals/record")
+    err = io.StringIO()
+    caught = None
+    with patch.object(record._opf_oplock, "acquire_operation", lambda *_args, **_kwargs: held), \
+            patch.object(record._opf_oplock, "release_operation", interrupted_release), \
+            patch.object(sys, "stderr", err):
+        try:
+            record._publish_homes2(ctx, SimpleNamespace(operands=[]), "create", None,
+                                   "record-20260101T000000Z-0123456789abcdef")
+        except BaseException as exc:  # noqa: BLE001  the outcome under test
+            caught = exc
+    assert isinstance(caught, record.RecordError), ("T116 the publication refusal governs", repr(caught))
+    assert "has no planned claim" in str(caught), ("T116 the refusal is the publication's own", str(caught))
+    assert releases == [held], ("T116 the own capability's release is attempted exactly once", releases)
+    assert "additionally, releasing the operation capability failed (" in err.getvalue(), \
+        ("T116 the failed release is surfaced", err.getvalue()[-800:])
+
+
+def flip_t116():
+    """The self-acquired path's narrow release handler (OpLockError only): the interrupt raised by
+    the release passes through and displaces the publication refusal."""
+    original = record._publish_homes2
+
+    def narrow_release(ctx, plan, subcommand, cap=None, run_id=None):
+        if cap is not None:
+            return original(ctx, plan, subcommand, cap, run_id)
+        own = record._opf_oplock.acquire_operation(str(ctx.res.store_root), record.VERB)
+        try:
+            return original(ctx, plan, subcommand, own, run_id)
+        finally:
+            try:
+                record._opf_oplock.release_operation(own)
+            except record._opf_oplock.OpLockError:
+                pass
+    return patch.object(record, "_publish_homes2", narrow_release)
 
 
 # --- T67, T68: the PR D fix-14 vectors ------------------------------------------------------------------
 
 def t67_ambient_exception_not_pending(fx):
-    """The record CLI invoked inside an embedding caller's except block, with the journal-lock
-    release raising a non-ordinary RuntimeError on the clean exit: the release failure is the run's
-    own failure (exit 2, no success report), exactly as it is outside the handler. On the fix-13
-    head the cleanup read sys.exc_info() in its finally, so the caller's handled ValueError read as
-    a refusal in flight and the run reported success exit 0 over the swallowed release failure (QA
-    round 13, F1)."""
+    """The record CLI invoked inside an embedding caller's except block, with the homes-2 operation
+    capability's release raising a non-ordinary RuntimeError on the clean exit (_conclude): the release
+    failure is the run's own failure (exit 2, no success report), exactly as it is outside the handler,
+    and the capability lease is left (flip: the clean-exit release reads sys.exc_info(), so the caller's
+    handled ValueError reads as a failure in flight and the run reports success over the swallowed
+    release failure)."""
     env = fx.env
     root = fx.case("t67-ambient-handler")
 
-    def raising_release(_journal_root):
+    def raising_release(_cap):
         raise RuntimeError("ambient release witness")
-    with patch.object(record._journal, "release_lock", raising_release):
+    with patch.object(record._opf_oplock, "release_operation", raising_release):
         try:
             raise ValueError("the embedding caller's handled exception")
         except ValueError:
@@ -6318,66 +5895,28 @@ def t67_ambient_exception_not_pending(fx):
                      "embedding caller's except block included", rc, out[-800:], err[-800:])
     assert RECORDED_EVENT not in out, ("T67 no success report", out[-800:])
     assert "ambient release witness" in err, ("T67 the release failure governs the exit", err[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T67 the unreleased lock is left"
+    assert (Path(root) / LEASE).exists(), "T67 the unreleased capability lease is left"
     outside = fx.case("t67-no-handler")
-    with patch.object(record._journal, "release_lock", raising_release):
+    with patch.object(record._opf_oplock, "release_operation", raising_release):
         result = record_cli(env, outside, CREATE)
     assert result[0] == 2, ("T67 the same failure outside any handler", result[0], result[2][-800:])
 
 
 def flip_t67():
-    """The fix-13 head's _publish cleanup: `pending = sys.exc_info()[1]` read in the finally, under
-    which an embedding caller's handled exception reads as a refusal in flight, so a clean-exit
-    non-ordinary release failure is surfaced as a warning and the run still reports success."""
-    def head_publish(ctx, plan, subcommand, cap=None):
-        if ctx.journal_rel != record.JOURNAL_REL:
-            return record._publish_homes2(ctx, plan, subcommand, cap)
-        root_fd = ctx.root_fd
-        journal_root = record._journal_root(ctx)
-        journal.require_containment()
-        journal.ensure_journal_dirs(root_fd, record.JOURNAL_REL)
-        jr_fd = journal.open_journal_root_fd(root_fd, record.JOURNAL_REL)
-        held = retain = False
-        token = os.urandom(16).hex()
+    """A clean-exit release that reads `pending = sys.exc_info()[1]`, under which an embedding caller's
+    handled exception reads as a failure in flight, so a non-ordinary release failure is surfaced as a
+    warning and the run still reports success."""
+    def head_conclude(ctx, lease, report, released):
+        released[0] = True
+        pending = sys.exc_info()[1]   # the ambient read
         try:
-            if journal.read_lock_owner(journal_root) is not None:
-                raise record.RecordError("the record journal lock is held (fail-closed)")
-            journal.acquire_lock(journal_root, "{}.{}".format(record.SESSION_ID, token))
-            held = True
-            ops, content, staged = [], dict(), []
-            for operand in plan.operands:
-                post = dict((("kind", "file"), ("content-sha256", record._sha256(operand.new_raw))))
-                source = dict((("kind", "file"), ("mode", operand.mode),
-                               ("sha256", record._sha256(operand.raw))))
-                ops.append(dict((("op", "write"), ("path", operand.rel), ("poststate", post),
-                                 ("source-poststate", source))))
-                content.update(((operand.rel, operand.new_raw),))
-                staged.append(record.base64.b64encode(operand.new_raw).decode("ascii"))
-            txn_id = record._record_run_id(token)
-            header = dict((("unit", record.SESSION_ID), ("kind", "record-" + subcommand),
-                           ("staged", staged)))
-            try:
-                journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
-                                        lambda op: content.get(op.get("path")), record.SESSION_ID)
-            except (journal.JournalError, OSError) as exc:
-                retain = True
-                raise record.RecordError("the publication FAILED ({})".format(exc))
-        finally:
-            if held and not retain:
-                pending = sys.exc_info()[1]   # the head's ambient read
-                try:
-                    journal.release_lock(journal_root)
-                except BaseException as exc:  # noqa: BLE001  the head's cleanup handler
-                    if pending is None and not isinstance(exc, (journal.JournalError, OSError)):
-                        raise
-                    try:
-                        print("opf record: the record journal lock under {} could not be released "
-                              "({}); it may be left in place.".format(record.JOURNAL_REL, exc),
-                              file=sys.stderr)
-                    except BaseException:
-                        pass
-            journal._close_fd_quietly(jr_fd)
-    return patch.object(record, "_publish", head_publish)
+            record._release_guard(ctx, lease)
+        except BaseException as exc:  # noqa: BLE001  the reverted cleanup handler
+            if pending is None:
+                raise
+            print("opf record: releasing the single-writer claim failed ({})".format(exc), file=sys.stderr)
+        record._emit_success(report)
+    return patch.object(record, "_conclude", head_conclude)
 
 
 def t68_release_mark_before_acquisition(fx):
@@ -6390,10 +5929,10 @@ def t68_release_mark_before_acquisition(fx):
     env = fx.env
     root = fx.case("t68-release-mark")
     acquired = []
-    real_acquire = guard.acquire_lease
+    real_acquire = record._opf_oplock.acquire_operation
 
-    def arming_acquire(root_fd, machine_rel, verb):
-        lease = real_acquire(root_fd, machine_rel, verb)
+    def arming_acquire(store_root, operation, holder=None, recover=False):
+        lease = real_acquire(store_root, operation, holder=holder, recover=recover)
         acquired.append(True)
         return lease
 
@@ -6406,7 +5945,7 @@ def t68_release_mark_before_acquisition(fx):
                                                              "acquisition"))
             return iter((False,))
     with patch.object(record, "_RELEASE_PENDING", MarkCopyTrap()), \
-            patch.object(guard, "acquire_lease", arming_acquire):
+            patch.object(record._opf_oplock, "acquire_operation", arming_acquire):
         result = record_cli(env, root, CREATE)
     assert acquired, "T68 the run acquired the lease for real"
     recorded(result)
@@ -6426,8 +5965,6 @@ def flip_t68():
     return patch.object(record, "_acquire_guard", head_order)
 
 
-# --- T69: the PR D fix-15 vector ------------------------------------------------------------------------
-
 def _fd_identity(fd):
     """The (device, inode) a descriptor number currently names, or None when it names nothing."""
     try:
@@ -6435,176 +5972,6 @@ def _fd_identity(fd):
     except OSError:
         return None
     return st.st_dev, st.st_ino
-
-
-@contextlib.contextmanager
-def journal_fd_ledger():
-    """Every journal root descriptor the run opens, as [fd, identity, close attempts]. A close is
-    counted on the latest open of its number, and only while that number still names the opened
-    directory or nothing (a second close); a number since reused by another object is not counted."""
-    ledger = []
-    real_open, real_close = journal.open_journal_root_fd, journal._close_fd_quietly
-
-    def opening(root_fd, journal_rel):
-        fd = real_open(root_fd, journal_rel)
-        ledger.append([fd, _fd_identity(fd), 0])
-        return fd
-
-    def closing(fd):
-        for entry in reversed(ledger):
-            if entry[0] == fd:
-                if _fd_identity(fd) in (entry[1], None):
-                    entry[2] += 1
-                break
-        return real_close(fd)
-    with patch.object(journal, "open_journal_root_fd", opening), \
-            patch.object(journal, "_close_fd_quietly", closing):
-        yield ledger
-
-
-def _settle(ledger):
-    """The ledger's descriptors still open, each closed here so a red run leaks nothing into later cases."""
-    latest = {}
-    for entry in ledger:
-        latest[entry[0]] = entry
-    alive = [entry for entry in latest.values() if _fd_identity(entry[0]) == entry[1]]
-    for entry in alive:
-        os.close(entry[0])
-    return alive
-
-
-def t69_release_failure_closes_fd(fx):
-    """The homes-1 publication's journal root descriptor is closed exactly once when the journal-lock
-    release raises a non-ordinary RuntimeError on the clean exit inside an embedding caller's except
-    block: the release failure governs (exit 2, no success report, the lock left), no journal
-    descriptor survives, and the single-writer lease is released. On the fix-14 head the release
-    handler's re-raise skipped the trailing close, leaking the descriptor (QA round 14, M1)."""
-    env = fx.env
-    root = fx.case("t69-release-in-handler")
-
-    def raising_release(_journal_root):
-        raise _injected("t69-release", RuntimeError("fd release witness"))
-    with journal_fd_ledger() as ledger, patch.object(journal, "release_lock", raising_release):
-        try:
-            raise ValueError("the embedding caller's handled exception")
-        except ValueError:
-            result = record_cli(env, root, CREATE)
-    alive = _settle(ledger)
-    rc, out, err = result
-    assert rc == 2, ("T69 the clean-exit release failure governs", rc, out[-800:], err[-800:])
-    assert RECORDED_EVENT not in out, ("T69 no success report", out[-800:])
-    assert "fd release witness" in err, ("T69 the release failure governs the exit", err[-800:])
-    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T69 the unreleased lock is left"
-    assert not (Path(root) / LEASE).exists(), "T69 the single-writer lease is released"
-    assert ledger, "T69 the publication opened its journal root for real"
-    assert not alive, ("T69 a raising clean-exit release leaves no journal descriptor open",
-                       [entry[0] for entry in alive])
-    assert [entry[2] for entry in ledger] == [1] * len(ledger), (
-        "T69 each journal descriptor is closed exactly once", [entry[2] for entry in ledger])
-
-
-def t69_token_failure_closes_fd(fx):
-    """The homes-1 publication's journal root descriptor is closed exactly once when os.urandom fails
-    with a MemoryError as _publish allocates the lock token: that failure governs (exit 2, no success
-    report, no journal lock taken), no journal descriptor survives, and the single-writer lease is
-    released. On the fix-14 head the token was allocated after the open but outside the cleanup
-    region, leaking the descriptor (QA round 14, M1)."""
-    env = fx.env
-    root = fx.case("t69-token-allocation")
-    real_urandom = os.urandom
-    fired = []
-
-    def urandom_trap(n):
-        if sys._getframe(1).f_code is record._publish.__code__:
-            fired.append(n)
-            raise _injected("t69-token", MemoryError("synthetic token allocation failure"))
-        return real_urandom(n)
-    with journal_fd_ledger() as ledger, patch.object(os, "urandom", urandom_trap):
-        result = record_cli(env, root, CREATE)
-    alive = _settle(ledger)
-    rc, out, err = result
-    assert fired, "T69 the token allocation failed for real"
-    assert rc == 2, ("T69 the allocation failure governs", rc, out[-800:], err[-800:])
-    assert RECORDED_EVENT not in out, ("T69 no success report", out[-800:])
-    assert "synthetic token allocation failure" in err, ("T69 the allocation failure governs the exit",
-                                                         err[-800:])
-    assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), "T69 no journal lock is taken"
-    assert not (Path(root) / LEASE).exists(), "T69 the single-writer lease is released"
-    assert ledger, "T69 the publication opened its journal root for real"
-    assert not alive, ("T69 a failed token allocation leaves no journal descriptor open",
-                       [entry[0] for entry in alive])
-    assert [entry[2] for entry in ledger] == [1] * len(ledger), (
-        "T69 each journal descriptor is closed exactly once", [entry[2] for entry in ledger])
-
-
-def flip_t69():
-    """The fix-14 head's _publish: the lock token is allocated after the journal root's open but before
-    the cleanup region, and the descriptor's close trails the release handler, whose re-raise of a
-    clean-exit non-ordinary release failure skips it."""
-    def head_publish(ctx, plan, subcommand, cap=None):
-        if ctx.journal_rel != record.JOURNAL_REL:
-            return record._publish_homes2(ctx, plan, subcommand, cap)
-        root_fd = ctx.root_fd
-        journal_root = record._journal_root(ctx)
-        journal.require_containment()
-        journal.ensure_journal_dirs(root_fd, record.JOURNAL_REL)
-        jr_fd = journal.open_journal_root_fd(root_fd, record.JOURNAL_REL)
-        held = retain = False
-        pending = None
-        token = os.urandom(16).hex()   # the head's allocation outside the cleanup region
-        try:
-            if journal.read_lock_owner(journal_root) is not None:
-                raise record.RecordError("the record journal lock is held (fail-closed)")
-            journal.acquire_lock(journal_root, "{}.{}".format(record.SESSION_ID, token))
-            held = True
-            ops, content, staged = [], dict(), []
-            for operand in plan.operands:
-                post = dict((("kind", "file"), ("content-sha256", record._sha256(operand.new_raw))))
-                source = dict((("kind", "file"), ("mode", operand.mode),
-                               ("sha256", record._sha256(operand.raw))))
-                ops.append(dict((("op", "write"), ("path", operand.rel), ("poststate", post),
-                                 ("source-poststate", source))))
-                content.update(((operand.rel, operand.new_raw),))
-                staged.append(record.base64.b64encode(operand.new_raw).decode("ascii"))
-            txn_id = record._record_run_id(token)
-            header = dict((("unit", record.SESSION_ID), ("kind", "record-" + subcommand),
-                           ("staged", staged)))
-            try:
-                journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
-                                        lambda op: content.get(op.get("path")), record.SESSION_ID)
-            except (journal.JournalError, OSError) as exc:
-                retain = True
-                raise record.RecordError("the publication FAILED ({})".format(exc))
-        except BaseException as exc:  # noqa: BLE001  the head's own record of the failure in flight
-            pending = exc
-            raise
-        finally:
-            if held and not retain:
-                try:
-                    journal.release_lock(journal_root)
-                except BaseException as exc:  # noqa: BLE001  the head's cleanup handler
-                    if pending is None and not isinstance(exc, (journal.JournalError, OSError)):
-                        raise   # the head's re-raise, skipping the close below
-                    try:
-                        print("opf record: the record journal lock under {} could not be released "
-                              "({}); it may be left in place.".format(record.JOURNAL_REL, exc),
-                              file=sys.stderr)
-                    except BaseException:
-                        pass
-            journal._close_fd_quietly(jr_fd)
-    return patch.object(record, "_publish", head_publish)
-
-
-def flip_t69_release():
-    """flip_t69 for T69-release-failure-closes-fd, a flip of its own so that it expects the one
-    injection that test raises, the release failure (_INTENDED_BACKSTOPS)."""
-    return flip_t69()
-
-
-def flip_t69_token():
-    """flip_t69 for T69-token-failure-closes-fd, a flip of its own so that it expects the one injection
-    that test raises, the token allocation failure (_INTENDED_BACKSTOPS)."""
-    return flip_t69()
 
 
 # --- T70-T71: the PR D fix-16 vectors -------------------------------------------------------------------
@@ -6644,44 +6011,43 @@ def t70_tag_after_unwind(fx):
             fired.append(True)
             raise MemoryError("synthetic removal-report allocation failure")
         return tuple(*args)
-    with _self_test_homes2_active(root):
-        with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails):
-            try:
-                _opf_oplock.acquire_operation(str(root), record.VERB)
-            except _opf_oplock.OpLockError as exc:
-                control = exc
-            else:
-                raise AssertionError("T70 the synthetic lease publication failure must refuse")
-        assert "synthetic lease publication failure" in str(control), ("T70 the original failure", control)
-        assert (control.recovered, control.recovered_operation, control.staging_removed) == ((), None, ()), \
-            ("T70 nothing stale was removed", [getattr(control, name, None) for name in REPORTS])
-        got = getattr(control, "created_removed", ())
-        assert len(got) == 2 and re.fullmatch(own_staging_pattern(_opf_oplock.ACTIVE_NAME, "active record"),
-                                              got[0]) and got[1] == "its own new active record (unwind)", \
-            ("T70 the original OpLockError carries its removal reports", got)
-        with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails), \
-                patch.object(_opf_oplock._FdOwner, "adopt", recording_adopt), \
-                patch.object(_opf_oplock, "tuple", tuple_trap, create=True):
-            try:
-                _opf_oplock.acquire_operation(str(root), record.VERB)
-            except (MemoryError, _opf_oplock.OpLockError) as exc:
-                failure = exc
-            else:
-                raise AssertionError("T70 the trapped acquisition must fail")
-        records = capability_records(root)
-        latest = dict((entry[0], entry) for entry in adopted)
-        alive = [fd for fd, identity in latest.values() if _fd_identity(fd) == identity]
+    with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails):
         try:
-            try:
-                cap = _opf_oplock.acquire_operation(str(root), record.VERB)
-            except _opf_oplock.OpLockError as exc:
-                probe = str(exc)
-            else:
-                _opf_oplock.release_operation(cap)
-                probe = None
-        finally:
-            for fd in alive:
-                os.close(fd)     # a red run leaks nothing, and frees the anchor, for later cases
+            _opf_oplock.acquire_operation(str(root), record.VERB)
+        except _opf_oplock.OpLockError as exc:
+            control = exc
+        else:
+            raise AssertionError("T70 the synthetic lease publication failure must refuse")
+    assert "synthetic lease publication failure" in str(control), ("T70 the original failure", control)
+    assert (control.recovered, control.recovered_operation, control.staging_removed) == ((), None, ()), \
+        ("T70 nothing stale was removed", [getattr(control, name, None) for name in REPORTS])
+    got = getattr(control, "created_removed", ())
+    assert len(got) == 2 and re.fullmatch(own_staging_pattern(_opf_oplock.ACTIVE_NAME, "active record"),
+                                          got[0]) and got[1] == "its own new active record (unwind)", \
+        ("T70 the original OpLockError carries its removal reports", got)
+    with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails), \
+            patch.object(_opf_oplock._FdOwner, "adopt", recording_adopt), \
+            patch.object(_opf_oplock, "tuple", tuple_trap, create=True):
+        try:
+            _opf_oplock.acquire_operation(str(root), record.VERB)
+        except (MemoryError, _opf_oplock.OpLockError) as exc:
+            failure = exc
+        else:
+            raise AssertionError("T70 the trapped acquisition must fail")
+    records = capability_records(root)
+    latest = dict((entry[0], entry) for entry in adopted)
+    alive = [fd for fd, identity in latest.values() if _fd_identity(fd) == identity]
+    try:
+        try:
+            cap = _opf_oplock.acquire_operation(str(root), record.VERB)
+        except _opf_oplock.OpLockError as exc:
+            probe = str(exc)
+        else:
+            _opf_oplock.release_operation(cap)
+            probe = None
+    finally:
+        for fd in alive:
+            os.close(fd)     # a red run leaks nothing, and frees the anchor, for later cases
     assert fired, "T70 the removal-report allocation failed for real"
     assert isinstance(failure, MemoryError), ("T70 the allocation failure escapes", failure)
     assert isinstance(failure.__context__, _opf_oplock.OpLockError) \
@@ -6736,7 +6102,12 @@ def flip_t71():
 
 T74_UNSCOPED = "Nothing was written;"
 T74_SCOPED = "Nothing was written to the journal or to any operand; both are left exactly as found"
-T74_HELD = "runs only under the single-writer lease"
+T74_HELD = "runs only under the operation capability"
+T74_RECLAIMED = ("recovery cleared the operation capability's lease and active record, left by an interrupted "
+                 "'record' run whose holder its recovery gate confirmed dead")
+T74_RELEASED_BEFORE = ("Before this refusal, under the held capability, the recovery acquisition removed the "
+                       "stale operation capability lease and active record of a holder its recovery gate "
+                       "confirmed dead")
 
 
 def _t74_interrupted(fx, name):
@@ -6747,14 +6118,6 @@ def _t74_interrupted(fx, name):
     assert proc.returncode == 137, ("T74 the child is killed", proc.returncode, proc.stderr[-800:])
     assert (Path(root) / LEASE).exists(), "T74 the killed run leaves its lease"
     return root
-
-
-def t74_lease_bytes(pid, host=None, verb="record", lease_schema=1):
-    """A canonical-shape lease payload naming holder opf-<verb>:<host>:<pid> (acquire_lease's field
-    order), for the refusal legs that plant a crafted leftover."""
-    host = socket.gethostname() if host is None else host
-    return ('acquired_at = "2026-09-27T00:00:00Z"\nholder = "opf-{}:{}:{}"\noperation = "{}"\n'
-            'schema = {}\n'.format(verb, host, pid, verb, lease_schema)).encode("utf-8")
 
 
 def _t74_dead_pid(root):
@@ -6781,43 +6144,39 @@ def _t74_refused_leg(fx, name, lease_bytes, needle=T74_HELD):
 
 
 def t74_never_seize_dead_run_release(fx):
-    """Recovery applies the spec 5.7 never-seize and dead-run release clauses, each never-seize guard
-    carrying its own discriminating leg: a leftover lease whose holder is confirmed dead on this host is
-    released through the reconciliation itself, in the same run, with the outcome naming the released
-    lease and its holder; a LIVE local holder refuses before any recovery write with every byte intact
-    (the never-seize core: never seized, however stale the journal behind it); a confirmed-dead holder on
-    ANOTHER host
-    refuses (liveness is observable only here, and this leg's dead pid turns red if the host binding is
-    dropped); a dead holder under a non-closed payload schema refuses (full validation precedes any
-    holder comparison); a MALFORMED OVERSIZED payload whose first 64 KiB parse as exactly the dead
-    holder's valid lease refuses (the payload is read through EOF, never judged by a valid-looking
-    prefix); an EPERM liveness probe reads possibly-live and refuses (a live foreign-uid holder is never
-    seized); a dead holder of ANOTHER verb's lease refuses (this verb's reconciliation reconciles nothing
-    of that verb's writes); and a refusal recovery raises after a release (an intervening edit) still
-    carries the released-lease report beside the scoped no-journal-no-operand sentence, never the
-    unscoped nothing-written reading."""
+    """Recovery applies the spec 5.7 never-seize and dead-run release clauses through the operation
+    capability: a leftover capability whose holder is confirmed dead on this host is released through
+    the reconciliation itself, in the same run, with the outcome naming the released lease and its
+    holder; a MALFORMED OVERSIZED lease whose first 64 KiB parse as exactly the dead holder's valid
+    lease refuses with every byte intact; an EPERM liveness probe reads possibly-live and refuses (a
+    live foreign-uid holder is never seized); and a refusal recovery raises after a release (an
+    intervening edit) still carries the released-lease report beside the scoped
+    no-journal-no-operand sentence, never the unscoped nothing-written reading."""
     env = fx.env
     root = _t74_interrupted(fx, "t74-dead-holder")
     dead_pid = _t74_dead_pid(root)
     result = record_cli(env, root, CREATE)
     refused(result, "was reconciled")
     err = result[2]
-    assert "leftover single-writer lease" in err and "confirmed-dead holder" in err, (
-        "T74 the outcome names the released lease and its holder", err[-1200:])
+    assert T74_RECLAIMED in err, ("T74 the outcome names the released lease and its holder", err[-1200:])
     assert not (Path(root) / LEASE).exists(), "T74 the leftover lease and recovery's own are released"
     assert not any(s == "open" for s in journal_states(root).values()), "T74 the journal is reconciled"
-    # The live local holder: the never-seize core. The crafted lease names THIS live process.
-    _t74_refused_leg(fx, "t74-live-holder", t74_lease_bytes(os.getpid()))
-    # A confirmed-dead holder on another host still reads possibly-live here (the host binding).
-    _t74_refused_leg(fx, "t74-cross-host", t74_lease_bytes(dead_pid, host="no-such-host.invalid"))
-    # A dead holder under a non-closed payload schema (full validation precedes the holder comparison).
-    _t74_refused_leg(fx, "t74-bad-schema", t74_lease_bytes(dead_pid, lease_schema=999))
-    # A malformed oversized payload whose first 64 KiB are exactly the dead holder's valid lease.
-    valid = t74_lease_bytes(dead_pid)
+    # Retired legs, each covered by the capability's own gate tests in _opf_oplock --self-test:
+    # the live local holder by "T-r3-live recover REFUSES a live holder (never a second holder)";
+    # the cross-host holder by "T-r3-crosshost recover REFUSES a foreign-host holder";
+    # the non-closed payload schema by "T-d2 (DEF-2) missing holder fields are validated, not compared
+    # as None == None"; and another verb's dead holder, which a homes-2 record run now reclaims and
+    # attributes to that operation, by T37-reclaim-names-operation.
+    # A malformed oversized lease whose first 64 KiB are exactly the dead holder's valid lease.
+    root = _t74_interrupted(fx, "t74-oversized-prefix")
+    valid = read(root, LEASE)
     oversized = valid + b"#" * (65536 - len(valid) - 1) + b"\n" + b"schema = 1\n"
     assert len(oversized) > 65536 and tomllib.loads(oversized[:65536].decode("utf-8")), \
         "T74 the oversized fixture's 64 KiB prefix parses clean"
-    _t74_refused_leg(fx, "t74-oversized-prefix", oversized)
+    (Path(root) / LEASE).write_bytes(oversized)
+    before = snapshot(root)
+    refused(record_cli(env, root, CREATE), T74_HELD)
+    assert snapshot(root) == before, "T74 an oversized lease refuses with every byte untouched"
     # An EPERM liveness probe reads possibly-live, never dead (a live foreign-uid holder).
     real_kill = os.kill
 
@@ -6826,13 +6185,11 @@ def t74_never_seize_dead_run_release(fx):
             raise PermissionError(1, "Operation not permitted")
         return real_kill(pid, sig)
     root = _t74_interrupted(fx, "t74-eperm-holder")
-    (Path(root) / LEASE).write_bytes(t74_lease_bytes(dead_pid))
+    dead_pid = _t74_dead_pid(root)
     before = snapshot(root)
     with patch.object(os, "kill", eperm_kill):
         refused(record_cli(env, root, CREATE), T74_HELD)
     assert snapshot(root) == before, "T74 an EPERM probe refuses with every byte untouched"
-    # Another verb's dead holder: record recovery reconciles nothing of an upgrade's writes.
-    _t74_refused_leg(fx, "t74-foreign-verb", t74_lease_bytes(dead_pid, verb="upgrade"))
     root = _t74_interrupted(fx, "t74-released-then-refused")
     original = read(root, BI_INDEX)
     edited = original + b"# an edit after the interruption\n"
@@ -6840,8 +6197,7 @@ def t74_never_seize_dead_run_release(fx):
     result = record_cli(env, root, CREATE)
     refused(result, "an intervening edit")
     err = result[2]
-    assert "Before that refusal," in err and "leftover single-writer lease" in err, (
-        "T74 the refusal carries the released-lease report", err[-1600:])
+    assert T74_RELEASED_BEFORE in err, ("T74 the refusal carries the released-lease report", err[-1600:])
     assert T74_SCOPED in err and T74_UNSCOPED not in err, (
         "T74 the no-write sentence is scoped to the journal and operands", err[-1600:])
     assert not (Path(root) / LEASE).exists(), "T74 recovery's own lease is released on the refusal path"
@@ -6849,12 +6205,14 @@ def t74_never_seize_dead_run_release(fx):
 
 
 def flip_t74_claim():
-    """The pre-fix recovery claim: the plain atomic acquisition, under which ANY present lease refuses
-    (the pre-qualification reading of spec 8.8 item 1, which now grants the dead-run release, grounded in
-    the section 5.7 dead-run release clause) and a dead run's leftover waits for the operator."""
-    return patch.object(guard, "acquire_lease_for_recovery",
-                        lambda root_fd, machine_rel, verb: (guard.acquire_lease(root_fd, machine_rel, verb),
-                                                            None))
+    """The pre-fix recovery claim: the plain acquisition, under which ANY present capability record
+    refuses (the pre-qualification reading of spec 8.8 item 1, which now grants the dead-run release,
+    grounded in the section 5.7 dead-run release clause) and a dead run's leftover waits for the
+    operator."""
+    original = record._opf_oplock.acquire_operation
+    return patch.object(record._opf_oplock, "acquire_operation",
+                        lambda store_root, operation, holder=None, recover=False:
+                        original(store_root, operation, holder=holder))
 
 
 def flip_t74_unscoped():
@@ -6869,78 +6227,46 @@ def flip_t74_unscoped():
     return patch.object(record, "RecordError", Unscoped)
 
 
-def flip_t74_live():
-    """The liveness probe dropped: every examined holder reads confirmed-dead, live ones included."""
-    return patch.object(guard, "_lease_holder_confirmed_dead", lambda pid: True)
-
-
-def flip_t74_host():
-    """The host binding dropped: a cross-host holder's recorded pid is probed as if it were local."""
-    return patch.object(guard, "_holder_names_this_host", lambda host: True)
-
-
-def flip_t74_schema():
-    """The closed-payload validation dropped: any parseable payload carrying holder and operation
-    strings qualifies, whatever its schema or extra keys."""
-    def loose(raw):
-        try:
-            data = tomllib.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            return None
-        ok = isinstance(data, dict) and all(type(data.get(k)) is str for k in ("holder", "operation"))
-        return data if ok else None
-    return patch.object(guard, "_closed_lease_model", loose)
-
-
 def flip_t74_prefix():
-    """The pre-fix single bounded lease read: an oversized payload is judged by its first 64 KiB. It takes
-    the cause list its callers now pass and records no cause (the pre-fix read had none)."""
-    def bounded(pfd, name, why=None):
+    """The pre-cap control-record read: a record over the 64 KiB cap is judged by its first 64 KiB (the
+    rest read but never parsed), and the bytes it returns for the delete's binding are the whole object,
+    so the oversized leftover lease whose prefix is the dead holder's valid lease passes the recovery gate
+    and is removed. A record within the cap is read by the real reader."""
+    real = _opf_oplock._read_control_record
+
+    def prefix_judged(dir_fd, name, label):
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
         except OSError:
-            return None
+            return real(dir_fd, name, label)
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return None
-            return os.read(fd, 65536)
-        except OSError:
-            return None
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size <= _opf_oplock._MAX_RECORD_BYTES:
+                return real(dir_fd, name, label)
+            data = bytearray()
+            chunk = os.read(fd, 65536)
+            while chunk:
+                data += chunk
+                chunk = os.read(fd, 65536)
         finally:
             journal._close_fd_quietly(fd)
-    return patch.object(guard, "read_lease_payload", bounded)
+        return tomllib.loads(bytes(data[:65536]).decode("utf-8")), (st.st_dev, st.st_ino), bytes(data)
+    return patch.object(_opf_oplock, "_read_control_record", prefix_judged)
 
 
 def flip_t74_eperm():
     """EPERM read as dead: a live holder under another uid would be seized."""
-    def eperm_is_dead(pid):
+    original = journal.owner_confirmed_dead
+
+    def eperm_is_dead(owner):
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
+            os.kill(owner.get("pid"), 0)
         except PermissionError:
             return True
-        except Exception:  # noqa: BLE001  anything else stays possibly-live, as the fixed code reads it
-            return False
-        return False
-    return patch.object(guard, "_lease_holder_confirmed_dead", eperm_is_dead)
-
-
-def flip_t74_verb():
-    """The verb binding dropped: a dead holder of ANY opf verb's lease qualifies for this verb's
-    reconciliation."""
-    original = guard._examined_leftover_holder
-
-    def unbound(raw, verb):
-        found = original(raw, verb)
-        if found is not None:
-            return found
-        try:
-            op = tomllib.loads(raw.decode("utf-8")).get("operation")
-        except (UnicodeDecodeError, ValueError, AttributeError):
-            return None
-        return original(raw, op) if isinstance(op, str) and op and op != verb else None
-    return patch.object(guard, "_examined_leftover_holder", unbound)
+        except Exception:  # noqa: BLE001  anything else is judged as the fixed code judges it
+            pass
+        return original(owner)
+    return patch.object(journal, "owner_confirmed_dead", eperm_is_dead)
 
 
 # --- T75: two concurrent recoveries never both hold the lease (spec 5.7) ---------------------------------
@@ -6969,22 +6295,23 @@ def _t75_gated_unlink(path, *args, **kwargs):
     return _t75_unlink(path, *args, **kwargs)
 _t75_os.unlink = _t75_gated_unlink
 _t75_os.supports_dir_fd.add(_t75_gated_unlink)
-_t75_recover = record._recover_journal
-def _t75_gated_recover(ctx, jr_fd, journal_root):
+_t75_recover = record._capability_recovery_plan
+def _t75_gated_recover(ctx):
     (_T75_SYNC / (_T75_TAG + "-in-recovery")).write_bytes(b"")
     _t75_wait(_T75_TAG + "-go-recovery")
-    return _t75_recover(ctx, jr_fd, journal_root)
-record._recover_journal = _t75_gated_recover
+    return _t75_recover(ctx)
+record._capability_recovery_plan = _t75_gated_recover
 {neutralize}
 """
 
-# The T75 flip, applied inside both children: the examination serialization made a no-op, restoring the
-# reviewed head's unserialized release. _t75_flip holds the prelude the children run with.
+# The T75 flip, applied inside both children: the operation capability's anchor flock made a no-op,
+# restoring an unserialized recovery. _t75_flip holds the prelude the children run with.
 _t75_flip = [""]
 FLIP_T75 = """
-import _opf_write_guard as _t75_guard
-_t75_guard._exclusive_examination = lambda pfd, lease_rel, verb: None
+import _opf_oplock as _t75_oplock
+_t75_oplock._flock_exclusive = lambda anchor_fd: None
 """
+T75_CONTENTION = "operation lock is held by another process (contention; a held anchor is never seized)"
 
 T75_GO_MARKERS = ("a-go-unlink", "b-go-unlink", "a-go-recovery", "b-go-recovery")
 
@@ -7032,11 +6359,11 @@ def _t75_collect(proc, collected, unwinding=False):
 
 def t75_concurrent_recovery(fx):
     """At most ONE of two concurrent REAL recoveries ever examines, releases, and re-claims a dead run's
-    leftover lease (spec 5.7 never-seize over the recovery path itself). Recovery A is paused between its
-    passed ownership compare and its unlink, the examination lock held; recovery B, started there, must
-    refuse at that lock rather than read the same dead-holder bytes. Under an unserialized release this
-    exact schedule lets B pass the same compare, A release and re-claim, and B's deferred unlink then
-    seize A's freshly created LIVE lease, both runs entering journal recovery as writers; the test drives
+    leftover capability (spec 5.7 never-seize over the recovery path itself). Recovery A is paused between
+    its passed liveness gate and its lease unlink, the capability's anchor flock held; recovery B, started
+    there, must refuse at that anchor rather than read the same dead-holder bytes. Under an unserialized
+    recovery this exact schedule lets B pass the same gate, A release and re-claim, and B's deferred
+    unlink then race A's freshly created LIVE lease, both runs entering journal recovery as writers; the test drives
     that schedule with real `opf record` children whose only instrumentation forces the interleaving (a
     pause at the lease unlink and at recovery entry), changing no decision, and turns red whenever both
     children reach recovery together or the loser writes anything."""
@@ -7071,8 +6398,8 @@ def t75_concurrent_recovery(fx):
             "the faster recoverer's live lease)", err_a[-800:], err_b[-800:])
         assert a.returncode == 2 and "was reconciled" in err_a, (
             "T75 the first recoverer reconciles", a.returncode, err_a[-1200:])
-        assert b.returncode == 2 and "concurrently examining" in err_b, (
-            "T75 the second recovery refuses at the examination lock", b.returncode, err_b[-1200:])
+        assert b.returncode == 2 and T75_CONTENTION in err_b, (
+            "T75 the second recovery refuses at the capability's anchor", b.returncode, err_b[-1200:])
         assert "was reconciled" not in err_b and RECORDED_EVENT not in out_b, (
             "T75 the second recovery writes nothing", err_b[-1200:])
         assert not (Path(root) / LEASE).exists(), "T75 the winning recovery released its own lease"
@@ -7084,29 +6411,31 @@ def t75_concurrent_recovery(fx):
 
 # --- T76: an examination lock failure is diagnosed as what it is (spec section 17) -----------------------
 
-T76_HELD_LOCK = "concurrently examining"
-T76_LOCK_FAILURE = "could not be taken"
+T76_HELD_LOCK = "operation lock is held by another process (contention"
+T76_LOCK_FAILURE = "cannot flock mutex anchor"
 
 
 def _t76_flock_failing(code):
-    """fcntl.flock raising OSError(code) for the examination lock alone (an exclusive non-blocking lock
-    on a DIRECTORY descriptor); every other flock (the journal and capability locks, on regular files)
-    runs unchanged."""
+    """fcntl.flock raising OSError(code) for the operation capability's anchor flock alone (the run's
+    first exclusive non-blocking flock, its recovery acquisition's); every later flock runs
+    unchanged."""
     import fcntl
     real = fcntl.flock
+    armed = [True]
 
     def failing(fd, operation):
-        if operation == fcntl.LOCK_EX | fcntl.LOCK_NB and stat.S_ISDIR(os.fstat(fd).st_mode):
+        if armed and operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+            del armed[:]
             raise OSError(code, os.strerror(code))
         return real(fd, operation)
     return patch.object(fcntl, "flock", failing)
 
 
 def t76_lock_failure_diagnosed(fx):
-    """The examination lock's failure is diagnosed as what it is: a HELD lock (EWOULDBLOCK/EAGAIN)
-    refuses naming a concurrent reconciliation, and a lock the store's filesystem does not support or
-    refuses (ENOLCK, ENOTSUP, EINVAL, EBADF) refuses naming the lock failure, never a concurrent
-    reconciliation that need not exist; each refuses before any recovery write with every byte untouched."""
+    """The recovery acquisition's anchor flock failure is diagnosed as what it is: a HELD anchor
+    (EWOULDBLOCK/EAGAIN) refuses naming contention, and a lock the store's filesystem does not support
+    or refuses (ENOLCK, ENOTSUP, EINVAL, EBADF) refuses naming the flock failure, never a contention
+    that need not exist; each refuses before any recovery write with every byte untouched."""
     legs = ((errno.EWOULDBLOCK, T76_HELD_LOCK, T76_LOCK_FAILURE),
             (errno.ENOLCK, T76_LOCK_FAILURE, T76_HELD_LOCK),
             (errno.ENOTSUP, T76_LOCK_FAILURE, T76_HELD_LOCK),
@@ -7123,112 +6452,83 @@ def t76_lock_failure_diagnosed(fx):
 
 
 def flip_t76():
-    """The round-2 broad catch: every flock failure reads as a concurrent reconciliation."""
-    def broad(pfd, lease_rel, verb):
+    """The broad catch: every anchor flock failure reads as contention."""
+    def broad(anchor_fd):
         import fcntl
         try:
-            fcntl.flock(pfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(anchor_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise guard.WriteGuardError(
-                "another reconciliation is concurrently examining the {} lease {} ({}); this run refuses "
-                "rather than race it".format(verb, lease_rel, exc)) from exc
-    return patch.object(guard, "_exclusive_examination", broad)
+            raise _opf_oplock.OpLockError("operation lock is held by another process (contention; a held "
+                                          "anchor is never seized) ({})".format(exc)) from exc
+    return patch.object(_opf_oplock, "_flock_exclusive", broad)
 
 
 # --- T77: every failure after the release carries the released-lease report (spec 5.7) -------------------
 
-T77_REPORT = "leftover single-writer lease"
-
-
-def _t77_released(root):
-    """True once the leftover lease has been released (unlinked): the retried claim's window."""
-    return not os.path.lexists(os.path.join(str(root), LEASE))
+T77_REPORT = ("before it failed the acquisition removed the stale operation capability lease and active record "
+              "of a holder its recovery gate confirmed dead")
 
 
 @contextlib.contextmanager
-def _t77_claim_failing(root, make_exc):
-    """os.open raising make_exc() for the RETRIED exclusive lease create alone (the one after the
-    leftover's release; the first create meets the leftover and refuses EEXIST, unchanged). The stand-in
-    joins every capability set holding the real call (os.supports_dir_fd and its kin), so the store's
-    containment probe still finds it (journal._st_supports)."""
-    real = os.open
+def _t77_publication_failing(make_exc):
+    """The recovery acquisition's publication of its own lease raising make_exc(), once: after the
+    confirmed-dead holder's leftover capability records were removed."""
+    real = _opf_oplock._create_control_file
     armed = [True]
 
-    def failing(path, flags, *args, **kwargs):
-        if (armed and flags & os.O_EXCL and os.path.basename(str(path)) == Path(LEASE).name
-                and kwargs.get("dir_fd") is not None and _t77_released(root)):
+    def failing(dir_fd, name, *args, **kwargs):
+        if armed and name == opf_check.LEASE_NAME:
             del armed[:]
             raise make_exc()
-        return real(path, flags, *args, **kwargs)
-    tables = [table for table in journal._st_supports(os) if real in table]
-    for table in tables:
-        table.add(failing)
-    try:
-        with patch.object(os, "open", failing):
-            yield
-    finally:
-        for table in tables:
-            table.discard(failing)
-
-
-def _t77_reopen_failing(root):
-    """journal._open_parent raising JournalError for the retried claim's reopen of the lease directory
-    alone (the first reopen of the lease's parent after the leftover's release)."""
-    real = journal._open_parent
-    armed = [True]
-
-    def failing(root_fd, relpath):
-        if armed and relpath == LEASE and _t77_released(root):
-            del armed[:]
-            raise journal.JournalError("T77 injected: the lease directory cannot be reopened")
-        return real(root_fd, relpath)
-    return patch.object(journal, "_open_parent", failing)
+        return real(dir_fd, name, *args, **kwargs)
+    with patch.object(_opf_oplock, "_create_control_file", failing):
+        yield
 
 
 def t77_report_every_failure(fx):
-    """Every failure AFTER the leftover lease's release carries the released-lease report, whatever its
-    type: an EMFILE on the retried O_EXCL claim and a JournalError reopening the lease directory each
-    refuse with the report appended (the lease left released, the journal left for the next run), and an
-    interrupt propagates as itself with the report attached as a note."""
-    for name, injected in (("t77-emfile", lambda root: _t77_claim_failing(root, lambda: _injected(
-                                "t77-emfile", OSError(errno.EMFILE, "T77 injected: EMFILE on the retried "
-                                                                    "claim")))),
-                           ("t77-journal-error", _t77_reopen_failing)):
+    """Every failure AFTER the recovery acquisition removed a confirmed-dead holder's capability records
+    carries that removal's report, whatever its type: an EMFILE, a JournalError and an OpLockError raised
+    by the acquisition's own lease publication each refuse with the report appended (the leftover records
+    removed and nothing re-claimed, the journal left for the next run), and an interrupt propagates as
+    itself with the report attached as a note."""
+    for name, make in (("t77-emfile", lambda: _injected("t77-emfile", OSError(
+                            errno.EMFILE, "T77 injected: EMFILE on the retried claim"))),
+                       ("t77-journal-error", lambda: journal.JournalError(
+                           "T77 injected: the lease publication cannot complete")),
+                       ("t77-oplock-error", lambda: _opf_oplock.OpLockError(
+                           "T77 injected: the lease publication refused"))):
         root = _t74_interrupted(fx, name)
-        with injected(root):
+        with _t77_publication_failing(make):
             result = record_cli(fx.env, root, CREATE)
-        refused(result, "Before that claim,")
-        assert T77_REPORT in result[2], ("T77 the refusal carries the released-lease report", name,
-                                         result[2][-1600:])
-        assert _t77_released(root), ("T77 the leftover lease is released and nothing re-claimed", name)
+        refused(result, T77_REPORT)
+        assert capability_records(root) == (False, False), (
+            "T77 the leftover records are removed and nothing re-claimed", name)
         assert any(st == "open" for st in journal_states(root).values()), (
             "T77 the journal is left for the next run", name)
     root = _t74_interrupted(fx, "t77-interrupt")
     notes = None
-    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        with _t77_claim_failing(root, KeyboardInterrupt):
-            try:
-                guard.acquire_lease_for_recovery(root_fd, MACH, record.VERB)
-            except KeyboardInterrupt as exc:
-                notes = list(getattr(exc, "__notes__", ()))
-    finally:
-        os.close(root_fd)
+    with _t77_publication_failing(KeyboardInterrupt):
+        try:
+            record._opf_oplock.acquire_operation(str(root), record.VERB, recover=True)
+        except KeyboardInterrupt as exc:
+            notes = list(getattr(exc, "__notes__", ()))
     assert notes is not None, "T77 the interrupt propagates as itself"
     assert any(T77_REPORT in note for note in notes), (
         "T77 the interrupt carries the report as a note", notes)
-    assert _t77_released(root), "T77 the interrupted claim left the leftover released"
+    assert capability_records(root) == (False, False), "T77 the interrupted claim left the leftover removed"
 
 
 def flip_t77():
-    """The round-2 retry: only a WriteGuardError from the retried claim carries the release report."""
-    def narrow(pfd, root_fd, machine_rel, verb, lease_rel, released):
-        os.fsync(pfd)
-        try:
-            return guard.acquire_lease(root_fd, machine_rel, verb)
-        except guard.WriteGuardError as exc:
-            raise guard.WriteGuardError("{} Before that claim, {}.".format(exc, released)) from exc
-    return patch.object(guard, "_claim_after_release", narrow)
+    """The acquisition that tags only an OpLockError with what it removed: the EMFILE escapes untagged to
+    the unexpected-error backstop (the declared t77-emfile injection) and an interrupt carries no note."""
+    return patch.object(_opf_oplock, "_with_removals", lambda exc, *_report: exc)
+
+
+def flip_t77_dropped():
+    """A refusal that drops what the recovery acquisition removed: the removal report is never carried."""
+    return patch.object(record, "_acquisition_removals",
+                        lambda exc: ("No record operand, record journal or projection was written, and the "
+                                     "acquisition removed nothing"))
 
 
 # --- T84: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
@@ -7245,83 +6545,25 @@ def t84_recursion_lease_refused_as_held(fx):
 
 @contextlib.contextmanager
 def flip_t84():
-    """The pre-fix lease parse, catching UnicodeDecodeError and ValueError only: a RecursionError escapes
-    _closed_lease_model to the record verb's backstop (the injection its declared backstop is bound to:
-    the deeply nested payload's RecursionError, which turns the first leg red)."""
-    original = guard._closed_lease_model
+    """The capability recovery gate's control-record parse catching UnicodeDecodeError and ValueError
+    only: a RecursionError escapes _read_control_record to the record verb's backstop (the injection
+    its declared backstop is bound to: the deeply nested payload's RecursionError, which turns the
+    first leg red)."""
+    original = _opf_oplock._read_control_record
 
-    def narrow(raw):
-        try:
-            tomllib.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            pass
-        return original(raw)
-    with patch.object(guard, "_closed_lease_model", narrow), \
-            _crash_point("t84-recursion", guard, "_closed_lease_model",
+    def narrow(dir_fd, name, label):
+        with contextlib.suppress(OSError):
+            with open(os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd), "rb") as handle:
+                raw = handle.read()
+            try:
+                tomllib.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                pass
+        return original(dir_fd, name, label)
+    with patch.object(_opf_oplock, "_read_control_record", narrow), \
+            _crash_point("t84-recursion", _opf_oplock, "_read_control_record",
                          RecursionError("maximum recursion depth exceeded")):
         yield
-
-
-# --- T78: homes 2 is the declaration pair, never homes = 2 alone (spec 4.2) ---------------------------------
-
-def t78_homes2_needs_the_pair(fx):
-    """With homes 2 activated as the record verb will run once activation admits it (SUPPORTED_HOMES = 2
-    alone, without _Homes2SpecGate, so _load_manifest still admits 1.2.0; manifest validation also
-    refuses this declaration, but only after reconciliation, so the journal-home probe is the guard
-    before any write), a store declaring homes = 2 at the base spec_version (1.2.0, not
-    HOMES2_SPEC_VERSION) is not a homes-2 store, and the record verb refuses it at that probe before any
-    reconciliation or write. Two stores, each with the declaration committed: a fresh one, where a run
-    past the probe publishes into the legacy journal and rewrites the operands, and one holding a
-    reconcilable legacy leftover (the T15 journal lock), where a run past the probe reconciles it in
-    place. In each, every byte stays untouched (asserted first), the verb chooses no journal home, the
-    refusal names the declaration pair, homes_generation grades the store generation 1, and no journal
-    home is created. The retired HOMES2_SPEC_VERSION patch made 1.2.0 the homes-2 version, so it read
-    this very store as homes 2."""
-    env = fx.env
-    manifest_rel = MACH + "/" + _opf_store.MANIFEST_NAME
-    needle = "homes 2 only with spec_version " + _opf_store.HOMES2_SPEC_VERSION
-    for label in ("fresh", "legacy"):
-        root = fx.case("t78-base-version-" + label)
-        if label == "legacy":
-            proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
-            assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (label, proc.returncode,
-                                                                            proc.stderr[-800:])
-            assert (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T78 a reconcilable legacy leftover",
-                                                                        label)
-        declared = model(root, manifest_rel)
-        declared["opf"]["homes"] = 2
-        (Path(root) / manifest_rel).write_text(emit.emit_checked(declared), encoding="utf-8")
-        fx.commit_all(root, "declare homes = 2 at the base spec_version")
-        assert declared["opf"]["spec_version"] == _opf_store.SUPPORTED_SPEC_VERSION, (
-            "T78 the store declares homes = 2 at 1.2.0", label, declared["opf"])
-        chosen = []
-        journal_rel = record._record_journal_rel
-
-        def choosing(homes, chosen=chosen, journal_rel=journal_rel):
-            chosen.append(homes)
-            return journal_rel(homes)
-        with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
-            before = snapshot(root)
-            with patch.object(record, "_record_journal_rel", choosing):
-                result = record_cli(env, root, CREATE)
-            assert snapshot(root) == before, ("T78 bytes untouched on refusal", label, result[0], result[2][-800:])
-            assert chosen == [], ("T78 the verb chooses no journal home", label, chosen, result[2][-800:])
-            refused(result, needle)
-            assert _opf_store.homes_generation(declared) == 1, ("T78 homes = 2 at 1.2.0 is graded generation 1",
-                                                               label)
-        assert not (Path(root) / ".working/journals").exists(), ("T78 no typed journal home is created", label)
-        if label == "fresh":
-            assert not (Path(root) / record.JOURNAL_REL).exists(), "T78 no legacy journal is created"
-
-
-def flip_t78():
-    """Restore the retired HOMES2_SPEC_VERSION patch: the base spec_version becomes the homes-2 one, so
-    the 1.2.0 store declaring homes = 2 reads as generation 2. The record verb's probe then passes and
-    chooses the typed journal home; the fresh store then records through the live homes-2 seam into
-    the typed journal home, and the legacy one refuses at the legacy-journal refusal, so T78 turns red
-    on the written bytes or the journal home the verb chose, before its refusal text and before the
-    direct homes_generation assertion."""
-    return patch.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION)
 
 
 # --- T79, T80: the homes-2 reservation vectors (spec 8.2; homes plan PR-4) -----------------------------
@@ -7347,43 +6589,42 @@ def t79_kill_after_reserve(fx):
     carrying the orphan is VALID."""
     env = fx.env
     base = fx.case("t79-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t79-homes2-killed", base)
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        counters0 = model(root, COUNTERS)["counters"]
-        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AFTER_RESERVE)
-        assert proc.returncode == 137, ("T79 the child is killed after reserving", proc.returncode,
-                                        proc.stderr[-800:])
-        assert RECORDED_EVENT not in proc.stdout, "T79 a killed run reports no id"
-        alloc_dir = Path(root) / record._ALLOCATIONS_REL
-        names = sorted(os.listdir(alloc_dir))
-        assert len(names) == 1, ("T79 the reservation is standing", names)
-        first = (alloc_dir / names[0]).read_bytes()
-        first_claims = tomllib.loads(first.decode("utf-8"))["claims"]
-        assert first_claims == {"BI": counters0["BI"] + 1, "WL": counters0["WL"] + 1}, first_claims
-        assert journal_states(root, TYPED_JOURNAL) == {}, "T79 nothing was journaled"
-        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-            "T79 the operands end at the prestate"
-        refused(record_cli(env, root, CREATE), "were reclaimed before this operation")
-        assert (alloc_dir / names[0]).read_bytes() == first, "T79 the reclaim never touches the reservation"
-        rc, out, err = record_cli(env, root, CREATE)
-        assert rc == 0 and RECORDED_EVENT in out, ("T79 the run above the orphan records, doctor VALID", rc,
-                                                   err[-1600:])
-        names2 = sorted(os.listdir(alloc_dir))
-        assert len(names2) == 2 and names[0] in names2, ("T79 both reservations standing", names2)
-        (second_name,) = [n for n in names2 if n != names[0]]
-        second_claims = tomllib.loads((alloc_dir / second_name).read_bytes().decode("utf-8"))["claims"]
-        assert second_claims == {"BI": first_claims["BI"] + 1,
-                                 "WL": first_claims["WL"] + 1}, \
-            ("T79 the re-run derives above the orphaned reservation", first_claims, second_claims)
-        assert (alloc_dir / names[0]).read_bytes() == first, "T79 the orphan is never rewritten"
-        counters2 = model(root, COUNTERS)["counters"]
-        assert counters2["BI"] == second_claims["BI"] and counters2["WL"] == second_claims["WL"], counters2
-        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
-        reserved_id = "BI-{}".format(first_claims["BI"])
-        issued_id = "BI-{}".format(second_claims["BI"])
-        assert issued_id in rows and reserved_id not in rows, \
-            ("T79 the reserved id is never issued again", rows)
+    root = fx.case("t79-homes2-killed", base)
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    counters0 = model(root, COUNTERS)["counters"]
+    proc = child(env, root, CREATE, flip=DIE_AFTER_RESERVE)
+    assert proc.returncode == 137, ("T79 the child is killed after reserving", proc.returncode,
+                                    proc.stderr[-800:])
+    assert RECORDED_EVENT not in proc.stdout, "T79 a killed run reports no id"
+    alloc_dir = Path(root) / record._ALLOCATIONS_REL
+    names = sorted(os.listdir(alloc_dir))
+    assert len(names) == 1, ("T79 the reservation is standing", names)
+    first = (alloc_dir / names[0]).read_bytes()
+    first_claims = tomllib.loads(first.decode("utf-8"))["claims"]
+    assert first_claims == {"BI": counters0["BI"] + 1, "WL": counters0["WL"] + 1}, first_claims
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T79 nothing was journaled"
+    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+        "T79 the operands end at the prestate"
+    refused(record_cli(env, root, CREATE), "were reclaimed before this operation")
+    assert (alloc_dir / names[0]).read_bytes() == first, "T79 the reclaim never touches the reservation"
+    rc, out, err = record_cli(env, root, CREATE)
+    assert rc == 0 and RECORDED_EVENT in out, ("T79 the run above the orphan records, doctor VALID", rc,
+                                               err[-1600:])
+    names2 = sorted(os.listdir(alloc_dir))
+    assert len(names2) == 2 and names[0] in names2, ("T79 both reservations standing", names2)
+    (second_name,) = [n for n in names2 if n != names[0]]
+    second_claims = tomllib.loads((alloc_dir / second_name).read_bytes().decode("utf-8"))["claims"]
+    assert second_claims == {"BI": first_claims["BI"] + 1,
+                             "WL": first_claims["WL"] + 1}, \
+        ("T79 the re-run derives above the orphaned reservation", first_claims, second_claims)
+    assert (alloc_dir / names[0]).read_bytes() == first, "T79 the orphan is never rewritten"
+    counters2 = model(root, COUNTERS)["counters"]
+    assert counters2["BI"] == second_claims["BI"] and counters2["WL"] == second_claims["WL"], counters2
+    rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+    reserved_id = "BI-{}".format(first_claims["BI"])
+    issued_id = "BI-{}".format(second_claims["BI"])
+    assert issued_id in rows and reserved_id not in rows, \
+        ("T79 the reserved id is never issued again", rows)
 
 
 def flip_t79():
@@ -7408,58 +6649,57 @@ def t80_two_runs_never_same_id(fx):
     prestate; re-planned, the second run derives the next numbers, both reservations standing
     disjoint and the first never rewritten."""
     base = fx.case("t80-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t80-homes2-two-runs", base)
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        stamps = ("record-20260927T000101Z-" + "a" * 16,
-                  "record-20260927T000102Z-" + "b" * 16)
-        reservations = [Path(root) / record._opf_store.allocation_record("record", s) for s in stamps]
-        fds = []
+    root = fx.case("t80-homes2-two-runs", base)
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    stamps = ("record-20260927T000101Z-" + "a" * 16,
+              "record-20260927T000102Z-" + "b" * 16)
+    reservations = [Path(root) / record._opf_store.allocation_record("record", s) for s in stamps]
+    fds = []
 
-        def planned():
-            root_fd = record._opf_store._open_dir_nofollow(res.store_root)
-            fds.append(root_fd)
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            record._load_manifest(ctx)
-            assert ctx.homes == 2, ("T80 the validated generation", ctx.homes)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            return ctx, record._claim(ctx, ["BI", "WL"])
+    def planned():
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        fds.append(root_fd)
+        ctx = record.Context(res, str(root), root_fd)
+        ctx.journal_rel = record._record_journal_rel(record._probe_admission(ctx))
+        record._load_manifest(ctx)
+        assert ctx.homes == 2, ("T80 the validated generation", ctx.homes)
+        ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+        return ctx, record._claim(ctx, ["BI", "WL"])
 
-        def reserve(ctx, ids, stamp):
-            cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
-            try:
-                record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
-            finally:
-                record._opf_oplock.release_operation(cap)
+    def reserve(ctx, ids, stamp):
+        cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
         try:
-            (ctx1, ids1), (ctx2, ids2) = planned(), planned()
-            assert ids1 == ids2 == ["BI-1", "WL-1"], ("T80 both plans derive the same numbers", ids1, ids2)
-            reserve(ctx1, ids1, stamps[0])
-            first = reservations[0].read_bytes()
-            try:
-                reserve(ctx2, ids2, stamps[1])
-            except record.RecordError as exc:
-                message = str(exc)
-            else:
-                raise AssertionError("T80 the second, stale plan must refuse at the held revalidation")
-            assert "changed between planning and the held capability" in message, message
-            assert not reservations[1].exists(), "T80 the refused run publishes no reservation"
-            assert journal_states(root, TYPED_JOURNAL) == {}, "T80 no transaction is opened"
-            assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-                "T80 no operand is published"
-            ctx3, ids3 = planned()
-            assert ids3 == ["BI-2", "WL-2"], ("T80 the re-planned run derives the next numbers", ids3)
-            reserve(ctx3, ids3, stamps[1])
+            record._reserve_claim(ctx, record.Plan([], ids), cap, stamp)
         finally:
-            for fd in fds:
-                os.close(fd)
-        assert reservations[0].read_bytes() == first, "T80 the first reservation is never rewritten"
-        for reservation, claimed in zip(reservations, ({"BI": 1, "WL": 1}, {"BI": 2, "WL": 2})):
-            payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
-            assert payload["claims"] == claimed, ("T80 the reservations stand disjoint", reservation, payload)
+            record._opf_oplock.release_operation(cap)
+    try:
+        (ctx1, ids1), (ctx2, ids2) = planned(), planned()
+        assert ids1 == ids2 == ["BI-1", "WL-1"], ("T80 both plans derive the same numbers", ids1, ids2)
+        reserve(ctx1, ids1, stamps[0])
+        first = reservations[0].read_bytes()
+        try:
+            reserve(ctx2, ids2, stamps[1])
+        except record.RecordError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("T80 the second, stale plan must refuse at the held revalidation")
+        assert "changed between planning and the held capability" in message, message
+        assert not reservations[1].exists(), "T80 the refused run publishes no reservation"
+        assert journal_states(root, TYPED_JOURNAL) == {}, "T80 no transaction is opened"
+        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+            "T80 no operand is published"
+        ctx3, ids3 = planned()
+        assert ids3 == ["BI-2", "WL-2"], ("T80 the re-planned run derives the next numbers", ids3)
+        reserve(ctx3, ids3, stamps[1])
+    finally:
+        for fd in fds:
+            os.close(fd)
+    assert reservations[0].read_bytes() == first, "T80 the first reservation is never rewritten"
+    for reservation, claimed in zip(reservations, ({"BI": 1, "WL": 1}, {"BI": 2, "WL": 2})):
+        payload = tomllib.loads(reservation.read_bytes().decode("utf-8"))
+        assert payload["claims"] == claimed, ("T80 the reservations stand disjoint", reservation, payload)
 
 
 def flip_t80_no_recheck():
@@ -7480,47 +6720,46 @@ def t94_planned_ids_bound_to_claims(fx):
     right ids in another order, a missing id and an extra id each refuse with no reservation, no
     transaction and every operand at the prestate; the plan's own ids then reserve exactly its claims."""
     base = fx.case("t94-homes2-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t94-homes2-planned-ids", base)
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-        stamp = "record-20260927T000201Z-" + "c" * 16
-        reservation = Path(root) / record._opf_store.allocation_record("record", stamp)
-        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
-        try:
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            record._load_manifest(ctx)
-            assert ctx.homes == 2, ("T94 the validated generation", ctx.homes)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            ids = record._claim(ctx, ["BI", "WL"])
-            assert ids == ["BI-1", "WL-1"] and ctx.claims == {"BI": 1, "WL": 1}, ("T94 the plan", ids, ctx.claims)
+    root = fx.case("t94-homes2-planned-ids", base)
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    stamp = "record-20260927T000201Z-" + "c" * 16
+    reservation = Path(root) / record._opf_store.allocation_record("record", stamp)
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        ctx = record.Context(res, str(root), root_fd)
+        ctx.journal_rel = record._record_journal_rel(record._probe_admission(ctx))
+        record._load_manifest(ctx)
+        assert ctx.homes == 2, ("T94 the validated generation", ctx.homes)
+        ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+        ids = record._claim(ctx, ["BI", "WL"])
+        assert ids == ["BI-1", "WL-1"] and ctx.claims == {"BI": 1, "WL": 1}, ("T94 the plan", ids, ctx.claims)
 
-            def reserve(planned_ids):
-                cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
-                try:
-                    record._reserve_claim(ctx, record.Plan([], planned_ids), cap, stamp)
-                finally:
-                    record._opf_oplock.release_operation(cap)
-            for label, wrong in (("foreign-number", ["BI-999", "WL-1"]), ("reordered", ["WL-1", "BI-1"]),
-                                 ("missing", ["BI-1"]), ("extra", ["BI-1", "WL-1", "BI-2"])):
-                try:
-                    reserve(wrong)
-                except record.RecordError as exc:
-                    message = str(exc)
-                else:
-                    raise AssertionError(("T94 a plan whose ids its claims do not imply must refuse", label))
-                assert "are not the ids its demand and planned claims imply" in message, (label, message)
-                assert not reservation.exists(), ("T94 the refused plan publishes no reservation", label)
-                assert journal_states(root, TYPED_JOURNAL) == {}, ("T94 no transaction is opened", label)
-                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-                    ("T94 no operand is published", label)
-            reserve(ids)
-        finally:
-            os.close(root_fd)
-        payload = model(root, record._opf_store.allocation_record("record", stamp))
-        assert payload["claims"] == {"BI": 1, "WL": 1}, ("T94 the plan's own ids reserve its claims", payload)
+        def reserve(planned_ids):
+            cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
+            try:
+                record._reserve_claim(ctx, record.Plan([], planned_ids), cap, stamp)
+            finally:
+                record._opf_oplock.release_operation(cap)
+        for label, wrong in (("foreign-number", ["BI-999", "WL-1"]), ("reordered", ["WL-1", "BI-1"]),
+                             ("missing", ["BI-1"]), ("extra", ["BI-1", "WL-1", "BI-2"])):
+            try:
+                reserve(wrong)
+            except record.RecordError as exc:
+                message = str(exc)
+            else:
+                raise AssertionError(("T94 a plan whose ids its claims do not imply must refuse", label))
+            assert "are not the ids its demand and planned claims imply" in message, (label, message)
+            assert not reservation.exists(), ("T94 the refused plan publishes no reservation", label)
+            assert journal_states(root, TYPED_JOURNAL) == {}, ("T94 no transaction is opened", label)
+            assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                ("T94 no operand is published", label)
+        reserve(ids)
+    finally:
+        os.close(root_fd)
+    payload = model(root, record._opf_store.allocation_record("record", stamp))
+    assert payload["claims"] == {"BI": 1, "WL": 1}, ("T94 the plan's own ids reserve its claims", payload)
 
 
 def flip_t94_ids_unchecked():
@@ -7551,61 +6790,60 @@ def t81_cross_kind_reservations(fx):
     success assertion ending the run first."""
     env = fx.env
     base = fx.case("t81-homes2-base")
-    with _self_test_homes2_active(base):
-        stamp = "-20260927T000009Z-" + "9" * 16
-        for kind in record._opf_store.JOURNAL_KINDS:
-            if kind == "record":
-                continue
-            sub = fx.case("t81-homes2-malformed-" + kind, base)
-            target = Path(sub) / record._opf_store.allocation_record(
-                kind, record._opf_store._HOME_RUN_PREFIXES[kind] + stamp)
-            target.parent.mkdir(parents=True)
-            target.write_bytes(b"not toml [")
-            refused_untouched(env, sub, CREATE, "is malformed")
-        damaged = "imp" + stamp + ".toml"
-        rel = "{}/{}".format(record._allocations_rel("import"), damaged)
-        canonical = record._opf_journal.reservation_payload("import", "imp" + stamp, "op", {"BI": 1})
-        for label, name, plant, needle in (
-                ("non-regular", damaged, lambda d: d.mkdir(), "cannot read the id reservation {} (contained "
-                 "path {!r} is not a regular file)".format(rel, rel)),
-                ("unreadable", damaged, lambda d: d.write_bytes(canonical), "cannot read the id reservation "
-                 "{} ([Errno {}] {}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
-                ("wrong-type-string", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
-                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
-                ("wrong-type-boolean", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
-                 "the id reservation {} is malformed (id reservation claims must be".format(rel)),
-                ("conflicting", damaged, lambda d: d.write_bytes(record._opf_journal.reservation_payload(
-                    "ingest", "imp" + stamp, "op", {"BI": 1})),
-                 "conflicts with the exact canonical reservation"),
-                ("misnamed", "record" + stamp + ".toml", lambda d: d.write_bytes(
-                    record._opf_journal.reservation_payload("record", "record" + stamp, "op", {"BI": 1})),
-                 "is not an id reservation")):
-            sub = fx.case("t81-homes2-import-" + label, base)
-            target = Path(sub) / record._allocations_rel("import") / name
-            target.parent.mkdir(parents=True)
-            plant(target)
-            with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
-                refused_untouched(env, sub, CREATE, needle)
-        root = fx.case("t81-homes2-import-reserved", base)
-        cap = record._opf_oplock.acquire_operation(str(root), "import")
-        try:
-            record._opf_journal.reserve_allocation(cap, "import", T81_IMPORT_RUN, {"BI": 1, "WL": 1})
-        finally:
-            record._opf_oplock.release_operation(cap)
-        imported = Path(root) / record._opf_store.allocation_record("import", T81_IMPORT_RUN)
-        planted = imported.read_bytes()
-        rc, out, err = record_cli(env, root, CREATE)
-        rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
-        assert rows == ["BI-2"], ("T81 the import-kind reservation's numbers are never issued", rows, rc,
-                                  err[-1200:])
-        own = sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL))
-        assert len(own) == 1, ("T81 one record reservation", own)
-        claims = tomllib.loads((Path(root) / record._ALLOCATIONS_REL / own[0]).read_bytes()
-                               .decode("utf-8"))["claims"]
-        assert claims == {"BI": 2, "WL": 2}, ("T81 the record reservation claims above the import one", claims)
-        assert imported.read_bytes() == planted, "T81 the import reservation is never touched"
-        assert RECORDED_EVENT in out and rc == 0, ("T81 the run above the import reservation records, as T79",
-                                                  rc, err[-1600:])
+    stamp = "-20260927T000009Z-" + "9" * 16
+    for kind in record._opf_store.JOURNAL_KINDS:
+        if kind == "record":
+            continue
+        sub = fx.case("t81-homes2-malformed-" + kind, base)
+        target = Path(sub) / record._opf_store.allocation_record(
+            kind, record._opf_store._HOME_RUN_PREFIXES[kind] + stamp)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"not toml [")
+        refused_untouched(env, sub, CREATE, "is malformed")
+    damaged = "imp" + stamp + ".toml"
+    rel = "{}/{}".format(record._allocations_rel("import"), damaged)
+    canonical = record._opf_journal.reservation_payload("import", "imp" + stamp, "op", {"BI": 1})
+    for label, name, plant, needle in (
+            ("non-regular", damaged, lambda d: d.mkdir(), "cannot read the id reservation {} (contained "
+             "path {!r} is not a regular file)".format(rel, rel)),
+            ("unreadable", damaged, lambda d: d.write_bytes(canonical), "cannot read the id reservation "
+             "{} ([Errno {}] {}".format(rel, errno.EACCES, UNREADABLE_RESERVATION)),
+            ("wrong-type-string", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b'"1"')),
+             "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+            ("wrong-type-boolean", damaged, lambda d: d.write_bytes(_claims_retyped(canonical, b"true")),
+             "the id reservation {} is malformed (id reservation claims must be".format(rel)),
+            ("conflicting", damaged, lambda d: d.write_bytes(record._opf_journal.reservation_payload(
+                "ingest", "imp" + stamp, "op", {"BI": 1})),
+             "conflicts with the exact canonical reservation"),
+            ("misnamed", "record" + stamp + ".toml", lambda d: d.write_bytes(
+                record._opf_journal.reservation_payload("record", "record" + stamp, "op", {"BI": 1})),
+             "is not an id reservation")):
+        sub = fx.case("t81-homes2-import-" + label, base)
+        target = Path(sub) / record._allocations_rel("import") / name
+        target.parent.mkdir(parents=True)
+        plant(target)
+        with _unreadable_entry(damaged) if label == "unreadable" else contextlib.nullcontext():
+            refused_untouched(env, sub, CREATE, needle)
+    root = fx.case("t81-homes2-import-reserved", base)
+    cap = record._opf_oplock.acquire_operation(str(root), "import")
+    try:
+        record._opf_journal.reserve_allocation(cap, "import", T81_IMPORT_RUN, {"BI": 1, "WL": 1})
+    finally:
+        record._opf_oplock.release_operation(cap)
+    imported = Path(root) / record._opf_store.allocation_record("import", T81_IMPORT_RUN)
+    planted = imported.read_bytes()
+    rc, out, err = record_cli(env, root, CREATE)
+    rows = [r["id"] for r in model(root, BI_INDEX)["record"]]
+    assert rows == ["BI-2"], ("T81 the import-kind reservation's numbers are never issued", rows, rc,
+                              err[-1200:])
+    own = sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL))
+    assert len(own) == 1, ("T81 one record reservation", own)
+    claims = tomllib.loads((Path(root) / record._ALLOCATIONS_REL / own[0]).read_bytes()
+                           .decode("utf-8"))["claims"]
+    assert claims == {"BI": 2, "WL": 2}, ("T81 the record reservation claims above the import one", claims)
+    assert imported.read_bytes() == planted, "T81 the import reservation is never touched"
+    assert RECORDED_EVENT in out and rc == 0, ("T81 the run above the import reservation records, as T79",
+                                              rc, err[-1600:])
 
 
 def flip_t81():
@@ -7634,55 +6872,54 @@ def t82_publication_requires_reservation(fx):
     capability), and one whose reservation claims other numbers each refuse before any transaction
     opens, with no journal transaction, every operand at the prestate and the capability released."""
     root = fx.case("t82-homes2-boundary")
-    with _self_test_homes2_active(root):
-        req = record.parse_request(CREATE + ["--root", str(root)])
-        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
-        assert res.status == record._opf_store.RESOLVED, res
-        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
-        try:
-            ctx = record.Context(res, str(root), root_fd)
-            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
-            assert ctx.journal_rel == TYPED_JOURNAL, ("T82 the probed journal home", ctx.journal_rel)
-            record._load_manifest(ctx)
-            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
-            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
-            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
-            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
-            plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
-            for op in plan.operands:
-                op.new_raw = record._emit_bytes(op.new_model)
-            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
-            unreserved = "record-20260927T000201Z-" + "c" * 16
-            other = "record-20260927T000202Z-" + "d" * 16
+    req = record.parse_request(CREATE + ["--root", str(root)])
+    res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+    assert res.status == record._opf_store.RESOLVED, res
+    root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+    try:
+        ctx = record.Context(res, str(root), root_fd)
+        ctx.journal_rel = record._record_journal_rel(record._probe_admission(ctx))
+        assert ctx.journal_rel == TYPED_JOURNAL, ("T82 the probed journal home", ctx.journal_rel)
+        record._load_manifest(ctx)
+        ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+        ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+        ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+        operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+        plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+        for op in plan.operands:
+            op.new_raw = record._emit_bytes(op.new_model)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        unreserved = "record-20260927T000201Z-" + "c" * 16
+        other = "record-20260927T000202Z-" + "d" * 16
 
-            def held_publish(run_id, reserve=None):
-                cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-                try:
-                    if reserve is not None:
-                        record._opf_journal.reserve_allocation(cap, "record", run_id, reserve)
-                    record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
-                finally:
-                    record._opf_oplock.release_operation(cap)
-            for label, call, needle in (
-                    ("no run id", lambda: record._publish(ctx, plan, "create"),
-                     "requires the run id its irrevocable id reservation"),
-                    ("no reservation", lambda: held_publish(unreserved), "requires its id reservation"),
-                    ("other claims", lambda: held_publish(other, {"BI": 7, "WL": 7}),
-                     "to claim exactly this plan's numbers")):
-                try:
-                    call()
-                except record.RecordError as exc:
-                    assert needle in str(exc) and "no transaction is opened" in str(exc), (label, str(exc))
-                else:
-                    raise AssertionError("T82 a publication with {} must refuse".format(label))
-                assert journal_states(root, TYPED_JOURNAL) == {}, ("T82 no transaction", label)
-                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
-                    ("T82 the operands are untouched", label)
-                assert capability_records(root) == (False, False), ("T82 the capability is released", label)
-        finally:
-            os.close(root_fd)
-        assert not (Path(root) / record._opf_store.allocation_record("record", unreserved)).exists(), \
-            "T82 the boundary never reserves on its own"
+        def held_publish(run_id, reserve=None):
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+            try:
+                if reserve is not None:
+                    record._opf_journal.reserve_allocation(cap, "record", run_id, reserve)
+                record._publish(ctx, plan, "create", cap=cap, run_id=run_id)
+            finally:
+                record._opf_oplock.release_operation(cap)
+        for label, call, needle in (
+                ("no run id", lambda: record._publish(ctx, plan, "create"),
+                 "requires the run id its irrevocable id reservation"),
+                ("no reservation", lambda: held_publish(unreserved), "requires its id reservation"),
+                ("other claims", lambda: held_publish(other, {"BI": 7, "WL": 7}),
+                 "to claim exactly this plan's numbers")):
+            try:
+                call()
+            except record.RecordError as exc:
+                assert needle in str(exc) and "no transaction is opened" in str(exc), (label, str(exc))
+            else:
+                raise AssertionError("T82 a publication with {} must refuse".format(label))
+            assert journal_states(root, TYPED_JOURNAL) == {}, ("T82 no transaction", label)
+            assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                ("T82 the operands are untouched", label)
+            assert capability_records(root) == (False, False), ("T82 the capability is released", label)
+    finally:
+        os.close(root_fd)
+    assert not (Path(root) / record._opf_store.allocation_record("record", unreserved)).exists(), \
+        "T82 the boundary never reserves on its own"
 
 
 @contextlib.contextmanager
@@ -7815,60 +7052,59 @@ def _t85_leg(fx, kind, shape):
     root = fx.case("t85-{}-{}".format(kind, shape))
     home = Path(root) / rel
     opened = "cannot open the {} allocations home {} (".format(kind, rel)
-    with _self_test_homes2_active(root):
-        if shape == "symlink":
-            home.parent.mkdir(parents=True, exist_ok=True)
-            (home.parent / "elsewhere").mkdir()
-            home.symlink_to("elsewhere")
-            refused_untouched(env, root, CREATE, opened + "[Errno ")
-        elif shape == "regular-file":
-            home.parent.mkdir(parents=True, exist_ok=True)
-            home.write_bytes(b"")
-            refused_untouched(env, root, CREATE, opened + "[Errno ")
-        elif shape == "file-parent":
-            home.parent.parent.mkdir(parents=True, exist_ok=True)
-            home.parent.write_bytes(b"")
-            walk = opened + "cannot open contained directory component"
-            if kind == "record":
-                # The record kind's home shares its parent with the record journal home, whose
-                # inspection refuses first end to end; the scan's own refusal is pinned directly.
-                refused_untouched(env, root, CREATE, "cannot inspect the record journal")
-                _t85_scan_refuses(root, walk)
-            else:
-                refused_untouched(env, root, CREATE, walk)
-        elif shape == "mode-0":
-            home.mkdir(parents=True)
-            before = snapshot(root)
-            readable = stat.S_IMODE(home.lstat().st_mode)
-            os.chmod(home, 0)
-            try:
-                result = record_cli(env, root, CREATE)
-                mode = stat.S_IMODE(home.lstat().st_mode)
-            finally:
-                os.chmod(home, readable)
-            assert snapshot(root) == before and mode == 0, ("bytes untouched on refusal", CREATE, mode,
-                                                            result[0], result[2][-800:])
-            refused(result, opened + "[Errno {}]".format(errno.EACCES))
-        elif shape == "unlistable":
-            home.mkdir(parents=True)
-            with _t85_unlistable(home):
-                refused_untouched(env, root, CREATE, "cannot list the {} allocations home {} ([Errno {}] "
-                                  "synthetic unlistable allocations home".format(kind, rel, errno.EIO))
-        elif shape == "underivable":
-            # The derivation the scan reads is the reservation seam's own (_opf_journal), which the
-            # planner's scan and the seam's derivation under the held capability both call.
-            real = record._opf_journal._allocations_rel
-            error = KeyError if kind == "import" else ValueError
-
-            def underivable(k):
-                if k == kind:
-                    raise error("synthetic underivable {} home".format(kind))
-                return real(k)
-            with patch.object(record._opf_journal, "_allocations_rel", underivable):
-                refused_untouched(env, root, CREATE, "the journal kind {!r} has no reservation home this "
-                                  "build can derive (".format(kind))
+    if shape == "symlink":
+        home.parent.mkdir(parents=True, exist_ok=True)
+        (home.parent / "elsewhere").mkdir()
+        home.symlink_to("elsewhere")
+        refused_untouched(env, root, CREATE, opened + "[Errno ")
+    elif shape == "regular-file":
+        home.parent.mkdir(parents=True, exist_ok=True)
+        home.write_bytes(b"")
+        refused_untouched(env, root, CREATE, opened + "[Errno ")
+    elif shape == "file-parent":
+        home.parent.parent.mkdir(parents=True, exist_ok=True)
+        home.parent.write_bytes(b"")
+        walk = opened + "cannot open contained directory component"
+        if kind == "record":
+            # The record kind's home shares its parent with the record journal home, whose
+            # inspection refuses first end to end; the scan's own refusal is pinned directly.
+            refused_untouched(env, root, CREATE, "cannot inspect the record journal")
+            _t85_scan_refuses(root, walk)
         else:
-            raise Harness("T85 has no leg {!r}".format(shape))
+            refused_untouched(env, root, CREATE, walk)
+    elif shape == "mode-0":
+        home.mkdir(parents=True)
+        before = snapshot(root)
+        readable = stat.S_IMODE(home.lstat().st_mode)
+        os.chmod(home, 0)
+        try:
+            result = record_cli(env, root, CREATE)
+            mode = stat.S_IMODE(home.lstat().st_mode)
+        finally:
+            os.chmod(home, readable)
+        assert snapshot(root) == before and mode == 0, ("bytes untouched on refusal", CREATE, mode,
+                                                        result[0], result[2][-800:])
+        refused(result, opened + "[Errno {}]".format(errno.EACCES))
+    elif shape == "unlistable":
+        home.mkdir(parents=True)
+        with _t85_unlistable(home):
+            refused_untouched(env, root, CREATE, "cannot list the {} allocations home {} ([Errno {}] "
+                              "synthetic unlistable allocations home".format(kind, rel, errno.EIO))
+    elif shape == "underivable":
+        # The derivation the scan reads is the reservation seam's own (_opf_journal), which the
+        # planner's scan and the seam's derivation under the held capability both call.
+        real = record._opf_journal._allocations_rel
+        error = KeyError if kind == "import" else ValueError
+
+        def underivable(k):
+            if k == kind:
+                raise error("synthetic underivable {} home".format(kind))
+            return real(k)
+        with patch.object(record._opf_journal, "_allocations_rel", underivable):
+            refused_untouched(env, root, CREATE, "the journal kind {!r} has no reservation home this "
+                              "build can derive (".format(kind))
+    else:
+        raise Harness("T85 has no leg {!r}".format(shape))
 
 
 def _t85(kind, shape):
@@ -7992,20 +7228,19 @@ def t91_seam_five_sequential_distinct(fx):
     derives every claim under the held capability from counters.toml and every earlier reservation,
     so the runs claim the counter's base + 1 to base + 5 in order, five reservations standing."""
     root = fx.case("t91-homes2-five-runs")
-    with _self_test_homes2_active(root):
-        base = model(root, COUNTERS)["counters"]["BI"]
-        runs = ["record-20260928T00000{}Z-".format(n) + "e" * 16 for n in range(1, 6)]
-        for run_id in runs:
-            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            try:
-                record._opf_journal.reserve_allocation(cap, "record", run_id, {"BI": 1})
-            finally:
-                record._opf_oplock.release_operation(cap)
-        claims = [_seam_reservation_bi(root, run_id) for run_id in runs]
-        assert claims == [base + n for n in range(1, 6)], ("T91 five runs claim five distinct numbers", base,
-                                                            claims)
-        assert sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL)) == sorted(r + ".toml" for r in runs), \
-            "T91 five reservations stand"
+    base = model(root, COUNTERS)["counters"]["BI"]
+    runs = ["record-20260928T00000{}Z-".format(n) + "e" * 16 for n in range(1, 6)]
+    for run_id in runs:
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            record._opf_journal.reserve_allocation(cap, "record", run_id, {"BI": 1})
+        finally:
+            record._opf_oplock.release_operation(cap)
+    claims = [_seam_reservation_bi(root, run_id) for run_id in runs]
+    assert claims == [base + n for n in range(1, 6)], ("T91 five runs claim five distinct numbers", base,
+                                                        claims)
+    assert sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL)) == sorted(r + ".toml" for r in runs), \
+        "T91 five reservations stand"
 
 
 def flip_t91_scan_ignored():
@@ -8074,27 +7309,26 @@ def t92_seam_concurrent_processes_distinct(fx):
     it: the anchor flock is non-blocking, so a contender is refused, never queued) and reserve one BI id
     through the seam: every child exits 0 and the claims are exactly base + 1 to base + T92_CHILDREN."""
     root = fx.case("t92-homes2-concurrent")
-    with _self_test_homes2_active(root):
-        base = model(root, COUNTERS)["counters"]["BI"]
-        runs = ["record-20260928T0001{:02d}Z-".format(n) + "f" * 16 for n in range(T92_CHILDREN)]
-        go_read, go_write = os.pipe()
-        pids = []
-        try:
-            for run_id in runs:
-                pid = os.fork()
-                if pid == 0:
-                    _t92_child(root, run_id, go_read, go_write)
-                pids.append(pid)
-            os.write(go_write, b"g" * len(pids))
-        finally:
-            os.close(go_read)
-            os.close(go_write)
-            statuses = _t92_reap(pids)
-        assert all(s is not None and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 0 for s in statuses), \
-            ("T92 every child reserved and exited 0", statuses)
-        claims = sorted(_seam_reservation_bi(root, run_id) for run_id in runs)
-        assert claims == list(range(base + 1, base + 1 + T92_CHILDREN)), \
-            ("T92 concurrent runs claim distinct consecutive numbers", base, claims)
+    base = model(root, COUNTERS)["counters"]["BI"]
+    runs = ["record-20260928T0001{:02d}Z-".format(n) + "f" * 16 for n in range(T92_CHILDREN)]
+    go_read, go_write = os.pipe()
+    pids = []
+    try:
+        for run_id in runs:
+            pid = os.fork()
+            if pid == 0:
+                _t92_child(root, run_id, go_read, go_write)
+            pids.append(pid)
+        os.write(go_write, b"g" * len(pids))
+    finally:
+        os.close(go_read)
+        os.close(go_write)
+        statuses = _t92_reap(pids)
+    assert all(s is not None and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 0 for s in statuses), \
+        ("T92 every child reserved and exited 0", statuses)
+    claims = sorted(_seam_reservation_bi(root, run_id) for run_id in runs)
+    assert claims == list(range(base + 1, base + 1 + T92_CHILDREN)), \
+        ("T92 concurrent runs claim distinct consecutive numbers", base, claims)
 
 
 # How long T93's first thread is held inside the derivation waiting for the second thread's attempt to end,
@@ -8112,49 +7346,48 @@ def t93_seam_threads_serialised(fx):
     and exactly that one reservation stands. A second attempt that blocks instead of ending releases the
     first at T93_OVERLAP_DEADLINE and turns this red on the outcomes."""
     root = fx.case("t93-homes2-threads")
-    with _self_test_homes2_active(root):
-        base = model(root, COUNTERS)["counters"]["BI"]
-        runs = ["record-20260928T0002{:02d}Z-".format(n) + "f" * 16 for n in range(2)]
-        outcomes = [None, None]
-        held_inside, second_ended = threading.Event(), threading.Event()
-        real_derive = record._opf_journal._derive_claims
+    base = model(root, COUNTERS)["counters"]["BI"]
+    runs = ["record-20260928T0002{:02d}Z-".format(n) + "f" * 16 for n in range(2)]
+    outcomes = [None, None]
+    held_inside, second_ended = threading.Event(), threading.Event()
+    real_derive = record._opf_journal._derive_claims
 
-        def holding_derive(root_fd, machine_rel, kind, run_id, demand):
-            claims = real_derive(root_fd, machine_rel, kind, run_id, demand)
-            if run_id == runs[0]:
-                held_inside.set()
-                second_ended.wait(T93_OVERLAP_DEADLINE)
-            return claims
+    def holding_derive(root_fd, machine_rel, kind, run_id, demand):
+        claims = real_derive(root_fd, machine_rel, kind, run_id, demand)
+        if run_id == runs[0]:
+            held_inside.set()
+            second_ended.wait(T93_OVERLAP_DEADLINE)
+        return claims
 
-        def worker(index):
-            try:
-                record._opf_journal.reserve_allocation(cap, "record", runs[index], {"BI": 1})
-                outcomes[index] = "reserved"
-            except journal.JournalError as exc:
-                outcomes[index] = str(exc)
-            finally:
-                if index == 1:
-                    second_ended.set()
-        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+    def worker(index):
         try:
-            with patch.object(record._opf_journal, "_derive_claims", holding_derive):
-                first = threading.Thread(target=worker, args=(0,))
-                first.start()
-                reached = held_inside.wait(T93_OVERLAP_DEADLINE)
-                second = threading.Thread(target=worker, args=(1,))
-                second.start()
-                for thread in (first, second):
-                    thread.join(timeout=T93_JOIN_DEADLINE)
+            record._opf_journal.reserve_allocation(cap, "record", runs[index], {"BI": 1})
+            outcomes[index] = "reserved"
+        except journal.JournalError as exc:
+            outcomes[index] = str(exc)
         finally:
-            record._opf_oplock.release_operation(cap)
-        assert reached, ("T93 the first thread is held inside the derivation", outcomes)
-        assert not first.is_alive() and not second.is_alive(), "T93 both threads finished"
-        assert outcomes[0] == "reserved" and "being released or used" in (outcomes[1] or ""), \
-            ("T93 the overlapping second attempt is refused as the capability being used", outcomes)
-        standing = sorted(n[:-len(".toml")] for n in os.listdir(Path(root) / record._ALLOCATIONS_REL))
-        numbers = [_seam_reservation_bi(root, run_id) for run_id in standing]
-        assert standing == [runs[0]] and numbers == [base + 1], \
-            ("T93 exactly the first thread's reservation stands, at base + 1", base, standing, numbers)
+            if index == 1:
+                second_ended.set()
+    cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+    try:
+        with patch.object(record._opf_journal, "_derive_claims", holding_derive):
+            first = threading.Thread(target=worker, args=(0,))
+            first.start()
+            reached = held_inside.wait(T93_OVERLAP_DEADLINE)
+            second = threading.Thread(target=worker, args=(1,))
+            second.start()
+            for thread in (first, second):
+                thread.join(timeout=T93_JOIN_DEADLINE)
+    finally:
+        record._opf_oplock.release_operation(cap)
+    assert reached, ("T93 the first thread is held inside the derivation", outcomes)
+    assert not first.is_alive() and not second.is_alive(), "T93 both threads finished"
+    assert outcomes[0] == "reserved" and "being released or used" in (outcomes[1] or ""), \
+        ("T93 the overlapping second attempt is refused as the capability being used", outcomes)
+    standing = sorted(n[:-len(".toml")] for n in os.listdir(Path(root) / record._ALLOCATIONS_REL))
+    numbers = [_seam_reservation_bi(root, run_id) for run_id in standing]
+    assert standing == [runs[0]] and numbers == [base + 1], \
+        ("T93 exactly the first thread's reservation stands, at base + 1", base, standing, numbers)
 
 
 @contextlib.contextmanager
@@ -8525,7 +7758,7 @@ def _t86_crash(*_args):
 
 def _t86_backstop_flip():
     """A flip whose replacement crashes inside the CLI: the record backstop exits 2."""
-    return patch.object(guard, "acquire_lease", _t86_crash)
+    return patch.object(record._opf_oplock, "acquire_operation", _t86_crash)
 
 
 def _t86_declared_crash(*_args):
@@ -8534,7 +7767,7 @@ def _t86_declared_crash(*_args):
 
 def _t86_declared_flip():
     """The same crash, recorded as an injection this flip declares in _INTENDED_BACKSTOPS."""
-    return patch.object(guard, "acquire_lease", _t86_declared_crash)
+    return patch.object(record._opf_oplock, "acquire_operation", _t86_declared_crash)
 
 
 def _t86_harness_flip():
@@ -8543,12 +7776,12 @@ def _t86_harness_flip():
 
 
 def _t86_held(*_args):
-    raise guard.LeaseHeldError("t86 a held lease refuses")
+    raise record._opf_oplock.OpLockError("t86 a held lease refuses")
 
 
 def _t86_assertion_flip():
     """A flip the CLI meets as an ordinary refusal: the test's own assertion turns red."""
-    return patch.object(guard, "acquire_lease", _t86_held)
+    return patch.object(record._opf_oplock, "acquire_operation", _t86_held)
 
 
 def t86_discrimination_bound(fx):
@@ -8592,8 +7825,6 @@ _SUBSTRING_BACKSTOPS = {
     flip_t64_conclude: ("OSError(5, 'synthetic stderr failure')",),
     flip_t64_recovery: ("BrokenPipeError(32, 'synthetic emission failure')",),
     flip_t68: ("MemoryError('synthetic allocation failure after the acquisition')",),
-    flip_t69_release: ("RuntimeError('fd release witness')",),
-    flip_t69_token: ("MemoryError('synthetic token allocation failure')",),
     flip_t77: ("OSError({}, ".format(errno.EMFILE),),
     flip_t84: ("RecursionError('maximum recursion depth exceeded')",),
     flip_t85_derive_record: ("ValueError('synthetic underivable record home')",),
@@ -8637,7 +7868,7 @@ def _t87_unrelated_eio(*_args):
 
 def _t87_unrelated_flip():
     """A broken flip whose replacement crashes before its test's injection is reached."""
-    return patch.object(guard, "_claim_after_release", _t87_unrelated_eio)
+    return patch.object(record, "_capability_leftover_present", _t87_unrelated_eio)
 
 
 def _t87_mimic_crash(*_args):
@@ -9432,12 +8663,12 @@ def _t88_caught_then_raised(*_args):
     raise _injected("t86-declared", NameError("t86 broken flip fixture"))
 
 
-# A broken T75 flip, applied inside both children: the examination lock replaced by a stand-in of the
-# wrong arity, so recovery A crashes into the record backstop (exit 2) before it reaches the leftover
-# unlink, and T75's first assertion turns red before its verdict reads either child's stderr.
+# A broken T75 flip, applied inside both children: the capability's anchor flock replaced by a stand-in
+# of the wrong arity, so recovery A crashes into the record backstop (exit 2) before it reaches the
+# leftover unlink, and T75's first assertion turns red before its verdict reads either child's stderr.
 FLIP_T88_WRONG_ARITY = """
-import _opf_write_guard as _t75_guard
-_t75_guard._exclusive_examination = lambda pfd: None
+import _opf_oplock as _t75_oplock
+_t75_oplock._flock_exclusive = lambda: None
 """
 
 
@@ -9581,8 +8812,6 @@ _INTENDED_BACKSTOPS = {
     flip_t64_conclude: ("t64-stderr",),
     flip_t64_recovery: ("t64-emit",),
     flip_t68: ("t68-mark-copy",),
-    flip_t69_release: ("t69-release",),
-    flip_t69_token: ("t69-token",),
     flip_t77: ("t77-emfile",),
     flip_t84: ("t84-recursion",),
     flip_t85_derive_record: ("t85-record-underivable",),
@@ -9822,39 +9051,50 @@ T98_BOUND = 30
 
 def t96_malformed_lease(fx):
     """A malformed lease is present, so it is held, never absent: the create refuses exit 2 with the
-    held-lease refusal, the lease is not deleted and every byte is untouched."""
+    capability recovery's held refusal (a lone lease carries no owner identity, so its holder cannot
+    be confirmed dead), the lease is not deleted and every byte is untouched."""
     root = fx.case("t96-malformed-lease")
     (Path(root) / LEASE).write_bytes(T96_MALFORMED)
     before = snapshot(root)
     result = record_cli(fx.env, root, CREATE)
     refused(result, "never seized")
-    assert "a present lease with an unreadable payload" in result[2], result[2][-800:]
+    assert "a stale lease exists with no paired active record" in result[2], result[2][-800:]
     assert read(root, LEASE) == T96_MALFORMED, "T96 the malformed lease is not deleted"
     assert snapshot(root) == before, "T96 every byte untouched"
 
 
 def flip_t96():
     """An acquisition that reads a lease it cannot parse as absent: it removes that lease, then claims."""
-    original = guard.acquire_lease
+    original = record._opf_oplock.acquire_operation
 
-    def absent_if_malformed(root_fd, machine_rel, verb):
-        rel = "{}/{}".format(machine_rel, opf_check.LEASE_NAME)
+    def absent_if_malformed(store_root, operation, holder=None, recover=False):
+        path = Path(store_root) / LEASE
         with contextlib.suppress(FileNotFoundError):
-            with open(os.open(rel, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd), "rb") as handle:
-                raw = handle.read()
             try:
-                tomllib.loads(raw.decode("utf-8"))
+                tomllib.loads(path.read_bytes().decode("utf-8"))
             except ValueError:
-                os.unlink(rel, dir_fd=root_fd)
-        return original(root_fd, machine_rel, verb)
-    return patch.object(guard, "acquire_lease", absent_if_malformed)
+                path.unlink()
+        return original(store_root, operation, holder=holder, recover=recover)
+    return patch.object(record._opf_oplock, "acquire_operation", absent_if_malformed)
+
+
+def _t97_lease_not_dirt(store, label):
+    """The cleanliness gate the record path runs before its acquisition, driven directly over a store
+    holding a lease: the lease is excluded, so it never reads as dirt. The capability trigger refuses a
+    present lease before the record path reaches this gate, so the gate's own exclusion is reached
+    here."""
+    res = record._opf_store.resolve_store(Path(store))
+    try:
+        guard.check_clean(res, {"store": [], "product": []}, record.VERB, record.CLEAN_SCOPE)
+    except guard.WriteGuardError as exc:
+        raise AssertionError((label, "the cleanliness gate read the lease as dirt", str(exc)[-800:]))
 
 
 def t97_nested_store_held_lease(fx):
-    """A store root BELOW its git repository root, with a foreign held lease, reaches the held-lease
-    refusal naming the holder, never the dirty-store refusal: the porcelain paths are repository-root-
-    relative, so the lease is excluded only once the store's prefix is stripped. The lease survives and
-    every byte is untouched."""
+    """A store root BELOW its git repository root, with a foreign held lease, reaches the capability
+    recovery's held refusal, never the dirty-store refusal; and the cleanliness gate, driven directly,
+    excludes that lease: the porcelain paths are repository-root-relative, so the lease is excluded
+    only once the store's prefix is stripped. The lease survives and every byte is untouched."""
     env = fx.env
     outer = fx.case("t97-nested")
     store = outer / "product" / "store"
@@ -9869,8 +9109,9 @@ def t97_nested_store_held_lease(fx):
     before = snapshot(outer)
     result = record_cli(env, store, CREATE)
     refused(result, "never seized")
-    assert "peer-runner" in result[2] and "the working tree is not clean" not in result[2], result[2][-800:]
+    assert "the working tree is not clean" not in result[2], result[2][-800:]
     assert read(store, LEASE) == PEER_LEASE and snapshot(outer) == before, "T97 the peer lease survives"
+    _t97_lease_not_dirt(store, "T97")
 
 
 def flip_t97():
@@ -9881,9 +9122,10 @@ def flip_t97():
 
 
 def t98_fifo_lease(fx):
-    """A FIFO at the lease path refuses promptly: the held-lease refusal names a present non-regular lease
-    without reading it. The create runs in a child bounded by T98_BOUND, so a blocking open turns this
-    test red rather than hanging the gate. The FIFO is untouched and every byte is unchanged."""
+    """A FIFO at the lease path refuses promptly: the capability recovery's refusal names a lease that is
+    not a regular file without reading it. The create runs in a child bounded by T98_BOUND, so a blocking
+    open turns this test red rather than hanging the gate. The FIFO is untouched and every byte is
+    unchanged."""
     if not hasattr(os, "mkfifo"):
         raise CannotEvaluate("T98 needs os.mkfifo to plant a FIFO lease")
     root = fx.case("t98-fifo-lease")
@@ -9894,24 +9136,24 @@ def t98_fifo_lease(fx):
     except subprocess.TimeoutExpired:
         raise AssertionError("T98 the FIFO lease held the run past {} s, never refused".format(T98_BOUND))
     assert proc.returncode == 2, ("T98 exit 2", proc.returncode, proc.stderr[-800:])
-    assert "a present non-regular lease (held)" in proc.stderr and "never seized" in proc.stderr, (
+    assert "lease name is not a regular file" in proc.stderr and "never seized" in proc.stderr, (
         proc.stderr[-800:])
     assert stat.S_ISFIFO((Path(root) / LEASE).lstat().st_mode) and snapshot(root) == before, (
         "T98 the FIFO is untouched")
 
 
-# The T98 flip, applied inside the bounded child: the held-lease message opens the lease without
-# O_NONBLOCK, so its open of a writer-less FIFO blocks. The wrapper forwards dir_fd, so it is listed in
-# os.supports_dir_fd, as the containment probe requires of os.open. _t98_flip holds the child's prelude.
+# The T98 flip, applied inside the bounded child: the capability's stale-record classification opens
+# the lease to read it, without O_NONBLOCK, before its type check, so its open of a writer-less FIFO
+# blocks. _t98_flip holds the child's prelude.
 _t98_flip = [""]
 FLIP_T98 = """
-_open = os.open
-def _blocking_open(path, flags, *args, **kwargs):
-    if path == "lease.toml" and not flags & os.O_CREAT:
-        flags &= ~os.O_NONBLOCK
-    return _open(path, flags, *args, **kwargs)
-os.open = _blocking_open
-os.supports_dir_fd.add(_blocking_open)
+import _opf_oplock as _t98_oplock
+_t98_classify = _t98_oplock._classify_stale
+def _t98_reading_classify(dir_fd, name, label):
+    if name == "lease.toml":
+        os.close(os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd))
+    return _t98_classify(dir_fd, name, label)
+_t98_oplock._classify_stale = _t98_reading_classify
 """
 
 
@@ -10134,9 +9376,11 @@ def flip_t104():
 
 def t105_non_utf8_prefix(fx):
     """A store nested below its repository root under a real non-UTF-8 directory name: git's -z paths and
-    --show-prefix carry those bytes. An ignored, untracked operand (counters), view destination, or
-    collapsed .working ancestor refuses exit 2 before mutation with the dirty-store remedy naming the
-    destination; every byte, the index and HEAD untouched."""
+    --show-prefix carry those bytes. The record create refuses exit 2 before mutation at the operation
+    capability's control-root resolution, which refuses the undecodable prefix; every byte, the index
+    and HEAD untouched. The cleanliness gate the record path runs before its acquisition, driven
+    directly, refuses an ignored, untracked operand (counters), view destination, or collapsed .working
+    ancestor with the dirty-store remedy naming the destination."""
     env = fx.env
     for case, rel, untrack in (("counters", COUNTERS, COUNTERS), ("render", CONTRIBUTIONS_VIEW, CONTRIBUTIONS_VIEW),
                                ("ancestor", CONTRIBUTIONS_VIEW, ".working")):
@@ -10160,9 +9404,19 @@ def t105_non_utf8_prefix(fx):
         before = snapshot(outer)
         result = record_cli(env, nested, CREATE)
         assert snapshot(outer) == before, ("T105 bytes untouched on refusal", case, result[0], result[2][-800:])
-        refused(result, "Commit your changes (or move them aside)")
-        assert rel in result[2], (case, result[2][-800:])
+        refused(result, "cannot resolve the operation capability's control root")
         assert _index_and_head(outer) == state, ("T105 index and HEAD unchanged", case)
+        res = record._opf_store.resolve_store(Path(nested))
+        scope = guard.plan_write_scope(res.machine_rel, model(nested, MANIFEST), [COUNTERS, BI_INDEX],
+                                       record.VERB)
+        try:
+            guard.check_clean(res, scope, record.VERB, record.CLEAN_SCOPE)
+        except guard.WriteGuardError as exc:
+            err = str(exc)
+        else:
+            raise AssertionError(("T105 the cleanliness gate refuses", case))
+        assert "Commit your changes (or move them aside)" in err and rel in err, (case, err[-800:])
+        assert snapshot(outer) == before and _index_and_head(outer) == state, ("T105 the gate writes nothing", case)
 
 
 def flip_t105():
@@ -10200,26 +9454,29 @@ def flip_t106():
 
 def t107_ignored_and_directory_lease(fx):
     """An ignored lease, and a directory lease (untracked, or ignored and so collapsed), are held: each
-    create refuses exit 2 with the never-seize refusal, never the dirty-store remedy, the lease and every
-    byte untouched."""
+    create refuses exit 2 with the capability recovery's never-seize refusal, never the dirty-store
+    remedy, the lease and every byte untouched; and the cleanliness gate, driven directly, excludes
+    each of them (_t97_lease_not_dirt)."""
     env = fx.env
     root = fx.case("t107-ignored-lease")
     (Path(root) / LEASE).write_bytes(PEER_LEASE)
     _exclude(root, b"/" + LEASE.encode("utf-8"))
     assert env.git(root, "check-ignore", "--", LEASE).strip() == LEASE, "T107 the fixture lease is ignored"
-    err = _create_refused(env, root, "The lease is never seized (spec 5.7)")
-    assert "peer-runner" in err and "confirmed NO opf run is live" in err, err[-800:]
+    err = _create_refused(env, root, "never seized")
+    assert "a stale lease exists with no paired active record" in err, err[-800:]
     assert "Commit your changes" not in err, err[-800:]
     assert read(root, LEASE) == PEER_LEASE, "T107 the ignored lease survives"
+    _t97_lease_not_dirt(root, "T107 the ignored lease")
     for ignored in (False, True):
         root = fx.case("t107-directory-lease-" + ("ignored" if ignored else "untracked"))
         (Path(root) / LEASE).mkdir()
         (Path(root) / LEASE / "owner").write_bytes(b"held by another run\n")
         if ignored:
             _exclude(root, b"/" + LEASE.encode("utf-8") + b"/")
-        err = _create_refused(env, root, "The lease is never seized (spec 5.7)")
+        err = _create_refused(env, root, "never seized")
         assert "Commit your changes" not in err, ("T107 no dirt advice", ignored, err[-800:])
         assert (Path(root) / LEASE).is_dir(), ("T107 the directory lease survives", ignored)
+        _t97_lease_not_dirt(root, ("T107 the directory lease", ignored))
 
 
 def flip_t107():
@@ -10288,25 +9545,24 @@ NO_RECEIPT = "C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done r
 T113_PEER_RUN = "imp-20260927T000102Z-" + "b" * 16
 
 
-def _drop_legacy_journal(root):
-    """The homes-1 runs that built a fixture leave their completed transactions in the legacy record
-    journal, local recovery evidence that a homes-2 run refuses on sight (T20); a fixture about to run at
-    homes 2 removes it, once every transaction there is terminal and nothing else sits under .aiqt."""
-    states = journal_states(root)
+def _drop_setup_journal(root):
+    """The runs that built a fixture leave their terminal transactions, projections and reservations in
+    the typed record home (.working/journals/record, ignored local evidence); a fixture whose test counts
+    its own run's transaction and reservation removes that home, once every transaction there is
+    terminal and nothing sits under .aiqt (the record journal never lives there)."""
+    states = journal_states(root, TYPED_JOURNAL)
     assert states and all(s != "open" for s in states.values()), ("the setup runs left no open transaction",
                                                                   states)
-    aiqt = Path(root) / ".aiqt"
-    assert sorted(os.listdir(aiqt)) == ["record"], ("only the legacy record journal sits under .aiqt",
-                                                    sorted(os.listdir(aiqt)))
-    shutil.rmtree(aiqt)
+    assert not (Path(root) / ".aiqt").exists(), "the setup runs left nothing under .aiqt"
+    shutil.rmtree(Path(root) / record._opf_store.JOURNALS_REL / "record")
 
 
 def _repair_store(fx, name, moves=(["transition", "BI-1", "active"] + MAINTAINER,), edit="commit"):
-    """A store whose maintainer-created BI-1 ("repair me") the verb moved through `moves` at homes 1, each
-    step committed. With `edit` "commit" the reviewed hand edit then puts BI-1 at unqualified done with no
+    """A store whose maintainer-created BI-1 ("repair me") the verb moved through `moves`, each step
+    committed. With `edit` "commit" the reviewed hand edit then puts BI-1 at unqualified done with no
     receipt, canonical and committed (doctor reports the C-RECEIPTS finding); with "worktree" the same
-    edit is left uncommitted; with None no edit is made. The legacy journal is then removed
-    (_drop_legacy_journal), and the store is ready for homes-2 activation."""
+    edit is left uncommitted; with None no edit is made. The setup runs' typed record home is then
+    removed (_drop_setup_journal), so the test sees only its own run's journal and reservation."""
     root = fx.case(name)
     with ticking():
         step(fx, root, ["create", "--type", "backlog_item", "--title", "repair me"] + MAINTAINER, "BI-1")
@@ -10320,7 +9576,7 @@ def _repair_store(fx, name, moves=(["transition", "BI-1", "active"] + MAINTAINER
             write_commit(fx.env, root, BI_INDEX, data, "the reviewed edit: BI-1 done")
         else:
             (Path(root) / BI_INDEX).write_bytes(data)
-    _drop_legacy_journal(root)
+    _drop_setup_journal(root)
     return root
 
 
@@ -10341,65 +9597,31 @@ def t110_receipt_repair(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(base)])
     assert rc == 1 and NO_RECEIPT in out + err, ("T110 the reviewed edit leaves the C-RECEIPTS finding", rc,
                                                  out[-1600:], err[-800:])
-    with _self_test_homes2_active(base):
-        root = fx.case("t110-repair", base)
-        bi_before = read(root, BI_INDEX)
-        counters0 = model(root, COUNTERS)["counters"]
-        did, wid = "DN-{}".format(counters0["DN"] + 1), "WL-{}".format(counters0["WL"] + 1)
-        with ticking():
-            out = recorded(record_cli(env, root, REPAIR + ["--summary", "the missing receipt"]))
-        assert '"change": null' in out and '"ids": ["{}", "{}"]'.format(did, wid) in out, out[-1600:]
-        assert read(root, BI_INDEX) == bi_before, "T110 the backlog index bytes are unchanged"
-        receipts = receipts_of(root, "BI-1")
-        assert [r["id"] for r in receipts] == [did], receipts
-        assert (receipts[0]["actor"] == {"kind": "maintainer", "id": "owner"} and receipts[0]["title"] == "repair me"
-                and receipts[0]["status"] == "recorded" and receipts[0]["summary"] == "the missing receipt"), receipts
-        entry = model(root, WORKLOG)["entry"][-1]
-        assert entry["id"] == wid and entry["detail"] == "opf-record create {} recorded\nreceipt_of: BI-1\nreason: {}".format(
-            did, REPAIR_REASON), entry
-        states = journal_states(root, TYPED_JOURNAL)
-        assert list(states.values()) == ["complete"], ("T110 one COMPLETE typed transaction", states)
-        (run_id,) = states
-        assert _reservations(root) == [Path(record._opf_store.allocation_record("record", run_id)).name], (
-            "T110 the run's own reservation stands", _reservations(root))
-        payload = model(root, record._opf_store.allocation_record("record", run_id))
-        assert payload["claims"] == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, payload
-        assert not (Path(root) / record.JOURNAL_REL).exists(), "T110 no legacy journal is created"
-        doctor_valid(env, root)
-        refused_untouched(env, root, REPAIR, "already holds the clean done receipt '{}'".format(did))
-
-
-def t110_homes1_refused(fx):
-    """At homes 1 there is no reservation home: the repair refuses exit 2 naming it, before any file but the
-    manifest is read, every byte untouched and no journal home created (flips: the homes guard dropped, so
-    the repair claims through the homes-1 counters path and publishes; the request check's homes refusal
-    dropped, so only the planner's own refusal holds, after every operand is read)."""
-    root = _repair_store(fx, "t110-homes1")
-    manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
-    reads = []
-    original_read = record._read_operand
-
-    def observing(root_fd, rel):
-        reads.append(rel)
-        return original_read(root_fd, rel)
-    with patch.object(record, "_read_operand", observing):
-        refused_untouched(fx.env, root, REPAIR, "only a homes-2 store has")
-    assert reads and set(reads) == {manifest_rel}, ("T110 refused before any operand is read", reads)
-    assert not (Path(root) / ".working/journals").exists(), "T110 no reservation home is created"
-
-
-def flip_t110_homes1():
-    return patch.object(record, "_require_reservation_home", lambda ctx: None)
-
-
-def flip_t110_homes1_late():
-    """The request check without its receipt-repair homes refusal: the planner's own call still refuses."""
-    check_request = record._check_request
-
-    def without_repair(req, ctx):
-        if req.subcommand != "receipt-repair":
-            check_request(req, ctx)
-    return patch.object(record, "_check_request", without_repair)
+    root = fx.case("t110-repair", base)
+    bi_before = read(root, BI_INDEX)
+    counters0 = model(root, COUNTERS)["counters"]
+    did, wid = "DN-{}".format(counters0["DN"] + 1), "WL-{}".format(counters0["WL"] + 1)
+    with ticking():
+        out = recorded(record_cli(env, root, REPAIR + ["--summary", "the missing receipt"]))
+    assert '"change": null' in out and '"ids": ["{}", "{}"]'.format(did, wid) in out, out[-1600:]
+    assert read(root, BI_INDEX) == bi_before, "T110 the backlog index bytes are unchanged"
+    receipts = receipts_of(root, "BI-1")
+    assert [r["id"] for r in receipts] == [did], receipts
+    assert (receipts[0]["actor"] == {"kind": "maintainer", "id": "owner"} and receipts[0]["title"] == "repair me"
+            and receipts[0]["status"] == "recorded" and receipts[0]["summary"] == "the missing receipt"), receipts
+    entry = model(root, WORKLOG)["entry"][-1]
+    assert entry["id"] == wid and entry["detail"] == "opf-record create {} recorded\nreceipt_of: BI-1\nreason: {}".format(
+        did, REPAIR_REASON), entry
+    states = journal_states(root, TYPED_JOURNAL)
+    assert list(states.values()) == ["complete"], ("T110 one COMPLETE typed transaction", states)
+    (run_id,) = states
+    assert _reservations(root) == [Path(record._opf_store.allocation_record("record", run_id)).name], (
+        "T110 the run's own reservation stands", _reservations(root))
+    payload = model(root, record._opf_store.allocation_record("record", run_id))
+    assert payload["claims"] == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, payload
+    assert not (Path(root) / record.JOURNAL_REL).exists(), "T110 no legacy journal is created"
+    doctor_valid(env, root)
+    refused_untouched(env, root, REPAIR, "already holds the clean done receipt '{}'".format(did))
 
 
 def t110_importer_arm(fx):
@@ -10421,13 +9643,12 @@ def t110_importer_arm(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(base)])
     assert rc == 1 and "its only receipt(s) 'DN-1' are importer-authored" in out + err, (
         "T110 the importer-only receipt is the receipt arm's finding at rest", rc, out[-1600:], err[-800:])
-    with _self_test_homes2_active(base):
-        root = fx.case("t110-importer-arm", base)
-        with ticking():
-            recorded(record_cli(env, root, REPAIR))
-        assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-1", "DN-2"], receipts_of(root, "BI-1")
-        assert model(root, DN_INDEX)["record"][0] == legacy, "T110 the importer's receipt keeps its bytes"
-        doctor_valid(env, root)
+    root = fx.case("t110-importer-arm", base)
+    with ticking():
+        recorded(record_cli(env, root, REPAIR))
+    assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-1", "DN-2"], receipts_of(root, "BI-1")
+    assert model(root, DN_INDEX)["record"][0] == legacy, "T110 the importer's receipt keeps its bytes"
+    doctor_valid(env, root)
 
 
 def flip_t110_importer():
@@ -10469,52 +9690,51 @@ def t110_repair_crash(fx):
     (flip: the done index written outside the journaled transaction, applied in the killed child)."""
     env = fx.env
     base = _repair_store(fx, "t110-crash-base")
-    with _self_test_homes2_active(base):
-        counters0 = model(base, COUNTERS)["counters"]
-        reference = fx.case("t110-crash-reference", base)
-        proc = child(env, reference, REPAIR, flip=HOMES2_CHILD_FLIP)
-        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
-        post = dict((rel, read(reference, rel)) for rel in REPAIR_OPERANDS)
-        rolled_back = None
-        points = kill_points(len(REPAIR_OPERANDS))
-        for hook in points:
-            point = ("T110 repair", hook)
-            root = fx.case("t110-crash-" + hook.replace(":", "-"), base)
-            pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
-            bi_before = read(root, BI_INDEX)
-            proc = child(env, root, REPAIR, kill=hook, flip=HOMES2_CHILD_FLIP + _repair_crash_flip[0])
-            if hook == "after-lock":
-                # The homes-1 journal lock's hook: the homes-2 publication runs under the held operation
-                # capability and takes no journal lock, so the hook is never reached and the run records.
-                assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (
-                    "T110 no journal lock is taken at homes 2", point, proc.returncode, proc.stderr[-800:])
-                assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == post, ("T110 the poststate", point)
-                continue
-            assert proc.returncode == 137, ("T110 the child is killed at", point, proc.stderr[-800:])
-            assert RECORDED_EVENT not in proc.stdout, ("T110 a killed run reports no id", point)
-            (reserved,) = _reservations(root)
-            claims = model(root, record._ALLOCATIONS_REL + "/" + reserved)["claims"]
-            assert claims == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, (point, claims)
-            # Before INTENT is durable the kill leaves no opened transaction, only the dead holder's
-            # capability records, which the next run reclaims; from INTENT on it reconciles the transaction.
-            opened = points.index(hook) >= points.index("after-publish-INTENT")
-            refused(record_cli(env, root, REPAIR), "was reconciled" if opened else "were reclaimed")
-            states = journal_states(root, TYPED_JOURNAL)
-            assert states and all(s != "open" for s in states.values()), ("T110 terminal", point, states)
-            assert opened or set(states.values()) == {"nothing-opened"}, ("T110 nothing opened", point, states)
-            now = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
-            complete = any(s == "complete" for s in states.values())
-            assert now == (post if complete else pre), ("T110 prestate or poststate, poststate iff COMPLETE",
-                                                        point, states)
-            assert read(root, BI_INDEX) == bi_before, ("T110 the backlog index is never written", point)
-            assert _reservations(root) == [reserved], ("T110 the reservation stands", point)
-            if "rolled-back" in states.values() and rolled_back is None:
-                rolled_back = root
-        assert rolled_back is not None, "T110 some kill point rolls the repair back"
-        recorded(record_cli(env, rolled_back, REPAIR))
-        assert [r["id"] for r in receipts_of(rolled_back, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
-            "T110 the next repair derives above the reserved numbers", receipts_of(rolled_back, "BI-1"))
-        doctor_valid(env, rolled_back)
+    counters0 = model(base, COUNTERS)["counters"]
+    reference = fx.case("t110-crash-reference", base)
+    proc = child(env, reference, REPAIR)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+    post = dict((rel, read(reference, rel)) for rel in REPAIR_OPERANDS)
+    rolled_back = None
+    points = kill_points(len(REPAIR_OPERANDS))
+    for hook in points:
+        point = ("T110 repair", hook)
+        root = fx.case("t110-crash-" + hook.replace(":", "-"), base)
+        pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+        bi_before = read(root, BI_INDEX)
+        proc = child(env, root, REPAIR, kill=hook, flip=_repair_crash_flip[0])
+        if hook == "after-lock":
+            # The homes-1 journal lock's hook: the homes-2 publication runs under the held operation
+            # capability and takes no journal lock, so the hook is never reached and the run records.
+            assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (
+                "T110 no journal lock is taken at homes 2", point, proc.returncode, proc.stderr[-800:])
+            assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == post, ("T110 the poststate", point)
+            continue
+        assert proc.returncode == 137, ("T110 the child is killed at", point, proc.stderr[-800:])
+        assert RECORDED_EVENT not in proc.stdout, ("T110 a killed run reports no id", point)
+        (reserved,) = _reservations(root)
+        claims = model(root, record._ALLOCATIONS_REL + "/" + reserved)["claims"]
+        assert claims == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, (point, claims)
+        # Before INTENT is durable the kill leaves no opened transaction, only the dead holder's
+        # capability records, which the next run reclaims; from INTENT on it reconciles the transaction.
+        opened = points.index(hook) >= points.index("after-publish-INTENT")
+        refused(record_cli(env, root, REPAIR), "was reconciled" if opened else "were reclaimed")
+        states = journal_states(root, TYPED_JOURNAL)
+        assert states and all(s != "open" for s in states.values()), ("T110 terminal", point, states)
+        assert opened or set(states.values()) == {"nothing-opened"}, ("T110 nothing opened", point, states)
+        now = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+        complete = any(s == "complete" for s in states.values())
+        assert now == (post if complete else pre), ("T110 prestate or poststate, poststate iff COMPLETE",
+                                                    point, states)
+        assert read(root, BI_INDEX) == bi_before, ("T110 the backlog index is never written", point)
+        assert _reservations(root) == [reserved], ("T110 the reservation stands", point)
+        if "rolled-back" in states.values() and rolled_back is None:
+            rolled_back = root
+    assert rolled_back is not None, "T110 some kill point rolls the repair back"
+    recorded(record_cli(env, rolled_back, REPAIR))
+    assert [r["id"] for r in receipts_of(rolled_back, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
+        "T110 the next repair derives above the reserved numbers", receipts_of(rolled_back, "BI-1"))
+    doctor_valid(env, rolled_back)
 
 
 @contextlib.contextmanager
@@ -10532,11 +9752,10 @@ def t111_repair_maintainer_only(fx):
     naming the maintainer-only rule (flip: the maintainer check dropped)."""
     env = fx.env
     base = _repair_store(fx, "t111-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t111-maintainer-only", base)
-        for actor in (ASSISTANT, ["--actor", "automation"]):
-            refused_before_store(env, root, ["receipt-repair", "BI-1", "--reason", REPAIR_REASON] + actor,
-                                 "maintainer-only")
+    root = fx.case("t111-maintainer-only", base)
+    for actor in (ASSISTANT, ["--actor", "automation"]):
+        refused_before_store(env, root, ["receipt-repair", "BI-1", "--reason", REPAIR_REASON] + actor,
+                             "maintainer-only")
 
 
 def flip_t111():
@@ -10555,8 +9774,7 @@ def t112_repair_state_guard(fx):
             ("proposed", (["transition", "BI-1", "active"] + MAINTAINER, ["transition", "BI-1", "done"] + ASSISTANT),
              "ratified with its receipt by opf record done-with-receipt")):
         base = _repair_store(fx, "t112-" + label, moves=moves, edit=None)
-        with _self_test_homes2_active(base):
-            refused_untouched(env, fx.case("t112-" + label + "-repair", base), REPAIR, needle)
+        refused_untouched(env, fx.case("t112-" + label + "-repair", base), REPAIR, needle)
 
 
 def flip_t112_state():
@@ -10568,9 +9786,8 @@ def t112_repair_existing_receipt(fx):
     (flip: the receipt check dropped, so a second receipt publishes and fails the final doctor)."""
     base = _repair_store(fx, "t112-held", moves=(["transition", "BI-1", "active"] + MAINTAINER,
                                                  ["done-with-receipt", "BI-1"] + MAINTAINER), edit=None)
-    with _self_test_homes2_active(base):
-        refused_untouched(fx.env, fx.case("t112-held-repair", base), REPAIR,
-                          "already holds the clean done receipt 'DN-1'")
+    refused_untouched(fx.env, fx.case("t112-held-repair", base), REPAIR,
+                      "already holds the clean done receipt 'DN-1'")
 
 
 def flip_t112_receipt():
@@ -10597,9 +9814,8 @@ def t112_repair_uninterpreted_receipt(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(base)])
     assert rc != 0 and "the receipt join is not evaluated over a partial set" in out + err, (
         "T112 the malformed receipt leaves the receipt join not evaluated at rest", rc, out[-1600:], err[-800:])
-    with _self_test_homes2_active(base):
-        refused_untouched(env, fx.case("t112-uninterpreted-repair", base), REPAIR,
-                          "done.index.toml#{} has links that cannot be interpreted".format(len(dones["record"])))
+    refused_untouched(env, fx.case("t112-uninterpreted-repair", base), REPAIR,
+                      "done.index.toml#{} has links that cannot be interpreted".format(len(dones["record"])))
 
 
 def flip_t112_uninterpreted():
@@ -10628,9 +9844,8 @@ def t112_repair_uninterpreted_backlog(fx):
     assert rc != 0 and "the receipt join is not evaluated over a partial set" in out + err, (
         "T112 the uninterpreted backlog row leaves the receipt join not evaluated at rest", rc, out[-1600:],
         err[-800:])
-    with _self_test_homes2_active(base):
-        refused_untouched(env, fx.case("t112-uninterpreted-backlog-repair", base), REPAIR,
-                          "backlog_item record row {}#2 has status that cannot be interpreted".format(BI_INDEX))
+    refused_untouched(env, fx.case("t112-uninterpreted-backlog-repair", base), REPAIR,
+                      "backlog_item record row {}#2 has status that cannot be interpreted".format(BI_INDEX))
 
 
 def flip_t112_backlog():
@@ -10657,9 +9872,8 @@ def t112_repair_archived_receipt(fx):
     reads every archived record (flip: the active-only read, under which a second receipt publishes and
     fails the final doctor)."""
     base = _archived_receipt(fx, "t112-archived")
-    with _self_test_homes2_active(base):
-        refused_untouched(fx.env, fx.case("t112-archived-repair", base), REPAIR,
-                          "already holds the clean done receipt 'DN-1'")
+    refused_untouched(fx.env, fx.case("t112-archived-repair", base), REPAIR,
+                      "already holds the clean done receipt 'DN-1'")
 
 
 def t112_repair_unreadable_archive(fx):
@@ -10667,9 +9881,8 @@ def t112_repair_unreadable_archive(fx):
     problems, every byte untouched, never skipped (flip: the active-only read)."""
     base = _archived_receipt(fx, "t112-unreadable-archive")
     write_commit(fx.env, base, ARCHIVED_DN_INDEX, b"record = [\n", "a torn archive index")
-    with _self_test_homes2_active(base):
-        refused_untouched(fx.env, fx.case("t112-unreadable-archive-repair", base), REPAIR,
-                          "does not pass the doctor's own archive walk")
+    refused_untouched(fx.env, fx.case("t112-unreadable-archive-repair", base), REPAIR,
+                      "does not pass the doctor's own archive walk")
 
 
 def flip_t112_archive():
@@ -10685,32 +9898,31 @@ def t113_repair_peer_reservation(fx):
     planned claims, which reserves the next numbers and is refused only at the publication boundary)."""
     env = fx.env
     base = _repair_store(fx, "t113-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t113-peer-reservation", base)
-        counters0 = model(root, COUNTERS)["counters"]
-        peer = Path(root) / record._opf_store.allocation_record("import", T113_PEER_RUN)
-        payload = record._opf_journal.reservation_payload("import", T113_PEER_RUN, "op",
-                                                          {"DN": counters0["DN"] + 1})
-        reserve = record._reserve_claim
+    root = fx.case("t113-peer-reservation", base)
+    counters0 = model(root, COUNTERS)["counters"]
+    peer = Path(root) / record._opf_store.allocation_record("import", T113_PEER_RUN)
+    payload = record._opf_journal.reservation_payload("import", T113_PEER_RUN, "op",
+                                                      {"DN": counters0["DN"] + 1})
+    reserve = record._reserve_claim
 
-        def peer_first(ctx, plan, cap, run_id):
-            peer.parent.mkdir(parents=True, exist_ok=True)
-            peer.write_bytes(payload)
-            return reserve(ctx, plan, cap, run_id)
-        pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS + (BI_INDEX,))
-        with patch.object(record, "_reserve_claim", peer_first), ticking():
-            result = record_cli(env, root, REPAIR)
-        assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
-        refused(result, "changed between planning and the held capability")
-        assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS + (BI_INDEX,)) == pre, \
-            "T113 every operand at the prestate"
-        assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
-        assert peer.read_bytes() == payload, "T113 the peer's reservation is never touched"
-        with ticking():
-            recorded(record_cli(env, root, REPAIR))
-        assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
-            "T113 the re-run claims above the peer's reservation", receipts_of(root, "BI-1"))
-        doctor_valid(env, root)
+    def peer_first(ctx, plan, cap, run_id):
+        peer.parent.mkdir(parents=True, exist_ok=True)
+        peer.write_bytes(payload)
+        return reserve(ctx, plan, cap, run_id)
+    pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS + (BI_INDEX,))
+    with patch.object(record, "_reserve_claim", peer_first), ticking():
+        result = record_cli(env, root, REPAIR)
+    assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
+    refused(result, "changed between planning and the held capability")
+    assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS + (BI_INDEX,)) == pre, \
+        "T113 every operand at the prestate"
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
+    assert peer.read_bytes() == payload, "T113 the peer's reservation is never touched"
+    with ticking():
+        recorded(record_cli(env, root, REPAIR))
+    assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
+        "T113 the re-run claims above the peer's reservation", receipts_of(root, "BI-1"))
+    doctor_valid(env, root)
 
 
 def t113_repair_backlog_changed(fx):
@@ -10721,23 +9933,22 @@ def t113_repair_backlog_changed(fx):
     doctor fails after publication)."""
     env = fx.env
     base = _repair_store(fx, "t113-backlog-base")
-    with _self_test_homes2_active(base):
-        root = fx.case("t113-backlog-changed", base)
-        index = model(root, BI_INDEX)
-        index["record"][0]["status"] = "active"
-        edited = emit.emit_checked(index).encode("utf-8")
-        acquire = record._acquire_guard
+    root = fx.case("t113-backlog-changed", base)
+    index = model(root, BI_INDEX)
+    index["record"][0]["status"] = "active"
+    edited = emit.emit_checked(index).encode("utf-8")
+    acquire = record._acquire_guard
 
-        def edit_first(ctx):
-            (Path(root) / BI_INDEX).write_bytes(edited)
-            return acquire(ctx)
-        pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
-        with patch.object(record, "_acquire_guard", edit_first), ticking():
-            result = record_cli(env, root, REPAIR)
-        assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == pre, "T113 every operand at the prestate"
-        assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
-        assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
-        refused(result, "{} changed after it was read".format(BI_INDEX))
+    def edit_first(ctx):
+        (Path(root) / BI_INDEX).write_bytes(edited)
+        return acquire(ctx)
+    pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+    with patch.object(record, "_acquire_guard", edit_first), ticking():
+        result = record_cli(env, root, REPAIR)
+    assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == pre, "T113 every operand at the prestate"
+    assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
+    assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
+    refused(result, "{} changed after it was read".format(BI_INDEX))
 
 
 def flip_t113_backlog():
@@ -10751,14 +9962,13 @@ def t114_repair_uncommitted_edit(fx):
     pending status change for it, fails after publication)."""
     env = fx.env
     base = _repair_store(fx, "t114-base", edit="worktree")
-    with _self_test_homes2_active(base):
-        root = fx.case("t114-uncommitted", base)
-        refused_untouched(env, root, REPAIR, "commit the reviewed edit first")
-        write_commit(env, root, BI_INDEX, read(root, BI_INDEX), "the reviewed edit: BI-1 done")
-        index = model(root, BI_INDEX)
-        index["record"][0]["title"] = "repair me, retitled"
-        (Path(root) / BI_INDEX).write_bytes(emit.emit_checked(index).encode("utf-8"))
-        refused_untouched(env, root, REPAIR, "commit the reviewed edit first")
+    root = fx.case("t114-uncommitted", base)
+    refused_untouched(env, root, REPAIR, "commit the reviewed edit first")
+    write_commit(env, root, BI_INDEX, read(root, BI_INDEX), "the reviewed edit: BI-1 done")
+    index = model(root, BI_INDEX)
+    index["record"][0]["title"] = "repair me, retitled"
+    (Path(root) / BI_INDEX).write_bytes(emit.emit_checked(index).encode("utf-8"))
+    refused_untouched(env, root, REPAIR, "commit the reviewed edit first")
 
 
 def flip_t114():
@@ -10775,26 +9985,25 @@ def t115_repair_head_moved(fx):
     hold, records exit 0)."""
     env = fx.env
     base = _repair_store(fx, "t115-base")
-    with _self_test_homes2_active(base):
-        for label, target in (("absent", None), ("active", "HEAD~1")):
-            root = fx.case("t115-head-moved-" + label, base)
-            if target is None:
-                (target,) = env.git(root, "rev-list", "--max-parents=0", "HEAD").split()
-            target = env.git(root, "rev-parse", "--verify", target).strip()
-            acquire = record._acquire_guard
+    for label, target in (("absent", None), ("active", "HEAD~1")):
+        root = fx.case("t115-head-moved-" + label, base)
+        if target is None:
+            (target,) = env.git(root, "rev-list", "--max-parents=0", "HEAD").split()
+        target = env.git(root, "rev-parse", "--verify", target).strip()
+        acquire = record._acquire_guard
 
-            def moved_first(ctx, root=root, target=target, acquire=acquire):
-                env.git(root, "reset", "-q", "--soft", target)
-                return acquire(ctx)
-            before = snapshot(root)
-            with patch.object(record, "_acquire_guard", moved_first), ticking():
-                result = record_cli(env, root, REPAIR)
-            assert snapshot(root) == before, ("T115 bytes untouched", label, result[0], result[2][-1600:])
-            assert _reservations(root) == [], ("T115 no reservation", label, _reservations(root))
-            assert journal_states(root, TYPED_JOURNAL) == {}, ("T115 no transaction is opened", label)
-            assert env.git(root, "rev-parse", "HEAD").strip() == target, ("T115 HEAD was moved", label)
-            refused(result, "under the held lease, immediately before publication, the prior commit (HEAD) "
-                            "was read again: receipt-repair refused (uncommitted-item): BI-1")
+        def moved_first(ctx, root=root, target=target, acquire=acquire):
+            env.git(root, "reset", "-q", "--soft", target)
+            return acquire(ctx)
+        before = snapshot(root)
+        with patch.object(record, "_acquire_guard", moved_first), ticking():
+            result = record_cli(env, root, REPAIR)
+        assert snapshot(root) == before, ("T115 bytes untouched", label, result[0], result[2][-1600:])
+        assert _reservations(root) == [], ("T115 no reservation", label, _reservations(root))
+        assert journal_states(root, TYPED_JOURNAL) == {}, ("T115 no transaction is opened", label)
+        assert env.git(root, "rev-parse", "HEAD").strip() == target, ("T115 HEAD was moved", label)
+        refused(result, "under the held lease, immediately before publication, the prior commit (HEAD) "
+                        "was read again: receipt-repair refused (uncommitted-item): BI-1")
 
 
 def flip_t115():
@@ -10817,7 +10026,6 @@ TESTS = (
     ("T12-recovery-under-the-lease", t12_recovery_lease, flip_t12),
     ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
     ("T14-create-type-before-read", t14_type_before_read, flip_t14),
-    ("T15-leftover-journal-lock", t15_leftover_lock, flip_t15),
     ("T16-rejection-recorded-predecessor", t16_recorded_predecessor, flip_t16),
     ("T16-invalid-predecessor-rejection", t16_invalid_predecessor_rejection, flip_t16_trust),
     ("T16-invalid-predecessor-receipt", t16_invalid_predecessor_receipt, flip_t16_trust),
@@ -10830,9 +10038,10 @@ TESTS = (
     ("T18-options-apply-only-withdrawn", t18_apply_only_withdrawn, flip_t18_apply_only),
     ("T18-options-apply-only-ratification", t18_apply_only_ratification, flip_t18_apply_only),
     ("T19-record-run-id-grammar", t19_run_id_grammar, flip_t19),
-    ("T19-legacy-name-recovery", t19_legacy_name_recovery, flip_t19_legacy),
-    ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, flip_t20),
+    # T19-legacy-name-recovery retired: a homes-2 run id names its reservation, so no dotted name is minted (T23 covers recovery).
+    ("T20b-legacy-journal-ignored", t20b_legacy_journal_ignored, flip_t20b),
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
+    ("T27b-homes2-report-journal-rel", t27b_homes2_report, flip_t27b),
     ("T22-homes2-claim-reserves", t22_homes2_claim_reserves, (flip_t22_refuse, flip_t22_noreserve,
                                                               flip_t22_validator,
                                                               flip_unreadable_reservation_skipped,
@@ -10844,13 +10053,13 @@ TESTS = (
                                                                       flip_t5_count_empty,
                                                                       flip_t5_count_host_zero,
                                                                       flip_t5_count_table_row)),
-    ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
+    ("T24b-unreadable-manifest-typed-only", t24b_unreadable_manifest_typed_only, flip_t24b),
     ("T25-recovery-plan-under-capability", t25_plan_under_capability, flip_t25),
     ("T26-complete-before-projection", t26_complete_before_projection, flip_t26),
-    ("T27-homes1-report-shape", t27_homes1_report, flip_t27),
     ("T28-spec15-probe-sentence", t28_spec15_sentence, flip_t28),
     ("T29-git-lifecycle-pins", t29_git_lifecycle, flip_t29),
-    ("T30-unactivated-homes2-refused", t30_unactivated_homes2, flip_t30),
+    ("T30b-non-baseline-refused-first", t30b_non_baseline_refused_first, flip_t30b),
+    ("T30c-imported-rows-preserved", t30c_imported_rows_preserved, flip_t30c),
     ("T31-dead-capability-reclaimed", t31_dead_capability, flip_t31),
     ("T32-lone-active-record-reclaimed", t32_lone_active, flip_t32),
     ("T33-journal-rederived-under-capability", t33_journal_rederived_under_capability, flip_t33),
@@ -10868,21 +10077,16 @@ TESTS = (
     ("T45-unreported-removals-unknown", t45_unreported_removals_unknown, flip_t45),
     ("T46-disclosures-exact", t46_disclosures_exact, flip_t46),
     ("T47-reclaimed-outcome-scoped", t47_reclaimed_outcome_scoped, (flip_t47_grammar, flip_t47_poststate)),
-    ("T48-prepare-names-created", t48_prepare_names_created, flip_t48),
     ("T49-home-absent-recovery-disclosed", t49_home_absent_recovery_disclosed, flip_t49),
-    ("T50-leftover-lock-complete-scoped", t50_leftover_lock_complete_scoped, flip_t50),
-    ("T51-lock-refusals-name-created", t51_lock_refusals_name_created, flip_t51),
+    # T51-lock-refusals-name-created retired: no journal lock at homes 2; T38 and T43 name an acquisition's removals.
     ("T52-publication-refused-before-intent", t52_publication_refused_before_intent,
      (flip_t52_message, flip_t52_rule, flip_t79_doctor)),
     ("T53-projection-existence-only", t53_projection_existence_only, (flip_t53_outcome, flip_t53_guard)),
     ("T54-header-exact", t54_header_exact, flip_t54),
-    ("T55-lock-release-after-unlink", t55_lock_release_after_unlink, flip_t55),
-    ("T56-nothing-opened-not-terminal", t56_nothing_opened_not_terminal, flip_t56),
     ("T57-retained-not-promised", t57_retained_not_promised, flip_t57),
     ("T58-released-holder-staging-reported", t58_released_holder_staging_reported, flip_t58),
-    ("T59-recovery-lease-failure-scoped", t59_recovery_lease_failure_scoped, flip_t59),
+    # T59-recovery-lease-failure-scoped retired: T39, T40, T42 and T44 name what a failed recovery acquisition removed.
     ("T60-release-failure-scoped", t60_release_failure_scoped, flip_t60),
-    ("T61-lock-create-failure-disclosed", t61_lock_create_failure_disclosed, flip_t61),
     ("T62-output-failure-not-release", t62_output_failure_not_release, flip_t62),
     ("T63-t29-cleanup-covers-the-write", t63_t29_cleanup_covers_the_write, flip_t63),
     ("T64-diagnostic-failure-never-governs", t64_diagnostic_failure_never_governs,
@@ -10891,8 +10095,6 @@ TESTS = (
     ("T66-release-interrupt-never-displaces", t66_release_interrupt_never_displaces, flip_t66),
     ("T67-ambient-exception-not-pending", t67_ambient_exception_not_pending, flip_t67),
     ("T68-release-mark-before-acquisition", t68_release_mark_before_acquisition, flip_t68),
-    ("T69-release-failure-closes-fd", t69_release_failure_closes_fd, flip_t69_release),
-    ("T69-token-failure-closes-fd", t69_token_failure_closes_fd, flip_t69_token),
     ("T70-tag-after-unwind", t70_tag_after_unwind, flip_t70),
     ("T71-allocation-residual-disclosed", t71_allocation_residual_disclosed, flip_t71),
     ("T72-decision-supersession", t72_supersession, flip_t72_link),
@@ -10920,12 +10122,10 @@ TESTS = (
     ("T73-contribution-delivery-bundle", t73_contribution_delivery, (flip_t73_delivery, flip_t73_rejection,
                                                                     flip_t73_receipt)),
     ("T74-recovery-never-seize-dead-run-release", t74_never_seize_dead_run_release,
-     (flip_t74_claim, flip_t74_unscoped, flip_t74_live, flip_t74_host, flip_t74_schema, flip_t74_prefix,
-      flip_t74_eperm, flip_t74_verb)),
+     (flip_t74_claim, flip_t74_unscoped, flip_t74_eperm, flip_t74_prefix)),
     ("T75-concurrent-recovery-single-writer", t75_concurrent_recovery, None),  # its flip runs inside the children
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
-    ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
-    ("T78-homes2-declaration-pair-required", t78_homes2_needs_the_pair, (flip_t78, flip_t30)),
+    ("T77-release-report-every-failure", t77_report_every_failure, (flip_t77, flip_t77_dropped)),
     ("T79-kill-after-reserve", t79_kill_after_reserve, (flip_t79, flip_t79_doctor)),
     ("T80-two-runs-distinct-ids", t80_two_runs_never_same_id, (flip_t79, flip_t80_no_recheck)),
     ("T81-homes2-cross-kind-high-water", t81_cross_kind_reservations, (flip_t81,
@@ -10990,7 +10190,6 @@ TESTS = (
     ("T108-committed-deleted-lease-refused", t108_committed_deleted_lease, flip_t108),
     ("T109-normalizing-filter-note", t109_normalizing_filter_note, flip_t109),
     ("T110-receipt-repair-records", t110_receipt_repair, flip_t22_noreserve),
-    ("T110-receipt-repair-homes1-refused", t110_homes1_refused, (flip_t110_homes1, flip_t110_homes1_late)),
     ("T110-receipt-repair-importer-arm", t110_importer_arm, flip_t110_importer),
     ("T110-receipt-repair-crash", t110_repair_crash, flip_t110_crash),
     ("T111-receipt-repair-maintainer-only", t111_repair_maintainer_only, flip_t111),
@@ -11004,6 +10203,7 @@ TESTS = (
     ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
     ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
+    ("T116-own-capability-release-interrupt", t116_own_capability_release_interrupt, flip_t116),
 )
 
 

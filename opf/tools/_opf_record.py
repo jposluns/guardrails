@@ -73,8 +73,7 @@ backlog index is read, never rewritten, and no status changes (spec 8.8). Its ne
 the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has, so on a homes-1 store
 it refuses, recording nothing (_require_reservation_home; like every subcommand, it first reconciles any
 interrupted earlier run, and that recovery, where one is needed, writes the store before the run refuses);
-while SUPPORTED_HOMES is 1 (below) that is every store this build writes, so the shipped verb refuses it
-until activation. The item must be seated once in the active backlog index at unqualified `done`,
+the admission probe (below) refuses every store but a homes-2 one first. The item must be seated once in the active backlog index at unqualified `done`,
 schema-valid and authored by a clean-series author, and its row must be exactly the row the prior commit
 (HEAD) holds, read through the doctor's own prior-snapshot reader (_require_committed_item) while planning
 and read again under the held lease immediately before anything is reserved or published
@@ -162,13 +161,11 @@ its lower numbers are still reported missing and the next run is held at the pos
 a published record whose number a reservation records and whose deletion is committed is then graded as
 an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
 keeps that deletion a C-NO-DELETION finding. Spec 8.2 settles this direction: the doctor treats a
-reserved number as issued wherever its checks would otherwise report it missing. This homes-2 path is
-reached only once activation sets
-_opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
-SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
-write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
-.aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
-migration to carry it (spec 4.2).
+reserved number as issued wherever its checks would otherwise report it missing. Every subcommand
+admits only a store declaring spec_version 2.0.0 with homes = 2 (_probe_admission refuses any other
+readable manifest before any reconciliation or write), so the shipped verb claims through homes 2
+only. .aiqt/ is AIQT-only content on such a store (spec 4.2): a leftover .aiqt/record/journal is
+neither read, recovered nor refused.
 
 Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
 2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
@@ -673,18 +670,18 @@ class Context:
 
 def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
-    the tooling spec_version, in the inline layout. Validation already refuses an older store (spec 9.2),
-    so the version refusal below meets only a VALID store at another version, the reserved homes-2 pair,
-    which no upgrade carries back: such a store takes the tooling that implements its version."""
+    the tooling spec_version, in the inline layout. Validation already refuses every other version
+    (spec 9.2), so the version refusal below is a second guard: such a store takes the tooling that
+    implements its version."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
     mv = _opf_store.validate_manifest(manifest, manifest_rel=ctx.rel(_opf_store.MANIFEST_NAME))
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)
-    if base.get("spec_version") != _opf_store.SUPPORTED_SPEC_VERSION:
+    if base.get("spec_version") != _opf_store.SPEC_VERSION:
         raise RecordError("the store declares spec_version {!r}, not the tooling's {}; use the tooling "
                           "that implements it (fail-closed)".format(base.get("spec_version"),
-                                                       _opf_store.SUPPORTED_SPEC_VERSION))
+                                                       _opf_store.SPEC_VERSION))
     if base.get("layout") != "inline":
         raise RecordError("layout {!r} is not supported by this build (inline only); fail-closed".format(
             base.get("layout")))
@@ -711,7 +708,7 @@ def _counter_state(ctx, counters_model):
                              if _opf_check.imported_series_active(ctx.manifest) else None))
 
 
-def claim_ids(homes, high, demand, known_complete, reserved=None):
+def claim_ids(homes, high, demand, known_complete, reserved=None, imported_series=False):
     """THE allocation seam (exactly one). `demand` is the ordered list of namespaces to claim; returns
     (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map, with
     `reserved` refused (the homes-1 counters path takes no reservation input); the caller publishes the
@@ -729,7 +726,9 @@ def claim_ids(homes, high, demand, known_complete, reserved=None):
     claims again under the held capability and refuses a plan they no longer match; this function
     derives the plan only). A homes-2 call without the
     reservation scan, a malformed or out-of-range scan, and any other generation each refuse
-    fail-closed rather than claim through the homes-1 counters path."""
+    fail-closed rather than claim through the homes-1 counters path. `imported_series` is passed to
+    next_id unchanged: where the manifest activates the imported series the high-water map carries the
+    "imported:<NS>" rows too, which next_id refuses without the flag; this verb never demands one."""
     if type(homes) is int and homes == 1:
         if reserved is not None:
             raise RecordError("the homes-1 counters path takes no reservation input; fail-closed")
@@ -755,7 +754,8 @@ def claim_ids(homes, high, demand, known_complete, reserved=None):
     ids = []
     for ns in demand:
         try:
-            rid, n = _opf_schema.next_id(cur, ns, known_complete=known_complete)
+            rid, n = _opf_schema.next_id(cur, ns, known_complete=known_complete,
+                                         imported_series=imported_series)
         except ValueError as exc:
             raise RecordError("cannot claim an id: {}; fail-closed".format(exc))
         if homes == 2 and n > _opf_journal._CLAIM_VALUE_MAX:
@@ -822,7 +822,8 @@ def _claim(ctx, demand):
         raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
             "; ".join(findings)))
     reserved = _reservation_high(ctx) if ctx.homes == 2 else None
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved,
+                              imported_series=_opf_check.imported_series_active(ctx.manifest))
     new_model = copy.deepcopy(ctx.counters.model)
     new_model["counters"] = dict(new_model.get("counters") or {})
     for ns in demand:
@@ -1982,7 +1983,8 @@ def _expected_delta(req, ctx, raws, now):
     if findings:
         raise _postcondition_failed("the prior counters.toml cannot license the claim")
     reserved = _reservation_high(ctx) if ctx.homes == 2 else None
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved,
+                              imported_series=_opf_check.imported_series_active(ctx.manifest))
     table = dict(counters.get("counters") or {})
     for ns in demand:
         if new_high[ns] != max(table.get(ns, 0), (reserved or {}).get(ns, 0)) + 1:
@@ -2233,48 +2235,30 @@ def _record_journal_rel(homes):
         _opf_store._safe_display(homes)))
 
 
-def _probe_homes(ctx):
-    """The homes generation probed for the journal home BEFORE the manifest is validated (reconcile
-    runs first, so it cannot wait for _load_manifest): homes_generation over a best-effort manifest
-    read, unvalidated, which is that helper's own contract. On a read or parse failure the
-    generation is UNKNOWABLE (a homes-1 and a homes-2 store share one layout; only the manifest
-    tells them apart), so the store MAY be homes 2 and nothing may be written under .aiqt/: when a
-    no-follow existence probe finds a legacy record journal (an inspection used only to refuse,
-    never a read of AIQT material, spec 15) the run refuses fail-closed BEFORE any legacy
-    reconciliation could write there, and when none exists the probe reports 1, so homes-1
-    behaviour on a broken manifest is otherwise unchanged (reconcile finds nothing to do and
-    _load_manifest then refuses the unreadable manifest itself). A readable manifest whose `homes`
-    declaration is not the generation this tooling activates for it (a homes-2 declaration while
-    SUPPORTED_HOMES is 1, or without the homes-2 spec_version) also refuses fail-closed BEFORE any
-    reconciliation or write: probing it as generation 1 would reconcile the legacy .aiqt/record/journal
-    of what the store declares a homes-2 store (spec 9.2: an unknown generation is refused).
-    _load_manifest re-derives the generation from the validated manifest and _run_operation refuses
-    when the two differ."""
+def _probe_admission(ctx):
+    """The admission probe BEFORE the manifest is validated (reconcile runs first, so it cannot wait
+    for _load_manifest), over a best-effort manifest read, unvalidated. A readable manifest that does
+    not declare exactly spec_version 2.0.0 with the integer homes = 2 refuses fail-closed BEFORE any
+    reconciliation, capability acquisition or write (spec 9.2): this tooling defines no other
+    store. On a read or parse failure the typed home is returned and nothing under .aiqt/ is
+    touched: OPF keeps no record state there (spec 4.2), so reconcile runs on the typed home alone
+    and _load_manifest then refuses the unreadable manifest itself. Returns the homes generation, 2,
+    the only value _load_manifest can derive from a manifest it admits, so the two never differ."""
     try:
         model = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
-    except RecordError as probe_exc:
-        try:
-            st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
-        except (_journal.JournalError, OSError) as exc:
-            raise RecordError("cannot inspect the legacy record journal {} ({}); fail-closed".format(
-                JOURNAL_REL, exc))
-        if st is not None:
-            raise RecordError("the store manifest cannot be read ({}), so the homes generation cannot "
-                              "be told, and a record journal is present at {}: reconciling it could "
-                              "write under .aiqt/ on what may be a homes-2 store. Restore the manifest "
-                              "first. Nothing written (fail-closed)".format(probe_exc, JOURNAL_REL))
-        return 1
-    generation = _opf_store.homes_generation(model)
+    except RecordError:
+        return _opf_store.HOMES
     base = model.get(_opf_store.STANDARD_TOKEN) if isinstance(model, dict) else None
-    declared = base.get("homes", 1) if isinstance(base, dict) else 1
-    if type(declared) is not int or declared != generation:
-        raise RecordError("the store manifest declares homes generation {}, which this tooling does not "
-                          "activate (it activates homes {} at most, and homes 2 only with spec_version {}), "
-                          "so the record journal home cannot be told and reconciling a legacy journal could "
-                          "write under .aiqt/ on a homes-2 store. Nothing written (fail-closed)".format(
-                              _opf_store._safe_display(declared), _opf_store.SUPPORTED_HOMES,
-                              _opf_store.HOMES2_SPEC_VERSION))
-    return generation
+    version = base.get("spec_version") if isinstance(base, dict) else None
+    declared = base.get("homes") if isinstance(base, dict) else None
+    if (version != _opf_store.SPEC_VERSION or type(declared) is not int
+            or declared != _opf_store.HOMES):
+        raise RecordError("the store manifest declares spec_version {} with homes {}, but this tooling "
+                          "admits only spec_version {} with homes = {} (spec 9.2). Nothing written "
+                          "(fail-closed)".format(
+                              _opf_store._safe_display(version), _opf_store._safe_display(declared),
+                              _opf_store.SPEC_VERSION, _opf_store.HOMES))
+    return _opf_store.homes_generation(model)
 
 
 def _record_run_id(token):
@@ -2557,11 +2541,10 @@ def _reconcile_journal(ctx):
     transaction's operands are not re-checked: a COMPLETE one's publication was applied when it
     committed), the lease release is attempted with a failure surfaced, and the run refuses (exit 2)
     naming each outcome: the operator inspects the result before re-running. On a homes-2 store the
-    record journal lives in the typed capability home instead: a legacy .aiqt/record/journal found
-    there is REFUSED read-only and never recovered (homes 2 has no homes migration, spec 4.2),
-    and the typed home is reconciled through the capability-bound API (_reconcile_capability_journal)."""
+    record journal lives in the typed capability home instead, reconciled through the capability-bound
+    API (_reconcile_capability_journal); .aiqt/ is AIQT-only content there (spec 4.2), so a leftover
+    .aiqt/record/journal is neither read, recovered nor refused."""
     if ctx.journal_rel != JOURNAL_REL:
-        _refuse_legacy_journal(ctx)
         _reconcile_capability_journal(ctx)
         return
     root_fd = ctx.root_fd
@@ -2992,8 +2975,9 @@ def _recover_capability_journal(ctx, opened, unprojected):
                 "cleared only once its holder is confirmed dead)")
     # The outcome list is allocated BEFORE the acquisition (PR D fix 14): an allocation failure
     # between acquire_operation returning and the protected region would strand the just-acquired
-    # capability.
+    # capability. So is the failure in flight the cleanup reads (never sys.exc_info()).
     reconciled = []
+    pending = None
     try:
         cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB, recover=True)
     except _opf_oplock.OpLockError as exc:
@@ -3027,12 +3011,22 @@ def _recover_capability_journal(ctx, opened, unprojected):
         outcomes = ([_reclaimed_outcome(cap, opened or unprojected)] if cap.recovered else []) + reconciled
         if cap.staging_removed and not cap.recovered:
             outcomes.insert(0, _staging_removed_outcome(cap))
+    except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+        pending = exc
+        raise
     finally:
         try:
             _opf_oplock.release_operation(cap)
-        except _opf_oplock.OpLockError as exc:
-            print("opf record: additionally, releasing the operation capability failed ({}); the failure "
-                  "above still governs.".format(exc), file=sys.stderr)
+        except BaseException as rel_exc:  # noqa: BLE001  surfaced, never displaces a failure in flight
+            # An ordinary release failure on the clean exit stays surfaced, never fatal; any other
+            # raising release on the clean exit is the run's own failure.
+            if pending is None and not isinstance(rel_exc, _opf_oplock.OpLockError):
+                raise
+            try:
+                print("opf record: additionally, releasing the operation capability failed ({}); the failure "
+                      "above still governs.".format(rel_exc), file=sys.stderr)
+            except BaseException:
+                pass  # a failing diagnostic write never displaces the governing failure
     return (bool(reconciled), bool(cap.recovered), outcomes) if outcomes else None
 
 
@@ -3281,9 +3275,7 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     held capability, before the transaction opens, _require_reservation re-reads that run's
     canonical reservation and requires its claims to be this plan's. A call naming no run id, or one
     whose reservation is absent, unreadable, non-canonical or claims other numbers, refuses with no
-    transaction opened. _run_operation reaches this only once activation sets
-    _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
-    SUPPORTED_HOMES is 1, _probe_homes refuses a store declaring homes 2 first."""
+    transaction opened."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:
@@ -3304,6 +3296,9 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
         content[operand.rel] = operand.new_raw
         staged.append(base64.b64encode(operand.new_raw).decode("ascii"))
     own = cap is None
+    # The run's own failure in flight, allocated before the acquisition and read by the cleanup below
+    # (never sys.exc_info()), as _run_operation's release does.
+    pending = None
     if own:
         try:
             cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB)
@@ -3323,13 +3318,23 @@ def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
                               "transaction, or a terminal one missing its projection; none when it failed before "
                               "its transaction opened) is left for the next opf record run's recovery trigger "
                               "(fail-closed)".format(run_id, exc, ctx.journal_rel))
+    except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+        pending = exc
+        raise
     finally:
         if own:
             try:
                 _opf_oplock.release_operation(cap)
-            except _opf_oplock.OpLockError as exc:
-                print("opf record: additionally, releasing the operation capability failed ({}); the "
-                      "outcome above still governs.".format(exc), file=sys.stderr)
+            except BaseException as rel_exc:  # noqa: BLE001  surfaced, never displaces a failure in flight
+                # An ordinary release failure on the clean exit stays surfaced, never fatal; any other
+                # raising release on the clean exit is the run's own failure.
+                if pending is None and not isinstance(rel_exc, _opf_oplock.OpLockError):
+                    raise
+                try:
+                    print("opf record: additionally, releasing the operation capability failed ({}); the "
+                          "outcome above still governs.".format(rel_exc), file=sys.stderr)
+                except BaseException:
+                    pass  # a failing diagnostic write never displaces the governing failure
 
 
 # --- render, the final doctor, recovery, and the release-then-report ordering --------------------------
@@ -3441,13 +3446,22 @@ def _acquire_guard(ctx):
         try:
             return _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB)
         except _opf_oplock.OpLockError as exc:
-            raise RecordError(str(exc))
+            # The refusal names what the acquisition removed (_acquisition_removals), as the
+            # recovery acquisition's and the publication's do: a failure after a removal reaches
+            # here as an OpLockError carrying that report, an EMFILE or a JournalError included.
+            raise RecordError("{}. {}".format(exc, _acquisition_removals(exc)))
     return _opf_write_guard.acquire_lease(ctx.root_fd, ctx.machine_rel, VERB)
 
 
 def _release_guard(ctx, guard):
+    """Release what _acquire_guard took. An ordinary capability release failure (OpLockError) is a
+    refusal, as the homes-1 lease release's WriteGuardError is, never the cli's unexpected-error
+    backstop; anything else propagates as itself."""
     if ctx.journal_rel != JOURNAL_REL:
-        _opf_oplock.release_operation(guard)
+        try:
+            _opf_oplock.release_operation(guard)
+        except _opf_oplock.OpLockError as exc:
+            raise RecordError(str(exc))
     else:
         _release(ctx, guard)
 
@@ -3595,17 +3609,15 @@ def _run_operation(req):
     try:
         ctx = Context(res, root, root_fd)
         # 1. an interrupted earlier run is reconciled (under the lease), and refuses this one, before
-        # any operand is read. The journal home is the generation's (spec 8.8), probed from the manifest
-        # BEFORE validation because reconcile runs first; _load_manifest re-derives it below and a
-        # disagreement (the manifest changed between the reads) refuses.
-        ctx.journal_rel = _record_journal_rel(_probe_homes(ctx))
+        # any operand is read. The admission probe refuses a readable manifest this tooling does not
+        # admit BEFORE validation because reconcile runs first; the journal home is the typed one
+        # (spec 8.8).
+        ctx.journal_rel = _record_journal_rel(_probe_admission(ctx))
         _reconcile_journal(ctx)
         # 2. read the models this operation plans from; the request checks that need the manifest run
-        # before any operand path is built from the request.
+        # before any operand path is built from the request. No probe-versus-validation comparison
+        # follows: the probe yields homes 2 or refuses, and _load_manifest yields homes 2 or refuses.
         _load_manifest(ctx)
-        if _record_journal_rel(ctx.homes) != ctx.journal_rel:
-            raise RecordError("the manifest's homes generation changed between the journal probe and its "
-                              "validation; nothing written; re-run (fail-closed)")
         _check_request(req, ctx)
         ctx.counters = _read_operand(root_fd, ctx.rel(_opf_check.COUNTERS_NAME))
         ctx.version = _read_operand(root_fd, ctx.rel(_opf_check.VERSION_NAME)).model
@@ -3927,7 +3939,7 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
-    # The manifest route: _probe_homes reads the manifest through
+    # The manifest route: _probe_admission reads the manifest through
     # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
     # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
     # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than
@@ -3950,15 +3962,15 @@ def _self_test_units(check):
     deep_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, deep_model)
     deep_probe = None
     try:
-        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+        _probe_admission(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
     except RecordError as exc:
         deep_probe = str(exc)
     except RecursionError:
         pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
     finally:
         deep_globals["_read_operand"] = deep_read
-    check("a deeply nested manifest homes declaration refuses the homes probe with a bounded message",
-          deep_shape and deep_probe is not None and "declares homes generation" in deep_probe
+    check("a deeply nested manifest homes declaration refuses the admission probe with a bounded message",
+          deep_shape and deep_probe is not None and "admits only spec_version 2.0.0 with homes = 2" in deep_probe
           and "nested deeper than" in deep_probe
           and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
 
@@ -3984,24 +3996,62 @@ def _self_test_units(check):
           old_refusal is not None
           and "'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in old_refusal)
 
-    # The one VALID manifest at another spec_version, the reserved homes-2 pair, reaches the version
-    # refusal, which is pinned whole: offering an upgrade, which never carries the pair back, is red.
+    # The init manifest, the 2.0.0 / homes = 2 baseline, passes both the admission probe and
+    # _load_manifest, which reads it as homes generation 2 (red when either refuses it, or when the
+    # load reads it as another generation).
     import _opf_init
     pair_model = tomllib.loads(_opf_init.build_manifest())
-    pair_model[_opf_store.STANDARD_TOKEN]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
-    pair_model[_opf_store.STANDARD_TOKEN]["homes"] = 2
     old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, pair_model)
-    pair_refusal = None
+    pair_ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1)
+    pair_refusal = pair_probe = None
     try:
-        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+        pair_probe = _probe_admission(pair_ctx)
+        _load_manifest(pair_ctx)
     except RecordError as exc:
         pair_refusal = str(exc)
     finally:
         old_globals["_read_operand"] = old_read
-    check("a VALID manifest at another spec_version is refused toward the tooling that implements it",
-          _opf_store.validate_manifest(pair_model).status == _opf_store.VALID
-          and pair_refusal == "the store declares spec_version '2.0.0', not the tooling's 1.2.0; use the "
-                              "tooling that implements it (fail-closed)")
+    check("the init manifest is admitted at homes 2",
+          pair_refusal is None and pair_probe == 2 and pair_ctx.homes == 2
+          and _record_journal_rel(pair_ctx.homes) == _opf_store.journal_root("record"))
+    # A readable manifest that is not the 2.0.0 / homes = 2 baseline refuses at the probe, before
+    # any reconciliation: 1.2.0 with homes absent, homes = 1, homes = 3, and 2.0.0 with homes absent.
+    probe_refusals = []
+    for version, homes in (("1.2.0", None), ("1.2.0", 1), ("2.0.0", 1), ("2.0.0", 3),
+                           ("2.0.0", None), ("2.0.0", True), ("2.0.1", 2)):
+        probe_model = tomllib.loads(_opf_init.build_manifest())
+        probe_model[_opf_store.STANDARD_TOKEN]["spec_version"] = version
+        if homes is None:
+            del probe_model[_opf_store.STANDARD_TOKEN]["homes"]
+        else:
+            probe_model[_opf_store.STANDARD_TOKEN]["homes"] = homes
+        old_globals["_read_operand"] = lambda root_fd, rel, m=probe_model: Operand(rel, b"", 0o644, m)
+        try:
+            _probe_admission(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+            probe_refusals.append(None)
+        except RecordError as exc:
+            probe_refusals.append(str(exc))
+        finally:
+            old_globals["_read_operand"] = old_read
+    check("a readable non-baseline manifest refuses at the admission probe",
+          all(r is not None and "admits only spec_version 2.0.0 with homes = 2" in r
+              for r in probe_refusals))
+    # An unreadable manifest probes as the typed home and touches nothing under .aiqt/: the legacy
+    # journal is never inspected (red when the .aiqt lstat returns).
+    def unreadable(root_fd, rel):
+        raise RecordError("unreadable")
+    seen = []
+    lstat_prev = _journal._lstat_contained
+    old_globals["_read_operand"] = unreadable
+    _journal._lstat_contained = lambda fd, rel: seen.append(rel)
+    try:
+        unreadable_probe = _probe_admission(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    finally:
+        old_globals["_read_operand"] = old_read
+        _journal._lstat_contained = lstat_prev
+    check("an unreadable manifest probes as the typed home without inspecting .aiqt",
+          unreadable_probe == 2 and seen == []
+          and _record_journal_rel(unreadable_probe) == _opf_store.journal_root("record"))
 
 
 def _self_test_contexts(check, root_fd, now):
@@ -4025,44 +4075,45 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Where the imported series is active (the graded 2.0.0 / homes = 2 declaration under the tooling's
-    # imported-series support, the manifest here) the proof is the C-COUNTERS rule of
-    # that series (spec 8.2): the zero imported rows are accepted and each is required. Inactive
-    # (support below the series), an imported row still breaks it: at the shipped constants, and on
-    # the same 2.0.0 manifest with homes 2 supported but not the imported series.
+    # Where the imported series is active (the graded 2.0.0 / homes = 2 declaration, the manifest
+    # here) the proof is the C-COUNTERS rule of that series (spec 8.2): the zero imported rows are
+    # accepted and each is required. Inactive (no 2.0.0 / homes = 2 declaration), an imported row
+    # breaks it.
     imported_full = dict(full, **{"imported:" + ns: 0 for ns in full})
-    pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
-    prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-    try:
-        _opf_store.SUPPORTED_HOMES = 2
-        ctx = ctx_of(imported_full)
-        ctx.manifest = pair
-        check("an imported row breaks the proof without imported-series support",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        check("the active-series proof holds with every imported row",
-              _counter_state(ctx, ctx.counters.model)[1] == [])
-        # A homes-1 store declaring the imported series' own spec_version 1.3.0 stays off under both
-        # toggles: the imported series activates only inside the homes-2 declaration, so an imported row
-        # breaks the proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
-        ctx = ctx_of(imported_full)
-        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
-        homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
-        ctx = ctx_of(full)
-        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
-        check("an imported row breaks the proof on a 1.3.0 homes-1 manifest with imported-series support",
-              homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
-        imported_partial = dict(imported_full)
-        del imported_partial["imported:BI"]
-        ctx = ctx_of(imported_partial)
-        ctx.manifest = pair
-        check("a missing imported row breaks the active-series proof",
-              _counter_state(ctx, ctx.counters.model)[1] != [])
-    finally:
-        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
+    pair = {"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": 2}}
     ctx = ctx_of(imported_full)
-    check("an imported row breaks the proof at the shipped support",
+    ctx.manifest = pair
+    check("the active-series proof holds with every imported row",
+          _counter_state(ctx, ctx.counters.model)[1] == [])
+    # A store declaring the imported series' own spec_version 1.3.0 with homes 1 stays off: the
+    # imported series activates only inside the homes-2 declaration, so an imported row breaks the
+    # proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
+    ctx = ctx_of(imported_full)
+    ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+    homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
+    ctx = ctx_of(full)
+    ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+    check("an imported row breaks the proof on a 1.3.0 homes-1 manifest",
+          homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
+    imported_partial = dict(imported_full)
+    del imported_partial["imported:BI"]
+    ctx = ctx_of(imported_partial)
+    ctx.manifest = pair
+    check("a missing imported row breaks the active-series proof",
           _counter_state(ctx, ctx.counters.model)[1] != [])
+    ctx = ctx_of(imported_full)
+    check("an imported row breaks the proof with no manifest declaration",
+          _counter_state(ctx, ctx.counters.model)[1] != [])
+    # The id claim on a ledger that carries the imported rows: with the imported-series flag the
+    # clean ids are claimed and every imported row is left as it was; without it next_id refuses the
+    # map (red when claim_ids stops passing the flag to next_id).
+    ids, new_high = claim_ids(2, dict(imported_full, BI=4), ["BI"], True, reserved={},
+                              imported_series=True)
+    check("the id claim succeeds on a ledger with imported rows",
+          ids == ["BI-5"] and new_high["BI"] == 5
+          and all(new_high[k] == imported_full[k] for k in imported_full if k.startswith("imported:")))
+    check("the id claim without the imported-series flag refuses a ledger with imported rows",
+          _refuses(lambda: claim_ids(2, dict(imported_full), ["BI"], True, reserved={}), "cannot claim"))
     # Schema markers are exact integers everywhere this verb reads one (the same rule at every site):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
@@ -4569,6 +4620,7 @@ def _self_test_transitions(check, plan, post, full, now):
     _self_test_importer_operand(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
+    _self_test_acquire_guard(check)
 
 
 def _self_test_decisions(check, plan, post, full, now):
@@ -5416,6 +5468,40 @@ def _self_test_leftover_lock(check):
     line = _leftover_lock_outcome(owner, {decoy: "complete", minted: "rolled-back"})
     check("the hash16 binding picks the dead run's own homes-grammar transaction",
           minted in line and decoy not in line and "rolled back" in line)
+
+
+def _self_test_acquire_guard(check):
+    """The homes-2 single-writer acquisition's refusal names what the acquisition removed: an EMFILE
+    after it removed a staging leftover reaches _acquire_guard as the OpLockError the lock module
+    raises in its place (carrying the removal report), and the refusal names that removal; an
+    acquisition that removed nothing says so. Red when the refusal carries only the error's text."""
+    import errno
+    from types import SimpleNamespace
+    staging = "lease staging leftover ." + _opf_check.LEASE_NAME + _opf_oplock._STAGING_MARKER + "0" * 32
+    failures = (_opf_oplock._with_removals(OSError(errno.EMFILE, "synthetic EMFILE"), (), None,
+                                           (staging,), ()),
+                _opf_oplock._tag_removals(_opf_oplock.OpLockError("synthetic contention"), (), None, (), ()))
+    ctx = SimpleNamespace(journal_rel=_opf_store.journal_root("record"), res=SimpleNamespace(store_root="."))
+    real = _opf_oplock.acquire_operation
+    refusals = []
+    for failure in failures:
+        def failing(store_root, operation, holder=None, recover=False, _failure=failure):
+            raise _failure
+        _opf_oplock.acquire_operation = failing
+        try:
+            _acquire_guard(ctx)
+            refusals.append(None)
+        except RecordError as exc:
+            refusals.append(str(exc))
+        finally:
+            _opf_oplock.acquire_operation = real
+    check("a homes-2 acquisition refusal after a removal names it",
+          isinstance(failures[0], _opf_oplock.OpLockError) and refusals[0] is not None
+          and "synthetic EMFILE" in refusals[0]
+          and "before it failed the acquisition removed " + staging in refusals[0])
+    check("a homes-2 acquisition refusal that removed nothing says so",
+          refusals[1] is not None and "synthetic contention" in refusals[1]
+          and "and the acquisition removed nothing" in refusals[1])
 
 
 if __name__ == "__main__":

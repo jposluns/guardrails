@@ -594,8 +594,8 @@ def _check_imports(ev, rep):
 def _doctor_roster():
     """The per-check roster a VALID doctor result must grade: exactly what the whole-store validator
     requires of a store whose imported series is ACTIVE. Activation needs the homes-2 declaration
-    (_opf_check.imported_series_active), and required_checks widens every generation from 2 alike, so the
-    roster is required_checks(2, True): the strict checks, the homes-2 evidence enumeration
+    (_opf_check.imported_series_active), which every valid manifest carries, homes 2 being the only
+    generation, so the roster is required_checks(2, True): the strict checks, the homes-2 evidence enumeration
     (C-EVIDENCE-ENUM), and the four section 8.3 imported-series checks, every id read from the validator's
     own constants so the two modules cannot disagree."""
     import _opf_check

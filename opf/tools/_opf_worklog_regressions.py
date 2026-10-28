@@ -1085,8 +1085,10 @@ def self_test():
             with _Fixture(gen) as fx:
                 rep = _opf_check._Report()
                 def listing(_fd, rel, _rep):
+                    # A base 2.0.0 store carries the imported evidence home beside the machine store.
                     return {
-                        ".working": (["toml"], []),
+                        ".working": (["imported", "toml"], []),
+                        ".working/imported": ([], []),
                         ".working/toml": (["worklog"], []),
                         ".working/toml/worklog": ([], ["WL-1.toml"]),
                     }[rel]

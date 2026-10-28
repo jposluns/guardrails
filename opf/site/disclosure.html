@@ -106,9 +106,12 @@
         unidentified last-transition actor or a rejection requires unavailable pre-proposal state.
         Doctor does not check behind, ahead, or divergence against a sync target.</li>
       <li><b style="color:var(--ink)">Adoption and the prompt pack</b>: the reference CLI runs
-        adoption investigation and <code>opf adopt plan</code> read-only. <code>opf adopt
-        approve</code>, <code>apply</code>, <code>complete</code>, and <code>reconcile</code> refuse
-        with exit 2, so no approval, receipt, completion check, or retirement is recorded, and
+        adoption investigation, <code>opf adopt plan</code> and <code>opf adopt approve</code>
+        read-only; at base 2.0.0 they and <code>opf adopt status</code> run without reading the
+        adoption journal, and <code>status</code> says the journal is not read. <code>opf adopt
+        apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0 until the adoption
+        journal moves to its homes-2 home, and <code>complete</code> refuses with exit 2, so no
+        approval, receipt, completion check, or retirement is recorded, and
         adoption cannot install the enforcement pack. A frozen plan is an inert proposal, not
         permission to apply. Investigation covers only its detection roots, the declared
         deliverable and view destinations, and the paths the adopter names, detects by path rather
@@ -122,9 +125,7 @@
         that its manifest matches the member bytes; it does not authenticate them or review what
         they say. The interim clean-start route initializes a store with <code>opf init</code>; it
         is not an adoption, and a later <code>opf adopt</code> run reads that store as
-        re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the
-        specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a
-        store.</li>
+        re-adoption.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
@@ -135,13 +136,9 @@
         it (specification sections 4.5 and 9.2).</li>
       <li><b style="color:var(--ink)">Implementations</b> (specification section 16.1): the
         specification defines one implementation model, with no conformance classes, and base 2.0.0,
-        with <code>homes = 2</code>, is the only base version it defines. The reference tooling does
-        not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it
-        makes no claim of conformance to the specification. The reference tooling's <code>opf
-        doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with
-        <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says
-        nothing about conformance to the specification; <code>opf upgrade</code> and <code>opf
-        record</code> refuse such a store. The reference tooling defines no store upgrade:
+        with <code>homes = 2</code>, is the only base version it defines. The reference tooling
+        initializes and validates base 2.0.0 stores with <code>homes = 2</code>, and it makes no
+        claim of conformance to the specification. The reference tooling defines no store upgrade:
         <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing
         nothing.</li>
       <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the

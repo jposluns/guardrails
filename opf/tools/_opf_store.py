@@ -99,15 +99,12 @@ POINTER_REL = ".opf.toml"              # committed store pointer, at the PRODUCT
 LOCAL_POINTER_REL = ".opf.local.toml"  # uncommitted machine-local override, resolved FIRST (spec 4.3)
 WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root (spec 4.4)
 # Store-root exclusions, anchored only at the STORE ROOT. In homes 2, .aiqt is AIQT-only
-# content; OPF writes no state here. Until homes 2 is activated, legacy import state still
-# lives there. Keep this exclusion for those stores and for AIQT-owned material afterwards.
+# content; OPF writes no state here. Keep this exclusion for AIQT-owned material.
 # _opf_adopt derives its store-root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
-# Homes-2 topology is inert until writer activation (spec 4.2). Homes 2 has no homes migration: a
-# store is at homes 2 only when created there, and no homes-1 store is migrated (spec 4.2 / 9.2).
-# SUPPORTED_HOMES is the highest homes generation this tooling activates; until homes 2 activates,
-# every store, whatever it declares, keeps its legacy grading (generation 1).
-SUPPORTED_HOMES = 1
+# Homes 2 is the only homes generation (spec 4.2): a store is at homes 2 only when created there, and
+# no earlier store is migrated (spec 4.2 / 9.2). A manifest must declare exactly the integer 2.
+HOMES = 2
 # Worklog 2 remains test-only until schema, doctor, and release support land.
 SUPPORTED_WORKLOG = 1
 EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"  # spec 4.2
@@ -144,15 +141,12 @@ COUNTERS_NAME = "counters.toml"        # the machine store's id high-water ledge
 STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
-SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
-                                       # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # finding stating that no store upgrade reaches 2.0.0,
-                                       # naming the hand step that makes its tree foreign content (spec 9.2),
-                                       # and one declaring a NEWER spec_version is fail-closed with an
-                                       # upgrade-the-tooling finding, except only the reserved homes-2
-                                       # declaration pair (spec_version 2.0.0 with homes = 2), which this
-                                       # tooling grades under its 1.2.0 rules (spec 16.1) and which
-                                       # homes_generation() keeps at generation 1 while SUPPORTED_HOMES is 1
+SPEC_VERSION = "2.0.0"                 # the OPFiles base spec_version this tooling implements, and the
+                                       # only one it accepts; a store declaring a spec_version below it
+                                       # names no version the specification defines and is fail-closed
+                                       # with a finding naming the hand step that makes its tree foreign
+                                       # content (spec 9.2), and one declaring a NEWER spec_version is
+                                       # fail-closed with an upgrade-the-tooling finding
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -215,9 +209,9 @@ RESERVED_EXCLUDED_TYPES = {
 }
 
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
-OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
-# Recognized-but-OPTIONAL [opf] keys: absent homes means legacy generation 1; required-ness waits for L4.
-OPF_OPTIONAL_KEYS = frozenset({"homes", "worklog"})
+OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status", "homes"})
+# Recognized-but-OPTIONAL [opf] keys.
+OPF_OPTIONAL_KEYS = frozenset({"worklog"})
 STORE_KEYS = frozenset({"sync_target"})
 PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_modules",
                           "extension_namespace"})
@@ -327,29 +321,24 @@ def is_evidence_inventory_name(name):
     return isinstance(name, str) and _EVIDENCE_INVENTORY_RE.fullmatch(name) is not None
 
 
-HOMES2_SPEC_VERSION = "2.0.0"           # the only spec_version the homes-2 contract applies to (spec 4.2)
+HOMES2_SPEC_VERSION = SPEC_VERSION    # the only spec_version the homes-2 contract applies to (spec 4.2)
 
 
 def homes_generation(manifest_data):
-    """The store's active homes generation: 2 only when this tooling activates homes 2 and the
-    manifest declares both exactly the integer 2 and spec_version 2.0.0, otherwise the legacy
-    generation 1. Raising SUPPORTED_HOMES alone therefore activates nothing for a store at the
-    current spec_version. Manifest validation, not this helper, reports a malformed or unknown
-    declaration."""
+    """The store's homes generation: 2 when the manifest declares both exactly the integer 2 and
+    spec_version 2.0.0, otherwise 1, which validation refuses. Manifest validation, not this
+    helper, reports a malformed or unknown declaration."""
     opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     declared = opf.get("homes") if isinstance(opf, dict) else None
     version = opf.get("spec_version") if isinstance(opf, dict) else None
-    return 2 if (SUPPORTED_HOMES >= 2 and type(declared) is int and declared == 2
-                 and version == HOMES2_SPEC_VERSION) else 1
+    return 2 if (type(declared) is int and declared == HOMES and version == SPEC_VERSION) else 1
 
 
 # The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
 # IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
 # enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
-# imported index. Inert until activation: the gate below requires this tooling's OWN support
-# (SUPPORTED_SPEC_VERSION, currently 1.2.0, at or above IMPORTED_SPEC_VERSION), never the declared
-# version alone, because C-MANIFEST ACCEPTS one newer declaration today, the reserved spec_version
-# 2.0.0 / homes = 2 pair (spec 4.2).
+# imported index. The gate below also requires this tooling's OWN support (SPEC_VERSION at or above
+# IMPORTED_SPEC_VERSION), never the declared version alone.
 IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
@@ -363,31 +352,22 @@ _IMPORTED_SERIES_NAMESPACES = (frozenset(BASELINE_TYPES.values())
 
 
 def imported_series_supported():
-    """True when this tooling ITSELF supports the imported series: SUPPORTED_SPEC_VERSION at or
-    above IMPORTED_SPEC_VERSION, through the house SemVer parser. The ONE support comparison,
-    shared by the imported_series_declared gate below and by the opf-check activation predicate
-    imported_content_checks_landed, so the gate and that predicate cannot disagree about when
-    the series is supported."""
-    return _parse(SUPPORTED_SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION)
+    """True when this tooling ITSELF supports the imported series: SPEC_VERSION at or above
+    IMPORTED_SPEC_VERSION, through the house SemVer parser, so True at base 2.0.0. The ONE support
+    comparison, read by the imported_series_declared gate below, so every reader of that gate
+    agrees about when the series is supported."""
+    return _parse(SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION)
 
 
 def imported_series_declared(manifest_data):
     """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
-    this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
-    at or above IMPORTED_SPEC_VERSION): the version-and-support half of the activation flag the
+    this tooling itself supports that series (imported_series_supported: SPEC_VERSION at or above
+    IMPORTED_SPEC_VERSION): the version-and-support half of the activation flag the
     imported-series registrations read (spec 8.2/4.2). That flag, _opf_check.imported_series_active,
     also requires the graded homes-2 declaration (homes_generation), since the imported series
     activates only inside the 2.0.0 declaration.
     Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
-    False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
-    homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
-    declaration closed (it accepts the reserved HOMES2_SPEC_VERSION / homes = 2 pair, spec 4.2), so a
-    VALID store can declare 2.0.0 today, and reading the declaration alone would register the
-    imported leaves on it while every imported-content check is still deferred. Raising
-    SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the spec 1.3.0 activation; this helper
-    needs no edit then, but activation must also land the imported-content checks (C-IMPORTED-*):
-    the opf-check activation tripwire refuses to certify an active imported series while that
-    roster is empty, so raising the constant alone cannot ship."""
+    False (manifest validation, not this helper, reports it)."""
     opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     version = opf.get("spec_version") if isinstance(opf, dict) else None
     parsed = _parse(version) if isinstance(version, str) else None
@@ -446,7 +426,7 @@ def require_ordinary_target(path):
 
 
 def render_homes_gitignore():
-    """Pure homes-2 block renderer. This version does not install it in any store.
+    """Pure homes-2 block renderer; init installs the block as .working/.gitignore.
     This is not access control: git add -f can still stage ignored state.
     """
     ignored = (JOURNALS_DIRNAME, STAGING_DIRNAME)
@@ -457,8 +437,8 @@ def render_homes_gitignore():
 
 def homes_gitignore_matches(text):
     """Exact managed-block drift check; adopter text outside the block is preserved.
-    Only block bytes are checked, not effective git rules or index state. Activation must
-    inspect both before installation (_opf_write_guard.inspect_homes_gitignore is that
+    Only block bytes are checked, not effective git rules or index state. The init operation
+    installs the block and inspects both (_opf_write_guard.inspect_homes_gitignore is that
     read-only inspector); a tracked control path requires reviewed untracking.
     """
     if not isinstance(text, str):
@@ -2270,37 +2250,33 @@ def _validate_base(base, findings, manifest_rel=None):
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
             findings.append("[opf].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
-        elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION) or (
-                spec_tuple > _parse(SUPPORTED_SPEC_VERSION)
-                and not (sv == HOMES2_SPEC_VERSION and base.get("homes") == 2)):
-            # A store declaring an OLDER base spec_version than this tooling implements is fail-closed with
-            # its OWN named, remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
-            # missing-type findings a newer roster would otherwise raise against the older store (spec 9.x).
-            # A store declaring a NEWER base spec_version is fail-closed at validation the same way: older
-            # tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather than certify it
-            # under legacy checks (spec 9.2). The one exception is the exact reserved homes-2 declaration
-            # pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation() gates its activation
-            # on SUPPORTED_HOMES. Both mismatch findings share this ONE emission site:
+        elif spec_tuple != _parse(SPEC_VERSION):
+            # This tooling accepts exactly base 2.0.0. A store declaring a spec_version BELOW it names
+            # no version the specification defines and is fail-closed with its OWN named,
+            # remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
+            # missing-type findings the current roster would otherwise raise against it (spec 9.2).
+            # A store declaring a NEWER base spec_version is fail-closed at validation the same way:
+            # this tooling MUST refuse it rather than certify it under older checks (spec 9.2).
+            # Both mismatch findings share this ONE emission site:
             # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
             # a message selected above a shared censused append keeps each wording reviewable without
             # widening that set.
-            # The older refusal names the manifest path and the declared spec_version, states that no
-            # store upgrade reaches spec_version 2.0.0 (spec 9.2 defines none, and the 1.0.0 and 1.1.0
-            # route to 1.2.0 is not one), and states the hand step spec 9.2 gives a tree under a refused older
-            # manifest: the operator moves that manifest aside by hand (no OPF command writes it), after
-            # which its files are ordinary foreign content for a first adoption.
-            if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
+            # The lower refusal names the manifest path and the declared spec_version, and states the
+            # hand step spec 9.2 gives a tree under a refused manifest: the operator moves that
+            # manifest aside by hand (no OPF command writes it), after which its files are ordinary
+            # foreign content for a first adoption.
+            if spec_tuple < _parse(SPEC_VERSION):
                 where = "the store manifest" if manifest_rel is None else _safe_display(manifest_rel)
-                mismatch = ("{} declares [opf].spec_version {}, older than the {} this tooling "
-                            "implements; no store upgrade reaches spec_version 2.0.0, so the store is "
-                            "refused; to adopt this tree instead, first move {} aside by hand: "
-                            "its files are then ordinary foreign content for a first adoption "
+                mismatch = ("{} declares [opf].spec_version {}, below {}, which names no version "
+                            "this specification defines, so the store is refused; to adopt this "
+                            "tree instead, first move {} aside by hand: its files are then "
+                            "ordinary foreign content for a first adoption "
                             "(spec 9.2; fail-closed)".format(
-                                where, _safe_display(sv), SUPPORTED_SPEC_VERSION, where))
+                                where, _safe_display(sv), SPEC_VERSION, where))
             else:
                 mismatch = ("[opf].spec_version {} is above the {} this tooling implements; "
                             "upgrade the tooling before operating on this store "
-                            "(spec 9.2; fail-closed)".format(_safe_display(sv), SUPPORTED_SPEC_VERSION))
+                            "(spec 9.2; fail-closed)".format(_safe_display(sv), SPEC_VERSION))
             findings.append(mismatch)
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
@@ -2308,30 +2284,15 @@ def _validate_base(base, findings, manifest_rel=None):
     _check_enum(base, "layout", LAYOUTS, "[opf]", findings)
     _check_enum(base, "posture", POSTURES, "[opf]", findings)
     _check_enum(base, "import_status", IMPORT_STATES, "[opf]", findings)
-    # `homes` is an OPTIONAL integer generation declaration (spec 4.2 / 9.2). When present it must be
-    # the integer 1 (legacy) or 2 (homes-2); a non-integer, a bool (an int subclass), or an out-of-range
-    # value is a fail-closed finding. Absence means generation 1 and is not a finding: the key becomes
-    # REQUIRED only when homes 2 activates (L4). This validates the DECLARATION; homes_generation()
-    # decides ACTIVATION and does not activate while SUPPORTED_HOMES == 1.
-    # homes = 2 is a valid declaration only inside the homes-2 declaration pair, spec_version
-    # HOMES2_SPEC_VERSION with homes = 2 (spec 4.2 / 9.2), so homes = 2 beside any other spec_version,
-    # an absent or unparseable one included, is a fail-closed finding for every caller of
-    # validate_manifest, not only for the record verb's journal-home probe. The check keys on the
-    # declared pair alone, never on SUPPORTED_SPEC_VERSION or SUPPORTED_HOMES. A malformed homes value
-    # keeps its own finding and never reaches the pair check. Both findings share this ONE censused
-    # emission site, as the spec_version mismatch findings above do.
+    # `homes` is a REQUIRED integer generation declaration (spec 4.2 / 9.2), and the integer 2 is the
+    # only value accepted; a non-integer, a bool (an int subclass), or any other integer is a
+    # fail-closed finding. An absent key is reported by the missing-key finding above. The finding
+    # keeps this ONE censused emission site, as the spec_version mismatch findings above do.
     if "homes" in base:
         homes = base["homes"]
-        homes_finding = None
-        if type(homes) is not int or homes not in (1, 2):
-            homes_finding = "[opf].homes {} is not an integer generation (1 or 2)".format(
-                _safe_display(homes))
-        elif homes == 2 and sv != HOMES2_SPEC_VERSION:
-            homes_finding = ("[opf].homes = 2 is declared with spec_version {}, but homes 2 is "
-                             "declared only by spec_version {} with homes = 2 (spec 4.2 / 9.2; "
-                             "fail-closed)".format(_safe_display(sv), HOMES2_SPEC_VERSION))
-        if homes_finding is not None:
-            findings.append(homes_finding)
+        if type(homes) is not int or homes != HOMES:
+            findings.append("[opf].homes {} is not the integer {} (spec 9.2; fail-closed)".format(
+                _safe_display(homes), HOMES))
     return spec_tuple
 
 
@@ -2740,10 +2701,11 @@ def self_test():
             return default
 
     # A minimal valid base + a valid aiqt profile, as a manifest text builder.
-    def manifest_text(standard=STANDARD_TOKEN, spec_version=SUPPORTED_SPEC_VERSION, posture="required",
-                      with_aiqt=False, aiqt_floor="required", aiqt_compat=">=1.0.0 <2.0.0",
+    def manifest_text(standard=STANDARD_TOKEN, spec_version=SPEC_VERSION, posture="required",
+                      with_aiqt=False, aiqt_floor="required", aiqt_compat=">=2.0.0 <3.0.0",
                       aiqt_version="1.0.0", register_xaiqt=True, ops_enabled=True, with_acme=False,
-                      extra_top=""):
+                      extra_top="", homes="2"):
+        # homes is the TOML right-hand side of [opf].homes, or None to omit the key.
         lines = [
             "[opf]",
             'standard = "{}"'.format(standard),
@@ -2751,6 +2713,7 @@ def self_test():
             'layout = "inline"',
             'posture = "{}"'.format(posture),
             'import_status = "none"',
+        ] + ([] if homes is None else ["homes = {}".format(homes)]) + [
             "",
             "[store]",
             'sync_target = ""',
@@ -3060,123 +3023,90 @@ def self_test():
         check("wrong-typed-posture-invalid", aware.status == INVALID)
         check("wrong-typed-posture-named", any("posture must be a string" in f for f in aware.findings))
 
-        # 10g: a store declaring a spec_version OLDER than SUPPORTED_SPEC_VERSION is fail-closed with a
-        # distinct finding stating that no store upgrade reaches 2.0.0 (not the confusing roster
-        # cascade, and naming no upgrade command); a store at the current spec_version is clean.
+        # 10g: a store declaring a spec_version BELOW SPEC_VERSION names no version the specification
+        # defines and is fail-closed with a distinct finding (not the confusing roster cascade, and
+        # naming no upgrade command); a store at the current spec_version is clean.
         m_old = _t.loads(manifest_text(spec_version="1.0.0"))
         mv_old = validate_manifest(m_old)
         check("spec-version-floor-invalid", mv_old.status == INVALID)
         check("spec-version-floor-named",
-              any("older than the" in f and "no store upgrade reaches spec_version 2.0.0" in f
+              any("below 2.0.0, which names no version this specification defines" in f
                   and "opf upgrade" not in f for f in mv_old.findings))
-        # The older refusal names the manifest path and the declared spec_version, states that no
-        # store upgrade reaches 2.0.0 and that the store is refused, and states the hand step
-        # (spec 9.2), pinned whole: rewording it, dropping the path or the hand step, or offering an
-        # upgrade again, is red.
+        # The lower refusal names the manifest path and the declared spec_version, states that the
+        # store is refused, and states the hand step (spec 9.2), pinned whole: rewording it, dropping
+        # the path or the hand step, or offering an upgrade again, is red. The fixture carries
+        # homes = 2, so the refusal is the spec_version one alone.
         floor_rel = ".working/toml/manifest.toml"
         floor_message = (
-            "'.working/toml/manifest.toml' declares [opf].spec_version '1.0.0', older than the 1.2.0 "
-            "this tooling implements; no store upgrade reaches spec_version 2.0.0, so the store is "
-            "refused; to adopt this tree instead, first move '.working/toml/manifest.toml' "
-            "aside by hand: its files are then ordinary foreign content for a first adoption "
-            "(spec 9.2; fail-closed)")
+            "'.working/toml/manifest.toml' declares [opf].spec_version '1.2.0', below 2.0.0, which "
+            "names no version this specification defines, so the store is refused; to adopt this "
+            "tree instead, first move '.working/toml/manifest.toml' aside by hand: its files are "
+            "then ordinary foreign content for a first adoption (spec 9.2; fail-closed)")
+        m_floor = _t.loads(manifest_text(spec_version="1.2.0"))
         check("spec-version-floor-message-pinned",
-              SUPPORTED_SPEC_VERSION == "1.2.0"
-              and floor_message in validate_manifest(m_old, manifest_rel=floor_rel).findings)
+              SPEC_VERSION == "2.0.0" and m_floor["opf"].get("homes") == 2
+              and validate_manifest(m_floor, manifest_rel=floor_rel).findings == [floor_message])
         check("spec-version-floor-message-unnamed-path",
               any(f.startswith("the store manifest declares [opf].spec_version '1.0.0',")
-                  and "no store upgrade reaches spec_version 2.0.0, so the store is refused" in f
+                  and "names no version this specification defines, so the store is refused" in f
                   and "first move the store manifest aside by hand" in f for f in mv_old.findings))
+        # 1.3.0, once above the shipped version, is now below the floor: the floor finding, never
+        # the ceiling one (red when the lower bound compares against the ceiling instead).
+        mv_130 = validate_manifest(_t.loads(manifest_text(spec_version="1.3.0")))
+        check("spec-version-floor-1.3.0",
+              mv_130.status == INVALID
+              and any("below 2.0.0, which names no version" in f for f in mv_130.findings)
+              and not any("upgrade the tooling" in f for f in mv_130.findings))
         check("spec-version-current-ok",
-              validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
+              validate_manifest(_t.loads(manifest_text())).status == VALID
+              and validate_manifest(_t.loads(manifest_text(spec_version="2.0.0"))).status == VALID)
         # 10g1: load_manifest threads the RESOLVED manifest's own path into validation, so the
-        # older-spec_version refusal read through store resolution names that path, never the
+        # lower-spec_version refusal read through store resolution names that path, never the
         # "the store manifest" fallback.
         mv_old_loaded = load_manifest(resolve_store(
-            build_store(manifest=manifest_text(spec_version="1.0.0"))))
+            build_store(manifest=manifest_text(spec_version="1.2.0"))))
         check("spec-version-floor-load-manifest-names-path",
               mv_old_loaded.status == INVALID and floor_message in mv_old_loaded.findings)
 
-        # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SUPPORTED_SPEC_VERSION is fail-closed at
-        # validation with its own named finding, so older tooling never certifies a newer store (a bare
-        # 1.3.0 declaration included) under legacy checks. The single carve-out is the exact reserved
-        # homes-2 declaration pair (spec 4.2), which homes_generation() gates on SUPPORTED_HOMES; a
-        # version-only 2.0.0, or an above-version paired with homes = 2, still refuses.
-        mv_above = validate_manifest(_t.loads(manifest_text(spec_version="1.3.0")))
-        check("spec-version-ceiling-invalid", mv_above.status == INVALID)
-        check("spec-version-ceiling-named",
-              any("above the" in f and "upgrade the tooling" in f for f in mv_above.findings))
-        check("spec-version-ceiling-2.0.0-alone-invalid",
-              validate_manifest(_t.loads(manifest_text(spec_version="2.0.0"))).status == INVALID)
-        ceiling_anchor = 'import_status = "none"'
-        homes2_pair = manifest_text(spec_version="2.0.0").replace(
-            ceiling_anchor, ceiling_anchor + "\nhomes = 2")
-        check("spec-version-ceiling-homes2-pair-recognized",
-              validate_manifest(_t.loads(homes2_pair)).status == VALID)
-        above_pair = manifest_text(spec_version="1.3.0").replace(
-            ceiling_anchor, ceiling_anchor + "\nhomes = 2")
-        check("spec-version-ceiling-non-homes2-pair-invalid",
-              validate_manifest(_t.loads(above_pair)).status == INVALID)
+        # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SPEC_VERSION is fail-closed at
+        # validation with its own named finding, homes = 2 notwithstanding, so this tooling never
+        # certifies a newer store under its own checks. Sampled just above (patch and minor) and at
+        # the next major.
+        for above in ("2.0.1", "2.1.0", "3.0.0"):
+            mv_above = validate_manifest(_t.loads(manifest_text(spec_version=above)))
+            check("spec-version-ceiling-invalid-{}".format(above),
+                  mv_above.status == INVALID
+                  and any("is above the 2.0.0 this tooling implements" in f
+                          and "upgrade the tooling" in f for f in mv_above.findings)
+                  and not any("names no version" in f for f in mv_above.findings))
 
-        # 10h: [opf].homes is an optional, validated integer generation declaration.
-        # Recognition does not activate homes 2 or require a declaration in legacy manifests, and
-        # homes = 2 is valid only inside the homes-2 declaration pair (spec 4.2 / 9.2).
-        homes_manifest_text = manifest_text(spec_version=SUPPORTED_SPEC_VERSION)
-        homes_anchor = 'import_status = "none"'
-        check("homes-fixture-anchor", homes_manifest_text.count(homes_anchor) == 1)
-
-        m_homes_absent = _t.loads(homes_manifest_text)
+        # 10h: [opf].homes is a REQUIRED integer declaration whose only accepted value is 2
+        # (spec 4.2 / 9.2).
+        m_homes_absent = _t.loads(manifest_text(homes=None))
         mv_homes_absent = validate_manifest(m_homes_absent)
-        check("homes-absent-valid",
+        check("homes-absent-invalid",
               "homes" not in m_homes_absent["opf"]
-              and mv_homes_absent.status == VALID
-              and not any("homes" in f for f in mv_homes_absent.findings))
-        check("homes-absent-legacy-generation",
-              homes_generation(m_homes_absent) == 1)
-
-        m_homes = _t.loads(homes_manifest_text.replace(homes_anchor, homes_anchor + "\nhomes = 1"))
-        mv_homes = validate_manifest(m_homes)
-        check("homes-1-valid",
-              type(m_homes["opf"].get("homes")) is int
-              and m_homes["opf"]["homes"] == 1
-              and mv_homes.status == VALID
-              and not any("unknown key" in f or "[opf].homes" in f
-                          for f in mv_homes.findings))
-
-        # homes = 2 outside the declaration pair is INVALID with exactly one named finding: at this
-        # tooling's spec_version, below it, above it, unparseable, and with spec_version absent. The
-        # versions are literals, never SUPPORTED_SPEC_VERSION, so each stays off the pair whatever that
-        # constant becomes. Each vector rebuilds only the [opf] table of the manifest parsed above.
-        for label, version in (("base", "1.2.0"), ("older", "1.0.0"), ("above", "1.3.0"),
-                               ("unparseable", "bad"), ("absent", None)):
-            opf_off_pair = dict(m_homes["opf"], homes=2, spec_version=version)
-            if version is None:
-                del opf_off_pair["spec_version"]
-            mv_off_pair = validate_manifest(dict(m_homes, opf=opf_off_pair))
-            check("homes-2-off-pair-{}-invalid-named".format(label),
-                  mv_off_pair.status == INVALID
-                  and sum("[opf].homes = 2 is declared with spec_version" in f
-                          and HOMES2_SPEC_VERSION in f for f in mv_off_pair.findings) == 1)
-        # The pair itself stays VALID (spec-version-ceiling-homes2-pair-recognized, above) and carries
-        # no homes finding.
-        check("homes-2-pair-no-homes-finding",
-              not any("[opf].homes" in f for f in validate_manifest(
-                  dict(m_homes, opf=dict(m_homes["opf"], homes=2,
-                                         spec_version=HOMES2_SPEC_VERSION))).findings))
-
+              and mv_homes_absent.status == INVALID
+              and "[opf] missing required key(s): homes" in mv_homes_absent.findings)
+        check("homes-absent-generation-1", homes_generation(m_homes_absent) == 1)
+        m_homes2 = _t.loads(manifest_text())
+        check("homes-2-generation-2",
+              m_homes2["opf"].get("homes") == 2 and homes_generation(m_homes2) == 2
+              and not any("[opf].homes" in f for f in validate_manifest(m_homes2).findings))
         for label, rhs in (
+                ("1", "1"),
                 ("zero", "0"),
                 ("three", "3"),
                 ("string", '"2"'),
                 ("bool", "true")):
             # Parse first: these are valid TOML values whose declarations must fail validation.
-            m_homes_bad = _t.loads(homes_manifest_text.replace(
-                homes_anchor, homes_anchor + "\nhomes = " + rhs))
+            m_homes_bad = _t.loads(manifest_text(homes=rhs))
             mv_homes_bad = validate_manifest(m_homes_bad)
             check("homes-{}-invalid-named".format(label),
                   mv_homes_bad.status == INVALID
-                  and any("[opf].homes" in f and "integer generation" in f
-                          for f in mv_homes_bad.findings))
+                  and sum(f.startswith("[opf].homes ") and "is not the integer 2" in f
+                          for f in mv_homes_bad.findings) == 1
+                  and homes_generation(m_homes_bad) == 1)
 
         # 11: the base_compat range grammar (defined here).
         check("compat-match", _match_base_compat(">=1.0.0 <2.0.0", (1, 2, 3)) == (True, None))
@@ -5173,69 +5103,18 @@ def self_test():
         # (red when the constant itself drifts, e.g. to a multidigit 1.2.100 the interval
         # samples alone would not see; a drift to the sampled 1.2.10 the matrix already reds).
         check("imported-spec-version-pinned-130", IMPORTED_SPEC_VERSION == "1.3.0")
-        # imported_series_declared: the activation gate requires BOTH the declared spec_version
-        # (IMPORTED_SPEC_VERSION or later, through the house SemVer parser) AND this tooling's own
-        # support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION, the way homes_generation
-        # gates on SUPPORTED_HOMES). A newer declaration ALONE answers False, including the reserved
-        # 2.0.0 / homes = 2 pair validate_manifest accepts today (spec 4.2): without the
-        # tooling-support condition that accepted store would register the imported leaves while
-        # every imported-content check is still deferred. The current 1.2.0, an older, a non-string,
-        # and an unparseable declaration answer False in every case (spec 8.2/4.2), INCLUDING while
-        # support is raised: once the tooling-support clause is satisfied, only the declared-version
-        # comparison keeps them out, so that arm is asserted on its False side under the patch (red
-        # when the comparison is removed, or when its threshold drifts down to a SAMPLED point:
-        # 1.2.0, 1.2.1, 1.2.9, or the multidigit 1.2.10 and 1.2.99 below. The samples establish
-        # those points only, never the whole open 1.2.x range; the threshold constant itself is
-        # pinned to 1.3.0 by its own check above).
-        check("imported-series-declared-false-until-tooling-supports",
-              not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
-              and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
-              and not imported_series_declared(
-                  {"opf": {"spec_version": HOMES2_SPEC_VERSION, "homes": 2}}))
-        _isd_prev = SUPPORTED_SPEC_VERSION
-        try:
-            globals()["SUPPORTED_SPEC_VERSION"] = IMPORTED_SPEC_VERSION
-            check("imported-series-declared-130-and-later-once-supported",
-                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
-                  and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
-            check("imported-series-declared-below-130-false-even-once-supported",
-                  not imported_series_declared({"opf": {"spec_version": "1.2.0"}})
-                  and not imported_series_declared({"opf": {"spec_version": "1.2.1"}})
-                  and not imported_series_declared({"opf": {"spec_version": "1.2.9"}})
-                  and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
-                  and not imported_series_declared({"opf": {"spec_version": "one.three"}}))
-            # Multidigit patch declarations below the threshold: the house parser does not stop
-            # at single-digit patches, so 1.2.10 and 1.2.99 parse, sit below 1.3.0, and answer
-            # False under raised support. Sampled points only (red when the declared threshold
-            # drifts down to 1.2.99, or past it to the lower 1.2.10).
-            check("imported-series-declared-multidigit-patch-below-130-false",
-                  not imported_series_declared({"opf": {"spec_version": "1.2.10"}})
-                  and not imported_series_declared({"opf": {"spec_version": "1.2.99"}}))
-            # Support ABOVE the threshold activates too: the support comparison is at-or-above,
-            # not equality (red when its ">=" tightens to "==").
-            globals()["SUPPORTED_SPEC_VERSION"] = "1.3.1"
-            check("imported-series-declared-under-support-above-130",
-                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
-                  and imported_series_declared({"opf": {"spec_version": "1.3.1"}}))
-            # Support BELOW the threshold stays inactive whatever the declaration: the support
-            # arm also compares against IMPORTED_SPEC_VERSION, so the sampled support values
-            # 1.2.1 and the multidigit 1.2.10 both answer False even for 1.3.0 and 2.0.0
-            # declarations (red when the support threshold drifts down to the interior
-            # multidigit 1.2.10, or past it to the lower 1.2.1). Sampled support points only,
-            # the way the declared arm is sampled above.
-            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.1"
-            _isd_sup_121 = (not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
-                            and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
-            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.10"
-            check("imported-series-declared-false-under-support-below-130",
-                  _isd_sup_121
-                  and not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
-                  and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
-        finally:
-            globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
-        check("imported-series-declared-current-and-malformed-false",
-              not imported_series_declared({"opf": {"spec_version": SUPPORTED_SPEC_VERSION}})
-              and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+        # imported_series_declared at base 2.0.0: this tooling supports the series, so the declared
+        # spec_version alone decides, IMPORTED_SPEC_VERSION or later through the house SemVer parser.
+        # Sampled below the threshold (1.2.0, the multidigit 1.2.10 and 1.2.99), at it, and above it;
+        # a non-string, unparseable, absent or non-dict declaration answers False.
+        check("imported-series-supported-at-base-2", imported_series_supported())
+        check("imported-series-declared-130-and-later",
+              imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+              and imported_series_declared({"opf": {"spec_version": SPEC_VERSION, "homes": 2}}))
+        check("imported-series-declared-below-130-and-malformed-false",
+              not imported_series_declared({"opf": {"spec_version": "1.2.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "1.2.10"}})
+              and not imported_series_declared({"opf": {"spec_version": "1.2.99"}})
               and not imported_series_declared({"opf": {"spec_version": "one.three"}})
               and not imported_series_declared({"opf": {"spec_version": 2}})
               and not imported_series_declared({"opf": {}})
