@@ -1,0 +1,14 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-decisions.md"
+
+[[record]]
+key = "retention-window"
+type = "pending_decision"
+decided_at = "2019-07-08T13:20:00Z"
+decided_by = "operations lead"
+decision = "Keep monthly reports for 24 months."
+status = "decided"
+title = "Choose the report retention window"
+unrecorded = [{field = "created_at", reason = "not_recorded_in_source"}, {field = "updated_at", reason = "not_recorded_in_source"}]
