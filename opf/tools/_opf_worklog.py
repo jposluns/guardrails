@@ -211,12 +211,16 @@ def _read_document(root_fd, relpath):
 
 
 def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read_legacy=None,
-                    on_legacy_conflict=None, supported_profiles=None, manifest_model=None):
+                    on_legacy_conflict=None, supported_profiles=None, manifest_model=None,
+                    on_read=None):
     """Load only the manifest-selected source beneath an already-resolved descriptor.
 
     with_raw preserves legacy bytes; generation 2 uses a length-framed stream in
     numeric (number, suffix) order. read_legacy preserves the view reader's policy.
-    required=False allows only an absent generation-1 ledger.
+    required=False allows only an absent generation-1 ledger. on_read, when given,
+    is called once per source FILE read as on_read(relpath, raw_bytes) (the
+    generation-1 ledger, or each generation-2 entry file), so a caller that also
+    proves canonical bytes can reuse this read instead of reading the file again.
 
     Standalone readers refuse the opposite shape. Doctor alone supplies
     on_legacy_conflict: it already grades the generation-1 directory as INVALID
@@ -249,6 +253,8 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
             if required:
                 raise WorklogError("{} is absent (the active worklog ledger is required)".format(rel))
             return None
+        if on_read is not None:
+            on_read(rel, got[0])
         return got if with_raw else got[1]
     try:
         dfd = _journal._open_dir_contained(root_fd, rel)
@@ -264,6 +270,8 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
                 if got is None:
                     raise WorklogError("{}/{} vanished during enumeration".format(rel, name))
                 raw, entry = got
+                if on_read is not None:
+                    on_read(rel + "/" + name, raw)
                 if entry.get("id") != name[:-len(".toml")]:
                     raise WorklogError("{}/{}: filename and id differ".format(rel, name))
                 # A per-record body is flat, never a legacy envelope.
@@ -284,10 +292,15 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
         raise WorklogError("cannot load worklog ({})".format(exc))
 
 
-def load_archive_worklog_at(root_fd, relpath):
-    """An explicitly named archive bucket retains the legacy envelope (M7)."""
+def load_archive_worklog_at(root_fd, relpath, *, on_read=None):
+    """An explicitly named archive bucket retains the legacy envelope (M7). on_read, when given, is
+    called as on_read(relpath, raw_bytes) on presence, so the caller can reuse this read."""
     got = _read_document(root_fd, relpath)
-    return None if got is None else got[1]
+    if got is None:
+        return None
+    if on_read is not None:
+        on_read(relpath, got[0])
+    return got[1]
 
 
 def load_worklog(store):
@@ -405,6 +418,11 @@ def _self_test():
             old = load_worklog_at(fd, ".working/custom")
             check("legacy-model", old == {"schema": 1, "entry": [entry]})
             check("legacy-bytes", load_worklog_at(fd, ".working/custom", with_raw=True)[0] == raw)
+            # on_read hands each source file's raw bytes to the caller once (doctor's canonical-bytes
+            # leg proves them instead of reading the file again).
+            reads = []
+            load_worklog_at(fd, ".working/custom", on_read=lambda rel, got: reads.append((rel, got)))
+            check("legacy-on-read", reads == [(".working/custom/" + LEGACY_NAME, raw)])
             resolved = _opf_store.resolve_store(root)
             check("resolved-entry-point", load_worklog(resolved) == old)
             import _opf_views
@@ -445,6 +463,10 @@ def _self_test():
             (archive / LEGACY_NAME).write_bytes(raw)
             check("archive-stays-legacy", load_archive_worklog_at(
                 fd, ".working/custom/archive/2026/worklog.toml") == old)
+            reads = []
+            load_archive_worklog_at(fd, ".working/custom/archive/2026/worklog.toml",
+                                    on_read=lambda rel, got: reads.append((rel, got)))
+            check("archive-on-read", reads == [(".working/custom/archive/2026/worklog.toml", raw)])
             body = raw.split(b"[[entry]]\n", 1)[1]
             record = directory / "WL-1.toml"
             record.write_bytes(body)
@@ -453,6 +475,13 @@ def _self_test():
             provisional = directory / "WL-2.abcd.toml"
             provisional.write_bytes(body.replace(b'WL-1', b'WL-2.abcd'))
             check("provisional-loaded", len(load_worklog_at(fd, ".working/custom")["entry"]) == 2)
+            # Generation 2 reports every entry file, in load order, with the bytes it parsed. Only this
+            # self-test reaches it (the build supports generation 1 alone; see self_test).
+            reads = []
+            load_worklog_at(fd, ".working/custom", on_read=lambda rel, got: reads.append((rel, got)))
+            check("gen2-on-read", reads == [
+                (".working/custom/worklog/WL-1.toml", body),
+                (".working/custom/worklog/WL-2.abcd.toml", body.replace(b'WL-1', b'WL-2.abcd'))])
             provisional.write_bytes(body.replace(b'WL-1', b'WL-2.abcd').replace(b'summary = "x"', b'summary = "corrected"'))
             check("suffix-not-recomputed", load_worklog_at(fd, ".working/custom")["entry"][1]["summary"] == "corrected")
             record.write_bytes(body + b'aliases = ["WL-2.abcd"]\n')
