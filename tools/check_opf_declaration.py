@@ -64,7 +64,8 @@ Every helper module the gate imports that cannot be imported (it is missing or u
 any BaseException other than a KeyboardInterrupt, which is re-raised unchanged; a SyntaxError, a SystemExit of
 any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2) that names the cause, never a finding
 or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
-opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py. So is a
+opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
+opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
 declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
 cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list.
 
@@ -537,7 +538,15 @@ def self_test(report_path=None):
             type(exc).__name__, exc))
         return 2
     from unittest.mock import patch   # after arm: it imports logging, whose import registers an atexit hook
-    if opf._bootstrap() != 0:
+    try:
+        bootstrapped = opf._bootstrap()
+    except BaseException as exc:   # a helper opf.py's _bootstrap() imports raises past its own arms
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        print("SELF-TEST CANNOT EVALUATE: opf-declaration: opf.py helpers could not be bootstrapped ({}: {})".format(
+            type(exc).__name__, exc))
+        return 2
+    if bootstrapped != 0:
         print("SELF-TEST CANNOT EVALUATE: opf-declaration: opf.py helpers could not be bootstrapped")
         return 2
     shipped = _opf_declaration.SHIPPED_DECLARATION_BYTES
@@ -994,13 +1003,14 @@ def self_test(report_path=None):
              "opf/tools/_opf_store.py": "", "opf/tools/opf.py": ""}
     syntax_error, raises = "def broken(:\n", "raise RuntimeError('broken at import')\n"
 
-    def launch(home, site, rel, text, args, narrowing):
-        """The (exit status, output) of a copy of this gate in a scratch tree of stub helpers at `home`, the
-        helper `rel` holding `text`, launched with `args`; with `narrowing`, the guard at `site` replaced by it."""
-        for stub_rel, stub in dict(stubs, **{rel: text}).items():
+    def launch(home, site, rel, text, args, narrowing, helpers=stubs, gate=None):
+        """The (exit status, output) of a copy of this gate (or `gate`) in a scratch tree of the stub `helpers` at
+        `home`, the helper `rel` holding `text`, launched with `args`; with `narrowing`, the guard at `site`
+        replaced by it."""
+        for stub_rel, stub in dict(helpers, **{rel: text}).items():
             (home / stub_rel).parent.mkdir(parents=True, exist_ok=True)
             (home / stub_rel).write_text(stub, encoding="utf-8")
-        gate = source.replace(guards[site], narrowing) if narrowing else source
+        gate = source.replace(guards[site], narrowing) if narrowing else gate or source
         (home / "tools" / "check_opf_declaration.py").write_text(gate, encoding="utf-8")
         done = subprocess.run([sys.executable, "-I", "-B", str(home / "tools" / "check_opf_declaration.py")] + args,
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
@@ -1090,6 +1100,33 @@ def self_test(report_path=None):
     own = [exiting[site, "own-base", True] for site in guards]
     check("revert/custom-base-exception-guard-narrowed-red",
           all(rc == 1 and "Stop" in output for rc, output in own), own)
+
+    # and so is one that opf.py's _bootstrap() imports for the self-test, past its ImportError and OSError arms: a
+    # copy of this gate beside a copy of opf.py in a scratch tree of stub helpers, _opf_worklog ending its import
+    # with a SystemExit(0) or a bare sys.exit(), exits 2; with the _bootstrap() call moved out of its guard the
+    # SystemExit escapes and the self-test exits 0
+    bootstrap_guard = "    try:\n        bootstrapped = opf._bootstrap()\n"
+    outside = source.replace(bootstrap_guard, "    bootstrapped = opf._bootstrap()\n    try:\n        pass\n")
+    with_opf = dict(stubs, **{"opf/tools/opf.py": (OPF_TOOLS / "opf.py").read_text(encoding="utf-8")})
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        bootstrapping = {}
+        for kind, text in (("exit-0", system_exit_0), ("bare-exit", bare_exit)):
+            for removed in (False, True):
+                bootstrapping[kind, removed] = launch(Path(tmp, "bootstrap-{}-{}".format(kind, int(removed))), None,
+                                                      "opf/tools/_opf_worklog.py", text, ["--self-test"], None,
+                                                      with_opf, outside if removed else None)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, kind, removed, rc in (
+        ("live/self-test-bootstrap-helper-system-exit-0-cannot-evaluate", "exit-0", False, 2),
+        ("revert/self-test-bootstrap-guard-removed-system-exit-0-red", "exit-0", True, 0),
+        ("live/self-test-bootstrap-helper-bare-sys-exit-cannot-evaluate", "bare-exit", False, 2),
+        ("revert/self-test-bootstrap-guard-removed-bare-sys-exit-red", "bare-exit", True, 0),
+    ):
+        found, output = bootstrapping[kind, removed]
+        check(check_id, source.count(bootstrap_guard) == 1 and found == rc
+              and (removed or "CANNOT EVALUATE" in output and "bootstrapped (SystemExit" in output), (found, output))
     check("live/real-tree-passes", run(ROOT) == 0)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
