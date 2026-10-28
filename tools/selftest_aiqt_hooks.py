@@ -23450,6 +23450,128 @@ def _main_isolated(monitor):
              "cat <<<y; echo a \\\\\\> out.txt", "allow")
         bcmd("(ap-c97p) five backslashes before '>' in one backquote substitution DENY (disclosed over-deny)",
              "cat <<<y; echo `echo a \\\\\\\\\\> out.txt`", "deny")
+        # Text the full lex reads but not as the commands bash runs there (_abspth_placed_truncation): a command
+        # substitution a double-quoted string holds, which the lex skips whole, is read as a command of its own;
+        # an unquoted backquote substitution's text is read as bash reads it, its backslash pairs taken out
+        # first; and where bash ends a here-document opened in a substitution at a line such as 'EOF)' or at a
+        # backquote, the text from that line on is read by the unread-text scan. bash 5.3.9 writes out.txt for
+        # every deny below except ap-c100l and ap-c100m, which pin disclosed over-denies, and every deny row below
+        # allowed before this reading (fails when reverted). Each allow is an absolute target inside the same
+        # construct, or a shape bash runs no redirect in, that keeps its allow.
+        bcmd("(ap-c98) a relative '>' in a '$(...)' inside double quotes DENIES",
+             'echo "$(echo a > out.txt)"', "deny")
+        bcmd("(ap-c98b) a relative '>' in a backquote substitution inside double quotes DENIES",
+             'echo "`echo a > out.txt`"', "deny")
+        bcmd("(ap-c98c) a relative '>' in a double-quoted '$(...)' nested in another DENIES",
+             'echo "$(echo "$(echo a > out.txt)")"', "deny")
+        bcmd("(ap-c98d) a relative '>|' in a double-quoted '$(...)' DENIES", 'echo "$(echo a >| out.txt)"', "deny")
+        bcmd("(ap-c98e) a relative '&>' in a double-quoted '$(...)' DENIES", 'echo "$(echo a &> out.txt)"', "deny")
+        bcmd("(ap-c98f) a '>&' to a relative file in a double-quoted '$(...)' DENIES",
+             'echo "$(echo a >& out.txt)"', "deny")
+        bcmd("(ap-c98g) a relative '>' in a double-quoted '$(...)' assigned to a variable DENIES",
+             'x="$(echo a > out.txt)"', "deny")
+        bcmd("(ap-c98h) a relative '>' in a '$(...)' inside a double-quoted '${...}' DENIES",
+             'echo "${u:-$(echo a > out.txt)}"', "deny")
+        bcmd("(ap-c98i) a relative '>' in a single-quoted '$(...)' inside a double-quoted '${...}' DENIES",
+             "echo \"${u:-'$(echo a > out.txt)'}\"", "deny")
+        bcmd("(ap-c98j) a relative '>' in a '$(...)' inside a double-quoted '$((...))' DENIES",
+             'echo "$(( $(echo a > out.txt) + 1 ))"', "deny")
+        bcmd("(ap-c98k) a relative '>' in a double-quoted '$((...) )' subshell substitution DENIES",
+             'echo "$((echo a > out.txt) )"', "deny")
+        bcmd("(ap-c98l) an escaped backquote in double quotes inside a backquote substitution opens one: DENIES",
+             'echo `echo "\\`echo a > out.txt\\`"`', "deny")
+        bcmd("(ap-c98m) a backquote substitution nested in a double-quoted one DENIES",
+             'echo "`echo \\`echo a > out.txt\\``"', "deny")
+        bcmd("(ap-c98n) a double-quoted '$(...)' before a here-string (the partial lex's prefix) DENIES",
+             'echo "$(echo a > out.txt)"; cat <<<y', "deny")
+        bcmd("(ap-c98o) an escaped '\"' in a double-quoted backquote substitution is a quote there: DENIES",
+             'echo "`echo \\"x\\" > out.txt`"', "deny")
+        bcmd("(ap-c98o2) a relative '>' in a double-quoted '${ cmd; }' substitution DENIES",
+             'echo "${ echo a > out.txt; }"', "deny")
+        bcmd("(ap-c98o3) a relative '>' in a double-quoted '${| cmd; }' substitution DENIES",
+             'echo "${| echo a > out.txt; }"', "deny")
+        bcmd("(ap-c98o4) a relative '>' in a '${ cmd; }' inside a double-quoted '${...}' DENIES",
+             'echo "${u:-${ echo a > out.txt; }}"', "deny")
+        bcmd("(ap-c98o5) an absolute '>' in a double-quoted '${ cmd; }' substitution allows",
+             'echo "${{ echo a > {}/out.txt; }}"'.format(rp), "allow")
+        bcmd("(ap-c98p) an absolute '>' in a double-quoted '$(...)' allows",
+             'echo "$(echo a > {}/out.txt)"'.format(rp), "allow")
+        bcmd("(ap-c98q) an absolute '>' in a double-quoted backquote substitution allows",
+             'echo "`echo a > {}/out.txt`"'.format(rp), "allow")
+        bcmd("(ap-c98r) an absolute '>' in a '$(...)' inside a double-quoted '${...}' allows",
+             'echo "${{u:-$(echo a > {}/out.txt)}}"'.format(rp), "allow")
+        bcmd("(ap-c98s) a '>' comparison in a double-quoted '$((...))' arithmetic expansion allows",
+             'echo "$((1 > 2))"', "allow")
+        bcmd("(ap-c98t) a '>' in a double-quoted '${...}' pattern allows", 'echo "${line#> }"', "allow")
+        bcmd("(ap-c98u) the commit message form with '->' and a backquoted '>' in its quoted body allows",
+             "git commit -m \"$(cat <<'EOF'\nfix: a -> b\n\nUse `foo > bar` here.\nEOF\n)\"", "allow")
+        bcmd("(ap-c98v) a quoted '>' beside a double-quoted '$(...)' allows", 'echo "$(date) > note"', "allow")
+        bcmd("(ap-c98w) a '>' in a quoted here-document body inside an unquoted '$(...)' allows",
+             "x=$(cat <<'EOF'\na > b\nEOF\n)", "allow")
+        bcmd("(ap-c99) three backslashes before '>' in a backquote substitution DENY (full lex)",
+             "echo `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c99b) seven backslashes before '>' in a backquote substitution DENY (full lex)",
+             "echo `echo a \\\\\\\\\\\\\\> out.txt`", "deny")
+        bcmd("(ap-c99c) a '>|' after three backslashes in a backquote substitution DENIES (full lex)",
+             "echo `echo a \\\\\\>| out.txt`", "deny")
+        bcmd("(ap-c99d) a '>&' to a file after three backslashes in a backquote substitution DENIES (full lex)",
+             "echo `echo a \\\\\\>& out.txt`", "deny")
+        bcmd("(ap-c99e) five backslashes before '>' in a nested backquote substitution DENY (full lex)",
+             "echo `echo \\`echo a \\\\\\\\\\> out.txt\\``", "deny")
+        bcmd("(ap-c99f) three backslashes before '>' in a '$(...)' inside a backquote substitution DENY (full lex)",
+             "echo `echo $(echo a \\\\\\> out.txt)`", "deny")
+        bcmd("(ap-c99g) three backslashes before '>' in an assigned backquote substitution DENY (full lex)",
+             "x=`echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c99h) three backslashes before '>' in a backquote substitution before a here-string DENY",
+             "echo `echo a \\\\\\> out.txt`; cat <<<y", "deny")
+        bcmd("(ap-c99i) five backslashes before '>' in one backquote substitution keep their allow (full lex)",
+             "echo `echo a \\\\\\\\\\> out.txt`", "allow")
+        bcmd("(ap-c99j) one backslash before '>' in a backquote substitution keeps its allow (full lex)",
+             "echo `echo a \\> out.txt`", "allow")
+        bcmd("(ap-c99k) three backslashes before an absolute '>' target in a backquote substitution allow",
+             "echo `echo a \\\\\\> {}/out.txt`".format(rp), "allow")
+        bcmd("(ap-c99l) three backslashes before '>' in a nested backquote substitution keep their allow",
+             "echo `echo \\`echo a \\\\\\> out.txt\\``", "allow")
+        bcmd("(ap-c100) a body inside '$(...)' that bash ends at 'EOF)' under a quoted delimiter DENIES",
+             "x=$(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n)", "deny")
+        bcmd("(ap-c100b) a body inside '$(...)' that bash ends at 'EOF );' DENIES",
+             "x=$(cat <<'EOF'\nhi\nEOF );echo y > out.txt\nEOF\n)", "deny")
+        bcmd("(ap-c100c) a '<<-' body inside '$(...)' that bash ends at a tab and 'EOF)' DENIES",
+             "x=$(cat <<-'EOF'\n\thi\n\tEOF)\necho y > out.txt\nEOF\n)", "deny")
+        bcmd("(ap-c100d) a body inside a backquote substitution that bash ends at 'EOF`' DENIES",
+             "x=`cat <<'EOF'\nhi\nEOF`\necho y > out.txt\nEOF\n`", "deny")
+        bcmd("(ap-c100e) a body inside a backquote substitution that bash ends at a backquote mid-line DENIES",
+             "x=`cat <<'EOF'\nhi `\necho y > out.txt\nEOF\n`", "deny")
+        bcmd("(ap-c100f) a body inside a nested '$(...)' ended at 'EOF)', the command after it in the outer "
+             "one, DENIES", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\n)", "deny")
+        bcmd("(ap-c100g) a body under a double-quoted delimiter inside '$(...)' ended at 'EOF)' DENIES",
+             'x=$(cat <<"EOF"\nhi\nEOF)\necho y > out.txt\nEOF\n)', "deny")
+        bcmd("(ap-c100h) a body under a backslash-quoted delimiter inside '$(...)' ended at 'EOF)' DENIES",
+             "x=$(cat <<\\EOF\nhi\nEOF)\necho y > out.txt\nEOF\n)", "deny")
+        bcmd("(ap-c100i) an absolute '>' after a body inside '$(...)' ended at 'EOF)' allows",
+             "x=$(cat <<'EOF'\nhi\nEOF)\necho y > {}/out.txt\nEOF\n)".format(rp), "allow")
+        bcmd("(ap-c100j) a '<<' body line holding a tab before 'EOF)' does not end the body: allows",
+             "x=$(cat <<'EOF'\n\thi\n\tEOF)\necho y > out.txt\nEOF\n)", "allow")
+        bcmd("(ap-c100k) a body line 'EOF;' does not end the body: allows",
+             "x=$(cat <<'EOF'\nhi\nEOF;\necho y > out.txt\nEOF\n)", "allow")
+        bcmd("(ap-c100l) a nested body ended at 'EOF)' where bash then fails on a syntax error DENIES (disclosed "
+             "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n))", "deny")
+        bcmd("(ap-c100m) an unquoted here-document body holding a backquote in a double-quoted '$(...)' is read "
+             "and DENIES (disclosed over-deny)", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "deny")
+        # the deny names the target and asks for an absolute one.
+        _pt_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                  "tool_input": {"command": 'echo "$(echo a > out.txt)"'}})
+        _pt_reason = (_pt_out[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        if ("could not read that redirect's target as absolute" not in _pt_reason or "'out.txt'" not in _pt_reason
+                or "ABSOLUTE" not in _pt_reason):
+            failures.append("(ap-c101) the substitution-text deny must say the target could not be read as "
+                            "absolute, name 'out.txt' and ask for an ABSOLUTE target; got {!r}".format(_pt_reason))
+        # the lexer records each unquoted backquote, and a body whose end it cannot prove as "body", not "code".
+        with aiqt_hooks._LexPlaces() as _pt_spans:
+            aiqt_hooks._lex_reading("echo `a`; x=$(cat <<'E'\nb\nE\n)", False, {})
+        if sorted(_pt_spans) != [(5, 6, "backquote"), (7, 8, "backquote"), (24, 28, "body")]:
+            failures.append("(ap-c102) the lexer must record two backquote places and a body place; got {!r}"
+                            .format(sorted(_pt_spans)))
         # the deny names the unread construct, the target and the remedy.
         _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": "cat <<<y > out.txt"}})

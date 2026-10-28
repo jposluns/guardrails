@@ -970,13 +970,17 @@ class _SubstHeredocFloor:
 class _LexPlaces:
     """A context in which the shared lexer records where it read the characters of the command it lexes, for a
     caller that must know where the lexer places one character (the truncation guard's foreground detach,
-    _orch_lexed_amp_places). Inside it, a lex appends (start, end, kind) spans, end exclusive, to the list the
-    context returns: "quote" for a single- or double-quoted string in a word (a redirect target's included),
-    "code" for a substitution or expansion a double-quoted string holds (_read_word skips it whole, so nothing
-    inside it is recorded apart from the body below), "comment" for a '#' comment the lex reads to the end of
-    its line, and "heredoc" for the body of a quoted here-document the lex skips (the commit message form's
-    body in a substitution included, from its '<<' to the ')' that closes it). An ANSI-C $'...' quote and an
-    escape are not recorded. The spans of one pass nest or are disjoint, and each pass clears the list
+    _orch_lexed_amp_places) or a construct (the substitution texts bash_absolute_paths reads,
+    _abspth_placed_truncation). Inside it, a lex appends (start, end, kind) spans, end exclusive, to the list
+    the context returns: "quote" for a single- or double-quoted string in a word (a redirect target's
+    included), "code" for a substitution or expansion a double-quoted string holds (_read_word skips it whole,
+    so nothing inside it is recorded apart from the body below), "comment" for a '#' comment the lex reads to
+    the end of its line, "heredoc" for the body of a quoted here-document the lex skips (the commit message
+    form's body in a substitution included, from its '<<' to the ')' that closes it), "body" for such a body
+    whose end the lex cannot prove is where bash ends it (the span comment in _lex_pass), and "backquote" for
+    each unquoted, unescaped backquote the word reader reads (one character, opening or closing a backquote
+    substitution). An ANSI-C $'...' quote and an escape are not recorded. The spans of one pass nest or are
+    disjoint, and each pass clears the list
     first, so it holds the last pass's spans (_SubstHeredocRetry); a lex that resumes a fork (_LexFork) would
     lose the spans before it, so a recording lex is one reading lexed from the start. Outside the context
     spans is None and nothing is recorded; the segments a lex returns are the same either way. It restores
@@ -1516,6 +1520,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 backquote_end = i + 1
                 if heredoc is not None:
                     heredoc.substitution()
+                if _LexPlaces.spans is not None:
+                    _LexPlaces.spans.append((i, i + 1, "backquote"))
             if nest is not None:
                 _nest_track(nest, c, dollar_end == i)
         elif c == "$":
@@ -2603,11 +2609,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # pops its parenthesis), so the span is recorded as a here-document body
                         # ONLY when nothing is open on the stack AND no '(' and no backquote appears
                         # anywhere before the body, quoted or not; every other body records as
-                        # "code", which the bare-'&' narrowing never lifts (fail closed), while the
+                        # "body", which the bare-'&' narrowing never lifts (fail closed), while the
                         # segments are unchanged for every other reader of this lex.
                         trusted = (not nest and command.find("(", 0, body_at) == -1
                                    and command.find("`", 0, body_at) == -1)
-                        _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "code"))
+                        _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "body"))
                     del pending_heredocs[:]
                     seg_start[0] = i
                 if fork is not None and tail_key is None:
@@ -4914,6 +4920,275 @@ def _abspth_unread_truncation(command, stop):
     return None
 
 
+# The most levels of substitution text _abspth_text_truncation reads one inside another, and the most such texts
+# it reads in one command; a text past either bound is read whole by _abspth_unread_truncation instead.
+_ABSPTH_NEST_LIMIT = 8
+_ABSPTH_TEXT_LIMIT = 256
+# A here-document operator '<<' that is not part of a here-string's '<<<' (_abspth_early_end).
+_ABSPTH_OPENER_RE = re.compile(r"(?<!<)<<(?!<)")
+# The backslash pairs bash removes from a backquote substitution's text before it reads that text as a command:
+# a backslash before a backquote, '$' or backslash, and, where a double-quoted string holds the substitution,
+# also one before '"' (bash 5.3.9 writes x to out.txt for echo "`echo \"x\" > out.txt`").
+_ABSPTH_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$])")
+_ABSPTH_DQ_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$\"])")
+# The opener of a bash 5.3 '${ cmd; }' or '${| cmd; }' command substitution: '${' and then a blank, newline or
+# '|' (bash 5.3.9 writes out.txt for echo "${ echo a > out.txt; }" and for the '${|' form).
+_ABSPTH_BRACE_SUBST_RE = re.compile(r"\$\{[ \t\n|]")
+
+
+def _abspth_places(command):
+    """(places, stop) for one partial lex of command under no reading of an uncertain '#' (_lex_reading): places
+    is the sorted list of the _LexPlaces spans it records, and stop the index where it stopped (_LexStops), the
+    command's length where it read the whole command. (None, 0) where that lex raises."""
+    with _LexStops() as stops, _LexPlaces() as spans:
+        try:
+            _lex_reading(command, True, None, False, True)
+        except ValueError:
+            return None, 0
+    return sorted(spans), (stops.seen[-1][0] if stops.seen else len(command))
+
+
+def _abspth_backquotes(command, places):
+    """The (start, end) of each unquoted backquote substitution in command, as bash reads it: from a backquote the
+    lex read unquoted (a "backquote" place) that no earlier substitution here holds, to the first later backquote
+    no backslash escapes, whatever quote or comment comes first (bash 5.3.9 ends echo `echo "a`b"` at the second
+    backquote), end just past that backquote, or the command's length where none closes it."""
+    n = len(command)
+    out = []
+    k = -1
+    for at, _end, kind in places:
+        if kind != "backquote" or at < k:
+            continue
+        k = at + 1
+        while k < n and command[k] != "`":
+            k += 2 if command[k] == "\\" else 1
+        k = min(k + 1, n)
+        out.append((at, k))
+    return out
+
+
+def _abspth_text_truncation(text, depth, budget):
+    """bash_absolute_paths' deny tier for text read as a command of its own, as bash reads the text of a command
+    substitution: a reason naming the first truncating redirect ('>', '>|', '&>', or '>&' to a file) to a
+    relative or opaque target found there, else None. Each unquoted backquote substitution in text
+    (_abspth_backquotes) is read as a text of its own one level deeper (_abspth_placed_truncation), so before
+    the full lex every such substitution is overwritten with as many 'x' characters: the lex then reads the
+    words around it as bash does, with neither a backslash run at the wrong level nor the closing backquote
+    glued to a redirect target. A truncating redirect the lex reads in its segments, one
+    _abspth_unread_truncation reads from where that lex stops (in the whole of text where an uncertain '#' stops
+    it), or one _abspth_placed_truncation finds is returned. depth is how many substitution texts hold text, and
+    budget a one-element list counting the texts still to read in the command; past _ABSPTH_NEST_LIMIT levels,
+    once budget is spent, or where the recording lex raises, text is read whole by _abspth_unread_truncation,
+    the fail-closed reading."""
+    budget[0] -= 1
+    if depth > _ABSPTH_NEST_LIMIT or budget[0] < 0:
+        return _abspth_unread_truncation(text, 0)
+    places, stop = _abspth_places(text)
+    if places is None:
+        return _abspth_unread_truncation(text, 0)
+    quotes = _abspth_backquotes(text, places)
+    pieces = []
+    last = 0
+    for start, end in quotes:
+        pieces.append(text[last:start])
+        pieces.append("x" * (end - start))
+        last = end
+    pieces.append(text[last:])
+    lexed = "".join(pieces)
+    reads = _SubstHeredocs.reads
+    segments = None
+    scanned = None
+    try:
+        segments = _lex_command(lexed, skip_empty=True)
+    except _UncertainHashError:
+        return _abspth_unread_truncation(text, 0)
+    except ValueError as exc:
+        scanned = getattr(exc, "stop", 0)
+        unread = _abspth_unread_truncation(lexed, scanned)
+        if unread is not None:
+            return unread
+    if segments is None or _SubstHeredocs.reads != reads:
+        segments = _lex_command(lexed, partial=True, skip_empty=True)[0]
+    for seg in segments:
+        for redirect in seg.redirects:
+            if (redirect.op in _ABSPTH_TRUNCATING_OPS and redirect.target_class != "descriptor"
+                    and not redirect.target_leading_tilde
+                    and (redirect.target_class == "opaque" or not _is_absolute(redirect.target))):
+                return "a truncating redirection ('{}') to the relative or unverified target {!r}".format(
+                    redirect.op, redirect.target)
+    return _abspth_placed_truncation(text, depth, budget, scanned, (places, stop, quotes))
+
+
+def _abspth_brace_truncation(command, start, end, depth, budget):
+    """The reason _abspth_text_truncation gives for the first command substitution inside command[start:end],
+    the text of a '${...}' expansion or '$((...))' arithmetic expansion a double-quoted string holds, else None.
+    Bash reads neither expansion's text as a command, but it runs each '$(...)', backquote and '${ cmd; }' or
+    '${| cmd; }' substitution in it, a single-quoted one included (bash 5.3.9 writes out.txt for
+    echo "${u:-'$(echo a > out.txt)'}"), so each such substitution is found with _skip_quoting, past each
+    backslash pair, and its text read as a command; one _skip_quoting cannot close reads the whole text with
+    _abspth_unread_truncation."""
+    k = start
+    while k < end:
+        c = command[k]
+        if c == "\\":
+            k += 2
+            continue
+        if c != "`" and not command.startswith("$(", k) and not _ABSPTH_BRACE_SUBST_RE.match(command, k):
+            k += 1
+            continue
+        try:
+            close = _skip_quoting(command, k, end)
+        except ValueError:
+            return _abspth_unread_truncation(command[start:end], 0)
+        if c == "`":
+            text = _ABSPTH_DQ_BACKQUOTE_ESCAPE_RE.sub(r"\1", command[k + 1:close - 1])
+        else:
+            text = command[k + (3 if command.startswith("${|", k) else 2):close - 1]
+        reason = _abspth_text_truncation(text, depth + 1, budget)
+        if reason is not None:
+            return reason
+        k = close
+    return None
+
+
+def _abspth_early_end(command, covered, stop, inside):
+    """The index of the first line of command where bash may end a quoted here-document's body that the lexer
+    reads to its exact delimiter line, so that bash runs the text from that line on as commands; -1 where no
+    such line is found. Bash 5.3.9 ends a body opened inside a '$(...)' or '<(...)' substitution at a line
+    that, after its leading tabs for the <<- form, is the delimiter, then blanks, then a ')', and ends a
+    backquote substitution at its first unescaped backquote, a body line's included, while the lexer, which
+    reads both substitutions in place, ends the body only at a line that is exactly the delimiter. Each '<<'
+    before index stop that no span in covered (sorted, non-overlapping (start, end) pairs: what the lex read as
+    quoted text, a comment, a body or a substitution read on its own) holds is read as an opener
+    (_parse_heredoc_delim); where inside is True (command is a substitution's text) or a '(' comes before it in
+    the command, each body line before the first line that is exactly the delimiter is tested for that ')'
+    form, and where a backquote comes before it, for any backquote. The lines read across all openers are
+    bounded by about four times the command's length; past that bound the line being read is returned, the
+    fail-closed reading."""
+    n = len(command)
+    first_paren = command.find("(")
+    first_backquote = command.find("`")
+    budget = 4 * n + 64
+    j = 0
+    for match in _ABSPTH_OPENER_RE.finditer(command, 0, stop):
+        at = match.start()
+        while j < len(covered) and covered[j][1] <= at:
+            j += 1
+        if j < len(covered) and covered[j][0] <= at:
+            continue
+        paren = inside or 0 <= first_paren < at
+        backquote = 0 <= first_backquote < at
+        if not (paren or backquote):
+            continue
+        parsed = _parse_heredoc_delim(command, match.end(), n)
+        if parsed is None:
+            continue
+        _quoted, delim, strip_tabs, after = parsed
+        nl = command.find("\n", after)
+        k = n if nl < 0 else nl + 1
+        while k < n:
+            eol = command.find("\n", k)
+            eol = n if eol < 0 else eol
+            budget -= eol - k + 1
+            if budget < 0:
+                return k
+            line = command[k:eol]
+            body = line.lstrip("\t") if strip_tabs else line
+            if body == delim:
+                break
+            if paren and body.startswith(delim) and body[len(delim):].lstrip(" \t").startswith(")"):
+                return k
+            if backquote and "`" in line:
+                return k
+            k = eol + 1
+    return -1
+
+
+def _abspth_placed_truncation(command, depth, budget, scanned, read=None):
+    """bash_absolute_paths' deny tier for the text a lex of command reads but does not read as the commands bash
+    runs: a reason naming the first truncating redirect ('>', '>|', '&>', or '>&' to a file) to a relative or
+    opaque target found there, else None. read is the (places, stop, backquotes) the caller already holds for
+    command (_abspth_places, _abspth_backquotes), else None, where they are found here. Then:
+    (1) Each unquoted backquote substitution (_abspth_backquotes), whose text the full lex reads in place as if
+    no backquote held it, is read as a command of its own (_abspth_text_truncation, one level deeper) with the
+    backslash pairs bash takes out there removed (_ABSPTH_BACKQUOTE_ESCAPE_RE): bash turns each '\\\\' into '\\'
+    and each escaped backquote or '$' into the bare character before it reads that text, so an odd run of three
+    backslashes leaves a '>' an operator, and an escaped backquote in a double-quoted string there opens a
+    substitution. At depth 0 only a text holding a backslash is read so: the full lex read every other one the
+    way bash reads it. At a deeper level every one is, since _abspth_text_truncation overwrote them all.
+    (2) Each substitution a double-quoted string holds (a "code" place), which the lex skips whole, is read as a
+    command of its own one level deeper, unless a backquote substitution (1) read holds it: a '$(...)' by its
+    text inside the parentheses, a '${ cmd; }' or '${| cmd; }' (_ABSPTH_BRACE_SUBST_RE) by its text inside the
+    braces, a backquote substitution by its text with the backslash pairs bash takes out
+    there removed (_ABSPTH_DQ_BACKQUOTE_ESCAPE_RE), and a '$((...))' that ends in '))' (bash reads it as
+    arithmetic) or a '${...}' through the substitutions it holds (_abspth_brace_truncation); a '$((...) )' is
+    a command substitution holding a subshell, read by its text inside the outer parentheses.
+    (3) Where bash may end a quoted here-document's body before the line the lex ends it at (_abspth_early_end),
+    the text from that line on is read by _abspth_unread_truncation.
+    (4) Where the recording lex stops before the end (an uncertain '#', or a construct a full lex refuses), the
+    text from there on is read by _abspth_unread_truncation where it holds a backquote, '$' or '<<'.
+    scanned is the index from which the caller has already read the command that way (None where it has not),
+    so (3) and (4) skip a read from there or later. The caller reads the full lex's segments; they are not read
+    again here."""
+    n = len(command)
+    if read is None:
+        places, stop = _abspth_places(command)
+        if places is None:
+            return _abspth_unread_truncation(command, 0)
+        quotes = _abspth_backquotes(command, places)
+    else:
+        places, stop, quotes = read
+    inside = []  # the backquote substitutions read below as texts of their own
+    for start, end in quotes:
+        text = command[start + 1:end - 1] if end - 1 > start and command[end - 1] == "`" else command[start + 1:end]
+        if depth or "\\" in text:
+            inside.append((start, end))
+            reason = _abspth_text_truncation(_ABSPTH_BACKQUOTE_ESCAPE_RE.sub(r"\1", text), depth + 1, budget)
+            if reason is not None:
+                return reason
+    covered = []
+    j = 0
+    for start, end, kind in places:
+        if kind == "backquote":
+            continue
+        if covered and start < covered[-1][1]:
+            covered[-1] = (covered[-1][0], max(end, covered[-1][1]))
+        else:
+            covered.append((start, end))
+        if kind != "code":
+            continue
+        while j < len(inside) and inside[j][1] <= start:
+            j += 1
+        if j < len(inside) and inside[j][0] <= start:
+            continue  # inside a backquote substitution read above, which read this text at bash's own level
+        if command[start] == "`":
+            reason = _abspth_text_truncation(_ABSPTH_DQ_BACKQUOTE_ESCAPE_RE.sub(r"\1", command[start + 1:end - 1]),
+                                             depth + 1, budget)
+        elif _ABSPTH_BRACE_SUBST_RE.match(command, start):
+            reason = _abspth_text_truncation(command[start + (3 if command.startswith("${|", start) else 2):end - 1],
+                                             depth + 1, budget)
+        elif command.startswith("${", start) or (command.startswith("$((", start)
+                                                 and command.endswith("))", start, end)):
+            reason = _abspth_brace_truncation(command, start + 2, end - 1, depth, budget)
+        else:
+            reason = _abspth_text_truncation(command[start + 2:end - 1], depth + 1, budget)
+        if reason is not None:
+            return reason
+    if depth:
+        # The caller lexed this text with every backquote substitution overwritten, so no body it skipped
+        # starts inside one; at depth 0 the full lex read each in place and may have skipped a body past it.
+        covered = sorted(covered + inside)
+    early = _abspth_early_end(command, covered, stop, depth > 0)
+    if early >= 0 and (scanned is None or early < scanned):
+        reason = _abspth_unread_truncation(command, early)
+        if reason is not None:
+            return reason
+    if stop < n and (scanned is None or stop < scanned) and (
+            "`" in command[stop:] or "$" in command[stop:] or "<<" in command[stop:]):
+        return _abspth_unread_truncation(command, stop)
+    return None
+
+
 def bash_absolute_paths(data):
     """abspth (quali/absolute-paths) Bash floor, PreToolUse on Bash: NO-ASK posture. Where a Bash command
     shifts the working directory through a relative cd/pushd operand, or names a relative/opaque
@@ -4935,6 +5210,11 @@ def bash_absolute_paths(data):
     nothing from there on, so a truncating redirect operator that _abspth_unread_truncation reads in that text
     whose target the raw text does not show absolute DENIES (that scan states how it reads a backslash and
     what it does not model), a '>' in quoted text, a here-string or a comment there included.
+    Text the lex reads but not as the commands bash runs there (a command substitution a double-quoted string
+    holds, an unquoted backquote substitution's text as bash reads it, and the text after a line where bash ends
+    a here-document opened inside a substitution) is read for the deny tier by _abspth_placed_truncation, after
+    the segments, on the full lex and on the prefix a partial lex reads: a truncating redirect it finds there
+    whose target it cannot show absolute DENIES, with a message that the target could not be read as absolute.
     The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
     and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
     fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
@@ -4989,6 +5269,7 @@ def bash_absolute_paths(data):
     # on, or one whose failed main's reading leaves segments only a partial lex recovers (MAIN'S DECISION AS
     # A FLOOR), is lexed again below.
     segments = None
+    scanned = None  # where the unread-text scan below started, if it ran
     reads = _SubstHeredocs.reads
     try:
         segments = _lex_command(command, skip_empty=True)
@@ -5020,7 +5301,8 @@ def bash_absolute_paths(data):
                 "blank before such a '#' outside any grouping or substitution.")
     except ValueError as exc:
         # stop is set by _lex_pass on every error it raises; the whole command is read if it is ever absent.
-        unread = _abspth_unread_truncation(command, getattr(exc, "stop", 0))
+        scanned = getattr(exc, "stop", 0)
+        unread = _abspth_unread_truncation(command, scanned)
         if unread is not None:
             return _deny(
                 "AIQT rule abspth (absolute-paths): this command holds a construct the shared lexer does not "
@@ -5076,6 +5358,23 @@ def bash_absolute_paths(data):
             "not denied.)".format("; ".join(seen)),
             "AIQT guardrail: denied a truncating redirect to a relative/unverified target that could zero the "
             "wrong file (rule abspth); name an absolute, verified target.")
+    # The text the lex read but not as the commands bash runs there: a substitution a double-quoted string
+    # holds, an unquoted backquote substitution's text as bash reads it, and the text after a line where bash
+    # ends a here-document opened in a substitution (_abspth_placed_truncation).
+    placed = _abspth_placed_truncation(command, 0, [_ABSPTH_TEXT_LIMIT], scanned)
+    if placed is not None:
+        return _deny(
+            "AIQT rule abspth (absolute-paths): this command holds text that bash reads as commands but that "
+            "this guard's lexer reads as one word or as data (the text of a command substitution inside double "
+            "quotes, a backquote substitution's text once bash removes its escaping backslashes, or the text "
+            "after a line where bash ends a here-document opened inside a substitution), and that text carries "
+            "{}, so this guard could not read that redirect's target as absolute. A truncating redirect ZEROES "
+            "its target, so aimed at a cwd-dependent relative or unverified path it can destroy the WRONG file; "
+            "it is denied rather than run unread (check-fails-closed-on-unreadable). Name an ABSOLUTE target for "
+            "the redirect (for example '> /abs/path/out'). (An append '>>', a descriptor duplication such as "
+            "'2>&1', a relative cd, or a read '<' redirect is only a convention nudge, not denied.)".format(placed),
+            "AIQT guardrail: denied a truncating redirect inside a substitution whose target this guard could not "
+            "read as absolute (rule abspth, fail-closed); name an absolute target.")
     if reasons:
         seen = []
         for reason in reasons:  # de-duplicate while preserving order so the banner stays bounded
@@ -19108,7 +19407,7 @@ def _orch_foreground_detach_kind(command):
 # The places the shared lexer may put a bare `&` the foreground scan reads, for that `&` to read as no detach
 # (_orch_foreground_detach_lexed), as _LexPlaces span kinds: a single- or double-quoted string, a '#'
 # comment, and a quoted here-document's body. They are the only narrowing of the scan's detach. A
-# here-document body whose end the lexer cannot prove is where bash ends it records as "code", not
+# here-document body whose end the lexer cannot prove is where bash ends it records as "body", not
 # "heredoc" (the span comment in _lex_pass), so it is never a lifting place.
 _ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
 
@@ -19175,7 +19474,7 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     top level of the command, with nothing open on the nesting stack and no '(' and no backquote
     anywhere before the body (inside a command or process substitution or backquotes bash 5.3 can end a
     body at a line that merely STARTS with the delimiter when a ')' or a backquote follows it on that
-    line, running what this lex would read as body, so such a body records as "code" and is never
+    line, running what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
     close the lex itself resolves; (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
