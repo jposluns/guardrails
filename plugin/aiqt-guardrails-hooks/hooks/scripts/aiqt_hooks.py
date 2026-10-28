@@ -5512,10 +5512,13 @@ def _abspth_early_end(line, delim, strip_tabs, closer):
 
 def _abspth_read_truncation(command, scanned):
     """bash_absolute_paths' deny tier for the commands bash runs where the shared lexer does not read them as
-    commands (_AbspthReader): a reason naming the first truncating redirect bash would perform to a relative or
+    commands (_AbspthReader): a reason naming the first truncating redirect the reader finds to a relative or
     opaque target, else None. Where the reader cannot tell how bash reads the text from some index on, that text
     is read by _abspth_unread_truncation instead, unless scanned (where the caller's unread-text scan started,
-    None where it did not run) is at or before that index."""
+    None where it did not run) is at or before that index. Not yet judged, so None can come back where bash
+    truncates: a command substitution inside single quotes in an arithmetic context (bash runs it); a truncating
+    redirect whose target word the reader cannot read, where the raw scan resumes past the operator; and a quote
+    glued to the '}' that closes a double-quoted '${ cmd; }' or '${| cmd; }'."""
     try:
         _AbspthReader(command, 0, [4 * len(command) + 64]).commands(0, len(command), None)
     except _AbspthFound as found:
@@ -5551,9 +5554,12 @@ def bash_absolute_paths(data):
     double-quoted string holds, in an unquoted backquote substitution's text as bash reads it, and after a line
     where bash ends a here-document opened inside a substitution) are read for the deny tier by
     _abspth_read_truncation, after the segments, whether the full lex parsed the command or not: it reads the
-    whole command as bash's parser does (_AbspthReader), and a truncating redirect it finds whose target it
+    whole command as _AbspthReader models bash's parser, and a truncating redirect it finds whose target it
     cannot show absolute DENIES, with a message that the target could not be read as absolute. Where it cannot
     tell how bash reads the text from some index on, the text from there is read by _abspth_unread_truncation.
+    It does not yet judge three shapes bash runs (the residue lists them): a command substitution inside single
+    quotes in an arithmetic context, a truncating redirect whose target word it cannot read (the raw scan
+    resumes past the operator), and a quote glued to the '}' closing a double-quoted '${ cmd; }' or '${| cmd; }'.
     The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
     and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
     fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
