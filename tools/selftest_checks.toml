@@ -1831,6 +1831,7 @@ expected-check-ids = [
   "ci/match-tree-head-flag-consumed",
   "ci/match-tree-repeated-flag-refused",
   "ci/match-tree-failed-run-on-same-tree-refused",
+  "ci/match-tree-window-disclosed",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]

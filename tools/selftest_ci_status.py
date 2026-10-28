@@ -2479,7 +2479,12 @@ def _run_checks():
         # A failed run on another tree, a failed run of another workflow file and a same-tree run
         # still in progress never veto (exit 0). The window ends: a veto on page 5, the last page
         # read, refuses and one on page 6 is never read; a veto on the 19th or 20th distinct head
-        # commit refuses and one on the 21st is never resolved (its commit is not read).
+        # commit refuses and one on the 21st is never resolved (its commit is not read). Past the
+        # commit bound the scan goes on: a veto listed after the 21st distinct head commit still
+        # refuses when its own commit's tree is already known, on the matched run's own commit (with
+        # 20, 21 or 22 distinct head commits listed, or with 21 listed and the veto alone on page 2
+        # or page 5 behind full pages) or on another same-tree commit an earlier success resolved,
+        # and one on a resolved commit with another tree never does.
         def filler(count, start):
             return [workflow_run(start + k, "completed", "failure", "Other", same_sha,
                                  path=".github/workflows/unrelated.yml") for k in range(count)]
@@ -2494,14 +2499,31 @@ def _run_checks():
                 pages.append({"body": page(runs)})
             return {"runs": pages, "commits": commits, "jobs": {}}
 
-        def far_commits(fillers):
+        def late_veto(sha):
+            return workflow_run(769, "completed", "failure", "Quality", sha)
+
+        def far_commits(fillers, late=None, early=(), after=()):
+            # quality_same, then early, then fillers successful runs each on its own commit with
+            # other_tree, then late (by default a failed run on head_sha), then after, all on one page.
             shas = ["{:040x}".format(0xc0ffee000 + k) for k in range(fillers)]
-            served = tree_listing([quality_same]
+            served = tree_listing([quality_same] + list(early)
                                   + [workflow_run(770 + k, "completed", "success", "Quality", sha)
                                      for k, sha in enumerate(shas)]
-                                  + [workflow_run(769, "completed", "failure", "Quality", head_sha)],
+                                  + [late or late_veto(head_sha)] + list(after),
                                   dict(commits))
             served["commits"].update((sha, commit_record(sha, other_tree)) for sha in shas)
+            return served
+
+        def far_paged(veto_page):
+            # far_commits(20, late_veto(same_sha)) with its late veto alone on page veto_page: the runs
+            # before it stay on page 1, and every page before veto_page is filled up with filler.
+            served = far_commits(20, late_veto(same_sha))
+            listed = served["runs"][0]["body"]["workflow_runs"]
+            pages = [listed[:-1]] + [[] for _ in range(veto_page - 1)]
+            pages[-1].append(listed[-1])
+            served["runs"] = [{"body": page(runs if number == veto_page
+                                            else runs + filler(100 - len(runs), 10000 * number))}
+                              for number, runs in enumerate(pages, 1)]
             return served
 
         failed_same = workflow_run(740, "completed", "failure", "Quality", same_sha)
@@ -2529,7 +2551,14 @@ def _run_checks():
                 (paged(6), (), None, 0),
                 (far_commits(17), (), 769, 0),
                 (far_commits(18), (), 769, 0),
-                (far_commits(19), (), None, 0)):
+                (far_commits(19), (), None, 0),
+                (far_commits(19, late_veto(same_sha)), (), 769, 0),
+                (far_commits(20, late_veto(same_sha)), (), 769, 0),
+                (far_commits(21, late_veto(same_sha)), (), 769, 0),
+                (far_commits(20, late_veto(head_sha), [quality_head]), (), 769, 0),
+                (far_commits(20, late_veto(other_sha), [quality_other]), (), None, 0),
+                (far_paged(2), (), 769, 0),
+                (far_paged(5), (), 769, 0)):
             rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + extra, tree=served)
             named = veto_run is not None and "run {} on ".format(veto_run) in output
             failed_run.append((rc, vetoes in output, named, matched + "701 " in output,
@@ -2545,7 +2574,71 @@ def _run_checks():
                (1, True, True, False, 0, 0, 1), (1, True, True, False, 0, 0, 1),
                (0, False, False, True, 0, 0, 0),
                (1, True, True, False, 0, 0, 1), (1, True, True, False, 0, 0, 1),
-               (0, False, False, True, 0, 0, 0)])
+               (0, False, False, True, 0, 0, 0),
+               (1, True, True, False, 0, 0, 0), (1, True, True, False, 0, 0, 0),
+               (1, True, True, False, 0, 0, 0), (1, True, True, False, 0, 0, 1),
+               (0, False, False, True, 0, 0, 0),
+               (1, True, True, False, 0, 0, 0), (1, True, True, False, 0, 0, 0)])
+
+        # Every result line but a veto's states the window it read: the listing pages read, each in
+        # full, and whether the listing ended or the page bound did; how many head commits' trees were
+        # read, of the bound; and how many completed quality.yml runs sit on a further head commit and
+        # so were not compared, adding, when any is, that no successful run listed after the first of
+        # them is accepted. So no run that passes is older than an uncompared one. A successful run on
+        # a resolved commit listed just before the first uncompared run stands where a newer one lacks
+        # a required job; one listed after it never does, whether the uncompared runs before it are a
+        # pass on another tree, a failed run on a commit with the queried tree (the 21st distinct head
+        # commit), or both (that commit then the 22nd); and one on a further commit with the same tree
+        # is never read, never stands and is counted.
+        pages_end = "listing pages read, each in full: {} of at most 5, to the listing's end; "
+        pages_cut = "listing pages read, each in full: 5 of at most 5, any later page unread; "
+        trees_read = "head commits whose tree was read: {} of at most 20, newest first; "
+        uncompared = "completed runs of that file on a further head commit, not compared: {})"
+        stopped = ("completed runs of that file on a further head commit, not compared: {}, and no "
+                   "successful run listed after the first of them is accepted)")
+        no_tree = ("head commits whose tree was read: none, as no completed successful run of that file "
+                   "is listed)")
+        far_sha = "d" * 40
+        late_green = workflow_run(704, "completed", "success", "Quality", same_sha)
+        far_failed = workflow_run(900, "completed", "failure", "Quality", far_sha)
+
+        def skipped_then_green(served):
+            served["jobs"] = {"701": skipped_opf, "704": all_green, "705": all_green}
+            served["commits"][far_sha] = commit_record(far_sha, head_tree)
+            return served
+
+        inside_pass = skipped_then_green(far_commits(19, late_green, after=[far_failed]))
+        late_pass = skipped_then_green(far_commits(20, late_green))
+        after_failed = skipped_then_green(far_commits(19, far_failed, after=[late_green]))
+        after_far_failed = skipped_then_green(far_commits(20, far_failed, after=[late_green]))
+        far_pass = skipped_then_green(far_commits(20, workflow_run(705, "completed", "success",
+                                                                   "Quality", far_sha)))
+        opf = ("--require-job-success", "opf")
+        window = []
+        for served, extra, want, needles in (
+                (tree_listing([quality_same], commits), (), matched + "701 ",
+                 [pages_end.format(1), trees_read.format(1), uncompared.format(0)]),
+                (paged(6), (), matched + "701 ", [pages_cut, trees_read.format(1), uncompared.format(0)]),
+                (far_commits(19), (), matched + "701 ",
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (inside_pass, opf, matched + "704 ",
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (late_pass, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (after_failed, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(1)]),
+                (after_far_failed, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(2)]),
+                (far_pass, opf, unmatched,
+                 [pages_end.format(1), trees_read.format(20), stopped.format(2)]),
+                (tree_listing([failed_same], commits), (), unmatched, [pages_end.format(1), no_tree])):
+            rc, output, _calls = fixture.invoke([], rev=None, extra_args=match + extra, tree=served)
+            window.append((rc, want in output, [needle for needle in needles if needle not in output],
+                           fixture.gh_reads("git/commits/" + far_sha),
+                           fixture.gh_reads("actions/runs/705/jobs"),
+                           fixture.gh_reads("actions/runs/704/jobs")))
+        check("ci/match-tree-window-disclosed", window,
+              [(0, True, [], 0, 0, 0)] * 3 + [(0, True, [], 0, 0, 1)] + [(1, True, [], 0, 0, 0)] * 5)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

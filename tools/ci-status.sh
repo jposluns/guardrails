@@ -27,7 +27,7 @@
 # Every invocation requires a completed successful run of the workflow file
 # .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below), except --match-tree,
 # which requires one on a commit with the same TREE and refuses that tree when any completed run of
-# that file on it concluded otherwise (see THE TREE MATCH below).
+# that file on it, within the window THE TREE MATCH below states, concluded otherwise.
 #
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
@@ -49,8 +49,14 @@
 #                                                   # .github/workflows/quality.yml whose head commit
 #                                                   # has the TREE of REV (default HEAD), each NAME
 #                                                   # concluded success in that run, and no completed
-#                                                   # run of it on that tree concluded otherwise
-#                                                   # (THE TREE MATCH)
+#                                                   # run of it on that tree concluded otherwise. The
+#                                                   # window: up to 5 listing pages, all read in full,
+#                                                   # with trees read for the newest 20 distinct head
+#                                                   # commits; a non-success run on one of them with
+#                                                   # that tree refuses wherever it is listed, a run
+#                                                   # on a further commit is not compared, and no
+#                                                   # successful run listed after the first such run
+#                                                   # is accepted (THE TREE MATCH)
 #
 # Exit codes (--match-tree has its own, stated at THE TREE MATCH below): 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
 # does not satisfy --require-base, or no completed successful run of the required workflow file
@@ -1088,7 +1094,8 @@ pr_probe() {
 # that file whose conclusion is anything else (failure, cancelled, timed_out, skipped, none, ...) is a
 # veto: as on a commit, where any completed non-success run fails the read, a later pass never erases
 # an earlier failure, so the tree of a veto's head commit fails the read even beside a successful run.
-# The whole window below is read before any decision, since a veto can be older than every candidate.
+# Every page of the window below is read in full before any decision, and every veto on it whose head
+# commit's tree was read is tested, since a veto can be older than every candidate.
 # A head commit's tree is read from the Git Data API (`git/commits/<head_sha>`, its .tree.sha), not
 # from this checkout, because a squashed train head may no longer be fetchable into it; the record must
 # name the commit asked for. No commit is read when the window holds no candidate. A veto with the same
@@ -1097,18 +1104,28 @@ pr_probe() {
 # --require-job-success NAME is read from that run's jobs listing (`actions/runs/<id>/jobs`, the latest
 # attempt): at least one job is named exactly NAME and every job so named is completed with conclusion
 # success, so a run that skipped a job (conclusion skipped), or ran none of that name, never stands as
-# that job's evidence. The newest candidate meeting every requirement passes (exit 0).
+# that job's evidence. The newest candidate meeting every requirement, listed before every run on a
+# further head commit (WINDOW below), passes (exit 0).
 # Exit 1: a veto on the same tree within the window, or no candidate meets every requirement within it
 # (no run, only runs that are not completed and successful, only runs of another workflow file, only
-# runs on another tree, or only same-tree runs without the named jobs' success). Exit 2: a read fails,
-# or a page, a run record, a commit record or a jobs listing is malformed (including any record of the
-# listing, not only a candidate's or a veto's), at once: a malformed record ends the read, never skipped.
-# WINDOW (disclosed): at most MATCH_TREE_MAX_PAGES pages (500 runs) of the listing are read, and the
-# trees of at most MATCH_TREE_MAX_COMMITS distinct head commits of candidates and vetoes, taken newest
-# first; a run beyond either bound is not seen. An unseen candidate can only refuse, but an unseen veto
-# cannot refuse either: a failed run older than the window, or one a page shift between page reads
-# skips, does not stop a pass. A run a page shift repeats is read again (its commit tree once), and a
-# run listed once as a candidate and once as a veto is a veto.
+# runs on another tree, only same-tree runs without the named jobs' success, or only same-tree runs
+# listed after a run on a further head commit). Exit 2: a read fails, or a page, a run record, a commit
+# record or a jobs listing is malformed (including any record of the listing, not only a candidate's or
+# a veto's), at once: a malformed record ends the read, never skipped.
+# WINDOW (disclosed, and stated on the success line and the no-match line): the listing is read to
+# its end or to MATCH_TREE_MAX_PAGES pages (500 runs), every page read in full; a run past the page
+# bound is not seen. The trees of at most MATCH_TREE_MAX_COMMITS distinct head commits are read, those
+# of the newest completed runs of the file (candidates and vetoes alike), and a run on a further head
+# commit is not compared (it can neither pass nor refuse); the result line counts it. Resolution is per
+# run, not a prefix of the listing: past the commit bound the veto scan goes on through every run read,
+# so a veto on a commit whose tree is already known refuses wherever it is listed. The candidate scan
+# stops at the first run listed on a further head commit, so no run that passes is older than a run
+# that was not compared: a candidate listed after that run never stands, even on a commit whose tree is
+# known, and the result line says so whenever such a run is listed. An unseen, uncompared or passed-over
+# candidate can only refuse, but an unseen or uncompared veto cannot refuse either: a failed run past the
+# page bound, one on a head commit past the commit bound (always listed after any run that passes), or
+# one a page shift between page reads skips, does not stop a pass. A run a page shift repeats is read
+# again (its commit tree once), and a run listed once as a candidate and once as a veto is a veto.
 # NOT CHECKED (disclosed): a pull_request run tested the merge of its head into its base, not its head
 # alone; the two trees are equal only when the base was an ancestor of the head when the run ran. The
 # listing shows each run's latest attempt only, so a failed earlier attempt of a run later re-run to
@@ -1219,10 +1236,10 @@ match_tree_error() {
 
 # Every outcome exits here (see THE TREE MATCH above).
 match_tree() {
-  local tree raw step row rest kind run_id head_sha verdict page_no=1 window="" seen_runs=" "
-  local i resolved candidates=0
+  local tree raw step row rest kind run_id head_sha verdict page_no=1 window seen_runs=" "
+  local i listing_end=0 candidates=0
   local -a rows=() kinds=() run_ids=() head_shas=() concls=() vetoed=() unmet=()
-  local -A tree_of=()
+  local -A tree_of=() unresolved=()
   if ! tree="$(git rev-parse --verify --quiet "${SHA}^{tree}")"; then
     printf 'ERROR: cannot read the tree of %s.\n' "$SHA" >&2
     exit 2
@@ -1253,39 +1270,53 @@ match_tree() {
       [ "$kind" = "pass" ] && candidates=$((candidates + 1))
     done
     case "${rows[0]}" in
-      stop) break ;;
+      stop)
+        listing_end=1
+        break
+        ;;
       more) ;;
       *) match_tree_error "unexpected workflow-runs listing output" "${rows[0]}" ;;
     esac
-    if [ "$page_no" -ge "$MATCH_TREE_MAX_PAGES" ]; then
-      window="the newest ${MATCH_TREE_MAX_PAGES} pages of the listing"
-      break
-    fi
+    [ "$page_no" -ge "$MATCH_TREE_MAX_PAGES" ] && break
     page_no=$((page_no + 1))
   done
   # With no candidate the read refuses without reading a commit. Otherwise the head trees are read
-  # newest first up to the commit bound; resolved counts the runs whose tree is known.
-  resolved=0
+  # newest first up to the commit bound, and the scan goes on past it: resolution is per run, so a run
+  # whose own head commit's tree is already known keeps that tree wherever it is listed, and only a run
+  # on a further head commit is left unresolved (counted by run id for the result line).
   if [ "$candidates" -ne 0 ]; then
     for ((i = 0; i < ${#run_ids[@]}; i++)); do
       head_sha="${head_shas[i]}"
-      if [ -z "${tree_of[$head_sha]+set}" ]; then
-        if [ "${#tree_of[@]}" -ge "$MATCH_TREE_MAX_COMMITS" ]; then
-          window="the newest ${MATCH_TREE_MAX_COMMITS} head commits of completed runs"
-          break
-        fi
-        raw="$(gh api "repos/$REPO/git/commits/$head_sha" 2>&1)" ||
-          match_tree_error "the commit ${head_sha} of run ${run_ids[i]} could not be read" "$raw"
-        tree_of[$head_sha]="$(printf '%s\n' "$raw" | tree_jq commit "$head_sha" 2>&1)" ||
-          match_tree_error "the commit record of ${head_sha} (run ${run_ids[i]}) was refused" \
-            "${tree_of[$head_sha]}"
+      [ -z "${tree_of[$head_sha]+set}" ] || continue
+      if [ "${#tree_of[@]}" -ge "$MATCH_TREE_MAX_COMMITS" ]; then
+        unresolved[${run_ids[i]}]=1
+        continue
       fi
-      resolved=$((i + 1))
+      raw="$(gh api "repos/$REPO/git/commits/$head_sha" 2>&1)" ||
+        match_tree_error "the commit ${head_sha} of run ${run_ids[i]} could not be read" "$raw"
+      tree_of[$head_sha]="$(printf '%s\n' "$raw" | tree_jq commit "$head_sha" 2>&1)" ||
+        match_tree_error "the commit record of ${head_sha} (run ${run_ids[i]}) was refused" \
+          "${tree_of[$head_sha]}"
     done
   fi
-  # A later pass never erases an earlier failure: any veto on this tree refuses the read.
-  for ((i = 0; i < resolved; i++)); do
-    if [ "${kinds[i]}" = "veto" ] && [ "${tree_of[${head_shas[i]}]}" = "$tree" ]; then
+  if [ "$listing_end" -eq 1 ]; then
+    window="listing pages read, each in full: ${page_no} of at most ${MATCH_TREE_MAX_PAGES}, to the listing's end"
+  else
+    window="listing pages read, each in full: ${page_no} of at most ${MATCH_TREE_MAX_PAGES}, any later page unread"
+  fi
+  if [ "$candidates" -eq 0 ]; then
+    window+="; head commits whose tree was read: none, as no completed successful run of that file is listed"
+  else
+    window+="; head commits whose tree was read: ${#tree_of[@]} of at most ${MATCH_TREE_MAX_COMMITS}, newest first"
+    window+="; completed runs of that file on a further head commit, not compared: ${#unresolved[@]}"
+    if [ "${#unresolved[@]}" -ne 0 ]; then
+      window+=", and no successful run listed after the first of them is accepted"
+    fi
+  fi
+  # A later pass never erases an earlier failure: a veto anywhere in the pages read whose head commit's
+  # tree is known and is this tree refuses the read, and this scan ends before any success counts.
+  for ((i = 0; i < ${#run_ids[@]}; i++)); do
+    if [ "${kinds[i]}" = "veto" ] && [ "${tree_of[${head_shas[i]}]-}" = "$tree" ]; then
       vetoed+=("run ${run_ids[i]} on ${head_shas[i]}: ${concls[i]}")
     fi
   done
@@ -1296,15 +1327,19 @@ match_tree() {
     done
     exit 1
   fi
-  for ((i = 0; i < resolved; i++)); do
+  # The candidates, newest first, each judged by its own head commit. The scan stops at the first run
+  # listed on a further head commit, candidate or veto, so no run that passes is older than a run that
+  # was not compared.
+  for ((i = 0; i < ${#run_ids[@]}; i++)); do
     run_id="${run_ids[i]}"
     head_sha="${head_shas[i]}"
+    [ -n "${tree_of[$head_sha]+set}" ] || break
     [ "${kinds[i]}" = "pass" ] || continue
     case "$seen_runs" in
       *" ${run_id} "*) continue ;;
     esac
     seen_runs+="${run_id} "
-    [ "${tree_of[$head_sha]}" = "$tree" ] || continue
+    [ "${tree_of[$head_sha]-}" = "$tree" ] || continue
     if [ "${#REQUIRE_JOBS[@]}" -ne 0 ]; then
       raw="$(gh api "repos/$REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
         --paginate --slurp 2>&1)" ||
@@ -1320,10 +1355,10 @@ match_tree() {
         *) match_tree_error "unexpected jobs listing output" "$verdict" ;;
       esac
     fi
-    echo "RESULT: completed successful run ${run_id} of the workflow file ${REQUIRE_WORKFLOW} on ${head_sha} has the tree ${tree} of ${SHA}${REQUIRE_JOBS[0]+, every required job concluded success}, and no completed run on that tree within the window concluded otherwise."
+    echo "RESULT: completed successful run ${run_id} of the workflow file ${REQUIRE_WORKFLOW} on ${head_sha} has the tree ${tree} of ${SHA}${REQUIRE_JOBS[0]+, every required job concluded success}, and no completed run of that file concluded otherwise on a head commit whose tree was read and is that tree (window: ${window})."
     exit 0
   done
-  echo "RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} on a commit with the tree ${tree} of ${SHA}${REQUIRE_JOBS[0]+ with every required job concluded success} was found${window:+ within ${window}}."
+  echo "RESULT: no completed successful run of the workflow file ${REQUIRE_WORKFLOW} on a commit with the tree ${tree} of ${SHA}${REQUIRE_JOBS[0]+ with every required job concluded success} was found (window: ${window})."
   for row in "${unmet[@]}"; do
     printf '  %s\n' "$row"
   done

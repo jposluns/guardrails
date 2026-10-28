@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.16** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.17** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -74,7 +74,12 @@ tree (each run's tree is read from `git/commits/<sha>`, expected to need Content
 live), with optional per-job success requirements: every job of each name given concluded success in that
 run, so a skipped job never counts, and it refuses the tree when any completed run of that file on a commit
 with the same tree, within its read window, concluded anything but success, since a later pass never
-erases an earlier failure. The gate roster grows
+erases an earlier failure. That window is up to 5 listing pages, all read in full, with trees read for the
+newest 20 distinct head commits of completed runs of that file (when no successful run of that file is
+listed, no tree is read and the read refuses): a non-success run on one of those commits with the same
+tree refuses wherever it is listed, a run on any further commit is not compared, and no successful run
+listed after the first such run is accepted, so no accepted run is older than one not compared (the
+success and no-match result lines state the window). The gate roster grows
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).
 
 Quality runs on a pull request only when a label is added to it: `quality.yml` triggers on the `labeled`
