@@ -794,6 +794,7 @@ def self_test(report_path=None):
         ("cli/report-documented-run", "report-documented-run"),
         ("cli/report-cannot-evaluate-run", "report-cannot-evaluate-run"),
         ("cli/doctor-carries-report", "doctor-carries-report"),
+        ("cli/raised-build-reads-its-declaration", "raised-build-reads-its-declaration"),
     ):
         check(check_id, *opf.run_declaration_cli_vector(vector))
         cli_covered.add(vector)
@@ -812,6 +813,21 @@ def self_test(report_path=None):
               not opf.run_declaration_cli_vector("report-cannot-evaluate-run")[0])
     with patch.object(opf, "_DECLARATION_REPORTING", ()):
         check("revert/cli-doctor-report-dropped-red", not opf.run_declaration_cli_vector("doctor-carries-report")[0])
+    # The raised-build helper reverted two ways: presenting nothing, so the installed copy stands against the raised
+    # constants, and silencing the runtime check for its duration instead of presenting a declaration.
+    installed = opf._installed_declaration()
+
+    @contextlib.contextmanager
+    def silenced():
+        with patch.object(_opf_declaration, "runtime_check",
+                          lambda path: _opf_declaration.Check(_opf_declaration.OK, _opf_declaration.SHIPPED_DECLARATION_SHA256)):
+            yield installed
+    with patch.object(opf, "_running_build_declaration", lambda: contextlib.nullcontext(installed)):
+        check("revert/cli-raised-build-presents-nothing-red",
+              not opf.run_declaration_cli_vector("raised-build-reads-its-declaration")[0])
+    with patch.object(opf, "_running_build_declaration", silenced):
+        check("revert/cli-raised-build-check-silenced-red",
+              not opf.run_declaration_cli_vector("raised-build-reads-its-declaration")[0])
     # The gate narrowed to refuse on absent alone (a mutant of opf.py): every other refusing state then
     # dispatches, so each of its rows is red (the mode row is skipped, and so excluded, under uid 0), while the
     # absent row stays green, so the mutant is that narrowing and not a broken copy.

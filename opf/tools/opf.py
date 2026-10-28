@@ -20647,7 +20647,9 @@ def _cli_self_test():
                 # too (red when it reports the malformed home's not-a-directory instead). reconcile and
                 # apply refuse with the fence, and approve is cannot-evaluate, apply and approve before they
                 # read their inputs (the worksheet and artefact reads are recorded: red when either reads
-                # any of them first, or approve prints an approval). Every root stays byte-identical.
+                # any of them first, or approve prints an approval). Every root stays byte-identical. The
+                # dispatcher's spec 16.1 runtime check reads, while homes is raised, the declaration the
+                # raised build ships (_running_build_declaration), so each verb gets past it to its fence.
                 from unittest import mock
                 this = sys.modules[__name__]
                 missing = os.path.join(abase, "no-such-worksheet.toml")
@@ -20658,19 +20660,21 @@ def _cli_self_test():
                 saved_homes = _opf_store.SUPPORTED_HOMES
                 try:
                     _opf_store.SUPPORTED_HOMES = 2
-                    for where, at in (("journal debris", debris), ("a clean root", clean)):
-                        fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
-                        fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
-                    fenced["status", "a malformed evidence home"] = run_adopt(
-                        ["adopt", "status", "--root", badhome])
-                    fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
-                    for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
-                        with mock.patch.object(this, "_adopt_read_inputs",
-                                               lambda path, sub=sub: read.append((sub, path)) or {}), \
-                                mock.patch.object(this, "_adopt_read_bounded",
-                                                  lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
-                            fenced[sub, "journal debris"] = run_adopt(
-                                ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
+                    with _running_build_declaration():
+                        for where, at in (("journal debris", debris), ("a clean root", clean)):
+                            fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
+                            fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
+                        fenced["status", "a malformed evidence home"] = run_adopt(
+                            ["adopt", "status", "--root", badhome])
+                        fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
+                        for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
+                            with mock.patch.object(this, "_adopt_read_inputs",
+                                                   lambda path, sub=sub: read.append((sub, path)) or {}), \
+                                    mock.patch.object(this, "_adopt_read_bounded",
+                                                      lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
+                                fenced[sub, "journal debris"] = run_adopt(
+                                    ["adopt", sub, "--inputs", missing, "--plan", missing] + flags
+                                    + ["--root", debris])
                 finally:
                     _opf_store.SUPPORTED_HOMES = saved_homes
                 unread = "cannot evaluate: " + _opf_adopt_apply.JOURNAL_UNREAD
@@ -23192,6 +23196,36 @@ def _installed_declaration():
     return Path(__file__).resolve().parent / _opf_declaration.DECLARATION_NAME
 
 
+def _running_build_declaration():
+    """A context manager for a self-test vector that raises _opf_store's SUPPORTED_HOMES, SUPPORTED_SPEC_VERSION
+    or SUPPORTED_WORKLOG in process to exercise the build those constants describe. Entered after the raise, it
+    presents the declaration that build ships: the four fields rendered from RELEASE_IDENTITY and the constants
+    as they stand on entry (the raised values are read, never restated), written to a fresh scratch directory,
+    with _installed_declaration, the shipped bytes and the shipped-file digest pointed at that file until exit,
+    when all three are restored and the directory is removed. The runtime check itself runs unpatched over it,
+    so constants raised without it, or changed after entry, still refuse as contradictory, and every run outside
+    it reads the installed copy beside this file."""
+    import contextlib
+    import hashlib
+    import tempfile
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+
+    @contextlib.contextmanager
+    def presented():
+        data = _opf_declaration.declaration_bytes(
+            _opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION, _opf_store.SUPPORTED_HOMES,
+            _opf_store.SUPPORTED_WORKLOG)
+        with tempfile.TemporaryDirectory(prefix="opf-raised-declaration-") as tmp:
+            path = Path(tmp) / _opf_declaration.DECLARATION_NAME
+            path.write_bytes(data)
+            with patch.object(here, "_installed_declaration", lambda: path), \
+                    patch.object(_opf_declaration, "SHIPPED_DECLARATION_BYTES", data), \
+                    patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", hashlib.sha256(data).hexdigest()):
+                yield path
+    return presented()
+
+
 def _declaration_run(rest):
     """`opf.py --declaration`: the documented run of the spec 16.1 runtime check and the emitter. It resolves no
     store and writes the report on stdout, at exit 0 where the check yields ok (runtime result fail: the run
@@ -23423,6 +23457,50 @@ def _dv_doctor_carries_report(tmp):
     return ok, (rc, out, err, refused, resolved)
 
 
+def _dv_raised_build_reads_its_declaration(tmp):
+    """A build raised in process (SUPPORTED_HOMES one past the shipped generation) passes the gate only inside
+    _running_build_declaration, over the declaration that build ships: doctor is refused as contradictory with
+    the constant raised before the context, inside it once another constant moves after entry, and after it;
+    inside it doctor dispatches and its report restates the raised declaration, and with the constant restored
+    it dispatches over the installed copy again, the presented file gone and the shipped bytes restored."""
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    called = []
+
+    def doctor(rest):
+        called.append(rest)
+        return EXIT_OK
+    installed = _installed_declaration()
+    shipped = _opf_declaration.SHIPPED_DECLARATION_BYTES
+    raised = _opf_store.SUPPORTED_HOMES + 1
+    data = _opf_declaration.declaration_bytes(_opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION,
+                                              raised, _opf_store.SUPPORTED_WORKLOG)
+    argv = ["doctor", "--root", str(root)]
+    rows = {}
+    with patch.object(here, "_cmd_doctor", doctor):
+        with patch.object(_opf_store, "SUPPORTED_HOMES", raised):
+            rows["raised"] = _declaration_capture(argv)
+            with _running_build_declaration() as presented:
+                rows["presented"] = _declaration_capture(argv)
+                presented_bytes = presented.read_bytes()
+                with patch.object(_opf_store, "SUPPORTED_WORKLOG", _opf_store.SUPPORTED_WORKLOG + 1):
+                    rows["moved"] = _declaration_capture(argv)
+            rows["exited"] = _declaration_capture(argv)
+        rows["restored"] = _declaration_capture(argv)
+    line = ("opf doctor: cannot evaluate: implementation declaration contradictory (spec 16.1); no store "
+            "operation was performed\n")
+    refused = all(rows[key][0] == EXIT_MALFORMED and rows[key][2].startswith(line)
+                  for key in ("raised", "moved", "exited"))
+    ok = (refused and presented_bytes == data
+          and rows["presented"] == (EXIT_OK, _declaration_expected(data, _declaration_sha256(data), "fail"), "")
+          and rows["restored"] == (EXIT_OK, _declaration_expected(shipped, _declaration_sha256(shipped), "fail"), "")
+          and len(called) == 2 and not presented.exists() and _installed_declaration() == installed
+          and _opf_declaration.SHIPPED_DECLARATION_BYTES == shipped)
+    return ok, (rows, presented_bytes, called)
+
+
 _DECLARATION_CLI_VECTORS = (
     ("gate-refuses-every-store-verb", _dv_gate_refuses_every_store_verb),
     ("gate-refuses-symlink", _dv_gate_refuses_symlink),
@@ -23438,6 +23516,7 @@ _DECLARATION_CLI_VECTORS = (
     ("report-documented-run", _dv_report_documented_run),
     ("report-cannot-evaluate-run", _dv_report_cannot_evaluate_run),
     ("doctor-carries-report", _dv_doctor_carries_report),
+    ("raised-build-reads-its-declaration", _dv_raised_build_reads_its_declaration),
 )
 
 
@@ -23460,7 +23539,8 @@ def _declaration_cli_self_test():
     """The dispatcher's spec 16.1 vectors: the gate refuses every store verb before dispatch on an absent,
     symlinked, CRLF, empty, directory, FIFO, oversize, mode-unreadable, malformed or contradictory declaration,
     upgrade, import and the stub verbs never read it, `--declaration` writes the expected report
-    (exit 0, and exit 2 with not-read and cannot_evaluate when absent), and doctor appends the report.
+    (exit 0, and exit 2 with not-read and cannot_evaluate when absent), doctor appends the report, and a build
+    raised in process passes the gate only over the declaration _running_build_declaration presents for it.
     tools/check_opf_declaration.py runs each under its registered check id and shows it red under its revert."""
     failures = []
     for name, _fn in _DECLARATION_CLI_VECTORS:
