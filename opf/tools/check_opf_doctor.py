@@ -127,7 +127,11 @@ vector), with HEAD unmoved, while the same commit in a clone without the hook su
 not the working tree, is what is checked (a staged tamper with restored working-tree bytes is refused, an
 unstaged tamper does not block a clean staged change); `git commit PATH` and `git commit -a` are checked
 against the temporary index git names in GIT_INDEX_FILE; an unborn branch commits a clean store; and a
-dedicated sync target equal to the clone's remote stays VALID in the snapshot. Under a recording stub tool,
+dedicated sync target equal to the clone's remote stays VALID in the snapshot. Over a store made with opf
+init and committed, render --write output and an opf record write each commit through the hook, while a
+comment line appended to the manifest is refused by doctor's canonical-bytes finding and a new file under
+an applied adoption run's archive by its unregistered-path finding (the hook output must name each
+finding). Under a recording stub tool,
 run by hand: exact order and arguments (doctor --require-store, then render --check, over one snapshot root
 under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
 finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
@@ -2050,6 +2054,130 @@ def _self_test_isolated():
             (remote / "README.md").write_text("readme\n", encoding="utf-8")
             _git(remote, home, "add", "README.md")
             expect("commit-remote-sync-target-passes", _committed(remote), (EXIT_OK, True))
+            # The two direct writes completion check 5 probes (spec 14.1), over a store made the way an
+            # adopter makes one: opf init and a commit, then, with the hook installed, render --write and a
+            # sanctioned opf record, each committed through the hook. A comment line appended to the manifest
+            # (bytes every other check parses past) and a new file under an applied adoption run's archive
+            # are each refused by a named doctor finding over the snapshot, with HEAD unmoved.
+            tool = Path(__file__).resolve().parent / "opf.py"
+            manifest_rel = "{}/{}/manifest.toml".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+
+            def _opf_verb(root, *args):
+                # One opf.py verb over root, launched isolated (-I -B) under the fixture env; its exit status.
+                # opf init takes the shared init operation mutex, whose rev-parse strips every GIT_* variable,
+                # the fixture env's system-config pins included. The launch therefore runs inside the OPF git
+                # lifecycle: _env() carries its PATH, whose git wrapper reasserts those pins in the child, so
+                # the verb does not read the host's system configuration.
+                import _opf_oplock
+
+                def launch():
+                    return subprocess.run([sys.executable, "-I", "-B", str(tool)] + list(args)
+                                          + ["--root", str(root)], cwd=str(root), env=_env(),
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+
+                try:
+                    proc = _opf_oplock._st_with_git_lifecycle(launch)
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                    raise OSError("could not run opf {} in {} ({})".format(args[0], root, exc))
+                return proc.returncode
+
+            def _refused_by(root, finding):
+                # (refused, HEAD unchanged, the hook output names `finding`) for one commit attempt.
+                before = _head(root)
+                rc, text = _commit(root)
+                return rc != EXIT_OK, _head(root) == before, finding in text
+
+            def _applied_run(root):
+                # An applied adoption run as committed evidence: the real planner freezes the retirement of
+                # one file at the store location in a scratch tree, and the plan, its approval, the file's
+                # preimage under the run archive and the sealed inventory are written into root beside the
+                # frozen file (apply itself refuses while its receipt stage has not landed). Returns the run id;
+                # a fixture that cannot be built is a harness error.
+                import copy
+                import datetime
+                import _opf_adopt as schema
+                import _opf_adopt_apply as apply
+                import _opf_adopt_plan as planner
+                import _opf_init
+
+                def digest(blob):
+                    return "sha256:" + hashlib.sha256(blob).hexdigest()
+
+                old, data = ".working/OLD.md", b"old rules\n"
+                plan_root = base / "adopt-plan"
+                (plan_root / ".working").mkdir(parents=True)
+                (plan_root / old).write_bytes(data)
+                head = apply._selftest_git_commit(plan_root)
+                if head is None:
+                    raise OSError("the adoption plan fixture could not be committed")
+                try:
+                    manifest = _opf_init.build_manifest().encode("utf-8")
+                    views = sorted(v["target"] for v in _opf_init._manifest_model()["views"].values())
+                    bindings = dict(schema.canonical_plan_bindings(), revision=head)
+                    ops = [dict(op="init-store", store_root=".",
+                                members=[dict(path=manifest_rel, digest=digest(manifest))]),
+                           dict(op="render-views", store_root=".",
+                                members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views])]
+                    ops += schema.enforcement_install_ops(bindings["enforcement"])
+                    sheet = dict(sources=[old], targets=[schema.PACK_MIRROR_ROOT], product="opf",
+                                 decisions=[dict(path=old, disposition="retire", actor="fixture")], ops=ops,
+                                 bindings=bindings)
+                    obs = planner.investigate(plan_root, sources=sheet["sources"], targets=sheet["targets"])
+                    if obs.status != _opf_store.VALID:
+                        raise OSError("the observation is not VALID: {}".format(obs.findings))
+                    sheet["expected_observation_digest"] = _opf_store._parse_store_toml(
+                        "observation.toml", obs.observation)["observation_digest"]
+                    now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
+                    res = planner.plan(plan_root, now=now, run_nonce="0123456789abcdef", **copy.deepcopy(sheet))
+                    if res.status != _opf_store.VALID:
+                        raise OSError("the plan is not VALID: {}".format(res.findings))
+                    approval = apply.capture_approval(plan_root, res.plan, sheet, "adopter", now)
+                    plan = apply.frozen_plan(res.plan)
+                    rid = plan["run_id"]
+                    bundle = {apply.plan_rel(rid): res.plan, apply.approval_rel(rid): approval,
+                              apply.archive_rel(rid, old): data}
+                    bundle[apply.inventory_rel(rid)] = apply.emit_inventory(
+                        rid, [apply.inventory_row(path, blob) for path, blob in bundle.items()], None,
+                        plan["plan_digest"])
+                except Exception as exc:  # noqa: BLE001  any refusal while building the fixture is a harness error
+                    raise OSError("the applied adoption run fixture cannot be built ({!r})".format(exc))
+                bundle[old] = data
+                for path, blob in bundle.items():
+                    (root / path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / path).write_bytes(blob)
+                return rid
+
+            made = base / "opf-made"
+            made.mkdir()
+            shutil.copytree(str(pack), str(made / rel))
+            _git(made, home, "init")
+            expect("made-init", _opf_verb(made, "init"), EXIT_OK)
+            _git(made, home, "add", "-A")
+            _git(made, home, "commit", "-m", "init store")
+            expect("made-install", _install(made), EXIT_OK)
+            expect("made-render-write", _opf_verb(made, "render", "--write"), EXIT_OK)
+            _git(made, home, "add", "-A")
+            expect("commit-render-write-output-passes", _committed(made), (EXIT_OK, True))
+            expect("made-record", _opf_verb(made, "record", "worklog-append", "--kind", "added",
+                                            "--summary", "a fact", "--actor", "assistant:gate"), EXIT_OK)
+            _git(made, home, "add", "-A")
+            expect("commit-writer-output-passes", _committed(made), (EXIT_OK, True))
+            hand = (made / manifest_rel).read_text(encoding="utf-8") + "# a hand comment\n"
+            (made / manifest_rel).write_text(hand, encoding="utf-8")
+            _git(made, home, "add", manifest_rel)
+            expect("commit-manifest-comment-refused",
+                   _refused_by(made, "FINDING: C-CONTAINMENT: machine-store file '" + manifest_rel
+                               + "' is not in canonical emitted form"), (True, True, True))
+            _git(made, home, "reset", "-q", "--hard")
+            run_id = _applied_run(made)
+            _git(made, home, "add", "-A")
+            expect("commit-applied-run-passes", _committed(made), (EXIT_OK, True))
+            stray = ".working/archive/adoption/" + run_id + "/opf-wiring-probe.md"
+            (made / stray).write_text("probe\n", encoding="utf-8")
+            _git(made, home, "add", stray)
+            expect("commit-adoption-archive-file-refused",
+                   _refused_by(made, "FINDING: C-CONTAINMENT: unregistered path '" + stray + "'"),
+                   (True, True, True))
             # The stub fails closed when the working tree being committed has no pack hook (a branch that
             # predates the pack, say): the commit is refused rather than passing silently.
             nopack = _fixture("stub-no-pack")
@@ -2251,7 +2379,9 @@ def _self_test_isolated():
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
-              "passes an unborn branch and a remote sync target; stubbed hook order, -I -B, read-only, "
+              "passes an unborn branch and a remote sync target; over an opf init store passes render "
+              "--write and opf record output and refuses, by named finding, a manifest comment line and "
+              "a new file in an applied adoption run's archive; stubbed hook order, -I -B, read-only, "
               "propagation, normalization, usage and snapshot cleanup; fail closed on an unreadable hooks "
               "directory, an environment-only hooksPath, git below 2.32, an unreadable environment, a "
               "missing dirname and a failed cleanup; the --no-verify history bypass CI misses is disclosed "

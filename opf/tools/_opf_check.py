@@ -571,7 +571,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed", "required", "migration_incomplete")
+                 "unattributed", "required", "migration_incomplete", "toml_reads")
 
     def __init__(self):
         self.findings = []
@@ -584,6 +584,7 @@ class _Report:
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
         self.required = REQUIRED_CHECKS   # the closed roster; homes 2 or an imported series widens it
         self.migration_incomplete = []    # bounded adoption-state paths: reported, never a status change
+        self.toml_reads = {}              # relpath -> the raw bytes _read_toml read (the first read per path)
 
     def require_homes(self, homes, imported=False):
         # Bind the roster to the store's homes generation and imported-series activation once the manifest
@@ -784,9 +785,13 @@ def _rel(*parts):
 def _read_toml(root_fd, relpath, rep):
     """Read a contained TOML file beneath root_fd. Returns (data, "ok"|"absent"|"error"); on a StoreError
     (unreadable, unparseable, a refused symlink) it records a CANNOT-EVALUATE naming the input and returns
-    (None, "error"). Absence is (None, "absent") and left to the caller to grade."""
+    (None, "error"). Absence is (None, "absent") and left to the caller to grade. The bytes of a file read
+    are kept on the report (the first read per path; the worklog ledger reads in _gather_worklog feed the
+    same cache), so the canonical-bytes leg proves the bytes the checks graded and never reads them again
+    (the manifest and each worklog ledger are read once per validation; store discovery reads the
+    manifest separately, before it)."""
     try:
-        data = _read_toml_contained(root_fd, relpath)
+        found = _read_toml_contained(root_fd, relpath, with_raw=True)
     except StoreError as exc:
         rep.cant("cannot read {}: {}".format(relpath, exc))
         return None, "error"
@@ -796,8 +801,10 @@ def _read_toml(root_fd, relpath, rep):
         # rather than escaping validate_store. Mirrors U7's _read_toml guard (guard-input-soundness; B5).
         rep.cant("cannot read {} ({})".format(relpath, exc))
         return None, "error"
-    if data is None:
+    if found is None:
         return None, "absent"
+    raw, data = found
+    rep.toml_reads.setdefault(relpath, raw)
     return data, "ok"
 
 
@@ -1574,13 +1581,18 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
     failure still permits archive diagnostics. An entry the map leaves out (not a table, no well-formed
     WL id, or a reused id) puts "worklog" in `unread` (when given), since its links are then never read;
     a caller that gets None back adds it the same way."""
+    # The ledger bytes feed the report's read cache, so the canonical-bytes leg proves the exact bytes
+    # graded here and never reads the file again (one content read per worklog path per run).
+    def note_read(read_rel, raw):
+        rep.toml_reads.setdefault(read_rel, raw)
+
     try:
         if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
-            data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
+            data = _opf_worklog.load_archive_worklog_at(root_fd, relpath, on_read=note_read)
         else:
             data = _opf_worklog.load_worklog_at(
                 root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict,
-                supported_profiles=supported_profiles, manifest_model=manifest_model)
+                supported_profiles=supported_profiles, manifest_model=manifest_model, on_read=note_read)
         st = "absent" if data is None else "present"
     except _opf_worklog.ManifestShapeError as exc:
         if propagate_manifest_failure:
@@ -1870,6 +1882,25 @@ def _archive_unmanaged(rep, partial_active, path):
     else:
         rep.finding("C-ARCHIVE-ENUM: unregistered path {!r} in the archive tree is neither an OPF-managed "
                     "archive artefact nor a <YYYY> bucket (spec 12/14.2)".format(path))
+
+
+def _archive_triaged_file(archive_rel, path):
+    """Whether _validate_archive routes the file `path` under `archive_rel` through _archive_unmanaged: a
+    file directly under archive/, any file beneath a bucket subdirectory, or a bucket file that is neither
+    archive.toml, worklog.toml nor a <type>.index.toml. Every other archive file (a bucket's manifest,
+    worklog or index, whatever the bucket's name) is never only triaged there: it is graded, or named in a
+    finding or a CANNOT-EVALUATE, at any import status."""
+    parts = path[len(archive_rel) + 1:].split("/")
+    if len(parts) != 2:
+        return True
+    return parts[1] not in (ARCHIVE_MANIFEST_NAME, WORKLOG_NAME) and not parts[1].endswith(INDEX_SUFFIX)
+
+
+def _archive_triaged_dir(archive_rel, path):
+    """Whether _validate_archive grades the directory `path` under `archive_rel` as one path through
+    _archive_unmanaged without listing it: a subdirectory of a bucket, or any directory beneath one. The
+    archive root and each bucket directly under it are listed there, so neither is."""
+    return path != archive_rel and len(path[len(archive_rel) + 1:].split("/")) >= 2
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
@@ -2486,12 +2517,17 @@ class _TeeReport:
     """Forwards a finding or CANNOT-EVALUATE to the report unchanged, under whichever check is current, and
     keeps a copy in `emitted`, so a second check that the spec gives the same obligation (C-IMPORTED-IDS
     over the imported series' own id grading, spec 8.2/8.3) replays exactly what the ONE grading emitted
-    rather than grading it again."""
+    rather than grading it again. Its toml_reads is the report's own read cache, so a TOML read through
+    the tee (_read_toml) feeds that cache exactly as a direct read does, never failing on a missing one."""
     __slots__ = ("_rep", "emitted")
 
     def __init__(self, rep):
         self._rep = rep
         self.emitted = []
+
+    @property
+    def toml_reads(self):
+        return self._rep.toml_reads
 
     def finding(self, msg):
         self._rep.finding(msg)
@@ -3605,11 +3641,13 @@ def _check_evidence(root_fd, homes, rep):
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
 # `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
+# `managed_dir` is the manifest-derived half of the walk's directory test (a directory it enters rather
+# than grading as one unregistered path), shared with the canonical-bytes leg.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
      "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes",
-     "worklog_errors"))
+     "worklog_errors", "managed_dir"))
 
 
 def classify_containment(manifest_data, machine_rel):
@@ -3790,13 +3828,28 @@ def classify_containment(manifest_data, machine_rel):
                 "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
         else:
             valid_unmanaged.append(u)
+    # The legacy store registers only the imports tree; homes 2 also registers the staging tree (spec 4.2).
+    staged_roots = (imports_root, _opf_store.STAGING_REL) if homes >= 2 else (imports_root,)
+
+    def managed_dir(full):
+        # A directory the walk enters as a managed namespace rather than grading as one unregistered path:
+        # the machine-store root, a staged root and its run interior, the generation-2 worklog directory, a
+        # per-record type-body dir, or an ancestor of a store-scope view target. The adoption namespaces an
+        # adopting store adds come from the adoption state, so _check_containment adds them itself.
+        if full == mrel or _under_any(full, staged_roots):
+            return True
+        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
+            return worklog2
+        if layout == "per-record" and full in perrecord_body_dirs:
+            return True
+        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
 
     return ContainmentClassification(
         view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
         colliding=colliding, managed_file=managed_file, layout=layout,
         perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
         control_roots=control_roots, evidence_roots=evidence_roots, homes=homes,
-        worklog_errors=worklog_errors)
+        worklog_errors=worklog_errors, managed_dir=managed_dir)
 
 
 # The legacy import staging area `<machine>/imports` (`.working/toml/imports` under the default layout): where
@@ -3830,6 +3883,122 @@ def _adoption_state(root_fd, machine_rel, in_repo, rep):
         rep.cant("C-CONTAINMENT: the adoption state cannot be read ({}); fail-closed".format(
             _safe_display(repr(exc))))
         return None
+
+
+def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, import_status):
+    """C-CONTAINMENT's canonical-bytes leg, run by the driver right after _check_containment and attributed
+    to the same check: a machine-store TOML file must be the canonical emission of its own parsed content,
+    the byte-reproduction rule each sanctioned writer re-proves before a rewrite (spec 5.7, 9.2). A hand
+    edit that leaves the content readable (an appended comment, re-flowed formatting) is therefore a
+    finding here, at the next doctor run and over a pre-commit snapshot, rather than passing until the
+    next write refuses it. A file an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic
+    string passes, as it does for the writers (_opf_emit.matches_store_bytes). A file whose bytes a check
+    already read (rep.toml_reads: _read_toml and the worklog ledger reads) is proven from those same bytes
+    and never read again, so the manifest and each worklog ledger keep one content read per validation
+    (store discovery reads the manifest separately, before it); a file no check read is read here, once.
+    The walk covers only the machine store, never the evidence homes or the journals beside it. NOT every
+    machine-store TOML file is graded, by design: a path under a valid [unmanaged] declaration and the
+    legacy imports staging are skipped (_check_containment grades the declaration, never the files under
+    it, and refuses the staging area); during a partial import substantiated by an active imports/<run-id>
+    run (the same predicate _check_containment and _validate_archive use) only the stray paths those walks
+    triage are skipped: outside the archive tree, a file outside the classifier's managed set (the
+    containment walk's stray, which it triages, or in an adopting store grades as a finding that already
+    fails the store), and inside it, a path _validate_archive routes through _archive_unmanaged
+    (_archive_triaged_file). A directory either walk grades as one such path without listing it (outside
+    the archive, one the classifier's managed_dir does not admit; inside it, a bucket subdirectory,
+    _archive_triaged_dir) is not entered, since every file beneath it is such a stray, so a symlink, a
+    listing fault or deep nesting inside it cannot turn the store CANNOT-EVALUATE. A triaged stray is
+    therefore never a canonical-bytes finding, while a bucket's archive.toml, worklog.toml and
+    <type>.index.toml, which _validate_archive grades, keep this check during the partial import. A file
+    that cannot be read or parsed is left to the check that reads it, EXCEPT init.toml, whose only reader
+    is this leg, so its faults are graded here (unreadable is a CANNOT-EVALUATE, unparseable a finding),
+    never a silent pass. A non-canonical managed or archived file is advised to be restored from the
+    integration base; an unregistered stray has no base version, so its finding advises removal or
+    re-admission through opf instead. It proves serialization only: a hand edit that leaves canonical
+    bytes is not detected here."""
+    cls = classify_containment(manifest_data, machine_rel)
+    skipped = tuple(cls.valid_unmanaged) + (_legacy_import_staging(machine_rel)[0],)
+    partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep,
+                                                                           cls.homes)
+    init_rel = _rel(machine_rel, INIT_PROVENANCE_NAME)
+
+    def walk(reldir, depth):
+        if depth > _CONTAINMENT_MAX_DEPTH:
+            rep.cant("C-CONTAINMENT: directory nesting under {!r} exceeds the containment-walk ceiling of "
+                     "{}; its TOML files are not proven canonical (fail-closed)".format(
+                         _safe_display(reldir), _CONTAINMENT_MAX_DEPTH))
+            return
+        subdirs, files = _list_dir(root_fd, reldir, rep)
+        if subdirs is None and files is None:
+            return
+        for f in files:
+            full = reldir + "/" + f
+            if not f.endswith(".toml") or _under_any(full, skipped):
+                continue
+            managed = cls.managed_file(full)
+            archived = _under_any(full, (cls.archive_root,))
+            if partial_active and (_archive_triaged_file(cls.archive_root, full) if archived else not managed):
+                # Under a substantiated partial import, skip only the strays those walks own: outside the
+                # archive, a file the containment walk triages (or, adopting, reports as a finding); inside
+                # it, a path _validate_archive sends to _archive_unmanaged. A bucket's archive.toml,
+                # worklog.toml and <type>.index.toml are graded there, so they keep this check.
+                continue
+            raw = rep.toml_reads.get(full)
+            try:
+                if raw is None:
+                    raw = _opf_store._read_store_bytes_contained(root_fd, full)
+            except (StoreError, _journal.JournalError) as exc:
+                if full == init_rel:
+                    rep.cant("C-CONTAINMENT: machine-store file {!r} cannot be read ({}); no other check "
+                             "reads it, so its canonical form cannot be evaluated (spec 5.7/9.2)".format(
+                                 full, _safe_display(str(exc))))
+                continue     # unreadable: graded by the check that reads it (see the docstring)
+            if raw is None:
+                continue     # gone between the listing and the read: absence is never graded here
+            try:
+                # The bytes a check already graded (or this leg's own single read), parsed afresh (never
+                # the shared model a check may hold), so a file is never read twice in one run.
+                model = _opf_store._parse_store_toml(full, raw)
+            except (StoreError, _journal.JournalError) as exc:
+                if full == init_rel:
+                    rep.finding("C-CONTAINMENT: machine-store file {!r} cannot be parsed ({}), so no "
+                                "sanctioned writer produced it and no other check grades it "
+                                "(spec 5.7/9.2)".format(full, _safe_display(str(exc))))
+                continue     # unparseable: graded by the check that reads it (see the docstring)
+            try:
+                fresh = _opf_emit.emit_checked(model).encode("utf-8")
+            except _opf_emit.EmitError as exc:
+                rep.finding("C-CONTAINMENT: machine-store file {!r} holds content the canonical emitter "
+                            "cannot write ({}), so no sanctioned writer produced it (spec 5.7/9.2)".format(
+                                full, _safe_display(str(exc))))
+                continue
+            if not _opf_emit.matches_store_bytes(raw, fresh):
+                if managed or archived:
+                    rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form "
+                                "(it carries comments or non-canonical serialization, which no sanctioned "
+                                "writer produces); restore it from the integration base and redo the "
+                                "change through opf (spec 5.7/9.2)".format(full))
+                else:
+                    rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form "
+                                "(it carries comments or non-canonical serialization, which no sanctioned "
+                                "writer produces); it is an unregistered path with no base version, so "
+                                "remove it or re-admit its content through opf (spec 14.2, 5.7/9.2)".format(
+                                    full))
+        for d in subdirs:
+            full = reldir + "/" + d
+            if _under_any(full, skipped):
+                continue
+            if partial_active and (_archive_triaged_dir(cls.archive_root, full)
+                                   if _under_any(full, (cls.archive_root,)) else not cls.managed_dir(full)):
+                # Under a substantiated partial import, a directory those walks grade as one path without
+                # listing it is not entered either: outside the archive, one the containment walk does not
+                # enter (it triages it, or, adopting, reports it as a finding); inside it, a bucket
+                # subdirectory (_archive_unmanaged). Every file beneath it is a stray the file test above
+                # already skips, so listing it could only add a CANNOT-EVALUATE that grading never needs.
+                continue
+            walk(full, depth + 1)
+
+    walk(machine_rel, 0)
 
 
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
@@ -3877,11 +4046,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
             rep.cant("C-CONTAINMENT: [unmanaged] path {!r} declares {!r}, {}".format(
                 u, legacy_rel, legacy_review))
     mrel = machine_rel
-    view_targets = cls.view_targets
     valid_unmanaged = cls.valid_unmanaged
     managed_file = cls.managed_file
-    layout = cls.layout
-    perrecord_body_dirs = cls.perrecord_body_dirs
     archive_root = cls.archive_root
     imports_root = cls.imports_root
     staging_root = _opf_store.STAGING_REL
@@ -3959,16 +4125,9 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, staged_roots) or full in adoption_dirs:
-            return True
-        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
-            try:
-                return _opf_worklog.generation(manifest_data) == 2
-            except _opf_worklog.WorklogError:
-                return False
-        if layout == "per-record" and full in perrecord_body_dirs:
-            return True
-        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
+        # The manifest-derived namespaces are the classifier's (cls.managed_dir, which the canonical-bytes
+        # leg shares); an adopting store's adoption namespaces are added here.
+        return full in adoption_dirs or cls.managed_dir(full)
 
     def walk(reldir, depth):
         if depth > _CONTAINMENT_MAX_DEPTH:
@@ -4937,6 +5096,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # 4.2): the flag stays False until activation raises both SUPPORTED_HOMES and
     # SUPPORTED_SPEC_VERSION.
     _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, in_repo=in_repo)
+    _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, import_status)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
@@ -5834,6 +5994,129 @@ def self_test():
         junk = run(clean_machine(), working={"junk.md": "x\n"})
         check("undeclared-file-invalid", junk.status == INVALID)
         check("undeclared-file-named", any("C-CONTAINMENT" in f for f in junk.findings))
+        # The canonical-bytes leg: a machine-store TOML file that still parses but is not the canonical
+        # emission of its own content (a comment appended to the manifest, a trailing blank line in a nested
+        # archive file) is a named C-CONTAINMENT finding, while a file holding a literal U+2028 inside a basic
+        # string, the spelling an earlier emitter wrote, still passes. Flip: dropping the leg's call from the
+        # driver turns both findings VALID.
+        _canon = "is not in canonical emitted form"
+        _cm = clean_machine()
+        _cm["manifest.toml"] = _opf_emit.emit(_cm["manifest.toml"]) + "# a hand comment\n"
+        _cmr = run(_cm)
+        check("canonical-manifest-comment-invalid", _cmr is not None and _cmr.status == INVALID)
+        check("canonical-manifest-comment-named",
+              _cmr is not None and _cmr.checks.get("C-CONTAINMENT") == "FINDING"
+              and len(_cmr.findings) == 1 and "'.working/toml/manifest.toml'" in _cmr.findings[0]
+              and _canon in _cmr.findings[0])
+        _ca = clean_machine()
+        _ca["archive/2026/worklog.toml"] = _opf_emit.emit(_ca["archive/2026/worklog.toml"]) + "\n"
+        _car = run(_ca)
+        check("canonical-archive-blank-line-named",
+              _car is not None and _car.status == INVALID
+              and any("'.working/toml/archive/2026/worklog.toml'" in m and _canon in m
+                      for m in _car.by_check.get("C-CONTAINMENT", [])))
+        _cl = clean_machine()
+        _cl_dn = dict(dn(1, "BI-1"), summary="done" + chr(0x2028) + "now")
+        _cl_text = _opf_emit.emit(idx([_cl_dn]))
+        _cl["done.index.toml"] = _cl_text.replace("\\u2028", chr(0x2028))
+        _cl_obs = copy.deepcopy(clean_prior())
+        _cl_obs["prior"]["digests"]["DN-1"] = _record_digest(_cl_dn)
+        _clr = run(_cl, obs=_cl_obs)
+        check("canonical-prior-separator-spelling-valid",
+              _cl["done.index.toml"] != _cl_text and _clr is not None and _clr.status == VALID)
+        # One content read per path: the leg proves the manifest and each worklog ledger from the bytes
+        # the grading checks already read (rep.toml_reads), so one validation reads each of those files'
+        # content exactly once. Flip: dropping the byte reuse in the leg, or the worklog read routing in
+        # _gather_worklog, makes a second read appear here.
+        _rcres = resolve_store(build(clean_machine()))
+        _rcounts = {}
+        _real_bytes_read = _opf_store._read_store_bytes_contained
+
+        def _counting_bytes_read(fd, relpath, allowance=None):
+            _rcounts[relpath] = _rcounts.get(relpath, 0) + 1
+            return _real_bytes_read(fd, relpath, allowance)
+
+        _opf_store._read_store_bytes_contained = _counting_bytes_read
+        try:
+            _rcv = validate_store(_rcres, observations=clean_prior())
+        finally:
+            _opf_store._read_store_bytes_contained = _real_bytes_read
+        check("canonical-single-read-per-path",
+              _rcv is not None and _rcv.status == VALID
+              and _rcounts.get(".working/toml/manifest.toml") == 1
+              and _rcounts.get(".working/toml/worklog.toml") == 1
+              and _rcounts.get(".working/toml/archive/2026/worklog.toml") == 1)
+        # init.toml's ONLY reader is this leg, so its faults are graded here rather than left to a check
+        # that never comes: a canonical file passes, an unparseable one is a named finding, an unreadable
+        # one a named CANNOT-EVALUATE. Flip: the former silent "graded elsewhere" skip read all three as
+        # the canonical case.
+        _ciok = clean_machine()
+        _ciok["init.toml"] = {"schema": 1}
+        _ciokr = run(_ciok)
+        check("canonical-init-canonical-valid", _ciokr is not None and _ciokr.status == VALID)
+        _cibad = clean_machine()
+        _cibad["init.toml"] = "= not toml\n"
+        _cibadr = run(_cibad)
+        check("canonical-init-unparseable-named",
+              _cibadr is not None and _cibadr.status == INVALID
+              and any("'.working/toml/init.toml'" in m and "cannot be parsed" in m
+                      for m in _cibadr.by_check.get("C-CONTAINMENT", [])))
+        _cird = clean_machine()
+        _cird["init.toml"] = {"schema": 1}
+        _real_bytes_read2 = _opf_store._read_store_bytes_contained
+
+        def _failing_bytes_read(fd, relpath, allowance=None):
+            if relpath.endswith("/init.toml"):
+                raise StoreError("synthetic unreadable init.toml")
+            return _real_bytes_read2(fd, relpath, allowance)
+
+        _opf_store._read_store_bytes_contained = _failing_bytes_read
+        try:
+            _cirdr = run(_cird)
+        finally:
+            _opf_store._read_store_bytes_contained = _real_bytes_read2
+        check("canonical-init-unreadable-cant",
+              _cirdr is not None and _cirdr.status == CANNOT_EVALUATE
+              and any("'.working/toml/init.toml'" in m and "cannot be read" in m
+                      for m in _cirdr.cannot_evaluate))
+        # The emitter-refusal finding: parseable content the canonical emitter cannot write (a nested
+        # array) is a named finding, since no sanctioned writer could have produced the file. Flip:
+        # reducing the EmitError branch to a bare continue drops the named finding.
+        _ce = clean_machine()
+        _ce["emitref.toml"] = "a = [[1]]\n"
+        _cer = run(_ce)
+        check("canonical-emitter-refusal-named",
+              _cer is not None and _cer.status == INVALID
+              and any("'.working/toml/emitref.toml'" in m and "canonical emitter cannot write" in m
+                      for m in _cer.by_check.get("C-CONTAINMENT", [])))
+        # The skip list: a TOML file under a VALID [unmanaged] declaration, and the legacy imports
+        # staging interior, are _check_containment's to grade, never canonical-bytes findings. Flip:
+        # emptying the skip list turns the unmanaged store INVALID and names the staging interior file.
+        _cun = clean_machine()
+        _cun["manifest.toml"] = base_manifest()
+        _cun["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/vendorarea"]}
+        _cun["vendorarea/notes.toml"] = "a = 1 # a hand comment\n"
+        _cunr = run(_cun)
+        check("canonical-unmanaged-skip-valid", _cunr is not None and _cunr.status == VALID)
+        _cst = clean_machine()
+        _cst["imports/old/run.toml"] = "a = 1 # a hand comment\n"
+        _cstr = run(_cst)
+        check("canonical-legacy-staging-skip-ungraded",
+              _cstr is not None
+              and any("'.working/toml/imports'" in m for m in _cstr.findings + _cstr.cannot_evaluate)
+              and not any("imports/old/run.toml" in m for m in _cstr.findings))
+        # A non-canonical stray at steady state is still a canonical finding, but one that never advises
+        # restoring an integration-base version the stray does not have; a registered file (the manifest
+        # vector above) keeps the restore advice.
+        _cj = clean_machine()
+        _cj["junk.toml"] = "a = 1 # a hand comment\n"
+        _cjr = run(_cj)
+        check("canonical-stray-no-base-advice",
+              _cjr is not None and _cjr.status == INVALID
+              and any("'.working/toml/junk.toml'" in m and _canon in m
+                      and "integration base" not in m and "no base version" in m
+                      for m in _cjr.by_check.get("C-CONTAINMENT", []))
+              and any("unregistered path '.working/toml/junk.toml'" in m for m in _cjr.findings))
         # A partial import SUBSTANTIATED by an active imports/<run-id> run triages stray paths (VALID):
         # the stray junk and the active run interior both land in triage, never a finding (codex-2).
         RUNID = "imp-20260601T000000Z-0123456789abcdef"
@@ -5843,6 +6126,116 @@ def self_test():
         partial = run(pm, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
+        # The same substantiated partial with a NON-CANONICAL stray TOML file in the machine store: the
+        # containment walk only TRIAGES the stray, so the canonical-bytes leg leaves it alone too and the
+        # store stays VALID with the stray in triage. Flip: dropping the leg's import-status exemption
+        # turns this store INVALID on the triaged path.
+        _cp = clean_machine()
+        _cp["manifest.toml"] = base_manifest()
+        _cp["manifest.toml"]["opf"]["import_status"] = "partial"
+        _cp["legacy.toml"] = "a = 1 # a hand comment\n"
+        _cpr = run(_cp, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
+        check("canonical-partial-stray-triaged-valid",
+              _cpr is not None and _cpr.status == VALID
+              and any("'.working/toml/legacy.toml'" in t for t in _cpr.triage))
+        # The exemption covers only what those walks triage. Under the same substantiated partial, a
+        # bucket's worklog.toml and archive.toml are graded by _validate_archive, never triaged, so a
+        # non-canonical one is still the named canonical-bytes finding, while a non-index stray file in a
+        # bucket (an _archive_unmanaged path) stays in triage and the store VALID. Flip: widening the
+        # exemption back to every file outside the classifier's managed set turns the first two VALID;
+        # dropping it turns the third INVALID.
+        def _partial_archive(rel, edit):
+            pa = clean_machine()
+            pa["manifest.toml"] = base_manifest()
+            pa["manifest.toml"]["opf"]["import_status"] = "partial"
+            pa[rel] = edit(pa.get(rel))
+            return run(pa, working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+
+        for label, rel, edit in (
+                ("worklog-blank-line", "archive/2026/worklog.toml", lambda m: _opf_emit.emit(m) + "\n"),
+                ("manifest-comment", "archive/2026/archive.toml",
+                 lambda m: _opf_emit.emit(m) + "# a hand comment\n")):
+            _par = _partial_archive(rel, edit)
+            check("canonical-partial-archive-{}-invalid".format(label),
+                  _par is not None and _par.status == INVALID
+                  and any("'.working/toml/{}'".format(rel) in m and _canon in m
+                          and "integration base" in m
+                          for m in _par.by_check.get("C-CONTAINMENT", [])))
+        _pas = _partial_archive("archive/2026/notes.toml", lambda _m: "a = 1 # a hand comment\n")
+        check("canonical-partial-archive-stray-triaged-valid",
+              _pas is not None and _pas.status == VALID
+              and any("'.working/toml/archive/2026/notes.toml'" in t for t in _pas.triage))
+        # The archive scope itself, path by path: a bucket's manifest, worklog and index (in any bucket
+        # name) are graded; a file directly under archive/, a non-index bucket file and anything beneath a
+        # bucket subdirectory are the _archive_unmanaged paths.
+        _ar = ".working/toml/archive"
+        check("canonical-archive-triage-scope",
+              not any(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
+                  "2026/archive.toml", "2026/worklog.toml", "2026/finding.index.toml", "x/worklog.toml",
+                  "2026/junk.index.toml"))
+              and all(_archive_triaged_file(_ar, _ar + "/" + p) for p in (
+                  "notes.toml", "2026/notes.toml", "2026/sub/archive.toml", "2026/sub/deeper/worklog.toml",
+                  "2026/archive.toml.toml")))
+        # A stray DIRECTORY under the same substantiated partial: the containment walk grades an
+        # unregistered directory, and the archive walk a bucket subdirectory, as one triaged path and never
+        # lists it, so the leg does not enter it either. A symlink inside it, a chain deeper than the walk
+        # ceiling, or a listing failure leaves the store VALID with the directory in triage. Flip: entering
+        # every directory again turns each of these CANNOT-EVALUATE.
+        def _partial_stray_dir(rel, shape):
+            sd = clean_machine()
+            sd["manifest.toml"] = base_manifest()
+            sd["manifest.toml"]["opf"]["import_status"] = "partial"
+            sd[rel + "/notes.toml"] = "a = 1 # a hand comment\n"
+            sd_root = build(sd, working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+            sd_dir = sd_root / ".working" / "toml" / rel
+            if shape == "symlink":
+                os.symlink("nowhere", str(sd_dir / "link"))
+            elif shape == "deep":
+                for _ in range(_CONTAINMENT_MAX_DEPTH + 16):
+                    sd_dir = sd_dir / "d"
+                sd_dir.mkdir(parents=True)
+            sd_res = resolve_store(sd_root)
+            if shape != "unlistable":
+                return validate_store(sd_res, observations=clean_prior())
+            from unittest.mock import patch as _sd_patch
+            sd_rel, real_list = ".working/toml/" + rel, _list_contained
+
+            def refused_list(fd, reldir):
+                if reldir == sd_rel:
+                    raise StoreError("synthetic unlistable stray directory")
+                return real_list(fd, reldir)
+
+            with _sd_patch.dict(globals(), {"_list_contained": refused_list}):
+                return validate_store(sd_res, observations=clean_prior())
+
+        for label, rel, shape in (
+                ("stray-dir-symlink", "stray", "symlink"), ("stray-dir-deep", "stray", "deep"),
+                ("stray-dir-unlistable", "stray", "unlistable"),
+                ("bucket-subdir-symlink", "archive/2026/stray", "symlink"),
+                ("bucket-subdir-deep", "archive/2026/stray", "deep"),
+                ("bucket-subdir-unlistable", "archive/2026/stray", "unlistable")):
+            _psd = _partial_stray_dir(rel, shape)
+            check("canonical-partial-{}-valid".format(label),
+                  _psd is not None and _psd.status == VALID and not _psd.cannot_evaluate
+                  and any("'.working/toml/{}'".format(rel) in t for t in _psd.triage))
+        # The directory exemption covers only those triaged directories: under the same substantiated
+        # partial, a per-record type-body directory is a managed namespace the containment walk enters, so a
+        # non-canonical record body inside it is still the named finding; and the archive root and each
+        # bucket are listed by the archive walk, so the leg enters them too. Flip: skipping every directory
+        # under the partial turns the body store VALID.
+        _pb = copy.deepcopy(pr_machine)
+        _pb["manifest.toml"]["opf"]["import_status"] = "partial"
+        _pb["finding/FN-1.toml"] = _opf_emit.emit(fn(1)) + "# a hand comment\n"
+        _pbr = run(_pb, product=pr_product, obs=pr_obs,
+                   working={"imports/{}/plan.toml".format(RUNID): "schema = 1"})
+        check("canonical-partial-managed-dir-entered",
+              _pbr is not None and _pbr.status == INVALID
+              and any("'.working/toml/finding/FN-1.toml'" in m and _canon in m
+                      for m in _pbr.by_check.get("C-CONTAINMENT", [])))
+        check("canonical-archive-dir-triage-scope",
+              not any(_archive_triaged_dir(_ar, _ar + p) for p in ("", "/2026", "/x"))
+              and all(_archive_triaged_dir(_ar, _ar + "/" + p)
+                      for p in ("2026/sub", "2026/sub/deeper", "x/sub")))
         # Staged ids join the C-ID-SPACE uniqueness union under a substantiated partial (spec 11: uniqueness
         # across active, archive, and staging). Containment only triages the run interior there, so a
         # staged BI-1 duplicating committed BI-1 is caught by the staged-id enumeration alone; without
@@ -5917,10 +6310,10 @@ def self_test():
         gone = "imports/{}/candidate/backlog_item.index.toml".format(RUNID)
         real_reader = _read_toml_contained
 
-        def vanishing_reader(fd, relpath):
+        def vanishing_reader(fd, relpath, **kwargs):
             if relpath.endswith(gone):
                 return None
-            return real_reader(fd, relpath)
+            return real_reader(fd, relpath, **kwargs)
 
         globals()["_read_toml_contained"] = vanishing_reader
         try:
@@ -6397,6 +6790,25 @@ def self_test():
                   and not any(_SCHEMA_DEFERRAL in m for m in _v_run.cannot_evaluate)
                   and _v_run.status == VALID
                   and tuple(_v_run.checks) == _h2_roster + IMPORTED_CHECKS)
+            # The canonical-bytes leg over an ACTIVATED imported leaf: the same conforming store with a
+            # comment appended to backlog_item.imported.index.toml is the one named canonical-bytes
+            # finding, with the restore advice of a managed file, while every imported check still runs
+            # to PASS. The imported id grading reads the leaves through a _TeeReport, so this is red when
+            # the tee does not forward the report's read cache (the run then fails closed with every later
+            # check, C-CONTAINMENT and the C-IMPORTED-* checks included, never run) and when the leg is
+            # dropped from the driver (VALID).
+            _vc = copy.deepcopy(_v)
+            _vc["backlog_item.imported.index.toml"] = (
+                _opf_emit.emit(_vc["backlog_item.imported.index.toml"]) + "# a hand comment\n")
+            _vc_run = act_run(_vc)
+            check("canonical-imported-leaf-comment-named-when-activated",
+                  _vc_run is not None and _vc_run.status == INVALID and pending_only(_vc_run)
+                  and len(_vc_run.findings) == 1
+                  and "'.working/toml/backlog_item.imported.index.toml'" in _vc_run.findings[0]
+                  and _canon in _vc_run.findings[0] and "integration base" in _vc_run.findings[0]
+                  and _vc_run.checks.get("C-CONTAINMENT") == "FINDING"
+                  and all(_vc_run.checks.get(cid) == "PASS" for cid in IMPORTED_CHECKS)
+                  and tuple(_vc_run.checks) == _h2_roster + IMPORTED_CHECKS)
             # An omitted non-exempt field with no missingness row is an INVALID finding naming the
             # leaf, the row and the field (red when rows are deferred, which reads CANNOT-EVALUATE,
             # or not validated, which reads PASS).
