@@ -955,16 +955,25 @@ conformance claim (checklist item 19) until the maintainer rules.
     `done/proposed`", never one already at unqualified `done`. The specification defines no
     mechanism for the store's lock, but two of its texts bear on the ruling: section 9 (The
     manifest, storage layout) says of the inline layout "One global store lock MUST serialize
-    writers", and section 8.8, item 3 says "At homes 1 the `counters.toml` advance MUST be an
-    operand of the same journaled transaction, under the held lease". This prompt's writer holds the
+    writers", and section 8.8, item 3 says "Claim each new ID as one atomic act (section 8.2): the
+    claim is an irrevocable reservation in the journal home, made before the reversible publication
+    (section 4.2)". This prompt's writer holds the
     step 7 lease, which section 5.7 requires before a run mutates the store, and open point 11 keeps
     the owned lock in the git common directory. Neither names a way for a maintainer's reviewed
-    edit, made with no operation running and in no journaled transaction, to hold it. Ask the
-    maintainer to rule, before step 14, whether such an edit that adds a record and raises its
-    counter, committed through the pre-commit check, meets "under the store's lock", and if not,
-    which sanctioned act allocates the new ID. This point asks for that ruling only; it
-    names no repair procedure. Until the ruling, step 14 reports each repair class that needs a new
-    ID as not run.
+    edit, made with no operation running and in no journaled transaction, to hold it. Decided, for
+    the maintainer's review: a reviewed edit allocates no new ID. The receipt this point names is
+    added by the narrow writer operation `receipt-repair` that section 8.8 now defines, a separate
+    subcommand, maintainer-only, with a recorded reason: once the maintainer's reviewed edit that
+    put the item at `done` is committed, it claims the receipt's ID through the irrevocable
+    reservation of section 8.2 and creates only the missing receipt and its worklog entry, so its
+    content derives from the request, the item and the schema rules as item 4 requires. It also
+    serves an item whose only receipts are importer-authored (section 8.6). The reference tooling
+    runs it only where a reservation home exists and refuses it elsewhere, recording nothing (like
+    every subcommand, it first reconciles any interrupted earlier run, and that recovery, where one
+    is needed, writes the store before the run refuses).
+    No general operation that adds a record from a reviewed edit is defined, so step 14 still
+    reports any other repair class that needs a new ID as not run until an operation for it is
+    added.
 32. **Exclusions under section 16.1.** Section 16.1 says "A class changes which requirements bind an
     implementation only where this specification says so; a declared scope, exclusion, profile, or
     posture MUST NOT otherwise waive a base requirement. Current-format requirements, the imported
@@ -2739,6 +2748,7 @@ platform." Wire all four, not only the platform you run on.
   | R5 | A contribution re-send: the old record to `superseded`, then a new one linking `supersedes` | 8.4, 8.5 | as R2 | `transition`, a commit, then `create` (step 10) |
   | R6 | A handoff replacement in one act | 8.5 | a maintainer (open point 23) | the open point 23 operation, once ruled; until then no deny rule covers the handoff index (below) |
   | R7 | A backlog item to unqualified `done`, with its new receipt | 8.5, 8.8 | a maintainer | `done-with-receipt` |
+  | R7a | The missing receipt of a backlog item already at unqualified `done` with no clean receipt authored by a non-importer actor, after the reviewed edit that put it there is committed | 8.5, 8.6, 8.8 | a maintainer | `receipt-repair` (open point 31) |
   | R8 | A finding's `severity` at its transition out of `open`, and its removal on a rejection | 8.5, Appendix A | as R2 | `transition` (open point 29) |
   | R9 | A later `severity` on a finding that left `open` ungraded | 8.5 ("at or after") | a maintainer | maintainer's reviewed edit (open point 29) |
   | R10 | A new worklog entry | 6.2, 8.8 | any actor but an importer | `worklog-append`, and the lifecycle entries of R1 to R8 |
@@ -2755,7 +2765,7 @@ platform." Wire all four, not only the platform you run on.
   | R19 | `lease.toml` taken and released | 5.7 | the running operation | the step 7 lease, inside every operation that writes the store |
   | R20 | `init.toml`, the empty imported leaves, the pointer `.opf.toml` and `.working/README.md`, each created | 9.2; OPF-INIT-D2B; open point 15 | the operator | `opf init` (step 9), and `opf upgrade` for an upgraded store's imported leaves; no operation writes them after, and every other file init creates is then written by the rows that name it |
   | R21 | Records moved to the archive, with the year's `archive.toml` | 12 | the operator | rotation (step 12); until it exists nothing rotates |
-  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, a ratified `done` item without its receipt, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and the section 8.8 refusal of a store file that is not canonical (item 2), which the validator does not report | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
+  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and the section 8.8 refusal of a store file that is not canonical (item 2), which the validator does not report | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
   | R23 | A store file conflicted in a merge: the integration base's version taken and the operation redone | 5.7 | the operator | `git merge --abort`, then each of the branch's authoring operations redone through the writer on a branch from the integration base, each committed (step 7) |
   | R24 | View drift | 10.3, 11 | any actor | R14 |
   | R25 | A tracked-store finding (an unstaged or ignored path), or the step 2 `.opf.local.toml` finding | 5.1; open point 20; step 2 | the operator | staging, an ignore-rule change, or `git rm --cached`; none writes a protected path |
@@ -2799,17 +2809,17 @@ platform." Wire all four, not only the platform you run on.
     not canonical (section 8.8, item 2), its final doctor must report VALID (item 7), so a defect
     that the final doctor detects in the operation's result prevents successful completion, and the content of most repairs, such as a
     removed record's original content, cannot be derived from a request and the schema rules as
-    item 4 requires; which sanctioned act allocates a repair's new ID, as for a missing receipt, is
-    open point 31. So this prompt adds no writer operation for any of them, and it prescribes no
-    repair procedure. The validator names each defect it detects and
-    its remedy in words (step 6), for example "raise the clean `BI` counter to 91" or "restore
+    item 4 requires; a missing receipt is the one repair whose new ID a writer operation allocates,
+    `receipt-repair` (R7a; open point 31). So, apart from that operation, this prompt adds no writer
+    operation for any of them, and it prescribes no repair procedure. The validator names each
+    defect it detects and its remedy in words (step 6), for example "raise the clean `BI` counter to 91" or "restore
     `WL-40` to bytes that recompute the digest that release 0.4.0 records". The maintainer repairs
     the defect by an ordinary reviewed edit that satisfies the specification: restoring a removed
-    record keeps its original ID and content; any new ID is allocated under the store's lock as
-    section 8.2 requires ("allocation MUST increment its counter under the store's lock as one
-    atomic claim"), and open point 31 asks the maintainer to rule how a reviewed edit meets that
-    rule where no writer operation allocates the new ID, as for the receipt of a ratified `done`
-    item that never had one; and the repaired store must validate. The deny rule and the
+    record keeps its original ID and content; a reviewed edit allocates no new ID (section 8.2:
+    "allocation MUST increment its counter under the store's lock as one atomic claim"), so the
+    receipt of a ratified `done` item that never had one is added by `receipt-repair` once the
+    edit is committed (R7a), and open point 31 leaves any other new ID without a sanctioned act;
+    and the repaired store must validate. The deny rule and the
     instruction bind an assistant, so this step's enforcement leaves those paths editable for that
     edit and forces no operation for it (section 14.1); that is this prompt's choice. Open point 22
     says how the comparison with `HEAD` treats a prior file that does not parse, a prior row that is
@@ -2961,9 +2971,10 @@ Acceptance checks:
   maintainer's reviewed edit that satisfies the specification is allowed by the pre-commit check and
   that the validator then reports valid. Where the pre-commit check refuses every such edit, or no
   such edit can be made as the specification requires, report that class as not passed, with the
-  finding and the reason, for the maintainer to rule on; checklist item 17 then does not pass. A
-  class whose repair adds a record with a new ID, such as a ratified `done` item committed with no
-  receipt ever written, follows the maintainer's ruling on open point 31; until the ruling, report
+  finding and the reason, for the maintainer to rule on; checklist item 17 then does not pass. For
+  a ratified `done` item committed with no receipt ever written, show instead that `receipt-repair`
+  (section 8.8; R7a) adds the missing receipt and that the validator then reports valid. Any other
+  class whose repair adds a record with a new ID has no sanctioned act under open point 31: report
   it as not run, and checklist item 17 then does not pass. A store file that is not canonical is not
   one of the validator's classes: commit an index carrying a comment, with the views re-rendered,
   which the pre-commit check allows, since the validator reports nothing for it, and show that the
