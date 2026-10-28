@@ -2341,9 +2341,11 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
     fails loudly at the read whose clock is at or past the deadline, after one more wait when the
     clock after the first read is one tick inside it and with no wait when that clock is exactly
     at or one tick past it. Events are split at LF only, so a raw U+2028, U+2029 or U+0085
-    inside a string value stays in its event; a malformed complete event, a non-object event, an
-    object whose event is missing or not a string, a child_start argv that is missing or not a
-    list of strings and an empty file are each loud."""
+    inside a string value stays in its event; a malformed complete event, an event nested too
+    deep to parse, a non-object event, an object whose event is missing or not a string, a
+    child_start argv that is missing or not a list of strings, an empty file, a missing file and
+    a path that cannot be read as a file (a directory, which fails the read even for root) are
+    each loud."""
     started = json.dumps({"event": "child_start",
                           "argv": ["git", "maintenance", "run", "--auto"]}).encode("ascii") + b"\n"
     late = json.dumps({"event": "child_start", "argv": ["git", "gc", "--auto"]}).encode("ascii")
@@ -2353,7 +2355,8 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
 
     def probe_trace(name, content, completion, ticks):
         trace = base / name
-        trace.write_bytes(content)
+        if content is not None:
+            trace.write_bytes(content)
         ticks, sleeps = list(ticks), []
 
         def sleep(seconds):
@@ -2394,22 +2397,58 @@ def _trace2_tail_checks(base, probe=_trace2_maintenance_children):
                        ("argv-missing", b'{"event":"child_start"}\n'),
                        ("event-missing", b'{"argv":["git","maintenance","run","--auto"]}\n'),
                        ("event-not-string",
-                        b'{"event":7,"argv":["git","maintenance","run","--auto"]}\n')):
+                        b'{"event":7,"argv":["git","maintenance","run","--auto"]}\n'),
+                       ("deep-nesting", b"[" * 100000 + b"]" * 100000 + b"\n")):
         got, sleeps = probe_trace("trace2-shape-" + name + ".jsonl", started + line, None,
                                   (0.0, 0.5))
         shape_legs.append((name, isinstance(got, str)
                            and got.startswith("unparseable trace2 event"), sleeps))
     check("env/trace2-malformed-shape-loud", shape_legs,
           [("array", True, 0), ("argv-string", True, 0), ("argv-missing", True, 0),
-           ("event-missing", True, 0), ("event-not-string", True, 0)])
+           ("event-missing", True, 0), ("event-not-string", True, 0), ("deep-nesting", True, 0)])
     check("env/trace2-empty-loud", probe_trace("trace2-empty.jsonl", b"", None, (0.0, 0.5)),
           ("empty trace2 event file: no event recorded", 0))
+    (base / "trace2-unreadable-directory.jsonl").mkdir()
+    unreadable_legs = []
+    for name in ("missing", "directory"):
+        got, sleeps = probe_trace("trace2-unreadable-" + name + ".jsonl", None, None, (0.0, 0.5))
+        unreadable_legs.append((name, isinstance(got, str)
+                                and got.startswith("maintenance probe failed"), sleeps))
+    check("env/trace2-unreadable-loud", unreadable_legs, [("missing", True, 0),
+                                                          ("directory", True, 0)])
     separated = ["git", "gc", "a\u2028b\u2029c\x85d"]
     check("env/trace2-split-newline-only",
           probe_trace("trace2-separators.jsonl", started + json.dumps(
               {"event": "child_start", "argv": separated}, ensure_ascii=False).encode("utf-8")
               + b"\n", None, (0.0, 0.5)),
           ([["git", "maintenance", "run", "--auto"], separated], 0))
+
+
+def _trace2_probe_raise_checks(base):
+    """The trace2 checks under a probe that always raises: each check must still be recorded, in
+    order, as a mismatch, so one raising probe fails its own check and the later checks run. An
+    exception escaping _trace2_tail_checks is this check's mismatch, never a pass."""
+    namespace, recorded = globals(), []
+
+    def raising_probe(*args):
+        raise RuntimeError("scripted probe failure")
+    # The trace2 checks call this module's check() directly. It is rebound to a recorder for this
+    # run only, so their ids, already recorded by the real run, are not recorded a second time.
+    saved = namespace["check"]
+    namespace["check"] = lambda name, got, want: recorded.append((name, got == want))
+    try:
+        _trace2_tail_checks(base, raising_probe)
+        got = recorded
+    except Exception as exc:
+        got = "raised %s after %r" % (type(exc).__name__, recorded)
+    finally:
+        namespace["check"] = saved
+    check("env/trace2-probe-raise-recorded", got,
+          [(name, False) for name in (
+              "env/trace2-tail-awaited", "env/trace2-tail-bound",
+              "env/trace2-complete-malformed-loud", "env/trace2-malformed-shape-loud",
+              "env/trace2-empty-loud", "env/trace2-unreadable-loud",
+              "env/trace2-split-newline-only")])
 
 
 def _core_lanes(base):
@@ -2456,6 +2495,8 @@ def _core_lanes(base):
           red if isinstance(red, str) else bool(red), True)
     (base / "trace2-tail").mkdir()
     _trace2_tail_checks(base / "trace2-tail")
+    (base / "trace2-raise").mkdir()
+    _trace2_probe_raise_checks(base / "trace2-raise")
 
     # Layer 4, the tripwire leg: the repo-wide scan must report NO unpinned
     # maintenance-capable launch (green), and a planted unpinned fixture commit must be
