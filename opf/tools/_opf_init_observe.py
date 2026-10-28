@@ -369,6 +369,102 @@ class GitObjects:
                 os.close(fd)
 
 
+def _glob_escape(text):
+    """Wildmatch metacharacters escaped, so a prefix matches literally inside :(glob)."""
+    return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in text)
+
+
+def prior_store_holder(git, repo_root, *, pinned_head, prefix, object_format):
+    """The newest commit on pinned_head's first-parent line whose tree holds a store, or None.
+
+    The markers, the walk and the fail-closed boundaries are plain `opf init`'s
+    (opf.py _init_no_prior_store, spec 8.2), so the coupled init refuses exactly
+    what plain init refuses: the committed pointer <prefix>/.opf.toml as a blob, or
+    a store manifest one level below <prefix>/.working. The roster is deliberately
+    narrower than latest_deletion's, which counts any .working entry. The walk runs
+    from the pinned commit, never the symbolic HEAD, from repo_root (the toplevel
+    every pathspec is relative to); a hit whose own tree holds no marker is a
+    deletion, so its first parent's tree is the holder. A store that lived only on
+    a side line, or under another directory, is not found. A shallow repository,
+    any grafts entry, and every git read that fails or answers in an unexpected
+    shape raise CANNOT_EVALUATE, never None. This selects no seed evidence.
+    """
+    import os
+    import _opf_init_contract
+    import _opf_observe
+    import _opf_store
+    if not oid_ok(pinned_head, object_format):
+        raise ObservationError(CANNOT_EVALUATE, "pinned_head", "invalid commit OID")
+    if type(prefix) is not str or (prefix and _opf_init_contract._bad_relpath(prefix)):
+        raise ObservationError(CANNOT_EVALUATE, "prefix", "invalid product prefix")
+    source = GitObjects(git, repo_root)
+    budget = Budget(Limits())
+
+    def read(args):
+        # plain init's bounds: _run_git's default timeout and output cap
+        outcome = _opf_observe._run_git(git, repo_root, args)
+        if not outcome.completed or outcome.rc != 0:
+            raise ObservationError(CANNOT_EVALUATE, "git " + " ".join(args[:2]),
+                                   outcome.err if not outcome.completed
+                                   else "rc {}: {}".format(outcome.rc, outcome.err))
+        return outcome.out
+
+    def commit_id(raw):
+        text = raw.decode("ascii", "replace").strip()
+        if not oid_ok(text, object_format):
+            raise ObservationError(CANNOT_EVALUATE, "commit", "unexpected object id")
+        return text
+
+    shallow = read(["rev-parse", "--is-shallow-repository"])
+    if shallow == b"true\n":
+        raise ObservationError(CANNOT_EVALUATE, "shallow",
+                               "the repository is SHALLOW, so its truncated first-parent "
+                               "history cannot rule out a prior store")
+    if shallow != b"false\n":
+        raise ObservationError(CANNOT_EVALUATE, "shallow",
+                               "unexpected --is-shallow-repository answer")
+    grafts = source.graft_snapshot(budget)
+    base = prefix + "/" if prefix else ""
+    pointer = base + _opf_store.POINTER_REL
+    working = base + _opf_store.WORKING_DIRNAME
+    manifest = os.fsencode(_opf_store.MANIFEST_NAME)
+
+    def holds(commit):
+        has_pointer = has_working = False
+        for entry in read(["--literal-pathspecs", "ls-tree", "-z", commit, "--",
+                           pointer, working]).split(b"\0"):
+            if not entry:
+                continue
+            meta, tab, name = entry.partition(b"\t")
+            fields = meta.split(b" ")
+            if tab != b"\t" or len(fields) != 3:
+                raise ObservationError(CANNOT_EVALUATE, commit, "unparseable ls-tree entry")
+            has_pointer |= name == os.fsencode(pointer) and fields[1] == b"blob"
+            has_working |= name == os.fsencode(working) and fields[1] == b"tree"
+        if has_pointer or not has_working:
+            return has_pointer
+        listing = read(["ls-tree", "-r", "-z", "--name-only", commit + ":" + working])
+        return any(len(parts) == 2 and parts[0] and parts[1] == manifest
+                   for parts in (name.split(b"/") for name in listing.split(b"\0")))
+
+    specs = [":(literal)" + pointer,
+             ":(glob)" + _glob_escape(working) + "/*/" + _glob_escape(_opf_store.MANIFEST_NAME)]
+    newest = read(["rev-list", "--first-parent", "--max-count=1", pinned_head, "--"] + specs)
+    holder = None
+    if newest.strip():
+        newest = holder = commit_id(newest)
+        if not holds(holder):
+            holder = commit_id(read(["rev-parse", "--verify", "--quiet", newest + "^1"]))
+            if not holds(holder):
+                raise ObservationError(CANNOT_EVALUATE, newest,
+                                       "changed a store path yet neither its tree nor its "
+                                       "first parent's holds a store identifier; refusing "
+                                       "rather than guessing")
+    if source.graft_snapshot(budget) != grafts:
+        raise ObservationError(CANNOT_EVALUATE, "grafts", "metadata changed during observation")
+    return holder
+
+
 def read_seed_basis(product_root, *, git, pinned_head, evidence_commit,
                     prefix, object_format, max_first_parent=10000):
     """Raw first-parent seed-consumer seam; deliberately does not select E.

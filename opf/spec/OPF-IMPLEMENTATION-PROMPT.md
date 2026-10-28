@@ -301,8 +301,9 @@ conformance claim (checklist item 19) until the maintainer resolves it.
     header.
 15. **Worklog entries written by the record verbs.** Section 8.8 fixes the opening line of their
     `detail` but not their `kind`; section 6.2 lets a manifest register more kinds but names no key.
-    Section 8.8 also says `create`, `transition` and `done-with-receipt` "MUST each append their own
-    worklog entry, one entry per change", and `done-with-receipt` changes two records. This prompt's
+    Section 8.8 also says `create`, `transition`, `done-with-receipt` and `receipt-repair` "MUST
+    each append their own worklog entry, one entry per change", and `done-with-receipt` changes two
+    records. This prompt's
     reading: it appends two entries in its one transaction, the transition form
     `opf-record transition <ID> <from> -> done` for the backlog item and the create form
     `opf-record create <ID> recorded` for its receipt, so the gates of open point 20 find the
@@ -429,7 +430,8 @@ conformance claim (checklist item 19) until the maintainer resolves it.
     operation has just written, and section 8.8 says "Every subcommand runs one operation sequence".
     Section 8.8, item 5 already refuses most of these cases: "the planned destinations MUST be
     clean, including ignored files", and `create`, `transition`, `done-with-receipt`,
-    `worklog-append`, `worklog-correct` (step 10) and the open point 21 handoff operation each
+    `receipt-repair`, `worklog-append`, `worklog-correct` (step 10) and the open point 21 handoff
+    operation each
     rewrite `worklog.toml`, so each refuses on that dirty destination while an
     earlier record operation is uncommitted. This prompt's choice extends that refusal only to what
     item 5 does not cover. Every operation of yours that writes the store refuses while any record
@@ -631,6 +633,35 @@ conformance claim (checklist item 19) until the maintainer resolves it.
     module refuses before any write, naming this open point, and the step C checks that need it are
     reported as not run. Report this as a blocker of checklist item 19, never as an exclusion from
     your conformance scope.
+27. **A new ID in a maintainer's reviewed repair.** Section 8.2 says "allocation MUST increment its
+    counter under the store's lock as one atomic claim". Some integrity defects that step 14,
+    Ordering, row R22 routes to the maintainer's reviewed edit need a record with a new ID: a
+    ratified `done` item whose receipt was never written needs a `done` receipt, since section 8.5
+    says "Ratified `done` MUST create the one-to-one `done` receipt". No writer operation allocates
+    that receipt: section 8.8 says of `create` that "`done` receipts and worklog entries are not
+    created this way", and `done-with-receipt` moves an item "from `active` or by ratifying
+    `done/proposed`", never one already at unqualified `done`. The specification defines no
+    mechanism for the store's lock, but two of its texts bear on the ruling: section 9 (The
+    manifest, storage layout) says of the inline layout "One global store lock MUST serialize
+    writers", and section 8.8, item 3 says "Claim each new ID as one atomic act (section 8.2): the
+    claim is an irrevocable reservation in the journal home, made before the reversible publication
+    (section 4.2)". This prompt's writer holds the
+    step 7 lease, which section 5.7 requires before a run mutates the store, and step 10 keeps
+    the owned lock in the git common directory. Neither names a way for a maintainer's reviewed
+    edit, made with no operation running and in no journaled transaction, to hold it. Decided, for
+    the maintainer's review: a reviewed edit allocates no new ID. The receipt this point names is
+    added by the narrow writer operation `receipt-repair` that section 8.8 now defines, a separate
+    subcommand, maintainer-only, with a recorded reason: once the maintainer's reviewed edit that
+    put the item at `done` is committed, it claims the receipt's ID through the irrevocable
+    reservation of section 8.2 and creates only the missing receipt and its worklog entry, so its
+    content derives from the request, the item and the schema rules as item 4 requires. It also
+    serves an item whose only receipts are importer-authored (section 8.6). The reference tooling
+    runs it only where a reservation home exists and refuses it elsewhere, recording nothing (like
+    every subcommand, it first reconciles any interrupted earlier run, and that recovery, where one
+    is needed, writes the store before the run refuses).
+    No general operation that adds a record from a reviewed edit is defined, so step 14 still
+    reports any other repair class that needs a new ID as not run until an operation for it is
+    added.
 
 ## The store you are building
 
@@ -1606,6 +1637,16 @@ Implement section 8.8 (Authoring operations). Subcommands:
 - `done-with-receipt`: maintainer-only; moves a backlog item to unqualified `done` and creates its
   `done` receipt in the same act. A backlog item reaches unqualified `done` only this way
   (section 8.8: "A backlog item MUST reach unqualified `done` only through `done-with-receipt`").
+- `receipt-repair`: maintainer-only, with a recorded reason; the reviewed repair of a backlog item
+  that stands at unqualified `done` without a clean receipt authored by a non-importer actor
+  (sections 8.5 and 8.6), such as one that a reviewed hand edit put at `done`. In one act it
+  creates the missing `done` receipt linked `receipt_of`, and it changes no status and no other
+  record. It refuses, with nothing written, unless the item is at unqualified `done` and its
+  current row is exactly the row the prior commit holds, and it refuses an item that already
+  holds such a receipt in the active index or the archive. It claims the receipt's ID through the
+  irrevocable reservation of section 8.2 (ID claims, below), and the repaired receipt, linked
+  one-to-one to its item, is not a standalone receipt (section 8.8; open point 27; step 14,
+  Ordering, row R7a).
 - `worklog-append`: appends one `recorded` entry to the unreleased tail; refuses an entry inside a
   released span and a `detail` that opens with the lifecycle grammar.
 - `worklog-correct`: corrects one existing entry of the unreleased tail of `worklog.toml` in place.
@@ -1630,7 +1671,8 @@ Implement section 8.8 (Authoring operations). Subcommands:
   the reviewed commit records who made a correction; disclose that with the step 14 residuals.
   Its allowed delta is exactly those value changes on that one row: no ID claim, no counter change
   and no other row. It appends no entry of its own: section 8.8 requires a lifecycle entry only of
-  `create`, `transition` and `done-with-receipt`, and section 17 says the unreleased tail's
+  `create`, `transition`, `done-with-receipt` and `receipt-repair`, and section 17 says the
+  unreleased tail's
   mutability "rests on review and version-control history rather than machine enforcement", so the
   reviewed commit records the correction. A correction never takes `/proposed`, since a worklog
   entry never does (section 8.4), and like every subcommand it leaves the change uncommitted for the
@@ -1682,23 +1724,11 @@ Implement section 8.8 (Authoring operations). Subcommands:
   substrate in the git common directory, and MUST NOT write any under `.aiqt/`." Where in the git
   common directory, and the names of the outer mutex and the owned lock of OPF-INIT-D2B.md, are
   yours to choose and record.
-- A new ID for a reviewed repair. Some integrity defects that step 14, Ordering, row R22 routes to
-  the maintainer's reviewed edit need a record with a new ID, such as a ratified `done` item whose
-  receipt was never written. Section 8.2 says "allocation MUST increment its counter under the
-  store's lock as one atomic claim", and a hand edit holds no lock and writes no reservation. This
-  prompt's rule: build a sanctioned writer operation, run by a maintainer, that allocates such an
-  ID through a reservation exactly as `create` claims one, under the lease and the full section
-  8.8 operation sequence, and that writes nothing but the reservation and the counter advance; the
-  maintainer's reviewed edit then adds the record with that ID. It appends no worklog entry:
-  section 8.8 requires a lifecycle entry only of `create`, `transition` and `done-with-receipt`,
-  and the reviewed commit that adds the record records the repair. Its name and its request form
-  are yours to choose and record. A reviewed edit that adds a record with an ID no
-  reservation or counter advance covers is not this route.
 - Step B builds the `import --batch` mode; your project's fresh store never uses it. The
   clean-series subcommands refuse `actor.kind = "importer"`.
 
-`create`, `transition` and `done-with-receipt` each append their own worklog entry in the same
-transaction, whose `detail` opens with `opf-record create <ID> <status>` or
+`create`, `transition`, `done-with-receipt` and `receipt-repair` each append their own worklog
+entry in the same transaction, whose `detail` opens with `opf-record create <ID> <status>` or
 `opf-record transition <ID> <from> -> <to>`, and a rejection's entry records its reason.
 Section 8.8 names no field for the reason; this prompt's choice is the rest of that entry's `detail`
 after the lifecycle line, which must hold text other than whitespace, so `transition` refuses a
@@ -1786,9 +1816,6 @@ Acceptance checks:
   publication; a process killed after the reservation and before the publication, then
   reconciled, leaves the reserved number issued, and the next `create` claims the number after it
   (section 8.2). A reservation file that already exists for the run with other bytes refuses.
-- The repair-allocation operation, run by a maintainer, writes a reservation and the counter
-  advance and nothing else, no worklog entry included; run by an assistant or automation it
-  refuses and writes nothing.
 - `done-with-receipt` appends a transition-form entry for the backlog item and a create-form entry
   for the receipt; and after an assistant lands `done/proposed`, `done-with-receipt` before any
   commit refuses and writes nothing, as do a `create`, a `worklog-append` and a `worklog-correct`
@@ -2279,12 +2306,13 @@ platform." Wire all four, not only the platform you run on.
   | R5 | A contribution re-send: the old record to `superseded`, then a new one linking `supersedes` | 8.4, 8.5 | as R2 | `transition`, a commit, then `create` (step 10) |
   | R6 | A handoff replacement in one act | 8.5 | a maintainer (open point 21) | the open point 21 operation, once ruled; until then no deny rule covers the handoff index (below) |
   | R7 | A backlog item to unqualified `done`, with its new receipt | 8.5, 8.8 | a maintainer | `done-with-receipt` |
+  | R7a | The missing receipt of a backlog item already at unqualified `done` with no clean receipt authored by a non-importer actor, after the reviewed edit that put it there is committed | 8.5, 8.6, 8.8 | a maintainer | `receipt-repair` (open point 27) |
   | R8 | A finding's `severity` at its transition out of `open`, and its removal on a rejection | 8.5, Appendix A | as R2 | `transition` (open point 24) |
   | R9 | A later `severity` on a finding that left `open` ungraded | 8.5 ("at or after") | a maintainer | maintainer's reviewed edit (open point 24) |
   | R10 | A new worklog entry | 6.2, 8.8 | any actor but an importer | `worklog-append`, and the lifecycle entries of R1 to R8 |
   | R11 | An unreleased worklog entry corrected in place | 6.2, 13, 17 | a maintainer, or an actor of the entry's own kind | `worklog-correct` (step 10) |
   | R12 | A released worklog entry corrected | 6.2 | any actor but an importer | a new entry linking `corrects`, through `worklog-append` |
-  | R13 | A counter advanced, or a counter row added | 8.2; 8.8, item 3; 4.2 | the writer | the ID claim inside each operation that adds a record or an entry, and inside the step 10 repair-allocation operation for a reviewed repair (R22); module enablement (R17a) adds an enabled module's counter rows; nothing else changes a fresh store's counters, apart from a reviewed repair of a counter defect (R22) |
+  | R13 | A counter advanced, or a counter row added | 8.2; 8.8, item 3; 4.2 | the writer | the ID claim inside each operation that adds a record or an entry; module enablement (R17a) adds an enabled module's counter rows; nothing else changes a fresh store's counters, apart from a reviewed repair of a counter defect (R22) |
   | R14 | A declared view regenerated | 10.1, 10.3; 8.8, item 7 | any actor | the render write mode, standalone or nested in an operation |
   | R15 | A release row, its working summary row and its bare heading | 6.1, 7.1 | whoever runs the cut | the release cut (step 11; open point 9) |
   | R16 | A summary published, re-published or superseded by a rollup: the summary rows and the `CHANGELOG.md` prose | 6.4, 7.2, 7.3 | the curator, a maintainer | maintainer's reviewed edit |
@@ -2295,7 +2323,7 @@ platform." Wire all four, not only the platform you run on.
   | R19 | `lease.toml` taken and released | 5.7 | the running operation | the step 7 lease, inside every operation that writes the store |
   | R20 | `init.toml`, the empty imported leaves, the pointer `.opf.toml`, `.working/.gitignore` and `.working/README.md`, each created | 4.2, 9; OPF-INIT-D2B; open point 14 | the operator | `opf init` (step 9), and module enablement (step C) for an enabled module's imported leaves; no operation writes them after, and every other file init creates is then written by the rows that name it |
   | R21 | Records moved to the archive, with the year's `archive.toml` | 12 | the operator | rotation (step 12); until it exists nothing rotates |
-  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, a ratified `done` item without its receipt, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and the section 8.8 refusal of a store file that is not canonical (item 2), which the validator does not report | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
+  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and the section 8.8 refusal of a store file that is not canonical (item 2), which the validator does not report | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
   | R23 | A store file conflicted in a merge: the integration base's version taken and the operation redone | 5.7 | the operator | `git merge --abort`, then each of the branch's authoring operations redone through the writer on a branch from the integration base, each committed (step 7) |
   | R24 | View drift | 10.3, 11 | any actor | R14 |
   | R25 | A tracked-store finding (an unstaged or ignored path), or the step 2 `.opf.local.toml` finding | 5.1; open point 19; step 2 | the operator | staging, an ignore-rule change, or `git rm --cached`; none writes a protected path |
@@ -2336,16 +2364,17 @@ platform." Wire all four, not only the platform you run on.
     not canonical (section 8.8, item 2), its final doctor must report VALID (item 7), so a defect
     that the final doctor detects in the operation's result prevents successful completion, and the content of most repairs, such as a
     removed record's original content, cannot be derived from a request and the schema rules as
-    item 4 requires; a repair's new ID, as for a missing receipt, comes from the step 10
-    repair-allocation operation. So this prompt adds no other writer operation for any of them,
-    and it prescribes no repair procedure. The validator names each defect it detects and
-    its remedy in words (step 6), for example "raise the clean `BI` counter to 91" or "restore
+    item 4 requires; a missing receipt is the one repair whose new ID a writer operation allocates,
+    `receipt-repair` (R7a; open point 27). So, apart from that operation, this prompt adds no writer
+    operation for any of them, and it prescribes no repair procedure. The validator names each
+    defect it detects and its remedy in words (step 6), for example "raise the clean `BI` counter to 91" or "restore
     `WL-40` to bytes that recompute the digest that release 0.4.0 records". The maintainer repairs
     the defect by an ordinary reviewed edit that satisfies the specification: restoring a removed
-    record keeps its original ID and content; any new ID is allocated under the store's lock as
-    section 8.2 requires ("allocation MUST increment its counter under the store's lock as one
-    atomic claim"), through the step 10 repair-allocation operation, as for the receipt of a
-    ratified `done` item that never had one; and the repaired store must validate. The deny rule and the
+    record keeps its original ID and content; a reviewed edit allocates no new ID (section 8.2:
+    "allocation MUST increment its counter under the store's lock as one atomic claim"), so the
+    receipt of a ratified `done` item that never had one is added by `receipt-repair` once the
+    edit is committed (R7a), and open point 27 leaves any other new ID without a sanctioned act;
+    and the repaired store must validate. The deny rule and the
     instruction bind an assistant, so this step's enforcement leaves those paths editable for that
     edit and forces no operation for it (section 14.1); that is this prompt's choice. Open point 20
     says how the comparison with `HEAD` treats a prior file that does not parse, a prior row that is
@@ -2515,10 +2544,11 @@ Acceptance checks:
   maintainer's reviewed edit that satisfies the specification is allowed by the pre-commit check and
   that the validator then reports valid. Where the pre-commit check refuses every such edit, or no
   such edit can be made as the specification requires, report that class as not passed, with the
-  finding and the reason, for the maintainer to rule on; checklist item 17 then does not pass. A
-  class whose repair adds a record with a new ID, such as a ratified `done` item committed with no
-  receipt ever written, takes that ID from the step 10 repair-allocation operation before the
-  reviewed edit adds the record. A store file that is not canonical is not
+  finding and the reason, for the maintainer to rule on; checklist item 17 then does not pass. For
+  a ratified `done` item committed with no receipt ever written, show instead that `receipt-repair`
+  (section 8.8; R7a) adds the missing receipt and that the validator then reports valid. Any other
+  class whose repair adds a record with a new ID has no sanctioned act under open point 27: report
+  it as not run, and checklist item 17 then does not pass. A store file that is not canonical is not
   one of the validator's classes: commit an index carrying a comment, with the views re-rendered,
   which the pre-commit check allows, since the validator reports nothing for it, and show that the
   next writer operation that rewrites that index refuses and leaves it untouched, as step 10 tests,

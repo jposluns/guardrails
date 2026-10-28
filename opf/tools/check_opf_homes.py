@@ -361,6 +361,7 @@ _CONTRACT = {
         'Init, and any upgrade, MUST render this managed block into .working/.gitignore from the topology constants: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
         'Installation MUST inspect effective ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed untracking change, never silent index mutation.',
         _D('The block travels with the store and joins the indexed-ignore candidate set.'),
+        'At homes 2 an implementation MUST register .working/.gitignore by its exact path as a managed control file that containment recognizes as OPF control area; containment never reads it for drift, and the doctor does not yet grade drift of its managed block.',
         _D('Gitignore is not access control: git add -f can stage ignored state.'),
         'Journals are machine-local even after completion; a clone without them cannot recover those transactions, and requested recovery MUST fail closed on a missing journal.',
         _D('Containment and doctor exclude journals and make no recovery claim, with one exception: the doctor reads the reservations under journals/<kind>/allocations/ read-only, and only for the section 8.2 counter checks; any other journal content, a rogue file included, is outside their coverage.'),
@@ -468,7 +469,12 @@ _CONTRACT = {
         _D("A write that would grow a store file past the store reader's size cap refuses instead, before anything is written, so an upgrade or record operation never rewrites a readable store into one the reader refuses."),
         _D('The DECISIONS.toml machine projection (section 10.5) takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered from a record holding either character differs from the current render in exactly that spelling, and the byte-level view-drift gate reports it as drifted until one re-render re-spells it.'),
         _D('A projection over records holding neither character renders byte-identically, so a store without these characters sees no drift.'),
-        _D('A hand edit or hand merge that leaves canonical bytes passes it undetected, so this integration-base rule is a separate requirement that the precondition does not enforce.'),
+        _D('opf doctor, and the pre-commit hook that runs it, also refuses a machine-store TOML file that is not in canonical form, at every run rather than only before a write: such a file is a C-CONTAINMENT finding, with the same allowance for a literal U+2028 or U+2029.'),
+        _D('It leaves out a path under a valid [unmanaged] declaration (the containment walk grades the declaration, never the files under it), the legacy import staging area, which the containment walk grades, and a file it cannot read or parse, which the check that reads it grades (except init.toml, which no other check reads, so an unreadable one cannot be evaluated and an unparseable one is a finding).'),
+        _D('During a partial import backed by an active import run, it also leaves out the stray paths the containment and archive walks triage there (section 14.2): a file outside the managed set and outside the archive tree (which, in an adopting store, the containment walk reports as a finding instead), and, within the archive tree, a file directly under archive/, a file under a bucket subdirectory, or a bucket file other than archive.toml, worklog.toml and a <type>.index.toml.'),
+        _D('Nor does it enter, there, a directory beneath which it leaves out every path: outside the archive tree, a directory that is not a managed namespace derived from the manifest (a per-record type directory, the generation-2 worklog directory or an ancestor of a store-scope view target), and, within it, a bucket subdirectory, so a symlink, an unreadable directory or deep nesting beneath one does not stop the store being evaluated.'),
+        _D("A bucket's archive.toml, worklog.toml and <type>.index.toml are checked at every import status."),
+        _D('A hand edit or hand merge that leaves canonical bytes passes both the precondition and doctor undetected, so the integration-base rule above is a separate requirement that neither enforces.'),
         _D('A merge that resolves without a conflict yet duplicates an ID is caught by opf doctor, which checks store-wide ID uniqueness and that every ID lies within its counter (section 8.2).'),
         'A collision MUST NOT be resolved by decrementing a counter or reusing an ID.',
     ),
@@ -672,7 +678,8 @@ _CONTRACT = {
         "decided_by MUST be given explicitly, never inferred from the actor, because the recorder of an answer is often not its decider, and decided_at MUST be the operation's clock value.",
         'A ratification MUST keep the bundle; a rejection of decided/proposed MUST remove it together with proposed_from, since an open decision carries none of it.',
         "A transition that lands a pending_decision at unqualified decided, a maintainer's open > decided or a maintainer's ratification of decided/proposed, MAY supersede the current resolution of a chain in the same act: transition then appends the supersedes link (section 8.5) to the record's links.",
-        'Before anything is written, the superseded record MUST be another pending_decision at unqualified decided, schema-valid, and the head of its chain (no pending_decision already links supersedes to it), and its own chain MUST NOT lead back to the superseding record.',
+        'Before anything is written, the superseded record MUST be another pending_decision at unqualified decided, schema-valid, and the head of its chain (no pending_decision not authored by an importer already links supersedes to it), and its own chain MUST NOT lead back to the superseding record.',
+        _D("An importer-authored pending_decision's supersedes link is left out of that test: such a record discharges no supersession and confers nothing now (section 8.6)."),
         'These target checks MUST read the same records as the chain rule below, the active index together with every archived record (section 12), so a decided, schema-valid chain head rotated to the archive can be superseded, and an archived pending_decision that already supersedes the target or leads back to the superseding record is counted.',
         'transition MUST refuse the link on every other transition, a /proposed landing included, because the doctor counts a supersedes link from a proposal too and would then find the superseded chain without a current resolution.',
         "Every transition that lands a pending_decision at unqualified decided, with or without a supersession, MUST then apply the doctor's chain rule (section 8.5) to the planned index together with every archived record before anything is written: the chain the record belongs to afterwards, a connected component over supersedes links in either direction, MUST have exactly one current effective resolution.",
@@ -689,6 +696,11 @@ _CONTRACT = {
         _D('- done-with-receipt: maintainer-only.'),
         _D('It moves a backlog item to unqualified done, from active or by ratifying done/proposed, and in the same act creates its one-to-one done receipt linked receipt_of (section 8.5).'),
         _D('An assistant reaching done uses transition and lands done/proposed; no receipt exists until a maintainer ratifies.'),
+        _D('- receipt-repair: maintainer-only, with a recorded reason.'),
+        _D('It is the reviewed repair of a backlog item that stands at unqualified done without a clean receipt authored by a non-importer actor (sections 8.5 and 8.6), such as an item a reviewed hand edit put at done: in one act it creates the missing done receipt linked receipt_of, and it changes no status and no other record.'),
+        'It MUST refuse, with nothing written, unless the item is at unqualified done and its current row is exactly the row the prior commit holds, and it MUST refuse an item that already holds such a receipt in the active index or the archive (section 12).',
+        'Its new ID MUST be claimed through the irrevocable reservation of section 8.2.',
+        _D('A repaired receipt is linked one-to-one to its item, so it is not a standalone receipt (section 8.1).'),
         _D('- worklog-append: one entry appended to the unreleased tail of worklog.toml, status recorded, never /proposed whatever the actor (sections 6.2 and 8.4).'),
         'An entry that would fall inside a released span MUST be refused.',
         _D('- import --batch FILE [--root DIR]: the primary import surface (the import write mode; there is no separate --import flag).'),
@@ -696,7 +708,7 @@ _CONTRACT = {
         _D('The canonical TOML batch, opf.record.import-batch/v1, declares one source path, record rows, worklog rows, historical fields, missingness, verbatim unparsed text and batch-local link keys.'),
         'The writer MUST resolve local keys to claimed imported IDs and MUST recompute source size and SHA-256 from preserved bytes, never trusting caller-supplied measurements.',
         'One invocation covers one source in one journaled transaction, followed by one render and one full doctor; a frozen migrate, move or retire source (section 14.2) MUST NOT be written, and doctor grades it under the section 11 bounded treatment, never as an obstacle to VALID.',
-        'create, transition, and done-with-receipt MUST each append their own worklog entry, one entry per change (section 6.2), in the same journaled transaction as the change.',
+        'create, transition, done-with-receipt, and receipt-repair MUST each append their own worklog entry, one entry per change (section 6.2), in the same journaled transaction as the change.',
         "Its detail MUST open with a lifecycle line naming the record and its status change (opf-record create <ID> <status>, or opf-record transition <ID> <from> -> <to>); a rejection's entry MUST also record its reason.",
         'worklog-append MUST refuse a detail that opens with that lifecycle grammar.',
         'Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its guarantees: 1.',
@@ -2428,6 +2440,20 @@ def boundary_self_test():
                 check("unmanaged-collision-" + operand,
                       lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
                       and not doctor.classify_containment(m, machine).valid_unmanaged)
+        # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
+        # path only, so an [unmanaged] declaration of it collides like any managed path.
+        control = ".working/.gitignore"
+        check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
+        check("classifier-gitignore-legacy-stray",
+              lambda: not doctor.classify_containment(manifest, machine).managed_file(control))
+        check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
+              and not cls2.managed_file(".working/staging/.gitignore"))
+        altered = dict(manifest2, unmanaged={"paths": [control]})
+        check("unmanaged-collision-" + control,
+              lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+              and not doctor.classify_containment(m, machine).valid_unmanaged)
+    check("classifier-gitignore-inert-declaration",
+          lambda: not doctor.classify_containment(manifest2, machine).managed_file(".working/.gitignore"))
     for home in homes[1:]:
         for operand in (home, home + "/child"):
             check("unmanaged-legacy-valid-" + operand, lambda o=operand: doctor.classify_containment(
