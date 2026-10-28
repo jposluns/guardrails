@@ -62,15 +62,20 @@ not detected.
 
 Every helper module the gate imports that cannot be imported (it is missing or unreadable, or its import raises
 any BaseException other than a KeyboardInterrupt, which is re-raised unchanged; a SyntaxError, a SystemExit of
-any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2) that names the cause, never a finding
-or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
+any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2), never a finding or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
 opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
 opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
 declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
 cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list. So, last, is
 any escape from the gate body: any BaseException other than a KeyboardInterrupt (re-raised unchanged) that
 leaves run() or the self-test, a SystemExit of any code or an error raised by a helper the gate calls included,
-ends the gate with exit 2 naming the cause, never with that SystemExit's code or a traceback's exit 1.
+ends the gate with exit 2, never with that SystemExit's code or a traceback's exit 1. Each of these
+cannot-evaluates prints its fixed CANNOT EVALUATE line first, then a cause line with the exception's type name
+and message; where reading the message raises (any BaseException, a SystemExit included), the cause line gives
+the type name alone, or is left out where that cannot be read either, and the exit is 2 all the same. The one
+SystemExit the gate expects, the execution-report harness refusing a --execution-report run that
+tools/check_selftest_execution.py did not launch (it prints its own SELF-TEST HARNESS ERROR line), is labelled
+as that refusal (exit 2), not as an escape.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
@@ -101,6 +106,7 @@ import io
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -159,6 +165,31 @@ MAX_READ_BYTES = 1 << 20
 
 class CannotEvaluate(Exception):
     """An input the gate needs cannot be read."""
+
+
+def _cannot_evaluate(what, exc, self_test=False):
+    """Print the fixed cannot-evaluate line for `what`, then describe the exception `exc` that caused it, and
+    return 2 whatever the description does: `exc` may come from a helper, whose own __str__ (or type name) can
+    raise any BaseException, a SystemExit included, so the description falls back to the type name, or to none."""
+    stream = sys.stdout if self_test else sys.stderr
+    try:
+        print(("SELF-TEST CANNOT EVALUATE: opf-declaration: " if self_test else
+               "opf-declaration: CANNOT EVALUATE: ") + what, file=stream)
+    except BaseException:   # the exit status still carries the cannot-evaluate
+        pass
+    try:
+        cause = "{}: {}".format(type(exc).__name__, exc)
+    except BaseException:
+        try:
+            cause = "{} (its message cannot be read)".format(type(exc).__name__)
+        except BaseException:
+            cause = None
+    if cause is not None:
+        try:
+            print("  cause: " + cause, file=stream)
+        except BaseException:
+            pass
+    return 2
 
 
 def _load():
@@ -424,17 +455,14 @@ def run(root):
     except BaseException as exc:   # a helper _load() imports is missing, unreadable or fails to import
         if isinstance(exc, KeyboardInterrupt):
             raise
-        print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
-            type(exc).__name__, exc), file=sys.stderr)
-        return 2
+        return _cannot_evaluate("a helper module cannot be loaded", exc)
     try:
         data = _read_regular(Path(root) / DECLARATION_REL, DECLARATION_REL)
         version = _read_regular(Path(root) / VERSION_REL, VERSION_REL).decode("utf-8")
         surfaces = dict((rel, _read_regular(Path(root) / rel, rel).decode("utf-8")) for rel in DOC_SURFACES)
         documents = restating_documents(root)
     except (CannotEvaluate, UnicodeDecodeError, OSError) as exc:
-        print("opf-declaration: CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
-        return 2
+        return _cannot_evaluate("an input the gate needs cannot be read", exc)
     problems = file_problems(data, version) + doc_problems(data, surfaces) + surface_problems(documents)
     if problems:
         print("opf-declaration: FAIL ({} finding(s))".format(len(problems)), file=sys.stderr)
@@ -525,7 +553,12 @@ def self_test(report_path=None):
     executed = []
     if report_path is not None:
         # The execution report is finalized at interpreter exit (tools/_selftest_exit_report.py).
-        _selftest_exit_report.arm(report_path, SUITE_ID, executed)
+        try:
+            _selftest_exit_report.arm(report_path, SUITE_ID, executed)
+        except SystemExit:   # arm() refused the run, having printed why: its only SystemExit, not an escape
+            print("opf-declaration: CANNOT EVALUATE: the execution-report harness refused the run",
+                  file=sys.stderr)
+            return 2
 
     def check(check_id, ok, detail=""):
         results.append((check_id, bool(ok), detail))
@@ -537,18 +570,14 @@ def self_test(report_path=None):
     except BaseException as exc:   # a helper or opf.py is missing, unreadable or fails to import
         if isinstance(exc, KeyboardInterrupt):
             raise
-        print("SELF-TEST CANNOT EVALUATE: opf-declaration: a helper module cannot be loaded ({}: {})".format(
-            type(exc).__name__, exc))
-        return 2
+        return _cannot_evaluate("a helper module cannot be loaded", exc, self_test=True)
     from unittest.mock import patch   # after arm: it imports logging, whose import registers an atexit hook
     try:
         bootstrapped = opf._bootstrap()
     except BaseException as exc:   # a helper opf.py's _bootstrap() imports raises past its own arms
         if isinstance(exc, KeyboardInterrupt):
             raise
-        print("SELF-TEST CANNOT EVALUATE: opf-declaration: opf.py helpers could not be bootstrapped ({}: {})".format(
-            type(exc).__name__, exc))
-        return 2
+        return _cannot_evaluate("opf.py helpers could not be bootstrapped", exc, self_test=True)
     if bootstrapped != 0:
         print("SELF-TEST CANNOT EVALUATE: opf-declaration: opf.py helpers could not be bootstrapped")
         return 2
@@ -1137,7 +1166,8 @@ def self_test(report_path=None):
     ):
         found, output = bootstrapping[kind, removed]
         check(check_id, source.count(bootstrap_guard) == 1 and found == rc
-              and (removed or "CANNOT EVALUATE" in output and "bootstrapped (SystemExit" in output), (found, output))
+              and (removed or "CANNOT EVALUATE" in output and "bootstrapped\n  cause: SystemExit" in output),
+              (found, output))
 
     # and so is any escape from the gate body once the helpers are loaded: a copy of this gate in a scratch tree of
     # stub helpers, one helper function raising a SystemExit(0) or a RuntimeError when the gate calls it during
@@ -1162,18 +1192,164 @@ def self_test(report_path=None):
         shutil.rmtree(tmp)
     for check_id, kind, removed, rc, cause in (
         ("live/run-helper-call-system-exit-0-cannot-evaluate", "run-exit-0", False, 2,
-         "escaped the gate body (SystemExit: 0)"),
+         "escaped the gate body\n  cause: SystemExit: 0"),
         ("revert/main-guard-removed-run-system-exit-0-red", "run-exit-0", True, 0, ""),
         ("live/self-test-helper-call-system-exit-0-cannot-evaluate", "self-test-exit-0", False, 2,
-         "escaped the gate body (SystemExit: 0)"),
+         "escaped the gate body\n  cause: SystemExit: 0"),
         ("revert/main-guard-removed-self-test-system-exit-0-red", "self-test-exit-0", True, 0, ""),
         ("live/run-helper-call-error-cannot-evaluate", "run-error", False, 2,
-         "escaped the gate body (RuntimeError: raised by a helper call)"),
+         "escaped the gate body\n  cause: RuntimeError: raised by a helper call"),
         ("revert/main-guard-removed-run-error-red", "run-error", True, 1, "RuntimeError: raised by a helper call"),
     ):
         found, output = escaping[kind, removed]
         check(check_id, source.count(main_try) == 1 and source.count(main_guard) == 1 and found == rc
               and cause in output and (removed or "CANNOT EVALUATE" in output), (found, output))
+
+    # a cause that cannot be described (an exception whose __str__ raises a SystemExit(0)) still ends the gate with
+    # exit 2 at every site that describes a caught exception: the site prints its fixed line first and the cause
+    # line falls back to the type name; with that site reverted to the single print that formats the cause into
+    # its line, the SystemExit escapes and the gate exits 0 (a site inside run() or the self-test is reverted in a
+    # copy with the guard in main() removed as well)
+    unprintable = "class Unprintable(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
+
+    def single_print(what, name, self_test=False):
+        """A describing site's call, and the single print it reverts to."""
+        call = 'return _cannot_evaluate("{}", {}{})'.format(what, name, ", self_test=True" if self_test else "")
+        line = "SELF-TEST CANNOT EVALUATE: opf-declaration: " if self_test else "opf-declaration: CANNOT EVALUATE: "
+        return call, 'return print("{}{} ({{}}: {{}})".format(type({}).__name__, {}), file=sys.{}) or 2'.format(
+            line, what, name, name, "stdout" if self_test else "stderr")
+    describing = {
+        "tools": single_print("a helper module cannot be loaded", "_HELPER_ERROR"),
+        "run": single_print("a helper module cannot be loaded", "exc"),
+        "read": single_print("an input the gate needs cannot be read", "exc"),
+        "self-test": single_print("a helper module cannot be loaded", "exc", True),
+        "bootstrap": single_print("opf.py helpers could not be bootstrapped", "exc", True),
+        "main": single_print("an exception escaped the gate body", "exc"),
+    }
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        undescribed = {}
+        for name, site, rel, text, args, helpers in (
+            ("tools", "tools", "tools/check_selftest_execution.py", unprintable + "raise Unprintable()\n", [], stubs),
+            ("run", "run", "opf/tools/_opf_store.py", unprintable + "raise Unprintable()\n", [], stubs),
+            ("self-test", "self-test", "opf/tools/opf.py", unprintable + "raise Unprintable()\n", ["--self-test"],
+             stubs),
+            ("bootstrap", "bootstrap", "opf/tools/_opf_worklog.py", unprintable + "raise Unprintable()\n",
+             ["--self-test"], with_opf),
+            ("main-run", "main", "opf/tools/_opf_declaration.py",
+             unprintable + "def parse_declaration(data):\n    raise Unprintable()\n", [], tree),
+            ("main-self-test", "main", "opf/tools/_opf_declaration.py",
+             unprintable + "SHIPPED_DECLARATION_BYTES = b''\n\n\ndef run_vector(vector):\n    raise Unprintable()\n",
+             ["--self-test"], with_vectors),
+        ):
+            for reverted in (False, True):
+                gate = (source if site in ("tools", "main") else removed_main).replace(*describing[site])
+                undescribed[name, reverted] = launch(Path(tmp, "undescribed-{}-{}".format(name, int(reverted))), None,
+                                                     rel, text, args, None, helpers, gate if reverted else source)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, name, site, reverted, rc in (
+        ("live/tools-helper-undescribable-cannot-evaluate", "tools", "tools", False, 2),
+        ("revert/tools-helper-single-print-undescribable-red", "tools", "tools", True, 0),
+        ("live/opf-helper-undescribable-cannot-evaluate", "run", "run", False, 2),
+        ("revert/load-guard-single-print-undescribable-red", "run", "run", True, 0),
+        ("live/self-test-helper-undescribable-cannot-evaluate", "self-test", "self-test", False, 2),
+        ("revert/self-test-load-guard-single-print-undescribable-red", "self-test", "self-test", True, 0),
+        ("live/self-test-bootstrap-helper-undescribable-cannot-evaluate", "bootstrap", "bootstrap", False, 2),
+        ("revert/self-test-bootstrap-guard-single-print-undescribable-red", "bootstrap", "bootstrap", True, 0),
+        ("live/run-helper-call-undescribable-cannot-evaluate", "main-run", "main", False, 2),
+        ("revert/main-guard-single-print-run-undescribable-red", "main-run", "main", True, 0),
+        ("live/self-test-helper-call-undescribable-cannot-evaluate", "main-self-test", "main", False, 2),
+        ("revert/main-guard-single-print-self-test-undescribable-red", "main-self-test", "main", True, 0),
+    ):
+        found, output = undescribed[name, reverted]
+        what = describing[site][0].split('"')[1]
+        check(check_id, source.count(describing[site][0]) == 1 and found == rc and (reverted or (
+            "CANNOT EVALUATE" in output and what + "\n  cause: Unprintable (its message cannot be read)\n" in output)),
+              (found, output))
+
+    # the same at the site that describes an input the gate cannot read, in this process: its read raising an
+    # OSError whose __str__ raises a SystemExit(0), run() returns 2; reverted to the single print, the SystemExit
+    # escapes run()
+    class UnprintableError(OSError):
+        def __str__(self):
+            raise SystemExit(0)
+
+    def unreadable(path, rel):
+        raise UnprintableError()
+    with patch.object(here, "_read_regular", unreadable), contextlib.redirect_stderr(io.StringIO()) as err:
+        rc = run(ROOT)
+    check("live/unreadable-input-undescribable-cannot-evaluate", source.count(describing["read"][0]) == 1 and rc == 2
+          and "CANNOT EVALUATE: an input the gate needs cannot be read\n  cause: UnprintableError (its message "
+          "cannot be read)\n" in err.getvalue(), (rc, err.getvalue()))
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        single = _copy_mutant(tmp, Path(__file__).resolve(), "opf_declaration_read_mutant", *describing["read"])
+        with patch.object(single, "_read_regular", unreadable), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                rc = single.run(ROOT)
+            except SystemExit as exc:
+                rc = "exit {!r}".format(exc.code)
+    except AssertionError as exc:
+        rc = 2, str(exc)
+    finally:
+        sys.modules.pop("opf_declaration_read_mutant", None)
+        shutil.rmtree(tmp)
+    check("revert/read-guard-single-print-undescribable-red", rc == "exit 0", rc)
+
+    # a KeyboardInterrupt still propagates, at the tools import site and inside run() (at its helper load and from
+    # a helper it calls): the process ends by SIGINT, not exit 2; with the site's re-raise dropped it exits 2
+    reraise = "\n        if isinstance(exc, KeyboardInterrupt):\n            raise\n"
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        interrupted = {}
+        for site, rel, text, helpers, old, new in (
+            ("tools", "tools/check_selftest_execution.py", "raise KeyboardInterrupt\n", stubs,
+             "            raise _HELPER_ERROR" "   # here:", "            pass   # here:"),
+            ("run", "opf/tools/_opf_store.py", "raise KeyboardInterrupt\n", stubs, guards["run"] + reraise,
+             guards["run"] + "\n"),
+            ("main", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise KeyboardInterrupt\n",
+             tree, main_guard, main_guard.split("\n")[0] + "\n"),
+        ):
+            for reverted in (False, True):
+                interrupted[site, reverted] = (source.count(old) == 1,) + launch(
+                    Path(tmp, "interrupt-{}-{}".format(site, int(reverted))), None, rel, text, [], None, helpers,
+                    source.replace(old, new) if reverted else source)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, site, reverted, rc in (
+        ("live/tools-helper-keyboard-interrupt-propagates", "tools", False, -signal.SIGINT),
+        ("revert/tools-helper-keyboard-interrupt-reraise-dropped-red", "tools", True, 2),
+        ("live/opf-helper-keyboard-interrupt-propagates", "run", False, -signal.SIGINT),
+        ("revert/load-guard-keyboard-interrupt-reraise-dropped-red", "run", True, 2),
+        ("live/run-helper-call-keyboard-interrupt-propagates", "main", False, -signal.SIGINT),
+        ("revert/main-guard-keyboard-interrupt-reraise-dropped-red", "main", True, 2),
+    ):
+        anchored, found, output = interrupted[site, reverted]
+        check(check_id, anchored and found == rc, (found, output))
+
+    # the execution-report harness refusing a --execution-report run it did not launch is labelled as that
+    # refusal, not as an escape: a copy of this gate beside the real tools/_selftest_exit_report.py, launched
+    # directly, exits 2 with the harness error and the refusal; with arm() moved out of its try the same run is
+    # labelled an escape
+    arm_call = "        try:\n            _selftest_exit_report.arm(report_path, SUITE_ID, executed)\n        except"
+    arm_outside = ("        _selftest_exit_report.arm(report_path, SUITE_ID, executed)\n        try:\n"
+                   "            pass\n        except")
+    with_harness = dict(stubs, **{"tools/_selftest_exit_report.py": (ROOT / "tools" / "_selftest_exit_report.py")
+                                  .read_text(encoding="utf-8")})
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        refused = [launch(Path(tmp, "refusal-{}".format(int(reverted))), None, "tools/check_selftest_execution.py", "",
+                          ["--execution-report", str(Path(tmp, "report-{}.json".format(int(reverted))))], None,
+                          with_harness, source.replace(arm_call, arm_outside) if reverted else source)
+                   for reverted in (False, True)]
+    finally:
+        shutil.rmtree(tmp)
+    check("live/harness-refusal-labelled", source.count(arm_call) == 1 and refused[0][0] == 2
+          and "SELF-TEST HARNESS ERROR" in refused[0][1] and "harness refused the run" in refused[0][1]
+          and "escaped the gate body" not in refused[0][1], refused[0])
+    check("revert/harness-refusal-arm-outside-try-red", refused[1][0] == 2
+          and "escaped the gate body\n  cause: SystemExit: 2" in refused[1][1], refused[1])
     check("live/real-tree-passes", run(ROOT) == 0)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
@@ -1204,9 +1380,7 @@ def main(argv=None):
     if _HELPER_ERROR is not None:
         if isinstance(_HELPER_ERROR, KeyboardInterrupt):
             raise _HELPER_ERROR   # here: tools/check_python_floor.py admits no raise in an import fallback
-        print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
-            type(_HELPER_ERROR).__name__, _HELPER_ERROR), file=sys.stderr)
-        return 2
+        return _cannot_evaluate("a helper module cannot be loaded", _HELPER_ERROR)
     try:
         if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
                 and args[:-2] in ([], ["--self-test"])):
@@ -1218,9 +1392,7 @@ def main(argv=None):
     except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit included
         if isinstance(exc, KeyboardInterrupt):
             raise
-        print("opf-declaration: CANNOT EVALUATE: an exception escaped the gate body ({}: {})".format(
-            type(exc).__name__, exc), file=sys.stderr)
-        return 2
+        return _cannot_evaluate("an exception escaped the gate body", exc)
     print("usage: check_opf_declaration.py [--self-test | [--self-test] --execution-report ABS_PATH]",
           file=sys.stderr)
     return 2
