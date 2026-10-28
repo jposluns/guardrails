@@ -32,7 +32,10 @@ with exit 2). This gate holds where it runs:
      _child_status_refusal_exit("<basename>"); the canonical file's entry ends in that line, each
      SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical
      --self-test statement and then that line (a direct --self-test launch of it is unguarded; the self-test runs
-     that launch under a process-creation audit hook and fails on any launch), each ENTRY_COPIES file
+     that launch under a process-creation audit hook, with _posixsubprocess.fork_exec wrapped so the
+     multiprocessing launches are recorded too, and fails on any launch recorded; a launch made below Python,
+     through ctypes or a native extension, or through a fork_exec other than the wrapped module attribute, is not
+     recorded), each ENTRY_COPIES file
      (tools/check_opf_declaration.py, whose entry raises its own exit rather than calling sys.exit) has the
      __main__ body exactly the single call _entry(), and _entry bound exactly once at module scope (the same
      count), by one undecorated top-level def with no parameters whose first statement is exactly
@@ -539,8 +542,8 @@ def _binding_forms(node, owner, name):
     """The form of each binding of name that one module-scope node makes (owner is the statement or walrus it
     sits in), one per binding."""
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        decorated = "a decorated " if node.decorator_list else "a "
-        return [decorated + DEF_FORMS[type(node).__name__]] if node.name == name else []
+        article = "a decorated " if node.decorator_list else "an " if isinstance(node, ast.AsyncFunctionDef) else "a "
+        return [article + DEF_FORMS[type(node).__name__]] if node.name == name else []
     if isinstance(node, ast.Name):
         stored = node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
         return [TARGET_FORMS.get(type(owner).__name__, "a target")] if stored else []
@@ -1449,7 +1452,22 @@ REBINDINGS = (
     ("global", "def _rebind():\n    global {0}\n    {0} = main\n", "a global declaration"),
     ("del", "del {0}\n", "a del"),
     ("attribute-store", "{0}.__code__ = main.__code__\n", "a store the walk cannot classify ({0}.__code__)"),
-    ("namespace-store", 'globals()["{0}"] = main\n', "a store the walk cannot classify (globals()['{0}'])"))
+    ("namespace-store", 'globals()["{0}"] = main\n', "a store the walk cannot classify (globals()['{0}'])"),
+    ("async-def", "async def {0}():\n    pass\n", "an async def"),
+    ("match-star", "match main:\n    case [*{0}]:\n        pass\n", "a match capture"),
+    ("match-mapping-rest", "match main:\n    case {{**{0}}}:\n        pass\n", "a match capture"),
+    ("star-import", "from json import *\n", "a star import"),
+    ("def-default", "def _defaulted(value=({0} := main)):\n    pass\n", "a walrus (:=)"),
+    ("class-base", "class _Based(({0} := object)):\n    pass\n", "a walrus (:=)"),
+    ("class-keyword", "class _Keyed(metaclass=({0} := type)):\n    pass\n", "a walrus (:=)"),
+    ("lambda-default", "_defaulted = lambda value=({0} := main): value\n", "a walrus (:=)"),
+    ("comprehension-if", "_kept = [0 for _value in () if ({0} := main)]\n", "a walrus (:=)"),
+    ("class-body-store", "class _Body:\n    {0}.__code__ = main.__code__\n",
+     "a store the walk cannot classify ({0}.__code__)"),
+    ("comprehension-starred", "_unpacked = [0 for *{0}.__code__, in ()]\n",
+     "a store the walk cannot classify ({0}.__code__)"),
+    ("attribute-del", "del {0}.__code__\n", "a store the walk cannot classify ({0}.__code__)"),
+    ("subscript-del", 'del globals()["{0}"]\n', "a store the walk cannot classify (globals()['{0}'])"))
 # The decorated form, swapped in place: (tree key, the def line, the decorated def line).
 DECORATED = (("entry", "\ndef _entry():\n", "\n@(lambda function: main)\ndef _entry():\n"),
              ("guard", "\ndef _child_status_refusal_exit(name):\n",
@@ -1464,15 +1482,24 @@ LOCAL_BINDINGS = ("def _local_bindings():\n    _entry = _child_status_refusal_ex
 # The process-creation audit: the driver runs the script named by its first argument as __main__, with the rest
 # as its arguments, under an audit hook that records every launch event (the events os.fork, os.forkpty,
 # os.posix_spawn and os.posix_spawnp, subprocess.Popen, os.system, os.exec* and os.spawn* raise), and prints
-# them with the script's exit status as its last stdout line. The control script launches through each audited
-# API (os.spawnv raises os.fork on POSIX; the exec names a path that does not exist, so it fails after its event).
-AUDIT_DRIVER = '''import json
+# them with the script's exit status as its last stdout line. _posixsubprocess.fork_exec raises no event, and
+# multiprocessing launches through it (the forkserver and spawn start methods, the resource tracker,
+# multiprocessing.util.spawnv_passfds), so the driver also replaces that module attribute with a wrapper that
+# records the call and then makes it (AUDIT_WRAP). A launch made below Python (ctypes, a native extension) or
+# through a fork_exec other than that attribute is not recorded. The control script takes one route by name
+# and launches through it; the self-test runs it once per AUDIT_CONTROL_LAUNCHES row, each run recording that
+# row's event (os.spawnv raises os.fork on POSIX; the exec names a path that does not exist, so it fails after
+# its event).
+AUDIT_WRAP = "_posixsubprocess.fork_exec = _fork_exec\n"
+AUDIT_DRIVER = '''import _posixsubprocess
+import json
 import runpy
 import sys
 
 LAUNCHES = ("os.exec", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn", "os.startfile", "os.system",
             "subprocess.Popen")
 seen = []
+fork_exec = _posixsubprocess.fork_exec
 
 
 def _audit(event, args):
@@ -1480,8 +1507,13 @@ def _audit(event, args):
         seen.append(event)
 
 
+def _fork_exec(*args, **kwargs):
+    seen.append("_posixsubprocess.fork_exec")
+    return fork_exec(*args, **kwargs)
+
+
 sys.addaudithook(_audit)
-sys.argv = sys.argv[1:]
+''' + AUDIT_WRAP + '''sys.argv = sys.argv[1:]
 try:
     runpy.run_path(sys.argv[0], run_name="__main__")
     code = 0
@@ -1489,25 +1521,76 @@ except SystemExit as exc:
     code = exc.code
 print("AUDITED " + json.dumps({"code": code, "launches": seen}))
 '''
-AUDIT_CONTROL = '''import os
+AUDIT_CONTROL = '''import multiprocessing
+import multiprocessing.util
+import os
 import subprocess
 import sys
 
 child = [sys.executable, "-I", "-B", "-c", "pass"]
-pid = os.fork()
-if pid == 0:
-    os._exit(0)
-os.waitpid(pid, 0)
-os.waitpid(os.posix_spawn(sys.executable, child, dict(os.environ)), 0)
-subprocess.run(child, check=True)
-os.system("exit 0")
-os.spawnv(os.P_WAIT, sys.executable, child)
-try:
-    os.execv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "absent", "program"), ["program"])
-except OSError:
-    pass
+
+
+def fork():
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+
+
+def forkpty():
+    pid, fd = os.forkpty()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+    os.close(fd)
+
+
+def process(method):
+    started = multiprocessing.get_context(method).Process()
+    started.start()
+    started.join()
+    if started.exitcode != 0:
+        sys.exit("the {} child exited {}".format(method, started.exitcode))
+
+
+def program():
+    try:
+        os.execv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "absent", "program"), ["program"])
+    except OSError:
+        pass
+
+
+ROUTES = {"fork": fork, "forkpty": forkpty,
+          "posix_spawn": lambda: os.waitpid(os.posix_spawn(sys.executable, child, dict(os.environ)), 0),
+          "subprocess": lambda: subprocess.run(child, check=True), "system": lambda: os.system("exit 0"),
+          "spawnv": lambda: os.spawnv(os.P_WAIT, sys.executable, child), "exec": program,
+          "forkserver": lambda: process("forkserver"), "spawn": lambda: process("spawn"),
+          "spawnv_passfds": lambda: os.waitpid(multiprocessing.util.spawnv_passfds(os.fsencode(sys.executable),
+                                                                                   child, ()), 0)}
+
+# A multiprocessing child imports this file again as __mp_main__; the guard keeps it from launching.
+if __name__ == "__main__":
+    ROUTES[sys.argv[1]]()
 '''
-AUDIT_CONTROL_LAUNCHES = ("os.exec", "os.fork", "os.posix_spawn", "os.system", "subprocess.Popen")
+# (route, the launch its run must record).
+AUDIT_CONTROL_LAUNCHES = (("fork", "os.fork"), ("forkpty", "os.forkpty"), ("posix_spawn", "os.posix_spawn"),
+                          ("subprocess", "subprocess.Popen"), ("system", "os.system"), ("spawnv", "os.fork"),
+                          ("exec", "os.exec"), ("forkserver", "_posixsubprocess.fork_exec"),
+                          ("spawn", "_posixsubprocess.fork_exec"),
+                          ("spawnv_passfds", "_posixsubprocess.fork_exec"))
+# A self-test launch that starts a forkserver child first and then runs the script named by its first argument,
+# with the rest as its arguments: the audit must report it.
+AUDIT_MULTIPROCESSING_TARGET = '''import multiprocessing
+import runpy
+import sys
+
+if __name__ == "__main__":
+    started = multiprocessing.get_context("forkserver").Process()
+    started.start()
+    started.join()
+    sys.argv = sys.argv[1:]
+    runpy.run_path(sys.argv[0], run_name="__main__")
+'''
 
 
 def _registered_check_ids(suite):
@@ -2102,6 +2185,32 @@ MUTANTS = (
      "        return []\n", "entries/entry-rebound-except-as"),
     ("binding-match", "        return [\"a match capture\"] if (node.rest",
      "        return [] if (node.rest", "copies/guard-rebound-match"),
+    ("binding-match-star", "(ast.MatchAs, ast.MatchStar, ast.MatchMapping)", "(ast.MatchAs, ast.MatchMapping)",
+     "copies/guard-rebound-match-star"),
+    ("binding-match-mapping-rest", "(ast.MatchAs, ast.MatchStar, ast.MatchMapping)", "(ast.MatchAs, ast.MatchStar)",
+     "entries/entry-rebound-match-mapping-rest"),
+    ("binding-star-import", "if (alias.asname or alias.name) in (name, \"*\")]",
+     "if (alias.asname or alias.name) == name]", "copies/guard-rebound-star-import"),
+    ("binding-async-article", " else \"an \" if isinstance(node, ast.AsyncFunctionDef) else \"a \"", " else \"a \"",
+     "entries/entry-rebound-async-def"),
+    ("binding-def-header", "children = node.decorator_list + [node.args] + (", "children = node.decorator_list + (",
+     "entries/entry-rebound-def-default"),
+    ("binding-class-bases", "children = node.decorator_list + node.bases + node.keywords",
+     "children = node.decorator_list + node.keywords", "copies/guard-rebound-class-base"),
+    ("binding-class-keywords", "children = node.decorator_list + node.bases + node.keywords",
+     "children = node.decorator_list + node.bases", "entries/entry-rebound-class-keyword"),
+    ("binding-lambda-defaults", "            children = [node.args]\n", "            children = []\n",
+     "copies/guard-rebound-lambda-default"),
+    ("binding-comprehension-ifs", "children, targets = [node.iter] + node.ifs, [node.target]",
+     "children, targets = [node.iter], [node.target]", "entries/entry-rebound-comprehension-if"),
+    ("binding-class-body-stores", "            stack.extend((statement, statement, True) for statement in node.body)\n",
+     "", "copies/guard-rebound-class-body-store"),
+    ("binding-comprehension-starred", "                    targets.append(target.value)\n",
+     "                    pass\n", "entries/entry-rebound-comprehension-starred"),
+    ("binding-delete",
+     "if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):",
+     "if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, ast.Store):",
+     "copies/guard-rebound-attribute-del"),
     ("binding-function-bodies",
      "children = node.decorator_list + [node.args] + ([node.returns] if node.returns else [])",
      "children = node.decorator_list + [node.args] + ([node.returns] if node.returns else []) + node.body",
@@ -2475,24 +2584,39 @@ def _behaviour(probe, base):
     out.append(("revert/runner-probe-removed-red", got[0] == 0 and "RESULT: PASS" in got[1], got))
 
     # The --self-test statement of opf/tools/_opf_declaration.py runs before its guard, so that launch is unguarded:
-    # run it under the process-creation audit, which must record no launch, and the control, which must record
-    # each audited API.
+    # run it under the process-creation audit, which must record no launch; the same self-test behind a
+    # multiprocessing launch, which the audit must report and the audit without its fork_exec wrap does not; and
+    # the control once per route, each run recording that route's launch.
     driver = _copy("audit/driver.py", base, AUDIT_DRIVER)
+    unwrapped = _copy("audit/unwrapped.py", base, AUDIT_DRIVER.replace(AUDIT_WRAP, ""))
 
-    def audited(*argv):
-        got = via("default", python + [str(driver)] + list(argv), cwd=str(ROOT))
+    def audited(*argv, script=driver):
+        got = via("default", python + [str(script)] + list(argv), cwd=str(ROOT))
         last = got[1].splitlines()[-1] if got[1].splitlines() else ""
         try:
             return got, json.loads(last[len("AUDITED "):]) if last.startswith("AUDITED ") else None
         except ValueError:
             return got, None
 
-    got, report = audited(str(ROOT / "opf/tools/_opf_declaration.py"), "--self-test")
+    declaration = str(ROOT / "opf/tools/_opf_declaration.py")
+    got, report = audited(declaration, "--self-test")
     out.append(("behaviour/opf-declaration-self-test-launches-nothing", got[0] == 0
                 and report == {"code": 0, "launches": []} and "opf declaration self-test: PASS" in got[1], got))
-    got, report = audited(str(_copy("audit/launches.py", base, AUDIT_CONTROL)))
-    out.append(("control/audit-sees-every-launch", got[0] == 0 and isinstance(report, dict)
-                and report.get("code") == 0 and set(AUDIT_CONTROL_LAUNCHES) <= set(report.get("launches", ())), got))
+    target = str(_copy("audit/forkserver_first.py", base, AUDIT_MULTIPROCESSING_TARGET))
+    got, report = audited(target, declaration, "--self-test")
+    out.append(("behaviour/audit-reports-multiprocessing-launch", got[0] == 0 and isinstance(report, dict)
+                and report.get("code") == 0 and "_posixsubprocess.fork_exec" in report.get("launches", ())
+                and "opf declaration self-test: PASS" in got[1], got))
+    got, report = audited(target, declaration, "--self-test", script=unwrapped)
+    out.append(("revert/audit-fork-exec-unwrapped-red", got[0] == 0 and report == {"code": 0, "launches": []}
+                and "opf declaration self-test: PASS" in got[1], got))
+    control, missed = str(_copy("audit/launches.py", base, AUDIT_CONTROL)), []
+    for route, event in AUDIT_CONTROL_LAUNCHES:
+        got, report = audited(control, route)
+        if not (got[0] == 0 and isinstance(report, dict) and report.get("code") == 0
+                and event in report.get("launches", ())):
+            missed.append((route, event, got))
+    out.append(("control/audit-sees-every-launch", not missed, missed))
     return out
 
 
@@ -2613,7 +2737,27 @@ def self_test(lane, report_path=None):
                                 ("entries/entry-rebound-attribute-store", 0),
                                 ("copies/guard-rebound-attribute-store", 0),
                                 ("entries/entry-rebound-namespace-store", 0),
-                                ("copies/guard-rebound-namespace-store", 0)):
+                                ("copies/guard-rebound-namespace-store", 0),
+                                ("entries/entry-rebound-async-def", 0), ("copies/guard-rebound-async-def", 0),
+                                ("entries/entry-rebound-match-star", 0), ("copies/guard-rebound-match-star", 0),
+                                ("entries/entry-rebound-match-mapping-rest", 0),
+                                ("copies/guard-rebound-match-mapping-rest", 0),
+                                ("entries/entry-rebound-star-import", 0), ("copies/guard-rebound-star-import", 0),
+                                ("entries/entry-rebound-def-default", 0), ("copies/guard-rebound-def-default", 0),
+                                ("entries/entry-rebound-class-base", 0), ("copies/guard-rebound-class-base", 0),
+                                ("entries/entry-rebound-class-keyword", 0),
+                                ("copies/guard-rebound-class-keyword", 0),
+                                ("entries/entry-rebound-lambda-default", 0),
+                                ("copies/guard-rebound-lambda-default", 0),
+                                ("entries/entry-rebound-comprehension-if", 0),
+                                ("copies/guard-rebound-comprehension-if", 0),
+                                ("entries/entry-rebound-class-body-store", 0),
+                                ("copies/guard-rebound-class-body-store", 0),
+                                ("entries/entry-rebound-comprehension-starred", 0),
+                                ("copies/guard-rebound-comprehension-starred", 0),
+                                ("entries/entry-rebound-attribute-del", 0), ("copies/guard-rebound-attribute-del", 0),
+                                ("entries/entry-rebound-subscript-del", 0),
+                                ("copies/guard-rebound-subscript-del", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
         with tempfile.TemporaryDirectory(prefix="child-status-coverage-selftest-") as base:
             gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition(
@@ -2656,6 +2800,8 @@ def self_test(lane, report_path=None):
                                 ("revert/hook-guard-removed-red", 0), ("revert/probe-guard-removed-red", 0),
                                 ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0),
                                 ("behaviour/opf-declaration-self-test-launches-nothing", 0),
+                                ("behaviour/audit-reports-multiprocessing-launch", 0),
+                                ("revert/audit-fork-exec-unwrapped-red", 0),
                                 ("control/audit-sees-every-launch", 0)):
             check(check_id, behaviour.get(check_id, (False, "not run"))[0], behaviour.get(check_id, (False, None))[1])
         out, err = io.StringIO(), io.StringIO()

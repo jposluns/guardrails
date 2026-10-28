@@ -535,7 +535,9 @@ def main():
 # ignored SIGCHLD before main() runs. The --self-test statement stays first in the entry, where opf.py's
 # aggregator requires it: self_test() also runs in process under opf.py --self-test, behind opf.py's own guard, so
 # it carries no guard call, and its vectors launch no child (that gate's self-test runs it under a
-# process-creation audit hook and fails on any launch).
+# process-creation audit hook, with _posixsubprocess.fork_exec wrapped so the multiprocessing launches are
+# recorded too, and fails on any launch recorded; a launch made below Python, through ctypes or a native
+# extension, or through a fork_exec other than the wrapped module attribute, is not recorded).
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
