@@ -1992,7 +1992,7 @@ def _entry_cannot_evaluate(what):
     return 2
 
 
-if __name__ == "__main__":
+def _entry():
     # exit 0 (or 1) only by an explicit normal return: the status is main()'s only when it returns exactly the
     # int 0, 1 or 2; any other return value, and any exception that leaves main() whatever its type or MRO (the
     # bare except catches one whose MRO leaves out BaseException too), ends the gate with exit 2, but for a
@@ -2013,3 +2013,7 @@ if __name__ == "__main__":
         raise SystemExit(status)
     _selftest_exit_report.exit_with(status)   # armed: raises the exit itself
     raise SystemExit(_entry_cannot_evaluate("exit_with() returned instead of ending the process"))
+
+
+if __name__ == "__main__":
+    _entry()
