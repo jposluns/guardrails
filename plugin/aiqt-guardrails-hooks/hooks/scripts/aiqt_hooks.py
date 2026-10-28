@@ -14647,6 +14647,42 @@ def _gate_runtime_text(text):
             or ("(" in text and not _GATE_EXTGLOB_HEADS.isdisjoint(text)))
 
 
+# A character a word built at run time holds (_gate_runtime_at): one of _OPAQUE_WORD_CHARS, a '~', or an extglob
+# opener's '@', '+' or '!' with only characters a de-quoted reading removes (_GATE_READING_DROPS) before its '('.
+_GATE_RUNTIME_START_RE = re.compile(r"[$`*?\[{~]|[@+!]['\"$\n\\]*\(")
+
+
+def _gate_runtime_may_hit(text):
+    """False when no walk of _gate_runtime_bypass over a de-quoted reading of text (_gate_dequoted_words,
+    _gate_bash_readings) can give a hit, so no reading of text need be built; True otherwise. Each walk gives a hit
+    only through a roster verb word (_NOVERIFY_VERBS) after the word it starts at: a word built at run time
+    (_gate_runtime_reading, the extglob read) or a word naming git in a reading of text with every standalone git
+    masked out (_gate_runtime_masked_git, _gate_assembled_reading). Only an ANSI-C $'...' escape decodes a
+    character text does not hold, and that needs both a '$' and a backslash. Without one of them, a reading only
+    removes characters (_GATE_READING_DROPS) and splits what is left, in text's order, so a word is a run of text's
+    own characters with only removed ones between them: a roster verb word stands in text with those removed, after
+    the first character a word built at run time can hold (_GATE_RUNTIME_START_RE), and a word naming git leaves
+    'git' in the masked text with those removed and lowercased (_gate_text_may_name_git). Text with no such
+    character (_gate_runtime_text), with no roster verb, or with no such 'git' and no roster verb after that first
+    character, gives None however it is read; a slice of text gives False wherever text does. A few translates and
+    substring tests, where the readings take several passes per character and per word, so a long command that
+    holds a '$' and no roster verb after it costs those passes, not the readings; one with no roster verb costs one."""
+    if not _gate_runtime_text(text):
+        return False
+    if "$" in text and chr(92) in text:
+        return True
+    plain = text.translate(_GATE_READING_DROPS)
+    if not any(verb in plain for verb in _NOVERIFY_VERBS):
+        return False
+    if "git" in _gate_runtime_masked_git(text).translate(_GATE_READING_DROPS).lower():
+        return True
+    start = _GATE_RUNTIME_START_RE.search(text)
+    if start is None:
+        return False
+    tail = text[start.start() + 1:].translate(_GATE_READING_DROPS)
+    return any(verb in tail for verb in _NOVERIFY_VERBS)
+
+
 def _gate_runtime_hit(words, k, tilde=False):
     """(word, sub, what) when, after words[k], a word built at run time that may be git, a roster verb carries a
     hook-skip spelling for it (_gate_any_word_bypass) or a later word is built at run time too (_gate_runtime_at,
@@ -14847,11 +14883,11 @@ def _gate_split_spans(text):
 def _gate_runtime_piece_hit(piece):
     """The hit of the first de-quoted reading of piece (_gate_dequoted_words, _gate_bash_readings) that gives one
     (_gate_runtime_reading), or of the same reading of piece with every standalone git masked out, a git glued
-    to a '-' left intact (_gate_runtime_masked_git, _gate_assembled_reading), else None. No reading is built when piece
-    cannot hold a word built at run time (_gate_runtime_text), the readings of piece serve both walks when it
-    holds no such git, and none of the masked piece is built when it holds no character a reading removes
+    to a '-' left intact (_gate_runtime_masked_git, _gate_assembled_reading), else None. No reading is built when no
+    walk over a reading of piece can give a hit (_gate_runtime_may_hit), the readings of piece serve both walks when
+    it holds no such git, and none of the masked piece is built when it holds no character a reading removes
     (_GATE_ASSEMBLY_CHARS) and no 'git' in any case, since then no reading of it names git."""
-    if not _gate_runtime_text(piece):
+    if not _gate_runtime_may_hit(piece):
         return None
     tilde = _GATE_TILDE_START_RE.search(piece) is not None
     readings = (_gate_dequoted_words(piece),) + _gate_bash_readings(piece)
@@ -14933,9 +14969,10 @@ def _gate_runtime_bypass(text):
     built at run time with no dash-prefixed option token in the text, after any roster verb and behind any
     word built at run time that may be git ($G commit $O, $G commit {-nv,}, $G commit ${P:--nv}, $G commit ?nv,
     $G commit ~, $G push $L, sudo $G commit $O, /usr/bin/g?t commit $O), are not read. The readings of a piece,
-    and of a longer text, are built only when it can hold such a word (_gate_runtime_text). Linear in the length
-    of text."""
-    if not _gate_runtime_text(text):
+    and of a longer text, are built only when a walk over them can give a hit (_gate_runtime_may_hit: both a '$'
+    and a backslash, a roster verb after a character a word built at run time can hold, or one anywhere with a git
+    left in the masked text), and text that gives none is not split either. Linear in the length of text."""
+    if not _gate_runtime_may_hit(text):
         return None
     pieces, spans = _gate_split_spans(text)
     for start, end in spans:

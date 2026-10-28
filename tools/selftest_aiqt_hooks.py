@@ -3075,6 +3075,162 @@ def _gate_read_cost_edge_failures():
     return out
 
 
+# Texts for the run-time word reading's pre-filter (_gate_runtime_may_hit): a word built at run time (a '$', a
+# backquote, a glob, a brace, a tilde, an extglob opener, one with a quote before its '(') before a roster verb that
+# carries a hook-skip spelling or has a word built at run time after it; that verb split by quote characters, by a
+# '$' before a quote, by a backslash and by a backslash-newline pair, or coded in an ANSI-C escape; a git a reading
+# assembles or an option word adds, before a roster verb with a word built at run time after it; and texts the walk
+# passes over: no roster verb, a roster verb only before the first such character, and a standalone git.
+_GATE_RUNTIME_FAST_TEXTS = (
+    "$G commit -nv", "$G commit $O", "$G co'm'mit -nv", '$G co"mm"it -nv', "$G co$'m'mit -nv",
+    "`x` com" + chr(92) + "mit -nv", "`x` com" + chr(92) + "\nmit -nv", "$G $'" + chr(92) + "x63ommit' -nv",
+    "g?t am -n", "{g,}it merge --no-v", "~ push --no-verify", "@(git) commit -nv", "+'('gi)t commit -nv",
+    "g'i't commit $O", "x -x-git commit $O", "git commit -m x; echo $y", "echo $y", "git log $x", "commit $x -nv",
+    "git commit $O", "echo 'a b' $x c")
+# The parts a random text's words are made of, one to three each.
+_GATE_RUNTIME_FAST_PARTS = ("$G", "$", "`x`", "`", "*", "?", "[", "{g,}", "~", "@(", "+", "(", ")", "'", '"', chr(92),
+                            "\n", ";", "commit", "co", "mmit", "am", "push", "git", "g", "it", "-nv", "--no-v",
+                            "$'" + chr(92) + "x63'", "x")
+
+
+def _gate_runtime_full(text):
+    """_gate_runtime_bypass(text) with every split and reading built: its pre-filter is replaced by one that is always
+    True for the call and restored after it."""
+    may = aiqt_hooks._gate_runtime_may_hit
+    aiqt_hooks._gate_runtime_may_hit = lambda _text: True
+    try:
+        return aiqt_hooks._gate_runtime_bypass(text)
+    finally:
+        aiqt_hooks._gate_runtime_may_hit = may
+
+
+def _gate_runtime_fast_failures(count=4000, seed=20261028):
+    """(gw-rt-fast) _gate_runtime_bypass, which passes over text in which _gate_runtime_may_hit says no walk over a
+    reading can give a hit, gives the full walk's result (every split and reading built, _gate_runtime_full) on
+    _GATE_RUNTIME_FAST_TEXTS and `count` seeded random texts of up to six blank-separated words, each made of one to
+    three _GATE_RUNTIME_FAST_PARTS, and (gw-rt-fast-hit) that test is never False on a text the full walk gives a
+    hit. The corpus must hold texts the test passes over though they hold a character a word built at run time can
+    hold, hits, and hits whose raw text holds no roster verb after the first such character, so only a reading's
+    removed characters or an escape make one. Six wrong tests (one reading the raw text, one keeping the newline,
+    one keeping the '$', one ignoring escapes, one ignoring a git the masked text leaves, and one reading after the
+    last such character instead of the first) must each be caught by the gw-rt-fast-hit check, so it
+    discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_GATE_RUNTIME_FAST_TEXTS)
+    for _ in range(count):
+        texts.append(" ".join("".join(rng.choice(_GATE_RUNTIME_FAST_PARTS) for _ in range(rng.randint(1, 3)))
+                              for _ in range(rng.randint(0, 6))))
+    drops = aiqt_hooks._GATE_READING_DROPS
+
+    def starts(text):
+        return [m.start() for m in aiqt_hooks._GATE_RUNTIME_START_RE.finditer(text)]
+
+    def verb_after(text, at, table):
+        return any(verb in text[at + 1:].translate(table) for verb in aiqt_hooks._NOVERIFY_VERBS)
+
+    def test_with(table=drops, escape=True, git=True, pick=min):
+        def test(text):
+            at = starts(text)
+            return aiqt_hooks._gate_runtime_text(text) and (
+                (escape and "$" in text and chr(92) in text)
+                or (git and "git" in aiqt_hooks._gate_runtime_masked_git(text).translate(drops).lower())
+                or (bool(at) and verb_after(text, pick(at), table)))
+        return test
+
+    may = aiqt_hooks._gate_runtime_may_hit
+    full = [(text, _gate_runtime_full(text)) for text in texts]
+    hits = [text for text, want in full if want is not None]
+    passed = [text for text in texts if aiqt_hooks._gate_runtime_text(text) and not may(text)]
+    hidden = [text for text in hits if not starts(text) or not verb_after(text, starts(text)[0], {})]
+    if not passed or not hits or not hidden:
+        out.append("(gw-rt-fast-corpus) the corpus must hold texts the test passes over though they hold a character a "
+                   "word built at run time can hold ({}), hits ({}), and hits only a reading's removed characters or "
+                   "an escape make ({})".format(len(passed), len(hits), len(hidden)))
+    for text in [text for text in hits if not may(text)][:3]:
+        out.append("(gw-rt-fast-hit) _gate_runtime_may_hit({!r}) is False, but the full walk gives a hit".format(text))
+    mismatches = [(text, aiqt_hooks._gate_runtime_bypass(text), want) for text, want in full]
+    for text, got, want in [m for m in mismatches if m[1] != m[2]][:3]:
+        out.append("(gw-rt-fast) _gate_runtime_bypass({!r}) gave {!r}, the full walk {!r}".format(text, got, want))
+    wrong = (
+        ("raw", test_with(table={})),
+        ("newline", test_with(table=str.maketrans("", "", "'\"$" + chr(92)))),
+        ("dollar", test_with(table=str.maketrans("", "", "'\"\n" + chr(92)))),
+        ("escape", test_with(escape=False)),
+        ("git", test_with(git=False)),
+        ("last", test_with(pick=max)),
+    )
+    for name, test in wrong:
+        if all(test(text) for text in hits):
+            out.append("(gw-rt-fast-red-{}) a wrong pre-filter passes the hit check".format(name))
+    return out
+
+
+# The budget of the run-time word reading's cost row (gw-rt-cost): the CPU time of _gate_runtime_bypass over a whole
+# command must stay under this share of the CPU time of one lex of the same command.
+_GATE_RUNTIME_COST_SHARE = 0.25
+# The lex-cost inputs the row times: long commands holding a character a word built at run time can hold and no
+# roster verb after it, the four on which that reading once took gate_weakening to several times main's time.
+_GATE_RUNTIME_COST_INPUTS = ("long-comment-line", "deep-nesting", "floor-long-words", "main-reading-long-words")
+
+
+def _gate_runtime_cost_problems(lex, read, held, result):
+    """What one timing of the gw-rt-cost row got wrong, as a list of phrases ([] for none): lex and read are the CPU
+    seconds of one lex of the command and of _gate_runtime_bypass over it, held is whether the command holds a
+    character a word built at run time can hold (_gate_runtime_text) and result is what _gate_runtime_bypass gave."""
+    problems = []
+    if not held:
+        problems.append("it holds no character a word built at run time can hold, so the row no longer times the read "
+                        "past the run-time character test")
+    if result is not None:
+        problems.append("the read found {!r}, so the row no longer times it to its end".format(result))
+    if read >= _GATE_RUNTIME_COST_SHARE * lex:
+        problems.append("the read took {:.4f} s of CPU, {:.2f} times one lex of the command ({:.3f} s); the budget is "
+                        "under {:g} of the lex".format(read, read / lex if lex > 0 else float("inf"), lex,
+                                                       _GATE_RUNTIME_COST_SHARE))
+    return problems
+
+
+def _gate_runtime_cost_edge_failures():
+    """(gw-rt-cost-edge) The row's own checks at each end: a read just under, exactly at and just over the budget's
+    share of the lex (the last two fail), a command with no character a word built at run time can hold (it fails),
+    and a read that found a hit (it fails), so a comparison turned the wrong way or made inclusive at the wrong end is
+    caught here rather than by a timing."""
+    out = []
+    lex = 0.4
+    budget = _GATE_RUNTIME_COST_SHARE * lex
+    for label, read, held, result, wanted in (
+            ("under", budget * 0.99, True, None, 0),
+            ("at", budget, True, None, 1),
+            ("over", budget * 1.01, True, None, 1),
+            ("unheld", 0.0, False, None, 1),
+            ("found", 0.0, True, ("$G", "commit", "the short -n (--no-verify) in '-n'"), 1)):
+        got = _gate_runtime_cost_problems(lex, read, held, result)
+        if len(got) != wanted:
+            out.append("(gw-rt-cost-edge-{}) the row's checks gave {} problem(s), want {}: {}".format(
+                label, len(got), wanted, got))
+    return out
+
+
+def _gate_runtime_cost_failures(cost_inputs):
+    """(gw-rt-cost-<input>) On each lex-cost input _GATE_RUNTIME_COST_INPUTS names (cost_inputs holds the lex-cost
+    rows' (name, command) pairs), the CPU time of _gate_runtime_bypass over the whole command against one lex of the
+    same command (_lex_readings, _gate_runtime_cost_problems), each timed once with time.process_time."""
+    out = []
+    commands = dict(cost_inputs)
+    for name in _GATE_RUNTIME_COST_INPUTS:
+        command = commands[name]
+        t0 = time.process_time()
+        aiqt_hooks._lex_readings(command)
+        lex = time.process_time() - t0
+        t0 = time.process_time()
+        got = aiqt_hooks._gate_runtime_bypass(command)
+        read = time.process_time() - t0
+        for problem in _gate_runtime_cost_problems(lex, read, aiqt_hooks._gate_runtime_text(command), got):
+            out.append("(gw-rt-cost-{}) on a {}-character command, {}".format(name, len(command), problem))
+    return out
+
+
 _GW_FLOOR = 0.1
 _GW_SIZES = 9
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
@@ -14668,6 +14824,21 @@ def _main_isolated(monitor):
             for _rd_problem in _gate_read_cost_problems(_rd_lex, _rd_read, _rd_longest, _rd_got):
                 failures.append("(gw-read-cost-{}) on a {}-character command, {}".format(
                     _rd_name, len(_rd_cmd), _rd_problem))
+        # RUN-TIME WORD COST. gate_weakening's parsed path also reads the whole command for a word built at run time
+        # that may be git (_gate_runtime_bypass): a raw split, then each piece read four ways and again with every
+        # standalone git masked out. Built for every piece holding a '$' or another such character, those readings
+        # took gate_weakening to several times main's time: on one host, as the min of five runs, 0.185 s and 0.313 s
+        # on long-comment-line and floor-long-words against main's 0.031 s and 0.136 s, and over the 1 s bound above
+        # on a CI runner. A walk gives a hit only through a roster verb after the word it starts at, so text with no
+        # roster verb after its first such character, and no git its masked readings can join, now gives None before
+        # any split or reading is built (_gate_runtime_may_hit). This row holds that read to a linear budget the
+        # host's speed cancels from: on each input _GATE_RUNTIME_COST_INPUTS names, the CPU time of
+        # _gate_runtime_bypass over the whole command must stay under a quarter of the CPU time of one lex of it
+        # (_gate_runtime_cost_problems). Over five runs on one host the read took at most 0.06 of the lex with that
+        # pass-over and at least 0.47 of it with the readings built behind the run-time character test alone
+        # (_gate_runtime_text), so the row fails the latter on every input; the clock is time.process_time.
+        failures.extend(_gate_runtime_cost_edge_failures())
+        failures.extend(_gate_runtime_cost_failures(_cost_inputs))
         # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
         # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
         # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes
@@ -17484,22 +17655,34 @@ def _main_isolated(monitor):
         # piece of the split a here-document body changes only where it holds such a character, and for the text
         # from a piece holding an ANSI-C escaped quote or a case word, before the last piece, to the end: a reading
         # only removes characters or decodes an ANSI-C escape, which needs a '$', so a piece with none has no
-        # run-time word to start at. The readings of a piece with every standalone git masked out are built
-        # only where masking changed it and it still holds a quote, a backslash or a 'git' a reading can join.
+        # run-time word to start at. A walk gives a hit only through a roster verb after its start, so each also
+        # needs both a '$' and a backslash, or a roster verb after its first such character, or one anywhere with a
+        # git its masked readings can join (_gate_runtime_may_hit): each text with only an off-roster verb builds
+        # none, and its twin with commit after that character builds them. The readings of a piece with every
+        # standalone git masked out are built only where masking changed it and it still holds a quote, a backslash
+        # or a 'git' a reading can join.
         _gw_built = []
         _gw_real_readings = aiqt_hooks._gate_bash_readings
         aiqt_hooks._gate_bash_readings = lambda text: _gw_built.append(text) or _gw_real_readings(text)
         try:
-            for _gw_text, _gw_want in (("make commit -n; git log -n 3", []), ("ls; $G log", [" $G log"]),
+            for _gw_text, _gw_want in (("make commit -n; git log -n 3", []), ("ls; $G log", []),
+                                       ("ls; $G commit", [" $G commit"]),
                                        ("make g++; echo hi!", []), ("make (x); echo hi", []),
-                                       ("ls @(a); log", ["ls @(a)", "ls @(a); log"]),
-                                       ("ls @(a)", ["ls @(a)"]), ("ls ~; log", ["ls ~"]),
+                                       ("ls @(a); log", []),
+                                       ("ls @(a) commit; log", ["ls @(a) commit", "ls @(a) commit; log"]),
+                                       ("ls @(a)", []), ("ls @(a) commit", ["ls @(a) commit"]),
+                                       ("ls ~; log", []), ("ls ~ commit; log", ["ls ~ commit"]),
                                        ("printf $'a\\'; log", ["printf $'a\\'", "printf $'a\\'; log"]),
                                        ("printf $'a\\'", ["printf $'a\\'"]),
-                                       ("cat <<E\n'\nE\n$x", ["'\nE\n$x", "$x"]),
-                                       ("git log $x", ["git log $x"]), ("g'i't log $x", ["g'i't log $x"]),
-                                       ("git log \"$x\"", ["git log \"$x\"", "xxx log \"$x\""]),
-                                       ("git log -Sgit $x", ["git log -Sgit $x", "xxx log -Sgit $x"])):
+                                       ("cat <<E\n'\nE\n$x", []),
+                                       ("cat <<E\n'\nE\n$x commit", ["'\nE\n$x commit", "$x commit"]),
+                                       ("git log $x", []), ("git log $x commit", ["git log $x commit"]),
+                                       ("g'i't log $x", []), ("g'i't log $x commit", ["g'i't log $x commit"]),
+                                       ("git log \"$x\"", []),
+                                       ("git log \"$x\" commit", ["git log \"$x\" commit", "xxx log \"$x\" commit"]),
+                                       ("git log -Sgit $x", []),
+                                       ("git log -Sgit $x commit", ["git log -Sgit $x commit",
+                                                                    "xxx log -Sgit $x commit"])):
                 del _gw_built[:]
                 if _gw_rtb is not None:
                     _gw_rtb(_gw_text)
@@ -17508,6 +17691,8 @@ def _main_isolated(monitor):
                                     .format(_gw_text, _gw_built, _gw_want))
         finally:
             aiqt_hooks._gate_bash_readings = _gw_real_readings
+        # That pre-filter keeps every result of the full walk (_gate_runtime_fast_failures).
+        failures.extend(_gate_runtime_fast_failures())
         # Direct unit cases for the tilde reading: the tilde word (each prefix form, a '/' just after the prefix and
         # later, a '~' later in the word), its place in a reading (the first word counts only with an unquoted
         # tilde at a word start in the raw text, a later word always), and that raw-text start (after the text's
@@ -17867,11 +18052,13 @@ def _main_isolated(monitor):
         #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) times the
         #   here-document mask and the second split it gives: each body's quote pairs with the next one for the
         #   first split, so the pieces of the two splits differ throughout. gw-lin-runtime-case (`case;` + ` $x log
-        #   -m y;`*n) times the read from a case word's piece to the end of the text, over many raw pieces.
-        #   gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x`) times the walk from each quote-assembled git
-        #   (_gate_assembled_reading) over one piece in which every git's -C takes the next git as its value, so
-        #   each git's subcommand is the one log at the end: the tables built from the end find each in one step,
-        #   where a subcommand search restarted at every git reads every later word again, quadratic.
+        #   -m y;`*n + ` commit -m y`) times the read from a case word's piece to the end of the text, over many
+        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) times the walk from each
+        #   quote-assembled git (_gate_assembled_reading) over one piece in which every git's -C takes the next git
+        #   as its value, so each git's subcommand is the one log near the end: the tables built from the end find
+        #   each in one step, where a subcommand search restarted at every git reads every later word again,
+        #   quadratic. Every runtime row holds a roster verb with no hook-skip spelling and no word built at run
+        #   time after it, since text with no roster verb is passed over before any reading (_gate_runtime_may_hit).
         # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
         # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
         # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
@@ -17896,8 +18083,8 @@ def _main_isolated(monitor):
             ("gw-lin-runtime-extglob", " x commit -m y;", "@(x);", "", _gw_runtime_scan, None),
             ("gw-lin-runtime-tilde", "~ log -m y ", "", "commit -m y", _gw_runtime_scan, None),
             ("gw-lin-runtime-heredoc", "cat <<E\n'$x log\nE\n", "", "commit -m y", _gw_runtime_scan, None),
-            ("gw-lin-runtime-case", " $x log -m y;", "case;", "", _gw_runtime_scan, None),
-            ("gw-lin-runtime-assembled", " g'i't -C", "", " x log $x", _gw_runtime_scan, None),
+            ("gw-lin-runtime-case", " $x log -m y;", "case;", " commit -m y", _gw_runtime_scan, None),
+            ("gw-lin-runtime-assembled", " g'i't -C", "", " x log $x commit", _gw_runtime_scan, None),
         )
         failures.extend(_gw_lin_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
