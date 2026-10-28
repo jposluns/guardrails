@@ -1632,14 +1632,17 @@ def _root_binding(root_fd):
     reconcile`'s help does, and states the remedy that resolves it, which the self-test executes: for a
     phase, a fresh run, whose phases extend the base it writes there; for reconcile, the operator's own act
     outside any OPF operation, which first tells from the open transaction's INTENT whether this tree holds
-    its apply: where it does, restoring the prestate from that transaction's verified preimages and only then
-    removing that transaction from the journal, and where it was copied in alone, restoring nothing and moving
-    that transaction out of the product root (_reconcile_run); for init-store, the operator's own act
-    outside any OPF operation, moving that run's adoption archive, evidence, Move destinations and journal
-    preimages out of `.working` to a place outside the product root, never deleting them, and only then
-    removing that run's journal transactions, any substrate record it names (beneath the substrate's control
-    root, _substrate_record_said) and the rest of what that run left beneath `.working`
-    (_binding_cleared_by_hand)."""
+    its apply (its ops read as one apply prefix, path by path only where every op is a create from absence):
+    where it does, restoring the prestate
+    from that transaction's verified preimages and only then removing that transaction from the journal, and
+    where it was copied in alone, restoring nothing and moving that transaction out of the product root
+    (_reconcile_run); for init-store, the operator's own act outside any OPF operation, moving that run's
+    adoption archive, evidence, Move destinations and journal preimages out of `.working` to a place outside
+    the product root, never deleting them, and only then removing that run's journal transactions, any
+    substrate record it names (beneath the substrate's control root, _substrate_record_said) and the rest of
+    what that run left beneath `.working` (_binding_cleared_by_hand). A substrate record in a common git
+    directory other worktrees share is never removed by either remedy: it is moved out and kept until no
+    other worktree's journal names its operation (_substrate_record_shared)."""
     st = os.fstat(root_fd)
     return dict(device=st.st_dev, inode=st.st_ino)
 
@@ -1691,6 +1694,38 @@ def _substrate_record_said(product_root, op_id):
     return os.path.join(desc, tail)
 
 
+def _substrate_record_shared(product_root):
+    """Whether the git directory of `product_root` differs from the common git directory its substrate record
+    lies beneath (_substrate_record_said): a linked worktree, or a product root nested in one. That record then
+    lies where every worktree of the repository looks, so another worktree's journal may name the same
+    operation, and a remedy keeps the record rather than deleting it. True as well when git cannot answer here,
+    so a remedy that cannot tell keeps it."""
+    import _opf_oplock
+    try:
+        out = _opf_oplock._git_rev_parse_output(str(product_root), "--absolute-git-dir", "--git-common-dir")
+    except (_opf_oplock.OpLockError, OSError):
+        return True
+    lines = out.split("\n")
+    if not out.endswith("\n") or len(lines) != 3 or not lines[0] or not lines[1]:
+        return True
+    common = lines[1] if os.path.isabs(lines[1]) else os.path.join(str(product_root), lines[1])
+    # only which text the remedy states turns on this, never a trust decision, so symlinks may resolve here
+    return os.path.realpath(lines[0]) != os.path.realpath(common)
+
+
+def _substrate_record_kept(product_root, op_id):
+    """The step a binding-mismatch remedy states for operation `op_id`'s substrate record where it lies in a
+    common git directory other worktrees share (_substrate_record_shared): moved out, kept, never deleted,
+    since another worktree's journal may name that operation and that worktree's recovery needs the record
+    back at its path."""
+    return ("moves its substrate record of operation {} ({}), if one is there, to a place outside this product "
+            "root, keeping it, never deleting it: it lies in the common git directory every worktree of this "
+            "repository shares, so another worktree's journal may name that operation, and that worktree's "
+            "reconcile and recovery need the record put back at that path; the operator deletes the kept record "
+            "only once no other worktree's journal names that operation".format(
+                op_id, _substrate_record_said(product_root, op_id)))
+
+
 def _binding_cleared_by_hand(run_id, op_id=None, product_root=None):
     """The remedy every init-store refusal on a binding mismatch states (spec 14.2): nothing a later run does
     consumes that journal state, so a fresh run's init-store refuses too, and only the operator's own act,
@@ -1700,12 +1735,17 @@ def _binding_cleared_by_hand(run_id, op_id=None, product_root=None):
     operator FIRST moves each of them out of `.working` to a place outside the product root, never deleting
     it, and only then removes the run's journal transactions, the substrate record of `op_id` (beneath the
     control root of `product_root`, _substrate_record_said) when one is named, and the rest of what that run
-    left beneath `.working`. Each path is formatted from the store layout, never validated, so the refusal
-    names whatever run the journal records (each site's self-test rows execute exactly this, in this order,
-    and find every original's bytes outside the product root)."""
+    left beneath `.working`. Where that record lies in a common git directory other worktrees share
+    (_substrate_record_shared), it is not removed: the operator moves it out, kept, and deletes it only once no
+    other worktree's journal names that operation (_substrate_record_kept). Each path is formatted from the
+    store layout, never validated, so the refusal names whatever run the journal records (each site's
+    self-test rows execute exactly this, in this order, and find every original's bytes outside the product
+    root)."""
     journal = "{}/{}".format(JOURNAL_REL, run_id)
-    record = ""
-    if op_id is not None:
+    record = kept = ""
+    if op_id is not None and _substrate_record_shared(product_root):
+        kept = ", and then " + _substrate_record_kept(product_root, op_id)
+    elif op_id is not None:
         record = ", its substrate record of operation {} ({})".format(
             op_id, _substrate_record_said(product_root, op_id))
     return ("every later init-store refuses, a fresh run's included, until the operator, outside any OPF "
@@ -1713,10 +1753,10 @@ def _binding_cleared_by_hand(run_id, op_id=None, product_root=None):
             "{}/{}/{}/, any file it moved to {}/ and the preimages of its journal transactions ({}/preimages/ "
             "and {}.<phase>/preimages/) out of {} to a place outside this product root (having first copied "
             "from them any original wanted back at its source path), and only then removes its journal "
-            "transactions ({} and {}.<phase>){} and the rest of what it left beneath {}; a fresh run is then "
+            "transactions ({} and {}.<phase>){} and the rest of what it left beneath {}{}; a fresh run is then "
             "no longer refused on it".format(
                 run_id, store.ARCHIVE_REL, KIND, run_id, store.IMPORTED_REL, KIND, run_id, _MOVED_ROOT,
-                journal, journal, store.WORKING_DIRNAME, journal, journal, record, store.WORKING_DIRNAME))
+                journal, journal, store.WORKING_DIRNAME, journal, journal, record, store.WORKING_DIRNAME, kept))
 
 
 def journal_state(root_fd, journal_root):
@@ -2101,13 +2141,23 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                     # preimages are another tree's bytes), so the remedy says how the operator tells and restores
                     # only in the first case: following it never writes another tree's prestate over this one,
                     # and a live file it would replace or cannot attribute is kept outside the product root.
+                    # The comparison is one apply prefix, never path by path: a tree holding none of the paths
+                    # holds every mkdir and create op's prestate and every remove op's poststate, so a
+                    # path-by-path match would read a journal copied alone into a tree lacking the sources as
+                    # holding the apply and restore another tree's preimages there. Only ops that are all creates
+                    # from absence (an init-store transaction's, published in the substrate's own order) read
+                    # path by path, since none has a preimage to put back.
                     # An init-store transaction's reversal also clears what its ops cannot name, and then its
                     # substrate record (_init_store_scrub); a remedy naming neither leaves every later init-store
-                    # refused on that record or on the run's leftovers, with no remedy named.
+                    # refused on that record or on the run's leftovers, with no remedy named. Where that record
+                    # lies in a common git directory other worktrees share, another worktree's journal may name
+                    # the same operation, so both branches keep it outside rather than delete it.
                     restored = record = ""
                     if op_id is not None:
-                        record = "its substrate record of operation {} ({}) if one is there".format(
-                            op_id, _substrate_record_said(product_root, op_id))
+                        record = (_substrate_record_kept(product_root, op_id)
+                                  if _substrate_record_shared(product_root) else
+                                  "removes its substrate record of operation {} ({}) if one is there".format(
+                                      op_id, _substrate_record_said(product_root, op_id)))
                         restored = (", then removes what its run left that no op names, as an init-store reversal "
                                     "does: each staging leftover beside a member ({}), the store lease {} once no "
                                     "opf run is live, and each of {} and {} that its INTENT header records it "
@@ -2116,7 +2166,7 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                                                      "{}/{}".format(store.WORKING_DIRNAME,
                                                                     store.DEFAULT_MACHINE_SUBDIR),
                                                      store.WORKING_DIRNAME, record))
-                        record = ", and removes " + record
+                        record = ", and " + record
                     raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the open adoption transaction {!r} {} "
                                            "(spec 14.2). Nothing was written; a later reconcile refuses the "
                                            "same way and every run refuses into reconcile until the operator, "
@@ -2124,10 +2174,18 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                                            "follows, after which reconcile finds nothing to reconcile. The "
                                            "operator first tells whether this tree holds its apply by comparing "
                                            "each path its INTENT (in {}/frames.log) names with that op's recorded "
-                                           "prestate and poststate: this tree holds it (the whole tree moved, was "
-                                           "restored or was copied with the transaction) only when every such "
-                                           "path holds one of the two, as an absence, a directory, or a file with "
-                                           "the sha256 recorded where one is; a path holding neither means the "
+                                           "prestate and poststate, each as an absence, a directory, or a file "
+                                           "with the sha256 recorded where one is: this tree holds it (the whole "
+                                           "tree moved, was restored or was copied with the transaction) only when "
+                                           "the ops read as ONE apply prefix, every op through some op k (none, "
+                                           "where no op landed) at its recorded poststate and every op after k at "
+                                           "its prestate. A path-by-path match is not enough, since a tree holding "
+                                           "none of the paths holds every mkdir and create op's prestate and every "
+                                           "remove op's poststate; only where every op is a create from absence "
+                                           "(an init-store transaction's, whose substrate publishes its members in "
+                                           "its own order, not the order its INTENT lists them) does each op at its "
+                                           "prestate or poststate, in any combination, hold it, since none has a "
+                                           "preimage to put back. Ops that read as no one prefix mean the "
                                            "transaction was copied in alone, or the tree changed after its run. "
                                            "Where this tree holds its apply, removing the transaction would drop "
                                            "its preimages ({}/preimages/) and leave whatever part of its apply "
@@ -2143,7 +2201,11 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                                            "recorded mode and checking the put-back bytes against that sha256 "
                                            "before going on, so no archive copy is deleted before its source "
                                            "verifies (a preimage or put-back that does not match stops the "
-                                           "restoration there, the transaction kept); only then does the operator "
+                                           "restoration there, the transaction kept as it stands, and the "
+                                           "transaction then needs a person: no OPF operation and no further step "
+                                           "of this remedy settles it, and the source's original bytes may lie in "
+                                           "the archive copy a create op of the transaction made, whose sha256 that "
+                                           "create op records); only then does the operator "
                                            "remove the transaction from the journal ({}){}. Otherwise the operator "
                                            "restores nothing, since its preimages may hold another tree's bytes, "
                                            "and only moves the transaction out of the journal ({}) to a place "
@@ -15625,8 +15687,13 @@ def _st_intent_ops(root, name):
 
 def _st_holds_apply(root, name):
     """The comparison a reconcile refusal on a binding mismatch has the operator make first: this tree holds the
-    apply of transaction `name` only when every path its INTENT names holds that op's recorded prestate or
-    poststate, as an absence, a directory, or a file with the sha256 recorded where one is."""
+    apply of transaction `name` only when the ops its INTENT lists read as ONE apply prefix, every op through
+    some op k (none, where no op landed) at its recorded poststate and every op after k at its prestate, each
+    as an absence, a directory, or a file with the sha256 recorded where one is. A path-by-path match is not
+    enough: a tree holding none of the paths holds every mkdir and create op's prestate and every remove op's
+    poststate. Where every op is a create from absence (an init-store transaction's, whose substrate publishes
+    its members in its own order, not the order the INTENT lists them), each op at its prestate or poststate,
+    in any combination, holds it: none has a preimage to put back."""
     def holds(path, recorded):
         if recorded.get("kind") == "absent":
             return not os.path.lexists(path)
@@ -15637,9 +15704,12 @@ def _st_holds_apply(root, name):
         digest = recorded.get("sha256", recorded.get("content-sha256"))
         with open(path, "rb") as fh:
             return digest is None or _sha256(fh.read()) == digest
-    return all(holds(os.path.join(root, op["path"]), op["prestate"])
-               or holds(os.path.join(root, op["path"]), op.get("poststate") or dict(kind="file"))
-               for op in _st_intent_ops(root, name))
+    ops = _st_intent_ops(root, name)
+    post = [holds(os.path.join(root, op["path"]), op.get("poststate") or dict(kind="file")) for op in ops]
+    pre = [holds(os.path.join(root, op["path"]), op["prestate"]) for op in ops]
+    if all(op["op"] == "create" and op["prestate"].get("kind") == "absent" for op in ops):
+        return all(p or q for p, q in zip(pre, post))
+    return any(all(post[:k]) and all(pre[k:]) for k in range(len(ops) + 1))
 
 
 def _st_keep(root, rel, kept):
@@ -15686,7 +15756,7 @@ def _st_restored_by_hand(root, name, kept):
     return True
 
 
-def _st_settled_by_hand(root, name, kept, record=None):
+def _st_settled_by_hand(root, name, kept, record=None, keep_record=False):
     """The whole remedy a reconcile refusal on a binding mismatch states for transaction `name`, in its order:
     the comparison first; where this tree holds the apply, the restoration and only then the transaction's
     removal (the transaction stays where the restoration stops); otherwise nothing restored and the transaction
@@ -15694,8 +15764,9 @@ def _st_settled_by_hand(root, name, kept, record=None):
     the refusal names for an init-store transaction: where this tree holds the apply, what the run left that no
     op names goes once the transaction is removed (each staging leftover beside a member, the store lease, and
     each of the machine home and `.working` the INTENT header records it created, if then empty), and only
-    then that record, if one is there; otherwise only that record, if one is there. Returns whether the
-    comparison read as holding the apply."""
+    then that record, if one is there; otherwise only that record, if one is there. With `keep_record`, as the
+    refusal states where that record lies in a common git directory other worktrees share, the record is moved
+    to `kept`/<its name> instead of removed. Returns whether the comparison read as holding the apply."""
     held = _st_holds_apply(root, name)
     if held:
         intent = _st_intent(root, name)
@@ -15718,7 +15789,10 @@ def _st_settled_by_hand(root, name, kept, record=None):
                     os.rmdir(os.path.join(root, rel))
     else:
         _st_keep(root, "{}/{}".format(JOURNAL_REL, name), kept)
-    if record is not None and os.path.isdir(record):
+    if record is not None and os.path.isdir(record) and keep_record:
+        os.makedirs(kept, exist_ok=True)
+        os.rename(record, os.path.join(kept, os.path.basename(record)))
+    elif record is not None and os.path.isdir(record):
         shutil.rmtree(record)
     return held
 
@@ -15876,7 +15950,7 @@ def _reconcile_binding_self_test(check):
               and "checking that the preimage its prestate payload names has the prestate's recorded "
                   "sha256" in (why or "")
               and "(a preimage or put-back that does not match stops the restoration there, the transaction "
-                  "kept)" in (why or "")
+                  "kept as it stands, and the transaction then needs a person" in (why or "")
               and held and archive_copy == files[sources[1]] and not os.path.lexists(t4 / sources[1])
               and state(t4) == "open", (held, archive_copy, state(t4)))
         t3.mkdir()
@@ -15893,7 +15967,7 @@ def _reconcile_binding_self_test(check):
         after = refusal_of(t3)
         check("reconcile-journal-only-copy-remedy-keeps-originals",
               got == RECONCILE_UNCLASSIFIABLE and "is bound to another product root" in (why or "")
-              and "a path holding neither means the transaction was copied in alone" in (why or "")
+              and "Ops that read as no one prefix mean the transaction was copied in alone" in (why or "")
               and "Otherwise the operator restores nothing, since its preimages may hold another tree's bytes, and "
                   "only moves the transaction out of the journal ({}) to a place outside this product root, keeping "
                   "it".format(txn_rel) in (why or "")
@@ -15901,6 +15975,43 @@ def _reconcile_binding_self_test(check):
               and os.path.isdir(os.path.join(kept, txn_rel, "preimages")) and after == (None, []),
               (held, sorted(rel for rel in set(product(t3)) | set(before) if product(t3).get(rel) != before.get(rel)),
                overwritten(t3, own), after))
+    # The journal copied alone into a tree lacking the source files, T1 interrupted after its first op (a mkdir)
+    # and after both source removals: every path the INTENT names is absent there, which is every mkdir and
+    # create op's prestate and every remove op's poststate, so only the comparison as ONE apply prefix (op 0's
+    # mkdir reads prestate while a later remove reads poststate) reads it as copied in alone. Following the
+    # remedy restores nothing, the tree keeps exactly what it held, and the transaction is kept outside the
+    # product root with its preimages (each red against a path-by-path comparison, which reads it as holding
+    # the apply and writes T1's preimages into this tree, deleting the transaction).
+    for point in ("after-apply-0", "after-apply-12"):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            t1, t3 = Path(temp).resolve() / "t1", Path(temp).resolve() / "t3"
+            t1.mkdir()
+            _root, files = _st_fixture(t1)
+            interrupted(t1, files, point)
+            own = {"README.md": b"T3's own readme\n", "legacy/RULES.md": b"T3's own rules\n"}
+            for rel, data in own.items():
+                os.makedirs(os.path.dirname(t3 / rel), exist_ok=True)
+                with open(t3 / rel, "wb") as fh:
+                    fh.write(data)
+            os.makedirs(t3 / ".working" / "toml")
+            shutil.copytree(t1 / store.JOURNALS_REL, t3 / store.JOURNALS_REL, symlinks=True)
+            before = product(t3)
+            got, why = refusal_of(t3)
+            kept = str(t3) + "-kept"
+            try:
+                held = settled_by_hand(t3, kept)
+            except OSError as exc:
+                held = exc
+            after = refusal_of(t3)
+            check("reconcile-journal-only-copy-into-sourceless-tree-keeps-it-" + point,
+                  got == RECONCILE_UNCLASSIFIABLE
+                  and "only when the ops read as ONE apply prefix, every op through some op k (none, where no op "
+                      "landed) at its recorded poststate and every op after k at its prestate" in (why or "")
+                  and "A path-by-path match is not enough" in (why or "")
+                  and held is False and product(t3) == before and not overwritten(t3, own)
+                  and os.path.isdir(os.path.join(kept, txn_rel, "preimages")) and after == (None, []),
+                  (held, sorted(rel for rel in set(product(t3)) | set(before)
+                                if product(t3).get(rel) != before.get(rel)), after))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = _st_fixture(temp)
         with mock.patch.dict(globals(), dict(_root_binding=lambda root_fd: None)):
@@ -18709,6 +18820,52 @@ def _init_store_git_checks(check, ctx, refused):
               and why.finding == RECONCILE_UNCLASSIFIABLE and said == records[0] and held and after == []
               and res.status == valid and store.resolve_store(open_twin).status == store.RESOLVED,
               observed=(records, str(why), after, res.findings))
+        # A linked worktree's substrate record lies in the common git directory every worktree of the repository
+        # shares. The same OPEN init-store transaction in worktree W of repository M (added by git worktree add,
+        # the killed run's operation lock cleared by a plain recover resume, as above), W then copied to W2: the
+        # reconcile refusal in W2 names the record where it lies in M's git directory, and following its remedy
+        # in W2 moves that record out, kept, never deleting it. W's own transaction still needs it: once the
+        # operator puts it back, as the remedy says, W reconciles to rolled-back and its fresh recover dispatch
+        # publishes (red against a remedy that removes the record: W's reconcile then refuses on a reversal it
+        # can no longer prove).
+        main = init_op._plain_repo(os.path.join(base, "linked"), env)
+        worktree = os.path.join(base, "linkedwt")
+        init_op._git(["worktree", "add", "-q", "--detach", worktree], main, env)
+        os.chmod(worktree, 0o755)
+        rc = _init_store_child(worktree, env, "source:2", row, ctx(worktree, run_id=rid()))
+        init_op.run_init_operation(worktree, recover=True)
+        copied = os.path.join(base, "linkedwtcopy")
+        shutil.copytree(worktree, copied, symlinks=True)
+        opened = [n for n in os.listdir(_journal_root(copied)) if n.endswith("." + INIT_STORE_PHASE)]
+        records = substrate_records(main)
+        linked_op = os.path.basename(records[0]) if len(records) == 1 else None
+        try:
+            why = None
+            reconcile(copied)
+        except ReconcileRefusal as exc:
+            why = exc
+        said = record_named(why, linked_op) if why is not None and linked_op else None
+        keeps = linked_op is not None and (
+            "moves its substrate record of operation {} ({}), if one is there, to a place outside this product root, "
+            "keeping it, never deleting it".format(linked_op, said) in str(why)
+            and "deletes the kept record only once no other worktree's journal names that operation" in str(why))
+        settled = (len(opened) == 1 and _st_settled_by_hand(copied, opened[0], copied + "-kept",
+                                                            said if said in records else None, keep_record=keeps))
+        copy_after = reconcile(copied)
+        kept_record = os.path.join(copied + "-kept", linked_op or "")
+        if linked_op and os.path.isdir(kept_record) and not os.path.lexists(records[0]):
+            os.rename(kept_record, records[0])
+        try:
+            outcomes = reconcile(worktree)
+        except ReconcileRefusal as exc:
+            outcomes = [(exc.finding, str(exc))]
+        res = dispatch(row, ctx(worktree, run_id=rid(), recover=True))
+        check("init-store-linked-worktree-copy-remedy-keeps-shared-record",
+              rc != 0 and len(opened) == 1 and len(records) == 1 and not records[0].startswith(worktree + os.sep)
+              and why is not None and why.finding == RECONCILE_UNCLASSIFIABLE and said == records[0] and keeps
+              and settled and copy_after == [] and "rolled-back" in [outcome for _t, outcome in outcomes]
+              and res.status == valid and store.resolve_store(worktree).status == store.RESOLVED,
+              observed=(records, str(why), copy_after, outcomes, res.findings))
         # files_beneath, the helper every keep-originals row reads, raises on a directory it cannot list, never
         # reading it as holding nothing (red against an os.walk that drops the error and reports no file).
         unlisted = os.path.join(base, "unlisted")
