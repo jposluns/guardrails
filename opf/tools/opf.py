@@ -19314,7 +19314,8 @@ def _cmd_adopt(rest):
           printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
           product files and every transaction as found, and releases any lock or lease it took; its message
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
-          creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
+          creation failed part-way, a journal lock whose release faulted or left it in place):
+          journal-lock-held (a possibly-live owner holds the journal lock, never
           seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
           classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
           listing), store-lease-held (a store pointer at the product root other than the in-root one
@@ -19325,7 +19326,8 @@ def _cmd_adopt(rest):
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
           open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
-          never reported recovered), or store-lease-release-failed (the recovery finished,
+          never reported recovered; also a finished recovery whose journal-lock release faulted or left
+          that lock in place, which stays, named), or store-lease-release-failed (the recovery finished,
           but releasing a store lease this run took faulted: one that could not be released stays, named,
           and one removed before its directory close failed is named as released). Also exit 2: a
           cannot-evaluate root. A leftover store lease an interrupted adoption apply kept (operation
