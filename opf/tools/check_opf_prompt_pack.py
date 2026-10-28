@@ -553,6 +553,21 @@ def _example_vectors():
         rewrite(pack, "contribution",
                 lambda d: d["record"][0]["delivery"].update(sent_at="2019-12-02T00:00:00.000Z"))
 
+    def field_midnight(stem, field, value):
+        # Supply value as the first row's field (no longer recorded absent), so the guard must read that field.
+        def change(doc):
+            row = (doc.get("record") or doc["worklog"])[0]
+            row["unrecorded"] = [u for u in row.get("unrecorded", []) if u["field"] != field]
+            if not row["unrecorded"]:
+                del row["unrecorded"]
+            row[field] = value
+        return lambda pack: rewrite(pack, stem, change)
+
+    def no_history(pack):
+        for stem in ("finding", "worklog"):
+            rewrite(pack, stem, lambda d: [row.pop("history", None)
+                                           for row in d.get("record", []) + d.get("worklog", [])])
+
     def without_row(pack):
         shutil.copytree(DEFAULT_PACK_DIR, pack, dirs_exist_ok=True)
         extra = EXAMPLES_DIR + "extra" + EXAMPLE_SUFFIX
@@ -585,6 +600,15 @@ def _example_vectors():
         ("example-fabricated-midnight", INVALID, "example-midnight", "created_at = 2019-03-04T00:00:00Z",
          built(midnight)),
         ("example-delivery-midnight", INVALID, "example-midnight", "delivery.sent_at", built(delivery_midnight)),
+        ("example-updated-at-midnight", INVALID, "example-midnight", "updated_at = 2019-07-09T00:00:00Z",
+         built(field_midnight("pending_decision", "updated_at", "2019-07-09T00:00:00Z"))),
+        ("example-date-midnight", INVALID, "example-midnight", "date = 2019-05-02T00:00:00Z",
+         built(field_midnight("worklog", "date", "2019-05-02T00:00:00Z"))),
+        ("example-decided-at-midnight", INVALID, "example-midnight", "decided_at = 2019-07-08T00:00:00Z",
+         built(field_midnight("pending_decision", "decided_at", "2019-07-08T00:00:00Z"))),
+        ("example-receipted-at-midnight", INVALID, "example-midnight", "delivery.receipted_at",
+         built(lambda p: rewrite(p, "contribution", lambda d: d["record"][0]["delivery"].update(
+             receipted_at="2019-12-05T00:00:00Z")))),
         ("example-member-without-row", INVALID, "unlisted-file", "extra.batch.toml", without_row),
         ("example-roster-missing", INVALID, "example-roster", "missing ['block']",
          built(lambda p: example(p, "block").unlink())),
@@ -592,6 +616,7 @@ def _example_vectors():
         ("example-reason-coverage", INVALID, "example-reasons", "reasons absent ['conflicting']",
          built(reason_coverage)),
         ("example-unparsed-coverage", INVALID, "example-reasons", "rows with unparsed 0", built(no_unparsed)),
+        ("example-history-coverage", INVALID, "example-reasons", "rows with history 0", built(no_history)),
         ("example-type-mismatch", INVALID, "example-type", "'finding'",
          built(lambda p: example(p, "handoff").write_bytes(example(p, "finding").read_bytes()))),
         ("example-non-canonical", INVALID, "example-batch", "not canonical",
@@ -733,6 +758,30 @@ def _self_test_vectors():
                 print("{} midnight-boundary {!r}: {}".format("PASS" if ok else "FAIL", value, want))
                 if not ok:
                     failures.append("midnight-boundary {!r} (wanted {})".format(value, want))
+            # The default run (main with no argument) includes the import examples: the shipped pack reports
+            # them, and a pack whose only fault is an example guard's is refused, not VALID.
+            import contextlib
+            import io
+            builders = dict((v[0], v[4]) for v in _example_vectors())
+            broken = Path(tmp) / "default-run" / "prompt-pack"
+            builders["example-unparsed-coverage"](broken)
+            for name, pack_dir, code, stream, text in (
+                    ("default-run-examples", DEFAULT_PACK_DIR, 0, "out", ", 12 import example(s))"),
+                    ("default-run-example-refused", broken, 1, "err", "[example-reasons]")):
+                out, err = io.StringIO(), io.StringIO()
+                shipped_dir = globals()["DEFAULT_PACK_DIR"]
+                globals()["DEFAULT_PACK_DIR"] = pack_dir
+                try:
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        got = main([])
+                finally:
+                    globals()["DEFAULT_PACK_DIR"] = shipped_dir
+                count += 1
+                ok = got == code and text in (out if stream == "out" else err).getvalue()
+                print("{} {}: exit {}".format("PASS" if ok else "FAIL", name, got))
+                if not ok:
+                    failures.append("{} (wanted exit {} carrying {!r}, got exit {}: {!r} {!r})".format(
+                        name, code, text, got, out.getvalue(), err.getvalue()))
             # chmod cannot make a directory unreadable to root. Restore access before snapshot/cleanup.
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 print("SKIP unreadable-subdirectory: running as root")

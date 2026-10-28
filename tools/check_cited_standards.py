@@ -96,7 +96,7 @@ designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
 Without --config the built-in default applies: corpus [".aiqt/core/rules/*.md"] and no exclusions; no
 default file is read. This repository's own CI and tools/run_all_checks.sh pass --config
 .aiqt/cited-standards.toml (tracked, not shipped), whose corpus adds the OPF prompt-pack members
-(opf/prompt-pack/**/*.md) to the rule files. A config file carries:
+(opf/prompt-pack/**/*.md and opf/prompt-pack/import/examples/*.batch.toml) to the rule files. A config file carries:
   format-version = 1                        required
   corpus = ["<root-relative glob>", ...]    optional; each glob must match at least one file
   [[exclusion]]                             optional, repeatable

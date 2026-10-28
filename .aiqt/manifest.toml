@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d9fade12fb8ffff495599da938f1109a372a1a32e56d61975ce25ed08a9f1e68"
+tree-sha256 = "cf018743c619a940221c14877860e6114a76cdc06faba66ba0536300cdc31919"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 496960
-sha256 = "fdb1b627e0f5d3190c75f4a4f05319713277db720e88175fe1b32d44bb30a21b"
+bytes = 497071
+sha256 = "a5cb650d87a97031672cdd430ff6d44b0e1c2ff3694436eeea414689b540cd75"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -846,8 +846,8 @@ sha256 = "2814ebe8138871d37bb97c03704051d3728e024a1cade5c515f577c709a8f4b5"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
-bytes = 9432
-sha256 = "35dd0657a22b3eb65aba344440dd24a23510e4608f9e9feb5dd1ba3bcf15ed9b"
+bytes = 9501
+sha256 = "7473c5b33ba1a13637d761d0726c4f3101ad4960329981332338d9bd9ba9dd3a"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -3111,8 +3111,8 @@ sha256 = "abb63c72d7f706ebf20ebaa8cd497c81279a28a3a6e8b232d2f2bc9acff96536"
 
 [[sources]]
 path = "opf/tools/check_opf_prompt_pack.py"
-bytes = 47458
-sha256 = "f2b5f04c57ae404358657ee191f2052c0427493c85a5e0a56bfcda69f9b1b11a"
+bytes = 50633
+sha256 = "6375a7ca043d0077b1258e3a34abb8a172cdf0b520acb08449a0ee5e0bcfce36"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
@@ -3421,8 +3421,8 @@ sha256 = "a3c54e7dc6deddbcfedffb3a89c536e5a5dd495a5eea7e5165fc9536546ca355"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
-bytes = 75366
-sha256 = "ad8fe49a738741a3a411f71a707d855447cd4a3ad6b582708045e494c64d67dc"
+bytes = 75415
+sha256 = "0a30385485f8ee7db5d200846b72e264130ad489752c736c1f5d280cb3a2ee3c"
 
 [[sources]]
 path = "tools/check_clauses.py"
