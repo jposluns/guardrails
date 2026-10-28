@@ -2695,6 +2695,7 @@ expected-check-ids = [
   "entries/real-entries-pass",
   "entries/cli-line-shape",
   "entries/cli-extra-statement",
+  "entries/main-exit-skips-argument",
   "entries/hook-block-shape",
   "entries/hook-block-missing",
   "launchers/real-launchers-pass",

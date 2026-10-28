@@ -15,9 +15,11 @@ with exit 2). This gate holds where it runs:
   3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
-     sys.exit(_child_status_refusal_exit("<basename>") or main()); the canonical file's entry ends in its own
-     line of that second form, and each dispatcher's main() holds HOOK_BLOCK as the statements right after its
-     is_fail_open assignment.
+     sys.exit(_child_status_refusal_exit("<basename>") or main()); opf.py's _main_exit, which receives the
+     guard inside that lambda, must call its argument first (one undecorated top-level def _main_exit(main)
+     whose first statement after its docstring is a try whose body is exactly status = main()); the canonical
+     file's entry ends in its own line of that second form, and each dispatcher's main() holds HOOK_BLOCK as
+     the statements right after its is_fail_open assignment.
   4. launchers: the first run_gate line of tools/run_all_checks.sh and of opf/tools/run_all_checks.sh is the
      probe, and no line above it names Python (read in line order through check_ci_parity.read_runner_text).
      A line names Python when, unless it is a whole-line comment, it holds an interpreter word (python with
@@ -182,6 +184,12 @@ CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
 # process by raising SystemExit itself (code opf loads can replace sys.exit); a refusal still ends the process at
 # once with its own line and exit 2.
 CLI_ENTRY_BY_NAME = {"opf.py": '_main_exit(lambda: _child_status_refusal_exit("opf.py") or main())'}
+# Such an entry hands the guard to _main_exit inside a lambda, so the guard runs only if _main_exit calls its
+# argument: the module's one top-level MAIN_EXIT is an undecorated function with exactly MAIN_EXIT_DEF's
+# parameters, and its first statement after the docstring is a try whose body is exactly MAIN_EXIT_CALL.
+MAIN_EXIT = "_main_exit"
+MAIN_EXIT_DEF = "def _main_exit(main):\n    pass\n"
+MAIN_EXIT_CALL = "status = main()"
 HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS"
 HOOK_BLOCK = """unobservable = _child_status_refusal()
 if unobservable is not None:
@@ -511,13 +519,32 @@ def cli_entry(name):
 
 
 def cli_entry_finding(rel, tree, name, exact=True):
-    """None when the module's __main__ body is exactly the CLI entry line (or, with exact false, ends in it)."""
+    """None when the module's __main__ body is exactly the CLI entry line (or, with exact false, ends in it) and,
+    for a CLI_ENTRY_BY_NAME entry, its _main_exit calls its argument first (main_exit_finding)."""
     block = tree.body[-1] if tree.body and check_entry_guard._is_guard(tree.body[-1]) else None
     want = ast.dump(ast.parse(cli_entry(name)).body[0])
     if (block is None or not block.body or ast.dump(block.body[-1]) != want
             or (exact and len(block.body) != 1)):
         return "{}: its __main__ entry is not {}{}".format(rel, "exactly " if exact else "ending in ",
                                                           cli_entry(name))
+    return main_exit_finding(rel, tree) if name in CLI_ENTRY_BY_NAME else None
+
+
+def main_exit_finding(rel, tree):
+    """None when the module's MAIN_EXIT calls its argument first: one undecorated top-level function with exactly
+    MAIN_EXIT_DEF's parameters, whose first statement after the docstring is a try whose body is exactly
+    MAIN_EXIT_CALL."""
+    nodes = _top_definitions(tree, MAIN_EXIT)
+    function = nodes[0] if len(nodes) == 1 and isinstance(nodes[0], ast.FunctionDef) else None
+    body = [] if function is None else function.body[1 if ast.get_docstring(function) is not None else 0:]
+    want = [ast.dump(statement) for statement in ast.parse(MAIN_EXIT_CALL).body]
+    if (function is None or function.decorator_list
+            or ast.dump(function.args) != ast.dump(ast.parse(MAIN_EXIT_DEF).body[0].args)
+            or not body or not isinstance(body[0], ast.Try)
+            or [ast.dump(statement) for statement in body[0].body] != want):
+        return "{}: {} does not call its argument first (one top-level {} whose first statement after its " \
+               "docstring is a try whose body is exactly {})".format(rel, MAIN_EXIT, MAIN_EXIT_DEF.split(":", 1)[0],
+                                                                     MAIN_EXIT_CALL)
     return None
 
 
@@ -1256,6 +1283,8 @@ def _inputs():
             ("hook-drift", _swap(hook, "_CHILD_STATUS_PROBE_CODE = 77", "_CHILD_STATUS_PROBE_CODE = 78")),
             ("opf-entry-bare", _swap(opf, "    " + opf_entry + "\n", "    _main_exit(lambda: main())\n")),
             ("opf-entry-extra", _swap(opf, "    " + opf_entry + "\n", "    print('entry')\n    " + opf_entry + "\n")),
+            ("opf-main-exit-global", _swap(opf, "        " + MAIN_EXIT_CALL + "\n",
+                                           "        status = globals()[\"main\"]()\n")),
             ("hook-block-open", _swap(hook, "            return 2\n        signal.signal(signal.SIGCHLD,",
                                       "            return 0\n        signal.signal(signal.SIGCHLD,")),
             ("hook-block-gone", _swap(hook, "    unobservable = _child_status_refusal()\n", "    unobservable = None\n"))):
@@ -1505,6 +1534,9 @@ def _vectors(module, trees, texts, canonical_tree):
         ("entries/cli-line-shape", lambda: m.cli_entry_finding("opf", trees["opf-entry-bare"], "opf.py") is not None),
         ("entries/cli-extra-statement",
          lambda: m.cli_entry_finding("opf", trees["opf-entry-extra"], "opf.py") is not None),
+        # _main_exit running main() by its global name, never its argument: the guard in the lambda never runs.
+        ("entries/main-exit-skips-argument",
+         lambda: m.cli_entry_finding("opf", trees["opf-main-exit-global"], "opf.py") is not None),
         ("entries/hook-block-shape", lambda: m.hook_block_finding("hook", trees["hook-block-open"]) is not None),
         ("entries/hook-block-missing", lambda: m.hook_block_finding("hook", trees["hook-block-gone"]) is not None),
         ("launchers/real-launchers-pass",
@@ -1656,6 +1688,10 @@ MUTANTS = (
      "copies/missing-copy-is-finding"),
     ("cli-entry-call", "or ast.dump(block.body[-1]) != want", "or False", "entries/cli-line-shape"),
     ("cli-entry-exact", "or (exact and len(block.body) != 1)", "or False", "entries/cli-extra-statement"),
+    ("main-exit-wired", "    return main_exit_finding(rel, tree) if name in CLI_ENTRY_BY_NAME else None\n",
+     "    return None\n", "entries/main-exit-skips-argument"),
+    ("main-exit-call", "            or [ast.dump(statement) for statement in body[0].body] != want):",
+     "            or False):", "entries/main-exit-skips-argument"),
     ("hook-block-compare", "    if got != want:\n", "    if False:\n", "entries/hook-block-shape"),
     ("runner-first", "if line.split() != probe_line.split():", "if False:", "launchers/runner-first-gate"),
     ("runner-prelude", "        if _names_python(line):\n            return", "        if False:\n            return",
@@ -1957,7 +1993,8 @@ def self_test(lane, report_path=None):
         for check_id, _kind in (("copies/real-copies-identical", 0), ("copies/drift-is-finding", 0),
                                 ("copies/missing-copy-is-finding", 0), ("copies/hook-drift-is-finding", 0),
                                 ("entries/real-entries-pass", 0), ("entries/cli-line-shape", 0),
-                                ("entries/cli-extra-statement", 0), ("entries/hook-block-shape", 0),
+                                ("entries/cli-extra-statement", 0), ("entries/main-exit-skips-argument", 0),
+                                ("entries/hook-block-shape", 0),
                                 ("entries/hook-block-missing", 0), ("launchers/real-launchers-pass", 0),
                                 ("launchers/runner-first-gate", 0), ("launchers/opf-runner-first-gate", 0),
                                 ("launchers/runner-prelude-launch", 0),
