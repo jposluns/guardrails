@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "52b5231a97f2c07d9028a8971dd2a8c5c7882cdf522f79f480619fae80a279ef"
+tree-sha256 = "9383e6aea6945e3c88e833f4aaa1595b6ade75196586c2fa8619768f48a67f1f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3346,8 +3346,8 @@ sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 372630
-sha256 = "f5f94dc8751a55c9ef9096d609f635a594c9daf2f35461a368b88e402041b7d3"
+bytes = 372612
+sha256 = "37aa3896fecf3f03c01869357c2d72e8177af9b5517d3e4d5666d09fcbc3aaa6"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3806,8 +3806,8 @@ sha256 = "cbe7d0022a79e4e6d037de3c8c82a64a743bb25d33f38753de0cdfeceb09ea9c"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 426550
-sha256 = "fb241df0661293cc5ed49ac12940d8869ca22b323342460dbc8f03b1d7fde11b"
+bytes = 426557
+sha256 = "912c50697f5ee084319062574e0e657e7dcc2a2a0b074d64b4ec3c8612adce77"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
@@ -3826,8 +3826,8 @@ sha256 = "99ab55b196362e770f00811e84c2a9f962c1d1ea1d7f871169ca2464d0f84d67"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_core.py"
-bytes = 171811
-sha256 = "71cbd15dd76c8b598aad98c5aa2a3828d41a2ee87eefd3f3562283eb937142f0"
+bytes = 171992
+sha256 = "51f22f3ca28b9042eece458f7a26dfeb432f4c86f5ffd3e31402515b48584649"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
