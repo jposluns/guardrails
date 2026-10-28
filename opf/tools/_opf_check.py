@@ -3701,13 +3701,20 @@ def classify_containment(manifest_data, machine_rel):
     homes = _opf_store.homes_generation(manifest_data)
     control_roots = _opf_store.store_control_roots(homes)
     evidence_roots = (_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL) if homes >= 2 else ()
+    # Homes 2 registers .working/.gitignore, the managed-block carrier, as a managed control file
+    # (spec 4.2), recognized by its exact path alone: containment never reads it, so its content is
+    # not graded here, and drift of the block is the writer's post-write check
+    # (_opf_write_guard.verify_homes_gitignore_effective). A legacy store grades it as before.
+    control_files = frozenset({WORKING_DIRNAME + "/.gitignore"}) if homes >= 2 else frozenset()
 
     def managed_leaf(p):
-        # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, or a declared
-        # store-scope view target. It deliberately EXCLUDES the `_under_any(p, unmanaged)` clause so the
-        # collision check can ask whether an unmanaged declaration names a managed leaf without the
-        # declaration trivially matching itself (F2).
+        # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, a declared
+        # store-scope view target, or a homes-2 control file. It deliberately EXCLUDES the
+        # `_under_any(p, unmanaged)` clause so the collision check can ask whether an unmanaged
+        # declaration names a managed leaf without the declaration trivially matching itself (F2).
         if p in view_targets:
+            return True
+        if p in control_files:
             return True
         prefix = mrel + "/"
         if p.startswith(prefix):
@@ -6113,6 +6120,15 @@ def self_test():
         _is2_h2_clean = run(copy.deepcopy(_is2_h2))
         check("containment-homes2-pair-clean-valid",
               _is2_h2_clean is not None and _is2_h2_clean.status == VALID)
+        # At the shipped constants the 2.0.0 / homes = 2 pair grades at generation 1, so its
+        # .working/.gitignore is an unregistered stray like any other unenumerated path (red when the
+        # control-file registration ignores the graded generation).
+        _is2_gi_legacy = run(copy.deepcopy(_is2_h2),
+                             working={".gitignore": _opf_store.render_homes_gitignore()})
+        check("containment-gitignore-stray-at-generation-1",
+              _is2_gi_legacy is not None and _is2_gi_legacy.status == INVALID
+              and any("C-CONTAINMENT" in f and ".working/.gitignore" in f and "unregistered" in f
+                      for f in _is2_gi_legacy.findings))
         _is2_h2["worklog.imported.toml"] = "deliberately invalid TOML ["
         _is2_h2["backlog_item.imported.index.toml"] = "garbage = ["
         _is2_h2_run = run(_is2_h2)
@@ -6239,6 +6255,15 @@ def self_test():
                   and _is2_act_run.status == (CANNOT_EVALUATE if _imp_pending else VALID)
                   and _is2_act_run.checks.get("C-IMPORTED-SCHEMA") == "PASS"
                   and pending_only(_is2_act_run))
+            # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) and grades
+            # none of its content: a drifted managed block is no C-CONTAINMENT finding (red when the
+            # registration is dropped, the file then being an unregistered stray, and red when drift
+            # grading is added here, since the writer's post-write check owns drift).
+            _is2_gi_run = run(copy.deepcopy(_is2_act), obs=_is2_prior(), working={
+                ".gitignore": "# adopter\n# >>> opf-managed >>>\n/imported/\n# <<< opf-managed <<<\n"})
+            check("containment-homes2-gitignore-content-not-graded",
+                  _is2_gi_run is not None and not _is2_gi_run.findings
+                  and _is2_gi_run.checks.get("C-CONTAINMENT") == "PASS" and pending_only(_is2_gi_run))
             # The roster of an activated 2.0.0 store is the homes-2 roster plus the four imported
             # checks (spec 4.2 / 8.3), in that order, and the report carries exactly it: the three not
             # yet landed are CANNOT-EVALUATE by reconciliation, never silently absent (red when the

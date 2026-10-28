@@ -570,6 +570,15 @@ reason = "self-emitted-bytes"
 # reparses the bytes emit_checked just emitted
 [[site]]
 path = "opf/tools/_opf_init.py"
+function = "build_imported_leaf"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "self-emitted-bytes"
+
+# reparses the bytes emit_checked just emitted
+[[site]]
+path = "opf/tools/_opf_init.py"
 function = "build_index"
 form = "call"
 count = 1
@@ -601,6 +610,14 @@ form = "call"
 count = 1
 class = "EXEMPT"
 reason = "already-validated"
+
+[[site]]
+path = "opf/tools/_opf_init_operation.py"
+function = "_homes2_plan_tests"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_init_operation.py"

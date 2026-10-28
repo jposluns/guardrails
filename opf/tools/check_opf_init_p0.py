@@ -240,6 +240,28 @@ def vectors(f):
         with patch.object(m.store, "SUPPORTED_HOMES", 2):
             return m.validate_compatibility(manifest)
     add("compat/homes-fence", homes, "REFUSED", "HOMES")
+
+    def generation2(change=None, spec=True, homes2=True):
+        # A generation-2 plan exists only under raised gates, patched inside the case and restored
+        # on exit, so the shared fixture and every default case stay at the shipped constants.
+        def case(m):
+            from unittest.mock import patch
+            with patch.object(m.store, "SUPPORTED_HOMES", 2), patch.object(
+                    m.store, "SUPPORTED_SPEC_VERSION",
+                    m.store.IMPORTED_SPEC_VERSION if spec else m.store.SUPPORTED_SPEC_VERSION):
+                built, data = operation.build_init_plan(
+                    operation_id=OP_ID, binding=plan["binding"], head=plan["head"],
+                    inventory_digest_value=plan["inventory_digest"],
+                    application_time=plan["application_time"], homes2=homes2)
+                return m.validate_plan(data if change is None else altered(change, built))
+        return case
+    add("accept/homes2-plan", generation2())
+    add("refuse/homes2-missing-gitignore", generation2(
+        lambda d: d["sets"]["S"].pop(0) if d["sets"]["S"][0]["path"] == ".working/.gitignore"
+        else None), "REFUSED", "UNCLASSIFIED")
+    add("refuse/gen1-imported-leaf", generation2(
+        lambda d: d["sets"]["S"].insert(-3, {"path": ".working/toml/backlog_item.imported.index.toml"}),
+        spec=False, homes2=False), "REFUSED", "UNCLASSIFIED")
     for name, value in (("missing", None), ("empty", b""), ("not-object", b"[]\n"),
                         ("duplicate", b'{"schema":1,"schema":1}\n'), ("truncated", raw[:-4])):
         add("input/" + name, lambda m, v=value: m.validate_plan(v),
@@ -281,6 +303,9 @@ REVERSIONS = (
     ("overlap", 'len(paths) == len(set(paths))', 'True', "refuse/overlap"),
     ("source-roster", 'set(sources) == roster and len(sources) == len(roster)',
      'True', "refuse/unclassified-S"),
+    ("generation-roster",
+     'set(operation.bootstrap_source_roster(operation._plan_manifest_model(plan)))',
+     'set(operation.BOOTSTRAP_SOURCE_ROSTER)', "accept/homes2-plan"),
     ("view-roster", 'sets["V"] == views', 'True', "refuse/unclassified-V"),
     ("plan-version", '_version(doc, PLAN_FORMATS, "plan")', 'pass', "refuse/plan-version-unknown"),
     ("outcome-version", '_version(doc, OUTCOME_FORMATS, "outcome")', 'pass',
