@@ -1,0 +1,13 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-links.md"
+
+[[record]]
+key = "report-format-guide"
+type = "reference"
+created_at = "2019-11-12T10:00:30Z"
+refs = [{kind = "url", locator = "https://example.org/guides/report-format", note = "Linked from the team wiki."}]
+status = "recorded"
+title = "Report formatting guide"
+unrecorded = [{field = "updated_at", reason = "not_applicable"}]
