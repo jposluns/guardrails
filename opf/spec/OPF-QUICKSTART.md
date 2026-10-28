@@ -132,8 +132,14 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    text, so from that point `opf init` reports a rendered line rather than a Python
    traceback, up to exactly three windows. Every fault raised while a helper module
    is imported, a SyntaxError in an installed helper included, is mapped to a
-   rendered cannot-evaluate (exit 2) except a keyboard interrupt. A failure before
-   init dispatch (that interrupt, or any interrupt before or during dispatch) is
+   rendered cannot-evaluate (exit 2) except a keyboard interrupt, as long as the
+   code opf loads neither ends the process itself nor replaces anything opf uses.
+   That code runs in opf's process with its privileges, at import, when called or
+   later (an atexit hook, a thread, a signal handler, a destructor, or a replaced
+   stream whose flush fails at shutdown, so that the process exits 120), and can do
+   both, so every exit status stated here holds only while it does neither. A
+   failure before init dispatch (a keyboard interrupt while a helper is imported,
+   or any interrupt before or during dispatch) is
    outside that handler entirely; an interrupt landing in the boundary handler's own few
    statements, after dispatch, escapes it; and an interrupt arriving after that
    handler has returned, in the dispatcher's own return and exit statements, escapes

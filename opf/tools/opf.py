@@ -109,15 +109,19 @@ def _bootstrap():
     dispatcher's own fail-closed handler). Every exception raised while a helper is imported maps to
     EXIT_MALFORMED except a KeyboardInterrupt, which is re-raised unchanged (one whose class also derives
     from ImportError or OSError is caught by that arm first and maps as that arm does), because exit 1 is
-    the drift or finding code and this function exists to keep an import fault from reaching it. The broader
-    arm, and every other handler here that must catch whatever is raised, is a bare except that takes its
-    exception from sys.exception(): an `except BaseException` matches through the class's mro(), which a
-    metaclass can make leave BaseException out, so such a class would escape it, and one whose mro() keeps
-    SystemExit would then end the process at its code (exit 0 for a code of 0) before main() returns. ImportError
-    and OSError (the broken/partial-install signals) keep their own arms and messages, and every other one,
-    an Exception subclass included (a SyntaxError in an installed helper, a ValueError at import) and a
-    SystemExit (sys.exit(0) and a bare sys.exit() included, which would otherwise end any verb at exit 0,
-    read as success), maps to a located diagnostic naming the helper (the module running in the outermost
+    the drift or finding code and this function exists to keep an import fault from reaching it; this, like
+    every guarantee opf states, holds only within the residual stated below. The broader arm is an `except
+    BaseException as exc`, where the interpreter binds what it caught, and only that arm decides an
+    interrupt. A bare except follows it, because `except BaseException` matches through the class's mro(),
+    which a metaclass can make leave BaseException out, so such a class would escape that arm. The bare arm
+    never asks what it caught (sys.exception() is a function code opf loads can replace) and never
+    re-raises: it prints the fixed cannot-bootstrap line and the fixed line naming no cause, then returns
+    EXIT_MALFORMED. The handlers that guard a description are bare excepts as well, and read no exception.
+    ImportError and OSError (the broken/partial-install signals) keep their own arms and messages, and every
+    other exception the broader arm catches, an Exception subclass included (a SyntaxError in an installed
+    helper, a ValueError at import) and a SystemExit (sys.exit(0) and a bare sys.exit() included, which
+    would otherwise end any verb at exit 0, read as success), maps to a located diagnostic naming the
+    helper (the module running in the outermost
     module frame of the traceback, or only "a helper module" when the traceback holds no module frame, as
     for a SyntaxError in the helper, whose own text names its file; and the innermost one's module when
     another module raised it) and the cause (its type and text), rendered through _init_inert. An error
@@ -135,16 +139,22 @@ def _bootstrap():
     before it prints a fixed cannot-bootstrap line, and then describes the helper and the cause inside a
     guard; a description that raises anything (a SystemExit or a ValueError included) falls back to a line
     naming only the cause's type, or to a fixed line naming nothing, and every arm still returns
-    EXIT_MALFORMED. Whether a cause is a KeyboardInterrupt is decided by its real type,
+    EXIT_MALFORMED (that fallback's own print is guarded too, so a stream raising there leaves the fixed
+    line and the status). Whether a cause is a KeyboardInterrupt is decided by its real type,
     issubclass(type(exc), KeyboardInterrupt), never by isinstance, which reads the cause's own __class__
-    when its type is not one: a __class__ property raising SystemExit(0) would escape before any line is
-    printed (exit 0 at the command line), and one returning KeyboardInterrupt would be re-raised as if it
-    were one. A KeyboardInterrupt re-raised here surfaces as
-    Python's own traceback: it runs before init dispatch and outside _cmd_init's rendering boundary, a window
-    _cmd_init and OPF-QUICKSTART state. No in-process code can close one residual: code opf loads can end the
-    process directly (os._exit, a signal, a C-level fault) with any status before the module entry point
-    (_main_exit) decides, and can rebind a name that entry point reads after main() returns (a builtin such
-    as SystemExit, or a module global such as EXIT_MALFORMED). Every mapped arm renders its variable parts
+    when its type is not one: a __class__ property raising SystemExit(0) would escape this function before
+    it prints a line, and one returning KeyboardInterrupt would be re-raised as if it were one. The real
+    type's test follows its mro(), as an `except KeyboardInterrupt` clause does, so a class whose
+    metaclass's mro() names KeyboardInterrupt is an interrupt here and is re-raised, by design. A
+    KeyboardInterrupt re-raised here surfaces as Python's own traceback: it runs before init dispatch and
+    outside _cmd_init's rendering boundary, a window _cmd_init and OPF-QUICKSTART state. No in-process code
+    can close one residual: code opf loads (a helper, or a module a helper imports) runs in this process
+    with its privileges, at import, when called or later (an atexit hook, a thread, a signal handler, a
+    destructor, or a replaced stream whose failing flush at shutdown ends the process at exit 120),
+    and can end the process with any status or replace anything opf uses (a sys or builtins function such
+    as sys.exception or issubclass, a stream such as sys.stderr, a module global such as EXIT_MALFORMED),
+    so every guarantee opf states (the exit guarantees here, in _main_exit and in OPF-QUICKSTART included)
+    holds only while that code does neither. Every mapped arm renders its variable parts
     AT this print (the init suite
     drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
     and requires each printed line inert, QA round 13 C)."""
@@ -185,10 +195,9 @@ def _bootstrap():
             line = _bootstrap_undescribed(exc)
         print(line, file=sys.stderr)
         return EXIT_MALFORMED
-    except:  # noqa: E722  an import-time fault is a cannot-evaluate, never exit 0 or 1
-        # Bare: `except BaseException` misses a class whose metaclass's mro() leaves BaseException out.
-        exc = sys.exception()
-        # The real type decides: isinstance would read the cause's own __class__, code the cause controls.
+    except BaseException as exc:  # an import-time fault is a cannot-evaluate, never exit 0 or 1
+        # The interpreter binds exc, and the real type decides: isinstance would read the cause's own
+        # __class__, code the cause controls.
         if issubclass(type(exc), KeyboardInterrupt):
             raise
         # The fixed line first: describing the cause runs its code, whose own failure must not erase this one.
@@ -211,6 +220,12 @@ def _bootstrap():
                 print(_bootstrap_undescribed(exc), file=sys.stderr)
             except:  # noqa: E722  the fixed line and the exit status still carry the fault
                 pass
+        return EXIT_MALFORMED
+    except:  # noqa: E722  a class whose metaclass's mro() leaves BaseException out is a cannot-evaluate too
+        # Never asks what it caught (sys.exception() can be replaced) and never re-raises: fixed lines only.
+        print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
+              file=sys.stderr)
+        print("opf: cannot bootstrap: the cause could not be described (cannot evaluate)", file=sys.stderr)
         return EXIT_MALFORMED
     return EXIT_OK
 
@@ -238,11 +253,16 @@ _BOOT_NAMELESS = ("opf: cannot bootstrap: the cause could not be described (cann
 # Stand-in prefixes defining HelperExit, a SystemExit subclass whose metaclass's mro() leaves BaseException out,
 # so `except BaseException` never matches it: _BOOT_MRO_KEEP's mro() is (cls, SystemExit, object), so uncaught
 # it ends the process at its code as a SystemExit does (exit 0 for HelperExit(0)); _BOOT_MRO_DROP's is (cls,
-# object). Neither has a __traceback__ attribute to read, so describing one falls back to naming its type.
+# object). Raised at import, either reaches only the bare arm, which maps it without describing it.
 _BOOT_MRO_KEEP = ("class SkipBase(type):\n    def mro(cls):\n        return (cls, SystemExit, object)\n\n\n"
                   "class HelperExit(SystemExit, metaclass=SkipBase):\n    pass\n\n\n")
 _BOOT_MRO_DROP = ("class SkipAll(type):\n    def mro(cls):\n        return (cls, object)\n\n\n"
                   "class HelperExit(SystemExit, metaclass=SkipAll):\n    pass\n\n\n")
+# A stand-in prefix replacing sys.exception with a function that reports a KeyboardInterrupt whatever is in flight,
+# so a handler that asks sys.exception() what it caught re-raises an exit or an error as an interrupt.
+_BOOT_CLAIMS_INTERRUPT = "import sys\n\nsys.exception = lambda: KeyboardInterrupt()\n"
+# A stand-in prefix defining Unwritable, a stream whose every write raises HelperExit(0) (so _BOOT_MRO_KEEP first).
+_BOOT_UNWRITABLE = "import sys\n\n\nclass Unwritable:\n    def write(self, text):\n        raise HelperExit(0)\n\n\n"
 
 # The import-time faults _bootstrap_exit_findings raises from a stand-in for the first helper _bootstrap
 # imports: (label, the stand-in's source, the exception type the call must let escape unchanged or None,
@@ -299,10 +319,8 @@ _BOOTSTRAP_EXIT_CASES = (
      "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
      "        return KeyboardInterrupt\n\n\nraise HelperUnread('class claims')\n",
      None, ((_BOOT_UNREAD, ("HelperUnread", "class claims")),)),
-    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n",
-     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperExit",)))),
-    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n",
-     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperExit",)))),
+    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n", None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n", None, (_BOOT_FAILED, _BOOT_NAMELESS)),
     ("str-raises-mro-exit",
      _BOOT_MRO_KEEP + "class HelperFault(Exception):\n    def __str__(self):\n        raise HelperExit(0)\n\n\n"
      "raise HelperFault()\n",
@@ -320,6 +338,20 @@ _BOOTSTRAP_EXIT_CASES = (
      _BOOT_MRO_KEEP + "class HelperUnread(OSError):\n    def __str__(self):\n        raise HelperExit(0)\n\n\n"
      "raise HelperUnread()\n",
      None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+    ("fallback-print-raises-mro-exit",
+     _BOOT_MRO_KEEP + _BOOT_UNWRITABLE + "class HelperFault(Exception):\n    def __str__(self):\n"
+     "        sys.stderr = Unwritable()\n        raise ValueError('undescribable')\n\n\nraise HelperFault()\n",
+     None, (_BOOT_FAILED,)),
+    ("replaced-sys-exception-systemexit-0", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(0)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+    ("replaced-sys-exception-systemexit-1", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(1)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "1")))),
+    ("replaced-sys-exception-valueerror", _BOOT_CLAIMS_INTERRUPT + "raise ValueError('helper')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("ValueError", "helper")))),
+    ("replaced-sys-exception-mro-exit", _BOOT_CLAIMS_INTERRUPT + _BOOT_MRO_KEEP + "raise HelperExit(0)\n",
+     None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("replaced-sys-exception-keyboardinterrupt",
+     "import sys\n\nsys.exception = lambda: None\nraise KeyboardInterrupt('stop')\n", KeyboardInterrupt, "stop"),
 )
 
 
@@ -327,8 +359,8 @@ def _bootstrap_exit_findings(bootstrap=None):
     """Drive each case of _BOOTSTRAP_EXIT_CASES through `bootstrap` (default _bootstrap) and return the
     failures, empty when every case holds. Each case writes a stand-in _opf_worklog.py into a fresh temporary
     directory put first on sys.path and takes the loaded _opf_worklog out of sys.modules for the call; the
-    loaded module, sys.path and the path importer cache are restored after it. An import-time fault other
-    than a KeyboardInterrupt (a SystemExit of 0, of None from a bare sys.exit(), of 1, a BaseException
+    loaded module, sys.path, sys.exception and the path importer cache are restored after it. An import-time
+    fault other than a KeyboardInterrupt (a SystemExit of 0, of None from a bare sys.exit(), of 1, a BaseException
     subclass that is not an Exception, a ValueError, a SyntaxError in the helper) must return EXIT_MALFORMED,
     raise nothing, and print exactly the fixed cannot-bootstrap line and then one line naming the helper and
     the cause's type and text, rendered inert. A cause whose __str__ raises (SystemExit(0) or a ValueError),
@@ -338,11 +370,21 @@ def _bootstrap_exit_findings(bootstrap=None):
     the lines that arm prints for its real type. A SystemExit subclass whose metaclass's mro() leaves out
     BaseException, raised at import (its mro() keeping SystemExit or not), from the cause's __str__ in each
     arm, or from the cause's type's __name__, must return EXIT_MALFORMED and print exactly the expected lines.
-    A KeyboardInterrupt must escape unchanged. Each call is judged under a bare except, so an escape of any
-    class is that case's failure. With the broader arm narrowed back to exits only, the ValueError and
-    SyntaxError cases escape the call and fail; with the broader arm reverted to `except BaseException`, its
-    two mro() cases escape the call and fail; with a description guard, or _bootstrap_undescribed's own,
-    reverted to it, that guard's mro() case escapes the call or loses its line and fails;
+    A cause whose __str__ replaces sys.stderr with a stream raising such a class must leave the fixed line and
+    EXIT_MALFORMED. A stand-in that replaces sys.exception with a function reporting a KeyboardInterrupt, then
+    raises SystemExit(0), SystemExit(1), a ValueError or such a class, must map as it would without the
+    replacement, and one that replaces it with a function reporting nothing, then raises a KeyboardInterrupt,
+    must let that interrupt escape. A KeyboardInterrupt must escape unchanged. Each call is judged under a
+    bare except, so an escape of any class is that case's failure. With the broader arm narrowed back to exits
+    only (`except SystemExit as exc` and no bare arm), the ValueError and SyntaxError cases escape the call
+    and fail; with the bare arm removed, the three mro() cases raised at import escape the call and fail; with
+    the bare arm asking sys.exception() what it caught and re-raising the interrupt it reports, the
+    replaced-sys.exception mro() case escapes the call and fails; with the broader arm deciding the interrupt
+    from sys.exception() in place of exc, the replaced-sys.exception exit and error cases escape the call and
+    its interrupt case returns, and each fails; with a description guard, or _bootstrap_undescribed's own,
+    reverted to `except BaseException`, that guard's mro() case escapes the call or loses its line and fails;
+    with the guard around the fallback's print removed or reverted to `except BaseException`, the
+    fallback-print case escapes the call and fails;
     with any arm reverted to describing its cause in its one unguarded print, that arm's __str__ cases
     escape the call and fail; with the broader arm's interrupt test reverted to isinstance, its two __class__
     cases escape the call and fail, and an isinstance interrupt test put first in the ImportError or OSError
@@ -360,8 +402,10 @@ def _bootstrap_exit_findings(bootstrap=None):
             loaded = sys.modules.pop("_opf_worklog", None)
             try:
                 with patch.object(sys, "path", [tmp] + sys.path), patch.object(sys, "dont_write_bytecode", True):
-                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                        rc = bootstrap()
+                    # A stand-in may replace sys.exception, which the verdict below calls: restored on the way out.
+                    with patch.object(sys, "exception", sys.exception):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                            rc = bootstrap()
             except:  # noqa: E722  an escape is this case's verdict, judged below, whatever its class
                 rc = sys.exception()
             finally:
@@ -18940,8 +18984,9 @@ def _cmd_init(rest):
     C), so this window can print an init value raw; any failure BEFORE
     init dispatch is outside this boundary entirely (_bootstrap maps every fault
     raised while a helper is imported, a SyntaxError in an installed helper
-    included, to a rendered cannot-evaluate, exit 2, except a KeyboardInterrupt;
-    that interrupt, or any interrupt before or during dispatch, surfaces as
+    included, to a rendered cannot-evaluate, exit 2, except a KeyboardInterrupt,
+    within the residual _bootstrap states for code opf loads; that interrupt, or
+    any interrupt before or during dispatch, surfaces as
     Python's own traceback or signal); and an interrupt
     AFTER this function returns, in the dispatcher's own return and sys.exit
     statements, escapes as Python's traceback of those dispatcher lines (that
@@ -23501,19 +23546,27 @@ _MAIN_UNDOCUMENTED = "opf: the command raised an error or returned no documented
 
 def _main_exit(main):
     """The module entry point: run `main` and end the process by raising SystemExit itself, never through
-    sys.exit, which code main() loads can replace. The status is main()'s own return only when it is exactly
-    an int among the exit codes opf documents (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED); any other return (None,
-    a str, a bool, a float, another int) and any exception main() lets escape end at EXIT_MALFORMED after the
-    one best-effort _MAIN_UNDOCUMENTED line, except a KeyboardInterrupt by its real type
-    (issubclass(type(exc), KeyboardInterrupt)), which is re-raised unchanged. The handler is a bare except
-    that takes its exception from sys.exception(), so a class whose metaclass's mro() leaves out BaseException
-    ends at EXIT_MALFORMED too. The residual no in-process code can close is stated in _bootstrap."""
+    sys.exit, so a helper that replaces sys.exit with a no-op cannot let the script run on to exit 0. The
+    status is main()'s own return only when it is exactly an int among the exit codes opf documents
+    (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED); any other return (None, a str, a bool, a float, another int)
+    and any exception main() lets escape end at EXIT_MALFORMED after the one best-effort _MAIN_UNDOCUMENTED
+    line, except a KeyboardInterrupt by its real type (issubclass(type(exc), KeyboardInterrupt), which
+    follows the type's mro(), so a class whose metaclass's mro() names KeyboardInterrupt is one, by design),
+    which is re-raised unchanged. Only an `except BaseException as exc` arm, where the interpreter binds what
+    it caught, decides the interrupt; a bare except follows it for a class whose metaclass's mro() leaves out
+    BaseException, never asks what it caught (sys.exception() can be replaced) and never re-raises, so such
+    a class ends at EXIT_MALFORMED too. Every guarantee here holds only within the residual stated in
+    _bootstrap: code main() loads can end the process itself, at any time, or replace anything this
+    function uses."""
     try:
         status = main()
-    except:  # noqa: E722  an escape is a cannot-evaluate, whatever its class's mro() leaves out
-        # The real type decides: isinstance would read the exception's own __class__.
-        if issubclass(type(sys.exception()), KeyboardInterrupt):
+    except BaseException as exc:  # an escape is a cannot-evaluate, except an interrupt
+        # The interpreter binds exc, and the real type decides: isinstance would read the exception's own
+        # __class__.
+        if issubclass(type(exc), KeyboardInterrupt):
             raise
+        status = None
+    except:  # noqa: E722  a class whose metaclass's mro() leaves out BaseException: never read, never re-raised
         status = None
     if type(status) is int and status in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
         raise SystemExit(status)
@@ -23528,14 +23581,21 @@ def _main_exit(main):
 # stand-in for every helper _bootstrap imports, the first (_opf_worklog) holding the source given: (label, that
 # source, then the exact lines, stdout and stderr merged, the run must print as it exits EXIT_MALFORMED). A
 # helper that replaces sys.exit with a no-op leaves `opf upgrade` its own refusal and exit; one that rebinds
-# that verb to return None makes main() return a non-int; the two mro() faults are mapped by _bootstrap.
+# that verb to return None makes main() return a non-int; the two mro() faults are mapped by _bootstrap. A
+# helper that replaces sys.exception with a function reporting a KeyboardInterrupt, then raises SystemExit(0)
+# at import or rebinds that verb to raise SystemExit(0) or an mro() exit, must still end at EXIT_MALFORMED.
+_MAIN_HALTS = "import __main__\n\n\ndef halt(rest):\n    raise {}\n\n\n__main__._cmd_upgrade = halt\n"
 _MAIN_EXIT_CASES = (
     ("helper-replaces-sys-exit", "import sys\nsys.exit = lambda *args: None\n", ("opf upgrade: " + UPGRADE_NONE,)),
     ("main-returns-none", "import __main__\n__main__._cmd_upgrade = lambda rest: None\n", (_MAIN_UNDOCUMENTED,)),
-    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n",
-     (_BOOT_FAILED[0], _BOOT_UNDESCRIBED.format("HelperExit"))),
-    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n",
-     (_BOOT_FAILED[0], _BOOT_UNDESCRIBED.format("HelperExit"))),
+    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n", (_BOOT_FAILED[0], _BOOT_NAMELESS[0])),
+    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n", (_BOOT_FAILED[0], _BOOT_NAMELESS[0])),
+    ("helper-replaces-sys-exception", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(0)\n",
+     (_BOOT_FAILED[0], _BOOT_RAISED.format("SystemExit", "0"))),
+    ("replaced-sys-exception-main-raises", _BOOT_CLAIMS_INTERRUPT + _MAIN_HALTS.format("SystemExit(0)"),
+     (_MAIN_UNDOCUMENTED,)),
+    ("replaced-sys-exception-main-raises-mro-exit",
+     _BOOT_CLAIMS_INTERRUPT + _BOOT_MRO_KEEP + _MAIN_HALTS.format("HelperExit(0)"), (_MAIN_UNDOCUMENTED,)),
 )
 
 
@@ -23545,14 +23605,22 @@ def _main_exit_findings():
     or 2, and SystemExit(EXIT_MALFORMED) printing exactly _MAIN_UNDOCUMENTED when main() returns anything else
     (None, a str, False, 0.0, 3) or raises a ValueError, a SystemExit(0), a SystemExit subclass whose
     metaclass's mro() leaves out BaseException (keeping SystemExit or not), or an exception whose __class__
-    claims KeyboardInterrupt; a KeyboardInterrupt must escape unchanged. Then each _MAIN_EXIT_CASES script
-    must exit exactly EXIT_MALFORMED printing exactly its lines. With _main_exit's SystemExit raises reverted
-    to sys.exit, the sys.exit script exits 0 (or prints the entry's line after its own) and fails; with the
+    claims KeyboardInterrupt, and SystemExit(EXIT_MALFORMED) printing nothing when main() returns None after
+    replacing sys.stderr with a stream whose write raises SystemExit(0) or such a class; a KeyboardInterrupt
+    must escape unchanged. Then each _MAIN_EXIT_CASES script must exit exactly EXIT_MALFORMED printing
+    exactly its lines. With _main_exit's SystemExit raises reverted to sys.exit, the sys.exit script
+    exits 0 (or prints the entry's line after its own) and fails; with the
     entry ending at main()'s own return (sys.exit(main()) or raise SystemExit(main())), the None script exits
-    0 and fails; with _main_exit's handler reverted to `except BaseException`, its two mro() cases escape and
-    fail, and with its interrupt test reverted to isinstance, the __class__ case escapes and fails; with
-    _bootstrap's broader arm reverted to `except BaseException`, the two mro() scripts print the entry's line
-    in place of the bootstrap lines and fail."""
+    0 and fails; with _main_exit's bare arm removed, its two mro() cases escape and fail, and with its
+    interrupt test reverted to isinstance, the __class__ case escapes and fails; with its broader arm
+    deciding the interrupt from sys.exception(), the replaced-sys.exception script whose verb raises
+    SystemExit(0) exits 0 and fails, and with its bare arm re-raising the interrupt sys.exception() reports,
+    the one whose verb raises an mro() exit exits 0 and fails; with the guard around its line removed, both
+    stream cases end at the stream's exception and fail, and with that guard reverted to `except
+    BaseException`, the mro() stream case does; with _bootstrap's bare arm removed, the two mro() scripts
+    print the entry's line in place of the bootstrap lines and fail, and with _bootstrap's broader arm
+    deciding the interrupt from sys.exception(), the replaced-sys.exception script that raises at import
+    does the same."""
     import ast
     import contextlib
     import inspect
@@ -23584,6 +23652,19 @@ def _main_exit_findings():
             raise exc
         return stand_in
 
+    class Unwritable:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def write(self, text):
+            raise self.exc
+
+    def unwritable(exc):
+        # A main() that replaces sys.stderr with a stream whose every write raises exc, then returns None.
+        def stand_in():
+            sys.stderr = Unwritable(exc)
+        return stand_in
+
     line = _MAIN_UNDOCUMENTED + "\n"
     failures = []
     # (label, a stand-in main, the exception type that must escape unchanged or None, then the escaping
@@ -23603,6 +23684,8 @@ def _main_exit_findings():
             ("raises-mro-drops-baseexception", raising(DroppedExit(0)), None, (EXIT_MALFORMED, line)),
             ("raises-class-claims-keyboardinterrupt", raising(ClaimsInterrupt("class claims")), None,
              (EXIT_MALFORMED, line)),
+            ("stream-raises-systemexit-0", unwritable(SystemExit(0)), None, (EXIT_MALFORMED, "")),
+            ("stream-raises-mro-exit", unwritable(KeptExit(0)), None, (EXIT_MALFORMED, "")),
             ("raises-keyboardinterrupt", raising(KeyboardInterrupt("stop")), KeyboardInterrupt, "stop")):
         out = io.StringIO()
         try:
