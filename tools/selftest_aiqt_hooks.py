@@ -23568,11 +23568,11 @@ def _main_isolated(monitor):
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n))", "deny")
         bcmd("(ap-c100m) an unquoted here-document body in a double-quoted '$(...)' is read for its substitutions "
              "only, so its '->' and a backquoted 'c' allow", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "allow")
-        # The second reading reads the command as it models bash's parser (_AbspthReader; its known misses are
-        # disclosed in the residue): a substitution ends at the ')' or '}' its grammar closes it with, and a
-        # here-document body inside '$(...)' or '${ cmd; }' ends early at a line that STARTS with the delimiter
-        # and holds that closer later on. bash 5.3.9 writes out.txt for every deny below, and every one allowed
-        # before this reading; each allow is a shape bash writes no relative file in.
+        # The second reading reads the command as it models bash's parser (_AbspthReader): a substitution ends at
+        # the ')' or '}' its grammar closes it with, and a here-document body inside '$(...)' or '${ cmd; }' ends
+        # early at a line that STARTS with the delimiter and holds that closer later on. bash 5.3.9 writes out.txt
+        # for every deny in the next two loops, and every one allowed before this reading; each allow in them is
+        # a shape bash writes no relative file in.
         for _rd_label, _rd_cmd in (
                 ("a case pattern's ')' in a double-quoted '$(...)'", 'echo "$(case a in a) echo a > out.txt;; esac)"'),
                 ("a case pattern's ')' in an assigned double-quoted '$(...)'",
@@ -23645,6 +23645,96 @@ def _main_isolated(monitor):
              "(disclosed over-deny of the unread-text scan)", "cat <<<y; echo `echo a \\\\\\\\>> out.txt`", "deny")
         bcmd("(ap-c104c) a nested body ended at 'EOFX)' where bash then fails on a syntax error DENIES (disclosed "
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOFX)\necho y > out.txt\nEOF\n))", "deny")
+        # Bash expands arithmetic text as if double-quoted, so it runs a substitution between single quotes
+        # there: in '$((...))', '((...))' and 'for ((...))', in a '${...}' subscript, offset or length, in a
+        # '${...}' inside arithmetic, and in the subscript of an array element assignment ('a[...]=1', '+=', an
+        # array's '[...]=' element, a declaration builtin's argument). A truncating redirect whose target word
+        # the reader cannot read is judged at its operator, and a quote glued to the '}' that closes a
+        # double-quoted '${ cmd; }' is text of the outer string. Every deny in these three loops allowed before
+        # (each fails with its fix reverted).
+        for _ar_label, _ar_cmd in (
+                ("a '$(...)' between single quotes in '$((...))'", "echo $(( '$(echo a > out.txt)' ))"),
+                ("a '$(...)' between single quotes in a '((...))' command", "(( '$(echo a > out.txt)' ))"),
+                ("a '$(...)' between single quotes in 'for ((...))'",
+                 "for (( i='$(echo a > out.txt)'; 0; )); do :; done"),
+                ("a '$(...)' between single quotes in a double-quoted '$((...))'",
+                 "echo \"$(( '$(echo a > out.txt)' ))\""),
+                ("a backquote substitution between single quotes in '$((...))'", "echo $(( '`echo a > out.txt`' ))"),
+                ("a single-quoted '$(...)' in a '${...}' word inside '$((...))'",
+                 "echo $(( ${u:-'$(echo a > out.txt)'} ))"),
+                ("a single-quoted '$(...)' in a subscript inside '$((...))'", "echo $(( a['$(echo a > out.txt)'] ))"),
+                ("a single-quoted '$(...)' in a '${...}' subscript", "echo ${a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a '${#...}' subscript", "echo ${#a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a '${!...}' subscript", "echo ${!a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a subscript before ':-'", "echo ${a['$(echo a > out.txt)']:-x}"),
+                ("a single-quoted backquote substitution in a '${...}' subscript", "echo ${a['`echo a > out.txt`']}"),
+                ("a single-quoted '$(...)' in a '${...}' offset", "echo ${x:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${...}' offset after a blank", "echo ${x: '$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${...}' length", "echo ${x:0:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${@:...}' offset", "echo ${@:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an offset after a subscript", "echo ${a[0]:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an offset in a '${...}' word", "echo ${u:-${x:'$(echo a > out.txt)'}}"),
+                ("a single-quoted '$(...)' in an 'a[...]=1' subscript", "a['$(echo a > out.txt)']=1"),
+                ("a single-quoted backquote substitution in an 'a[...]=1' subscript", "a['`echo a > out.txt`']=1"),
+                ("a single-quoted '$(...)' in an 'a[...]+=1' subscript", "a['$(echo a > out.txt)']+=1"),
+                ("a single-quoted '$(...)' in a second assignment's subscript",
+                 "x=1 a['$(echo a > out.txt)']=1 true"),
+                ("a single-quoted '$(...)' in a declare argument's subscript",
+                 "declare a['$(echo a > out.txt)']=1"),
+                ("a single-quoted '$(...)' in an array element's subscript", "a=(['$(echo a > out.txt)']=1)"),
+                ("a single-quoted '$(...)' in an 'a[...]=1' subscript in a double-quoted '$(...)'",
+                 "echo \"$(a['$(echo a > out.txt)']=1)\"")):
+            bcmd("(ap-c105) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a '>' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a > $[1])\""),
+                ("a '>|' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a >| $[1])\""),
+                ("a '&>' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a &> $[1])\""),
+                ("a '>' to a target with '$[...]' glued in a double-quoted '$(...)'", "echo \"$(echo a >x$[1])\""),
+                ("a '>' to a target holding a 'coproc' substitution in a double-quoted '$(...)'",
+                 "echo \"$(echo a > x$(coproc true))\"")):
+            bcmd("(ap-c106) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a single quote glued to the '}' of a double-quoted '${ cmd; }'",
+                 "echo \"${ echo b; }'$(echo a > out.txt)\" \"'\""),
+                ("a single quote glued to the '}' of a double-quoted '${ cmd; }' before a newline",
+                 "echo \"${ echo b; }'$(echo a > out.txt)\"\necho \"'\""),
+                ("a single quote glued to the '}' of a double-quoted '${| cmd; }'",
+                 "echo \"${| echo b; }'$(echo a > out.txt)\" \"'\""),
+                ("a single quote glued to the '}' before a backquote substitution",
+                 "echo \"${ echo b; }'`echo a > out.txt`\" \"'\"")):
+            bcmd("(ap-c107) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # Safe shapes with arithmetic, single quotes or '${ cmd; }' that write no relative file keep their allow.
+        for _ar_label, _ar_cmd in (
+                ("plain '$((...))' arithmetic", "echo $(( 1 + 2 ))"),
+                ("a '((...))' command", "(( i = 1 + 2 ))"),
+                ("a single-quoted '>' in '$((...))'", "echo $(( '1 > 2' ))"),
+                ("a single-quoted '$(...)' with no redirect in '$((...))'", "echo $(( '$(date)' ))"),
+                ("an absolute '>' in a single-quoted '$(...)' in '$((...))'",
+                 "echo $(( '$(echo a > {}/out.txt)' ))".format(rp)),
+                ("an offset and length", "echo ${x:1:2} ${x: -1}"),
+                ("subscripts and lengths", "echo ${a[0]} ${a[i+1]} ${#a[@]} ${!a[@]}"),
+                ("a single-quoted '>' in a '${...}' word", "echo ${u:-'a > b'}"),
+                ("a single-quoted '$(...)' in an unquoted '${...}' word", "echo ${u:-'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an unquoted '${...}' pattern", "echo ${x/'$(echo a > out.txt)'/y}"),
+                ("element assignments with single quotes", "a[0]=1; a[i+1]='x > y'; a['k']=2"),
+                ("a single-quoted '$(...)' in an element assignment's value", "a[0]='$(echo a > out.txt)'"),
+                ("a single-quoted '$(...)' in a glob's brackets", "ls a['$(echo a > out.txt)']"),
+                ("a single-quoted '$(...)' in a '${...}' word in a glob's brackets",
+                 "ls a[${u:-'$(echo a > out.txt)'}]"),
+                ("a single-quoted '$(...)' in a '((' bash reads as a subshell", "((echo '$(echo a > out.txt)') )"),
+                ("a single-quoted '$(...)' in a '${...}' word in a '((' bash reads as a subshell",
+                 "((echo ${u:-'$(echo a > out.txt)'}) )"),
+                ("a single-quoted '$(...)' in a '$((' bash reads as a command substitution",
+                 "echo $((echo '$(echo a > out.txt)') )"),
+                ("a double-quoted '${ cmd; }'", "echo \"${ echo b; }\""),
+                ("a single-quoted word glued to a double-quoted '${ cmd; }'", "echo \"${ echo b; }'x'\""),
+                ("a group in a double-quoted '${ cmd; }'", "echo \"${ { echo b; }; }\""),
+                ("absolute targets in and after a double-quoted '${ cmd; }'",
+                 "echo \"${{ echo b > {0}/o; }}\" > {0}/out.txt".format(rp)),
+                ("an append to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a >> $[1])\"")):
+            bcmd("(ap-c108) {} allows".format(_ar_label), _ar_cmd, "allow")
+        bcmd("(ap-c108b) a single-quoted '$(...)' in an 'a[...]=1' word that is echo's argument DENIES (disclosed "
+             "over-deny)", "echo a['$(echo a > out.txt)']=1", "deny")
         # the deny names the target and asks for an absolute one.
         _pt_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": 'echo "$(echo a > out.txt)"'}})

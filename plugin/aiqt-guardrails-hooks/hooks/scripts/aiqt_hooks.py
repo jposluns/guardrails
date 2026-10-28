@@ -4944,6 +4944,14 @@ _ABSPTH_DQ_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$\"])")
 # A word that is a variable assignment up to its '=' ('a=', 'a+=', 'a[1]='): a '(' right after it opens an
 # array's word list, not a subshell.
 _ABSPTH_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=$")
+# The start of a word that may assign to an array element ('a[' in 'a[...]=1'), and of an element of an array's
+# word list ('[' in '([...]=1)'): bash expands the subscript as arithmetic when the word ends it with ']=' or
+# ']+=' (_AbspthReader.word).
+_ABSPTH_SUBSCRIPT_HEAD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
+_ABSPTH_ELEMENT_HEAD_RE = re.compile(r"\[")
+# The name a '${...}' expansion starts with, after any '#' or '!' (_AbspthReader.param): a subscript or a
+# substring offset that follows it is arithmetic.
+_ABSPTH_PARAM_HEAD_RE = re.compile(r"[#!]?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[-@*#?!])")
 # The reserved words after which bash still accepts a reserved word (its reserved_word_acceptable), beside the
 # operators, separators and closers _AbspthReader.commands handles itself.
 _ABSPTH_COMMAND_WORDS = frozenset(("if", "then", "else", "elif", "fi", "while", "until", "do", "done", "!", "time"))
@@ -4952,8 +4960,9 @@ _ABSPTH_COMMAND_WORDS = frozenset(("if", "then", "else", "elif", "fi", "while", 
 class _AbspthUnsure(Exception):
     """Raised by _AbspthReader where it cannot tell how bash reads the text from index at on: a construct it does
     not model, an unterminated quote or substitution, a token bash rejects as a syntax error, or a bound passed.
-    The caller reads the command from there with _abspth_unread_truncation, the fail-closed reading, except in
-    the second known miss, where the raw scan resumes past the operator."""
+    The caller reads the command from there with _abspth_unread_truncation, the fail-closed reading. One raised
+    from a truncating redirect's target word becomes _AbspthFound at the operator instead, since that scan would
+    start past the operator (_AbspthReader.redirect)."""
 
     def __init__(self, at):
         Exception.__init__(self, at)
@@ -4973,14 +4982,11 @@ class _AbspthReader:
     """bash_absolute_paths' second reading of a command, for the deny tier: it reads the text as it models bash
     5.3's parser reading it, and finds each truncating redirect ('>', '>|', '&>', or '>&' to a file) that model
     has bash perform anywhere in it, at the top level or in any command, process or '${ cmd; }' substitution, a
-    double-quoted one included. The model has three known misses, where bash truncates and this reading does not
-    yet find it (_abspth_read_truncation lists them too): a command substitution inside single quotes in an
-    arithmetic context; a truncating redirect whose target word the reader cannot read, where the raw scan
-    resumes past the operator; and a quote glued to the '}' that closes a double-quoted '${ cmd; }' or
-    '${| cmd; }'. The shared lexer reads none of these the way bash does where it matters here: it skips a
-    double-quoted substitution whole, ending it at the first ')' or '}' (a case pattern's ')' or a here-document
-    body line holding one included), reads an unquoted backquote substitution's text with top-level backslash
-    rules, and ends a here-document body only at its exact delimiter line.
+    double-quoted one included. The shared lexer reads none of these substitutions the way bash does where it
+    matters here: it skips a double-quoted substitution whole, ending it at the first ')' or '}' (a case
+    pattern's ')' or a here-document body line holding one included), reads an unquoted backquote substitution's
+    text with top-level backslash rules, ends a here-document body only at its exact delimiter line, and does
+    not read a substitution between single quotes in arithmetic text as commands.
 
     How bash reads, as modelled here. A '$(...)' or '<(...)' ends at the ')' its grammar closes it with, and a
     '${ cmd; }' or '${| cmd; }' at the '}' that stands where a reserved word may: a case pattern's ')' and a
@@ -4997,12 +5003,16 @@ class _AbspthReader:
     test, else a command substitution starting with a subshell. A '${...}' expansion ends at its first '}' that
     no quote or escape holds; it runs each substitution in it, and inside double quotes or a here-document
     body also one between single quotes there (bash 5.3.9 writes out.txt for echo "${u:-'$(echo a > out.txt)'}").
-    A here-document's body starts after the newline that ends its operator's line and ends at a line that is
-    its delimiter (after leading tabs for the <<- form); inside a '$(...)' or '<(...)' bash also ends it at a
-    line that STARTS with the delimiter and has a ')' later on that line, and inside a '${ cmd; }' at one with a
-    '}' (_abspth_early_end), and then reads the rest of that line as commands. That test belongs to the
-    substitution bash is parsing: a top-level body, one in a subshell or group outside any substitution, and one
-    in a backquote substitution's text (which bash parses only when it runs it) end only at the delimiter line.
+    Bash expands arithmetic text as if double-quoted, so single quotes hold a ')' or ']' there but not a
+    substitution: one between them runs in '((...))', '$((...))' and 'for ((...))', in a '${...}' expansion
+    inside them, in a '${...}' subscript, offset or length (_AbspthReader.param), and in the subscript of a word
+    that assigns to an array element (_AbspthReader.word). A here-document's body starts after the newline that
+    ends its operator's line and ends at a line that is its delimiter (after leading tabs for the <<- form);
+    inside a '$(...)' or '<(...)' bash also ends it at a line that STARTS with the delimiter and has a ')' later
+    on that line, and inside a '${ cmd; }' at one with a '}' (_abspth_early_end), and then reads the rest of
+    that line as commands. That test belongs to the substitution bash is parsing: a top-level body, one in a
+    subshell or group outside any substitution, and one in a backquote substitution's text (which bash parses
+    only when it runs it) end only at the delimiter line.
     The body under an unquoted delimiter is read for the substitutions bash expands in it.
 
     Anything else that would change where a substitution ends or what runs as a command raises _AbspthUnsure at
@@ -5013,12 +5023,14 @@ class _AbspthReader:
     '((' arithmetic tries than budget allows. A redirect inside '[[ ... ]]' is a comparison there and is not
     read. Each target is decoded and classed as the lexer classes one (_read_word, _classify_redirect): a
     descriptor, an unquoted current-user tilde, a process substitution and an absolute static path pass; a
-    relative or opaque target, or one with no word, raises _AbspthFound. Like the lexer it does not model a
-    command that parses its argument again (eval, bash -c) or alias expansion. Each method takes the index n the
-    text it reads ends at, so a substitution in a here-document body or a single-quoted part of a '${...}' cannot
-    run past it. The reading is linear in the text's length apart from each failed '((' try, which costs the
-    text it read and is charged to budget (a one-element list shared by every reader of one command), and each
-    backquote substitution's text, copied once per level that holds it."""
+    relative or opaque target, one with no word, or one whose word raises _AbspthUnsure raises _AbspthFound.
+    Like the lexer it does not model a command that parses its argument again (eval, bash -c, and the
+    arithmetic bash evaluates in an argument after quote removal, as for let, [[ ... -eq ... ]], unset, read,
+    printf -v or a fully quoted declare argument, where a subscript's substitution runs) or alias expansion.
+    Each method takes the index n the text it reads ends at, so a substitution in a here-document body or a
+    single-quoted part of a '${...}' cannot run past it. The reading is linear in the text's length apart from
+    each failed '((' try, which costs the text it read and is charged to budget (a one-element list shared by
+    every reader of one command), and each backquote substitution's text, copied once per level that holds it."""
     __slots__ = ("text", "depth", "budget")
 
     def __init__(self, text, depth, budget):
@@ -5160,9 +5172,26 @@ class _AbspthReader:
                 i = self.redirect(op, i + oplen, n)
                 cmd = False
                 continue
-            j = self.word(i, n)
-            word = text[i:j].replace("\\\n", "")
             reserved = cmd and top not in ("[[", "[(")
+            if reserved and c == "}" and (case is None or case[0] == "body"):
+                # A '}' bash reads as the reserved word closes the innermost '{' group, or, with none open, the
+                # '${ cmd; }' this text is in, whatever is glued after it. It is tested before any word is read:
+                # in a double-quoted '${ cmd; }' a quote glued to that '}' is text of the outer string, and
+                # reading it as a word's quote would skip a redirect bash runs or stop at an index past one.
+                k = i + 1
+                while text.startswith("\\\n", k):
+                    k += 2
+                bare = k >= n or text[k] in " \t\n" or text[k] in _METACHARS
+                if bare and top == "{":
+                    stack.pop()
+                    i = k
+                    continue
+                if bare or closer == "}":
+                    if top is None and closer == "}" and not pending:
+                        return i + 1
+                    raise _AbspthUnsure(i)
+            j = self.word(i, n, _ABSPTH_SUBSCRIPT_HEAD_RE)
+            word = text[i:j].replace("\\\n", "")
             if case is not None and case[0] == "subject":
                 case[0] = "in"
             elif case is not None and case[0] == "in":
@@ -5172,16 +5201,6 @@ class _AbspthReader:
             elif top == "[[" and word == "]]":
                 stack.pop()
                 cmd = True
-            elif reserved and c == "}" and (word == "}" or closer == "}"):
-                # A '}' bash reads as the reserved word: it closes the innermost '{' group, or, with none open, the
-                # '${ cmd; }' this text is in, a word character glued after it included.
-                if top == "{" and word == "}":
-                    stack.pop()
-                    i = j
-                    continue
-                if top is None and closer == "}" and not pending:
-                    return i + 1
-                raise _AbspthUnsure(i)
             elif reserved and word == "case":
                 stack.append(["subject", "start"])
                 cmd = False
@@ -5213,10 +5232,23 @@ class _AbspthReader:
                 cmd = False
             i = j
 
-    def word(self, i, n):
+    def word(self, i, n, head=None):
         """The index just past the one word starting at text[i], read as modelled on bash reading an unquoted
-        word, each substitution in it read as commands (_AbspthReader.dollar, _AbspthReader.backquote)."""
+        word, each substitution in it read as commands (_AbspthReader.dollar, _AbspthReader.backquote). Where
+        head (_ABSPTH_SUBSCRIPT_HEAD_RE, _ABSPTH_ELEMENT_HEAD_RE) matches at i and the '[' it ends with is closed
+        by a ']=' or ']+=', the word assigns to an array element, and bash expands that subscript as arithmetic,
+        as if double-quoted, so each substitution between single quotes there is read too. The subscript is read
+        this way whatever command the word is in (a disclosed over-deny where it is an argument bash leaves
+        alone, such as echo's), so a declaration builtin's argument ('declare a[...]=1') is read too."""
         text = self.text
+        spans = None  # the single-quoted texts in the subscript, read once its ']=' shows an assignment
+        level = 0
+        if head is not None:
+            match = head.match(text, i, n)
+            if match is not None:
+                spans = []
+                i = match.end()
+                level = 1
         while i < n:
             c = text[i]
             if c in " \t\n" or c in _METACHARS:
@@ -5227,14 +5259,26 @@ class _AbspthReader:
                 end = text.find("'", i + 1, n)
                 if end < 0:
                     raise _AbspthUnsure(i)
+                if spans is not None:
+                    spans.append((i + 1, end))
                 i = end + 1
             elif c == '"':
                 i = self.dquote(i + 1, n)
             elif c == "`":
                 i = self.backquote(i, n, False)
             elif c == "$":
-                i = self.dollar(i, n, False)
+                i = self.dollar(i, n, False, spans)
             else:
+                if spans is not None:
+                    if c == "[":
+                        level += 1
+                    elif c == "]":
+                        level -= 1
+                        if not level:
+                            if text.startswith(("]=", "]+="), i):
+                                for start, end in spans:
+                                    self.quoted(start, end, True)
+                            spans = None
                 i += 1
         return n
 
@@ -5273,10 +5317,11 @@ class _AbspthReader:
             else:
                 i += 1
 
-    def dollar(self, i, n, quoted):
+    def dollar(self, i, n, quoted, arith=None):
         """The index just past the '$' form at text[i]: a '$(...)' or '$((...))', a '${ cmd; }' or '${| cmd; }',
-        a '${...}' expansion, or, where quoted is False, an ANSI-C $'...' or locale $"..." string; a bare '$' and
-        the character after it are plain text."""
+        a '${...}' expansion (in arithmetic text where arith is True or a list, _AbspthReader.param), or, where
+        quoted is False, an ANSI-C $'...' or locale $"..." string; a bare '$' and the character after it are
+        plain text."""
         text = self.text
         nxt = text[i + 1] if i + 1 < n else ""
         if nxt == "[":
@@ -5307,7 +5352,7 @@ class _AbspthReader:
                 return self.commands(i + 2, n, ")")
             if i + 2 < n and text[i + 2] in " \t\n|":
                 return self.commands(i + (3 if text[i + 2] == "|" else 2), n, "}")
-            return self.param(i + 2, n, quoted)
+            return self.param(i + 2, n, quoted, arith)
         finally:
             self.depth -= 1
 
@@ -5321,31 +5366,54 @@ class _AbspthReader:
         finally:
             self.depth -= 1
 
-    def param(self, i, n, quoted):
+    def param(self, i, n, quoted, arith=None):
         """The index just past the '}' that ends the '${...}' expansion whose text starts at text[i]. Single quotes
-        hold a '}' there; inside double quotes (quoted True) bash still runs a substitution between them."""
+        hold a '}' there; inside double quotes (quoted True) bash still runs a substitution between them, and so
+        it does where it expands the text as arithmetic, as if double-quoted: a subscript right after the name
+        (_ABSPTH_PARAM_HEAD_RE), the offset and length after a ':' that is not ':-', ':=', ':?' or ':+', and the
+        whole expansion inside arithmetic text (arith True). Where that text may not be arithmetic yet (a '(('
+        that may close as a subshell, a subscript before its ']='), arith is the list its single-quoted texts are
+        added to, read once the arithmetic shows. A subscript is read whatever the array, though bash reads an
+        associative array's subscript as a string (a disclosed over-deny)."""
         text = self.text
         start = i - 2
+        head = _ABSPTH_PARAM_HEAD_RE.match(text, i, n)
+        if head is not None:
+            i = head.end()
+        part = "sub" if i < n and text[i] == "[" else "op"  # then "arith" or "word", after the operator
+        level = 0  # the '[' open in the subscript
         while i < n:
             c = text[i]
             if c == "}":
                 return i + 1
+            if part == "op":
+                part = "arith" if c == ":" and not text.startswith(("-", "=", "?", "+"), i + 1) else "word"
+            sq = True if quoted or arith is True or part != "word" else arith
             if c == "\\":
                 i += 2
             elif c == "'":
                 end = text.find("'", i + 1, n)
                 if end < 0:
                     raise _AbspthUnsure(i)
-                if quoted:
+                if sq is True:
                     self.quoted(i + 1, end, True)
+                elif sq is not None:
+                    sq.append((i + 1, end))
                 i = end + 1
             elif c == '"':
                 i = self.dquote(i + 1, n)
             elif c == "`":
                 i = self.backquote(i, n, quoted)
             elif c == "$":
-                i = self.dollar(i, n, quoted)
+                i = self.dollar(i, n, quoted, sq)
             else:
+                if part == "sub":
+                    if c == "[":
+                        level += 1
+                    elif c == "]":
+                        level -= 1
+                        if not level:
+                            part = "op"
                 i += 1
         raise _AbspthUnsure(start)
 
@@ -5369,10 +5437,14 @@ class _AbspthReader:
     def arith(self, i, n):
         """(end, True) where the arithmetic whose text starts at text[i], just after its '((', closes with '))'
         ending just before end; (index, False) where its parentheses close with a single ')' first, so bash reads
-        a subshell there instead. A failed try charges what it read to budget."""
+        a subshell there instead. A failed try charges what it read to budget. Single quotes hold a ')' there,
+        but bash expands the text as if double-quoted, so a substitution between them runs, as does one between
+        single quotes in a '${...}' expansion there; that text is read once the '))' shows the arithmetic, since
+        in a subshell the quotes hold it."""
         text = self.text
         start = i
         level = 0
+        spans = []  # the single-quoted texts read once the arithmetic closes (_AbspthReader.param adds its own)
         while i < n:
             c = text[i]
             if c == "\\":
@@ -5382,6 +5454,7 @@ class _AbspthReader:
                 end = text.find("'", i + 1, n)
                 if end < 0:
                     raise _AbspthUnsure(i)
+                spans.append((i + 1, end))
                 i = end + 1
                 continue
             if c == '"':
@@ -5391,7 +5464,7 @@ class _AbspthReader:
                 i = self.backquote(i, n, False)
                 continue
             if c == "$":
-                i = self.dollar(i, n, False)
+                i = self.dollar(i, n, False, spans)
                 continue
             if c == "(":
                 level += 1
@@ -5399,6 +5472,8 @@ class _AbspthReader:
                 if level:
                     level -= 1
                 elif text.startswith("))", i):
+                    for begin, end in spans:
+                        self.quoted(begin, end, True)
                     return i + 2, True
                 else:
                     self.budget[0] -= i - start + 1
@@ -5425,7 +5500,7 @@ class _AbspthReader:
             elif c in _METACHARS:
                 raise _AbspthUnsure(i)
             else:
-                i = self.word(i, n)
+                i = self.word(i, n, _ABSPTH_ELEMENT_HEAD_RE)
         raise _AbspthUnsure(n)
 
     def operand(self, i, n):
@@ -5449,7 +5524,14 @@ class _AbspthReader:
             if op in _ABSPTH_TRUNCATING_OPS:
                 raise _AbspthFound("a truncating redirection ('{}') whose target it could not read".format(op))
             raise _AbspthUnsure(i)
-        end = self.word(i, n)
+        try:
+            end = self.word(i, n)
+        except _AbspthUnsure:
+            # The fail-closed scan would start inside the target, past this operator, and never judge it.
+            if op in _ABSPTH_TRUNCATING_OPS:
+                raise _AbspthFound("a truncating redirection ('{}') whose target it could not read"
+                                   .format(op)) from None
+            raise
         if op in _ABSPTH_TRUNCATING_OPS:
             try:
                 target, t_opaque, started, _digits, t_ltilde, _end = _read_word(text, i, n)
@@ -5520,10 +5602,8 @@ def _abspth_read_truncation(command, scanned):
     commands (_AbspthReader): a reason naming the first truncating redirect the reader finds to a relative or
     opaque target, else None. Where the reader cannot tell how bash reads the text from some index on, that text
     is read by _abspth_unread_truncation instead, unless scanned (where the caller's unread-text scan started,
-    None where it did not run) is at or before that index. Not yet judged, so None can come back where bash
-    truncates: a command substitution inside single quotes in an arithmetic context (bash runs it); a truncating
-    redirect whose target word the reader cannot read, where the raw scan resumes past the operator; and a quote
-    glued to the '}' that closes a double-quoted '${ cmd; }' or '${| cmd; }'."""
+    None where it did not run) is at or before that index. A truncating redirect whose target word the reader
+    cannot read is returned at its operator rather than read from inside that word."""
     try:
         _AbspthReader(command, 0, [4 * len(command) + 64]).commands(0, len(command), None)
     except _AbspthFound as found:
@@ -5561,12 +5641,13 @@ def bash_absolute_paths(data):
     _abspth_read_truncation, after the segments, whether the full lex parsed the command or not: it reads the
     whole command as _AbspthReader models bash's parser, and a truncating redirect it finds whose target it
     cannot show absolute DENIES, with a message that the target could not be read as absolute. Where it cannot
-    tell how bash reads the text from some index on, the text from there is read by _abspth_unread_truncation.
-    It does not yet judge three shapes bash runs (the residue lists them): a command substitution inside single
-    quotes in an arithmetic context, a truncating redirect whose target word it cannot read (the raw scan
-    resumes past the operator), and a quote glued to the '}' closing a double-quoted '${ cmd; }' or '${| cmd; }'.
-    The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
-    and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
+    tell how bash reads the text from some index on, the text from there is read by _abspth_unread_truncation,
+    except that a truncating redirect whose target word it cannot read DENIES at its operator. It reads a
+    substitution between single quotes in arithmetic text (a '((...))', '$((...))', a '${...}' subscript, offset
+    or length, an array element assignment's subscript), where bash runs it, and a quote glued to the '}' that
+    closes a double-quoted '${ cmd; }' as text of the outer string. The guard reads the segments of its full
+    lex where that lex parses the whole command and no floor moved, and lexes the command a second time,
+    partially, only where the full lex raises past the uncertain-'#'
     fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
     uncertain '#' characters it can make up to twice the thirty-one lexes of one
     _lex_readings call, each taking time linear in the command's length. Where a lex read a quoted here-document's body
