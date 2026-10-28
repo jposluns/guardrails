@@ -102,26 +102,35 @@ def _bootstrap():
     uncaught ImportError that Python would surface as its default exit 1 and that a direct `opf render
     --check` would then read as a false DRIFT (the exit-1=drift conflation, reached here BEFORE the render
     dispatcher's own fail-closed handler). Every BaseException raised while a helper is imported maps to
-    EXIT_MALFORMED except a KeyboardInterrupt, which is re-raised unchanged, because exit 1 is the drift or
-    finding code and this function exists to keep an import fault from reaching it: ImportError and OSError
-    (the broken/partial-install signals) keep their own arms and messages, and every other one, an Exception
-    subclass included (a SyntaxError in an installed helper, a ValueError at import) and a SystemExit
-    (sys.exit(0) and a bare sys.exit() included, which would otherwise end any verb at exit 0, read as
-    success), maps to a located diagnostic naming the helper (the module running in the outermost module
-    frame of the traceback, and the innermost one's module when another module raised it) and the cause (its
-    type and text), rendered through _init_inert. An error raised after a helper is imported, outside this
-    function, is not mapped here. The imports moved OFF module top for exactly this reason -- an eager
-    top-level import failed before main()'s contract could apply.
+    EXIT_MALFORMED except a KeyboardInterrupt, which is re-raised unchanged (one whose class also derives
+    from ImportError or OSError is caught by that arm first and maps as that arm does), because exit 1 is
+    the drift or finding code and this function exists to keep an import fault from reaching it: ImportError
+    and OSError (the broken/partial-install signals) keep their own arms and messages, and every other one,
+    an Exception subclass included (a SyntaxError in an installed helper, a ValueError at import) and a
+    SystemExit (sys.exit(0) and a bare sys.exit() included, which would otherwise end any verb at exit 0,
+    read as success), maps to a located diagnostic naming the helper (the module running in the outermost
+    module frame of the traceback, or only "a helper module" when the traceback holds no module frame, as
+    for a SyntaxError in the helper, whose own text names its file; and the innermost one's module when
+    another module raised it) and the cause (its type and text), rendered through _init_inert. An error
+    raised after a helper is imported, outside this function, is not mapped here. The imports moved OFF
+    module top for exactly this reason -- an eager top-level import failed before main()'s contract could
+    apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
-    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
-    that could not be brought in; the variable parts of that diagnostic (the helper name or the read
-    error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
-    printed on the way to any verb. Describing a cause runs code the cause controls (its __str__, a name
-    that is not a str), so no description may escape: the ImportError and OSError arms build their one line
-    inside a guard, and the broader arm prints a fixed cannot-bootstrap line first and then describes the
-    helper and the cause inside a guard; a description that raises anything (a SystemExit or a ValueError
-    included) falls back to a line naming only the cause's type, or to a fixed line naming nothing, and
-    every arm still returns EXIT_MALFORMED. A KeyboardInterrupt while a helper is imported surfaces as
+    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a cannot-bootstrap diagnostic (the
+    ImportError arm's line names the module its error names, which need not be a helper, or else gives the
+    error's text); every variable part of a diagnostic (a module name, the cause's type or text) is
+    rendered through _init_inert, the one init escaper, so no raw, shell-live value is printed on the way
+    to any verb. Describing a cause runs code the cause controls (its __str__, a name that is not a str,
+    its type's __name__ under a hostile metaclass), so no description may escape: the ImportError and
+    OSError arms build their one line inside a guard, and the broader arm runs no code the cause controls
+    before it prints a fixed cannot-bootstrap line, and then describes the helper and the cause inside a
+    guard; a description that raises anything (a SystemExit or a ValueError included) falls back to a line
+    naming only the cause's type, or to a fixed line naming nothing, and every arm still returns
+    EXIT_MALFORMED. Whether a cause is a KeyboardInterrupt is decided by its real type,
+    issubclass(type(exc), KeyboardInterrupt), never by isinstance, which reads the cause's own __class__
+    when its type is not one: a __class__ property raising SystemExit(0) would escape before any line is
+    printed (exit 0 at the command line), and one returning KeyboardInterrupt would be re-raised as if it
+    were one. A KeyboardInterrupt re-raised here surfaces as
     Python's own traceback: it runs before init dispatch and outside _cmd_init's rendering boundary, a window
     _cmd_init and OPF-QUICKSTART state. Every mapped arm renders its variable parts AT this print (the init suite
     drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
@@ -164,7 +173,8 @@ def _bootstrap():
         print(line, file=sys.stderr)
         return EXIT_MALFORMED
     except BaseException as exc:  # noqa: BLE001  an import-time fault is a cannot-evaluate, never exit 0 or 1
-        if isinstance(exc, KeyboardInterrupt):
+        # The real type decides: isinstance would read the cause's own __class__, code the cause controls.
+        if issubclass(type(exc), KeyboardInterrupt):
             raise
         # The fixed line first: describing the cause runs its code, whose own failure must not erase this one.
         print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
@@ -201,10 +211,12 @@ def _bootstrap_undescribed(exc):
 
 
 # The lines _bootstrap_exit_findings expects, each a (template, raw parts) pair whose parts are rendered
-# through _init_inert: the broader arm's fixed first line, its located description, and the line for a
-# cause whose description raised.
+# through _init_inert: the broader arm's fixed first line, its located description, the ImportError and
+# OSError arms' one line, and the line for a cause whose description raised.
 _BOOT_FAILED = ("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)", ())
 _BOOT_RAISED = "opf: cannot bootstrap: helper _opf_worklog raised {} ({}) while being imported (cannot evaluate)"
+_BOOT_MISSING = "opf: cannot bootstrap: {} (cannot evaluate)"
+_BOOT_UNREAD = "opf: cannot bootstrap: a helper module could not be read ({}: {}) (cannot evaluate)"
 _BOOT_UNDESCRIBED = "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)"
 
 # The import-time faults _bootstrap_exit_findings raises from a stand-in for the first helper _bootstrap
@@ -230,14 +242,38 @@ _BOOTSTRAP_EXIT_CASES = (
      "class HelperHalt(BaseException):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
      "raise HelperHalt()\n",
      None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperHalt",)))),
+    ("class-raises-systemexit-0",
+     "class HelperFault(Exception):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperFault('class raises')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperFault", "class raises")))),
+    ("class-claims-keyboardinterrupt",
+     "class HelperFault(Exception):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperFault('class claims')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperFault", "class claims")))),
     ("importerror-str-raises-systemexit-0",
      "class HelperMissing(ImportError):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
      "raise HelperMissing()\n",
      None, ((_BOOT_UNDESCRIBED, ("HelperMissing",)),)),
+    ("importerror-class-raises-systemexit-0",
+     "class HelperMissing(ImportError):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperMissing('class raises', name='_opf_missing')\n",
+     None, ((_BOOT_MISSING, ("_opf_missing",)),)),
+    ("importerror-class-claims-keyboardinterrupt",
+     "class HelperMissing(ImportError):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperMissing('class claims', name='_opf_missing')\n",
+     None, ((_BOOT_MISSING, ("_opf_missing",)),)),
     ("oserror-str-raises-valueerror",
      "class HelperUnread(OSError):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
      "raise HelperUnread()\n",
      None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+    ("oserror-class-raises-systemexit-0",
+     "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperUnread('class raises')\n",
+     None, ((_BOOT_UNREAD, ("HelperUnread", "class raises")),)),
+    ("oserror-class-claims-keyboardinterrupt",
+     "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperUnread('class claims')\n",
+     None, ((_BOOT_UNREAD, ("HelperUnread", "class claims")),)),
 )
 
 
@@ -251,10 +287,14 @@ def _bootstrap_exit_findings(bootstrap=None):
     raise nothing, and print exactly the fixed cannot-bootstrap line and then one line naming the helper and
     the cause's type and text, rendered inert. A cause whose __str__ raises (SystemExit(0) or a ValueError),
     in the broader arm or in the ImportError or OSError arm, must still return EXIT_MALFORMED, its
-    description falling back to a line naming only its type. A KeyboardInterrupt must escape unchanged. With
+    description falling back to a line naming only its type. A cause whose __class__ is a property raising
+    SystemExit(0) or returning KeyboardInterrupt, in each arm, must return EXIT_MALFORMED and print exactly
+    the lines that arm prints for its real type. A KeyboardInterrupt must escape unchanged. With
     the broader arm narrowed back to exits only, the ValueError and SyntaxError cases escape the call and fail;
     with any arm reverted to describing its cause in its one unguarded print, that arm's __str__ cases
-    escape the call and fail."""
+    escape the call and fail; with the broader arm's interrupt test reverted to isinstance, its two __class__
+    cases escape the call and fail, and an isinstance interrupt test put first in the ImportError or OSError
+    arm makes that arm's two fail the same way."""
     import contextlib
     import io
     import tempfile
