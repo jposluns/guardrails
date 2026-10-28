@@ -19266,19 +19266,22 @@ def _cmd_adopt(rest):
           creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
           seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
           classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
-          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
-          claimed by another writer, in a machine subdirectory, beside an open transaction other than
-          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
-          did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
+          listing), store-lease-held (a store pointer at the product root other than the in-root one
+          init-store publishes, or a store lease present in a machine subdirectory other than a dead adoption
+          apply's leftover, or one claimed by another writer or that cannot be claimed, beside an open
+          transaction other than init-store's), init-store-reversal-unproven (the reversal could remove
+          content the operation did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
           open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
           never reported recovered), or store-lease-release-failed (the recovery finished,
-          but a store lease this run took could not be released and stays, named). Also exit 2: a
+          but releasing a store lease this run took faulted: one that could not be released stays, named,
+          and one removed before its directory close failed is named as released). Also exit 2: a
           cannot-evaluate root. A leftover store lease an interrupted adoption apply kept (operation
           adopt-apply) beside an OPEN adoption transaction is released through this reconciliation only
-          once its holder is confirmed dead on this host (spec 5.7), and the release is printed (named in
-          the refusal when a later step refuses); beside such a transaction any other present lease
+          once its holder is confirmed dead on this host (spec 5.7), and the release is printed on every
+          outcome, before a refusal or error too, and named in the text of every refusal raised after it;
+          beside such a transaction any other present lease
           refuses as store-lease-held, and a lease beside no open transaction is not touched: each stays
           the operator's to release. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
@@ -19420,18 +19423,29 @@ def _cmd_adopt(rest):
     if sub == "reconcile":
         # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
         # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
+        leases_released = []
+
+        def print_released():
+            # a leftover lease this run released is gone whatever the run then did, so its release is
+            # printed on every outcome, before a refusal or error too
+            for report in leases_released:
+                print("opf adopt reconcile: {}".format(report))
         try:
-            leases_released = []
             outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs, leases_released)
         except _opf_adopt_apply.ReconcileRefusal as exc:
+            print_released()
             print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
             return EXIT_MALFORMED
         except _opf_adopt_apply.AdoptApplyError as exc:
-            print("opf adopt reconcile: cannot evaluate: {}".format(exc), file=sys.stderr)
+            print_released()
+            print("opf adopt reconcile: cannot evaluate: {}".format(_opf_adopt_apply._journal._msg_said(exc)),
+                  file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0 or uncaught exit-1
-            print("opf adopt reconcile: cannot evaluate: unexpected error ({!r}); failing closed to exit "
-                  "2".format(exc), file=sys.stderr)
+            # rendered with its notes: a release, or a lease that stays, may be recorded only there
+            print_released()
+            print("opf adopt reconcile: cannot evaluate: unexpected error ({}); failing closed to exit "
+                  "2".format(_opf_adopt_apply._journal._exc_said(exc)), file=sys.stderr)
             return EXIT_MALFORMED
         recovered = [(txn, outcome) for txn, outcome in outcomes
                      if outcome in ("rolled-back", "rolled-forward")]
@@ -19440,8 +19454,7 @@ def _cmd_adopt(rest):
         if stale_released:
             print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
                   "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
-        for report in leases_released:
-            print("opf adopt reconcile: {}".format(report))
+        print_released()
         if not (recovered or stale_released) and lock_taken:
             print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
                   "when this run took the journal lock (another reconcile may have recovered it first); no "
@@ -19506,8 +19519,10 @@ def _cmd_adopt(rest):
             print("opf adopt {}: cannot evaluate: {}".format(sub, exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
-            print("opf adopt {}: cannot evaluate: unexpected error ({!r}); failing closed to exit "
-                  "2".format(sub, exc), file=sys.stderr)
+            # rendered with its notes: a close error the transaction raises as itself names there the lease
+            # it left in place
+            print("opf adopt {}: cannot evaluate: unexpected error ({}); failing closed to exit "
+                  "2".format(sub, _opf_adopt_apply._journal._exc_said(exc)), file=sys.stderr)
             return EXIT_MALFORMED
 
     # sub == "status": the read-only state report over the two adoption homes; ZERO writes. Both homes
@@ -21270,7 +21285,9 @@ def _cli_self_test():
             its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
             (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
             transaction that never published its INTENT (each lock released and named), and a dead apply's
-            store lease kept beside its open transaction (the lease released, the release printed). The no-op: no
+            store lease kept beside its open transaction (the lease released, the release printed, also
+            before the refusal or error, which names it too, when the release of the lease reconcile claimed in
+            its place then faults). The no-op: no
             journal, a completed transaction, a store lease with nothing open, and a second reconcile after
             a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
             its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
@@ -21560,6 +21577,47 @@ def _cli_self_test():
                     failures.append("adopt reconcile over a dead apply's lease kept beside its open transaction: "
                                     "rc={!r} (expected 0 + rolled-back + the released lease printed, the lease "
                                     "gone; {})".format(rc, out.strip()))
+
+                # the release is printed on a refusal or an error too, before it, and the printed refusal or
+                # error names it as well: the recovery finished and only the release of the lease reconcile
+                # claimed in the leftover's place faults, as a WriteGuardError (store-lease-release-failed)
+                # or as another exception (the backstop) (red when the printing on either path, or the
+                # naming in the refusal or the error's note, is dropped)
+                def kept_dead(name):
+                    root = os.path.join(rbase, name)
+                    put(root, lease_rel.rsplit("/", 1)[0] + "/" + _opf_store.MANIFEST_NAME,
+                        _opf_init.build_manifest().encode("utf-8"))
+                    with mock.patch.object(journal, "_kill_point", kill_first):
+                        try:
+                            adopt.run_adopt_transaction(root, rid, lambda ops: ops.create(adopt.plan_rel(rid), plan),
+                                                        plan_digest=digest)
+                        except (_Interrupt, adopt.AdoptApplyError):
+                            pass
+                    path = os.path.join(root, lease_rel)
+                    if os.path.exists(path) and dead is not None:
+                        with open(path, "rb") as fh:
+                            left = fh.read()
+                        put(root, lease_rel, left.replace(":{}\"".format(os.getpid()).encode("utf-8"),
+                                                          ":{}\"".format(dead).encode("utf-8")))
+                    return root
+
+                for name, error, needle in (
+                        ("releasefault", _opf_write_guard.WriteGuardError("INJECTED-CLI-LEASE-RELEASE-FAULT"),
+                         "REFUSED ({})".format(adopt.RECONCILE_LEASE_RELEASE_FAILED)),
+                        ("releaseexception", RuntimeError("INJECTED-CLI-RELEASE-EXCEPTION"),
+                         "cannot evaluate: unexpected error")):
+                    faulted = kept_dead(name)
+
+                    def release_raises(root_fd, machine_rel, payload, verb, error=error):
+                        raise error
+                    with mock.patch.object(_opf_write_guard, "release_lease", release_raises):
+                        rc, out = run(faulted)
+                    printed = "opf adopt reconcile: the leftover single-writer lease {}".format(lease_rel)
+                    if not (rc == EXIT_MALFORMED and needle in out and str(error) in out and printed in out
+                            and out.count("confirmed-dead") >= 2 and dead is not None):
+                        failures.append("adopt reconcile over {} after a dead apply's leftover lease was released: "
+                                        "rc={!r} (expected 2 + {!r}, the release printed and named in the "
+                                        "printed refusal or error; {})".format(name, rc, needle, out.strip()))
 
                 # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
                 # archive copy is discarded) exits 2 named, and the state is the journal's record of a
@@ -22161,8 +22219,9 @@ def _retained_close_offpath_self_test():
         def transaction_refusal():
             # Every run starts from the same tree: an injected close failure after the lease's create
             # leaves that lease, and one in the journal lock's release keeps the lock and its journal
-            # directories, each by design and named in the refusal, and either would refuse every later
-            # run before it reaches the close under test, so both are reset here.
+            # directories, each by design and named in the refusal (or, for a close error the run raises
+            # as itself, in its note), and either would refuse every later run before it reaches the close
+            # under test, so both are reset here.
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(str(root / machine_rel / _opf_check.LEASE_NAME))
             shutil.rmtree(str(root / Path(_opf_adopt_apply.JOURNAL_REL).parts[0]), ignore_errors=True)
