@@ -53,7 +53,8 @@ refuses before any write while a plan op's slice, or the driver's receipt stage,
 `opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
 alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
 own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
-safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+safe; it releases a leftover store lease only when an interrupted adoption apply left it and its holder is
+confirmed dead (spec 5.7). `complete` is
 recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -19274,9 +19275,10 @@ def _cmd_adopt(rest):
           open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
           never reported recovered), or store-lease-release-failed (the recovery finished,
           but a store lease this run took could not be released and stays, named). Also exit 2: a
-          cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
-          lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
-          not used.
+          cannot-evaluate root. A leftover store lease an interrupted adoption apply kept (operation
+          adopt-apply) is released through this reconciliation only once its holder is confirmed dead on
+          this host (spec 5.7), and the release is printed; any other present lease refuses as
+          store-lease-held and stays the operator's to release. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -19417,7 +19419,8 @@ def _cmd_adopt(rest):
         # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
         # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
         try:
-            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs)
+            leases_released = []
+            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs, leases_released)
         except _opf_adopt_apply.ReconcileRefusal as exc:
             print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
             return EXIT_MALFORMED
@@ -19435,6 +19438,8 @@ def _cmd_adopt(rest):
         if stale_released:
             print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
                   "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
+        for report in leases_released:
+            print("opf adopt reconcile: {}".format(report))
         if not (recovered or stale_released) and lock_taken:
             print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
                   "when this run took the journal lock (another reconcile may have recovered it first); no "
@@ -22111,14 +22116,25 @@ def _retained_close_offpath_self_test():
             call()                            # the fixture reaches every registration before it is swept
             expect("offpath-adopt-observe-" + label, call)
         # _opf_adopt_apply: the product-root closes of verify_bundle, reconcile, the default-store probe
-        # and a transaction refused at the store posture (nothing written).
+        # and a transaction that joins the fixture store's single-writer lease under the journal lock,
+        # checks the store's clean state, composes nothing and refuses (nothing written).
         run_id = "adopt-20260101T000000Z-0123456789abcdef"
         expect("offpath-adopt-apply-verify-bundle", lambda: _opf_adopt_apply.verify_bundle(str(root), run_id))
         expect("offpath-adopt-apply-reconcile", lambda: _opf_adopt_apply.reconcile(str(root)))
         expect("offpath-adopt-apply-default-store-probe",
                lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
-        expect("offpath-adopt-apply-transaction-refusal",
-               lambda: _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None))
+
+        def transaction_refusal():
+            # Every run starts from the same tree: an injected close failure after the lease's create
+            # leaves that lease, and one in the journal lock's release keeps the lock and its journal
+            # directories, each by design and named in the refusal, and either would refuse every later
+            # run before it reaches the close under test, so both are reset here.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(root / machine_rel / _opf_check.LEASE_NAME))
+            shutil.rmtree(str(root / Path(_opf_adopt_apply.JOURNAL_REL).parts[0]), ignore_errors=True)
+            return _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None)
+
+        expect("offpath-adopt-apply-transaction-refusal", transaction_refusal)
         # opf.py: the init inventory / root-binding / create-only / observation helpers, beneath a held root.
         init = base / "init"
         (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)
