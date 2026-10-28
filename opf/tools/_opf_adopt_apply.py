@@ -2029,6 +2029,23 @@ def reconcile_report(product_root, released=None):
         store._close_fd_exc_safe(root_fd)
 
 
+def _lock_after_release(jr_fd, mine):
+    """What the release of the journal lock a reconcile took left at `lock`, read beneath the HELD journal
+    descriptor jr_fd, never by re-resolving the journal path (a journal renamed aside after the release
+    cannot hide that lock), and judged by inode, as the apply path's read-back judges it (_release_outcome):
+    "stays" for a lock at the inode of `mine` (the identity _lock_identity read when the lock was taken, its
+    descriptor HELD by the caller until after this read, so no filesystem can hand that inode to a later
+    lock), or for any lock present while `mine` is None (never read: a lock present is never presumed
+    another's); "replaced" for a lock at another inode (one taken after this run's lock left that name, a
+    peer's); "absent" for no lock. JournalError when it cannot be observed (_journal._lstat_at)."""
+    st = _journal._lstat_at(jr_fd, "lock")
+    if st is None:
+        return "absent"
+    if mine is None or (st.st_dev, st.st_ino) == tuple(mine[:2]):
+        return "stays"
+    return "replaced"
+
+
 def _reconcile_run(product_root, root_fd, taken, broke, released=None):
     """reconcile_report's body beneath its product-root descriptor; returns (outcomes, lock_taken). `taken`
     and `broke` are the caller's, so the caller releases the store leases this run took after the journal
@@ -2037,11 +2054,14 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
     once the journal exclusion is held, as the store leases are taken: a claim's close error, rendered with
     its notes, which name a lease the claim left) and recovering (RECONCILE_FAILED), the last set only once
     the leases are taken, right before the first recovery write. The release of the journal lock this run
-    took is outside every stage: a fault it raises, or a lock still present once it returned (it returns,
-    never raises, leaving a lock it cannot read in place), is recorded (`unreleased`) and named as that release's,
-    the lock named as one that STAYS while it is still present (lock_said), beside the refusal or exception
-    already in flight, which it never replaces; with nothing in flight (the recovery finished) it refuses
-    as RECONCILE_FAILED naming what the recovery did and that fault."""
+    took is outside every stage: a fault it raises, or this run's lock still present once it returned (it
+    returns, never raises, leaving a lock it cannot read in place), read back beneath the held jr_fd and by
+    the inode this run's lock was taken at (_lock_after_release), so a journal renamed aside cannot hide it
+    and a peer's lock taken since is never read as this run's, is recorded (`unreleased`, with what that
+    read-back found) and named as that release's, the lock named as one that STAYS while it is still present
+    (lock_said), beside the refusal or exception already in flight, which it never replaces; with nothing
+    in flight (the recovery finished) it refuses as RECONCILE_FAILED naming what the recovery did and that
+    fault."""
     journal_root = _journal_root(product_root)
     arb_rel = JOURNAL_REL + "/lock.break"
     outcomes = []
@@ -2049,7 +2069,8 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
     stage = ["classify"]
     held = []           # non-empty once THIS run holds the journal lock (released by the finally below)
     arb_before = []     # whether lock.break was present as this run's stale-lock arbitration began
-    unreleased = []     # the fault releasing the journal lock THIS run took raised, once it raised one
+    unreleased = []     # (fault, left) once releasing the journal lock THIS run took faulted: what it raised, and
+                        # what _lock_after_release then found there (or what reading it raised)
 
     def arbitration_said():
         if arb_before != [False]:
@@ -2065,16 +2086,21 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
     def lock_said():
         if not unreleased:
             return ""
-        fault = _journal._msg_said(unreleased[0])
-        try:
-            present = _journal._lstat_contained(root_fd, lock_rel) is not None
-        except (_journal.JournalError, OSError) as exc:
+        fault, left = _journal._msg_said(unreleased[0][0]), unreleased[0][1]
+        if isinstance(left, BaseException):
             return ("; releasing the journal lock this run took then faulted ({}), and whether {} stays could not "
-                    "be observed ({})".format(fault, lock_rel, exc))
-        if present:
+                    "be observed ({})".format(fault, lock_rel, left))
+        if left == "stays":
+            # a later reconcile reads the lock before any liveness test, so one it cannot read or parse is
+            # refused there, never broken
             return ("; releasing the journal lock this run took then faulted ({}), and {} is still present: that "
-                    "lock STAYS, and a later reconcile breaks it once its owner has exited and it can be "
-                    "read".format(fault, lock_rel))
+                    "lock STAYS. A later reconcile breaks it once its owner has exited if it can be read and is "
+                    "well formed, but refuses on it as {} while it cannot be read or is malformed, and no "
+                    "sanctioned path clears a malformed one".format(fault, lock_rel, RECONCILE_UNCLASSIFIABLE))
+        if left == "replaced":
+            return ("; releasing the journal lock this run took then faulted after that lock left {} ({}): the lock "
+                    "there now is at another inode, not the one this run took, and whether this run's removal is "
+                    "durable is unknown".format(lock_rel, fault))
         return ("; releasing the journal lock this run took then faulted after its removal ({}): {} is absent, and "
                 "whether that removal is durable is unknown".format(fault, lock_rel))
 
@@ -2195,7 +2221,15 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                 except OSError as exc:
                     lock_fault(exc)
             held.append(True)
+            mine = None     # the identity of the lock this run took, None until read (_lock_after_release)
             try:
+                # its descriptor HELD in held_fds, closed with them after the release's read-back below: while it
+                # is held no filesystem can hand this lock's inode to a later lock, so a peer's lock taken after
+                # the release lands at another inode and is never read as this run's
+                try:
+                    mine = _lock_identity(jr_fd, keep=held_fds)
+                except (_journal.JournalError, OSError) as exc:
+                    _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this
                 if not broke:
                     stage[0] = "claim"
                     _take_reconcile_leases(root_fd, targets, taken, released)
@@ -2230,13 +2264,18 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                 try:
                     _journal.release_lock(journal_root)
                     # release_lock returns, never raises, when it leaves the lock in place (one it cannot read, a
-                    # malformed one, one it does not own), so whether the lock stays is observed, never assumed
-                    if _journal._lstat_contained(root_fd, lock_rel) is not None:
+                    # malformed one, one it does not own), so whether this run's lock stays is observed, never
+                    # assumed: beneath the held jr_fd, by the inode it was taken at (_lock_after_release)
+                    if _lock_after_release(jr_fd, mine) == "stays":
                         raise _journal.JournalError("the release returned with {} still in place: a lock it cannot "
                                                     "read, a malformed one or one it does not own is never "
                                                     "removed".format(lock_rel))
                 except (_journal.JournalError, OSError) as exc:
-                    unreleased.append(exc)
+                    try:
+                        left = _lock_after_release(jr_fd, mine)
+                    except (_journal.JournalError, OSError) as unseen:
+                        left = unseen
+                    unreleased.append((exc, left))
                     if inflight is None:
                         stage[0] = "release"
                         raise
@@ -13244,12 +13283,13 @@ def _self_test_checks():
               and "{}/lock is absent, and whether that removal is durable is unknown".format(JOURNAL_REL) in said
               and "STAYS" not in said and not lock_present(root) and txn_state(root, rid) == "rolled-back", said)
 
-    # the journal directory made unsearchable for reads (mode 0o300) just before the real release: the release
-    # cannot open it and returns, the lock cannot be observed afterwards either, and the finished recovery is
-    # refused, saying whether that lock stays could not be observed, never reported clean (red when the release
-    # is trusted without observing the lock afterwards)
+    # the journal directory made unreadable and unsearchable (mode 0o200) just before the real release: the
+    # release cannot open it and returns, the lock cannot be observed afterwards either, not even beneath the
+    # journal descriptor this run holds, and the finished recovery is refused, saying whether that lock stays
+    # could not be observed, never reported clean (red when the release is trusted without observing the lock
+    # afterwards)
     def release_journal_unreadable(journal_root):
-        os.chmod(journal_root, 0o300)
+        os.chmod(journal_root, 0o200)
         return real_release_lock(journal_root)
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, _before = interrupted_mid(temp)
@@ -13263,6 +13303,146 @@ def _self_test_checks():
               report is None and isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
               and "recovery finished (" in said and "{}/lock stays could not be observed".format(JOURNAL_REL) in said
               and lock_present(root) and txn_state(root, rid) == "rolled-back", said)
+
+    # the journal directory made unreadable but still searchable (mode 0o300) just before the real release: the
+    # release cannot open it and returns, and the lock, read back beneath the journal descriptor this run holds,
+    # is observed in place, so the finished recovery is refused naming it as one that STAYS (red when the
+    # read-back re-resolves the journal path from the product root, which cannot open that directory)
+    def release_journal_unlistable(journal_root):
+        os.chmod(journal_root, 0o300)
+        return real_release_lock(journal_root)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        try:
+            with mock.patch.object(_journal, "release_lock", release_journal_unlistable):
+                report, finished = outcome_of(reconcile_report, root)
+        finally:
+            os.chmod(_journal_root(root), 0o700)
+        said = str(finished)
+        check("reconcile-finished-unlistable-journal-lock-observed-held",
+              report is None and isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
+              and "recovery finished (" in said and left_in_place in said and lock_stays in said
+              and "could not be observed" not in said and lock_present(root) and txn_state(root, rid) == "rolled-back",
+              said)
+
+    # the release leaves a lock it cannot read (mode 0) and the journal is then renamed aside, an empty directory
+    # put at its path: the lock is read back beneath the journal descriptor this run holds, so the finished
+    # recovery is refused naming that lock as one that STAYS, never reported clean (red when the read-back
+    # re-resolves the journal path from the product root)
+    def release_unreadable_then_swap(journal_root):
+        try:
+            return release_unreadable(journal_root)
+        finally:
+            os.rename(journal_root, str(journal_root) + ".aside")
+            os.mkdir(journal_root)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        aside = Path(str(_journal_root(root)) + ".aside")
+        with mock.patch.object(_journal, "release_lock", release_unreadable_then_swap):
+            report, finished = outcome_of(reconcile_report, root)
+        said = str(finished)
+        check("reconcile-finished-swapped-journal-lock-read-beneath-held-fd",
+              report is None and isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
+              and "recovery finished (" in said and "{} rolled-back".format(rid) in said and left_in_place in said
+              and lock_stays in said and os.path.lexists(aside / "lock") and not lock_present(root), said)
+
+    # the real release removes the lock this run took and a peer then takes the journal lock (another session of
+    # this process here, which release_lock would read as its own too): the finished recovery is reported, never
+    # refused, and the peer's lock, at another inode, is never read as this run's nor touched (red when any lock
+    # present after the release is read as this run's)
+    def release_then_peer_takes(journal_root):
+        real_release_lock(journal_root)
+        real_acquire_lock(journal_root, "opf-adopt-selftest-peer")
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        with mock.patch.object(_journal, "release_lock", release_then_peer_takes):
+            report, why = outcome_of(reconcile_report, root)
+        peer = _journal.read_lock_owner(_journal_root(root)) if lock_present(root) else None
+        check("reconcile-finished-peer-lock-after-release-not-this-runs",
+              report == ([(rid, "rolled-back")], False, True) and why is None and peer is not None
+              and peer.get("session") == "opf-adopt-selftest-peer" and txn_state(root, rid) == "rolled-back",
+              (report, str(why), peer))
+
+    # the release removes the lock this run took, its durability fsync fails, and a peer then takes the journal
+    # lock: the finished recovery is refused for that fault, naming the lock there now as not this run's, never as
+    # one that STAYS (red when any lock present after the release is read as this run's)
+    def release_fsync_fails_then_peer_takes(journal_root):
+        try:
+            return release_then_fsync_fails(journal_root)
+        finally:
+            real_acquire_lock(journal_root, "opf-adopt-selftest-peer")
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        with mock.patch.object(_journal, "release_lock", release_fsync_fails_then_peer_takes):
+            report, finished = outcome_of(reconcile_report, root)
+        said = str(finished)
+        peer = _journal.read_lock_owner(_journal_root(root)) if lock_present(root) else None
+        check("reconcile-finished-lock-release-fault-peer-lock-named",
+              report is None and isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
+              and "recovery finished (" in said and "INJECTED-LOCK-DIR-FSYNC-EIO" in said
+              and "the lock there now is at another inode, not the one this run took" in said and "STAYS" not in said
+              and peer is not None and peer.get("session") == "opf-adopt-selftest-peer"
+              and txn_state(root, rid) == "rolled-back", said)
+
+    # the release meets a malformed lock (the one this run took, rewritten in place) and leaves it: the finished
+    # recovery is refused naming it as one that STAYS with a remedy true for it (a later reconcile refuses on it,
+    # never breaks it), and a later reconcile does refuse on it as journal-unclassifiable (red when the remedy says
+    # a later reconcile breaks any lock that can be read once its owner has exited)
+    def release_malformed(journal_root):
+        (Path(journal_root) / "lock").write_bytes(b"not a lock record\n")
+        return real_release_lock(journal_root)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        with mock.patch.object(_journal, "release_lock", release_malformed):
+            report, finished = outcome_of(reconcile_report, root)
+        said = str(finished)
+        _later, again = outcome_of(reconcile_report, root)
+        check("reconcile-finished-malformed-lock-remedy-true",
+              report is None and isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
+              and lock_stays in said and "refuses on it as {} while it cannot be read or is malformed".format(
+                  RECONCILE_UNCLASSIFIABLE) in said and "and it can be read" not in said
+              and isinstance(again, ReconcileRefusal) and again.finding == RECONCILE_UNCLASSIFIABLE
+              and "not valid JSON" in str(again), (said, str(again)))
+
+    # nothing to reconcile with the lock taken (a concurrent reconcile recovered every transaction first), and the
+    # release then leaves a lock it cannot read: refused naming that lock as one that STAYS, never reported as
+    # nothing to reconcile (red when the release is trusted without observing the lock afterwards)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        nested = []
+
+        def first_reconciles_first(journal_root, session_id):
+            if not nested:
+                with mock.patch.object(_journal, "acquire_lock", real_acquire_lock), \
+                        mock.patch.object(_journal, "release_lock", real_release_lock):
+                    nested.append(reconcile_report(root))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", first_reconciles_first), \
+                mock.patch.object(_journal, "release_lock", release_unreadable):
+            report, finished = outcome_of(reconcile_report, root)
+        said = str(finished)
+        check("reconcile-nothing-to-recover-lock-taken-unreadable-lock-refused",
+              nested != [] and (rid, "rolled-back") in nested[0][0] and report is None
+              and isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
+              and "recovery finished ({} terminal)".format(rid) in said and left_in_place in said
+              and lock_stays in said and lock_present(root), (nested, said))
+
+    # a dead run's journal lock beside a completed transaction (nothing to recover): the stale-lock break takes the
+    # lock, and the release then leaves a lock it cannot read: refused naming that lock as one that STAYS, never
+    # reported as the dead run's lock released (red when the release is trusted without observing the lock
+    # afterwards)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        with mock.patch.object(_journal, "release_lock", release_unreadable):
+            report, finished = outcome_of(reconcile_report, root)
+        said = str(finished)
+        check("reconcile-stale-break-nothing-to-recover-unreadable-lock-refused",
+              txn == rid and dead is not None and report is None and isinstance(finished, ReconcileRefusal)
+              and finished.finding == RECONCILE_FAILED and "recovery finished ({} terminal)".format(rid) in said
+              and left_in_place in said and lock_stays in said and lock_present(root), said)
 
     # a later target's claim refuses and releasing the lease the first claim took then faults: the refusal names
     # that lease as one that STAYS and never says every lock and lease this run took is released (red when the

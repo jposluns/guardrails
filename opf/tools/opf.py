@@ -21431,7 +21431,9 @@ def _cli_self_test():
             init-store reversal whose live creations are not the operation's own
             (init-store-reversal-unproven). A fault after recovery began exits 2 as recovery-failed with
             the partial state the journal records (the transaction open, no lock and no lease left), and a
-            second reconcile resumes it to the prestate. A product root that does not exist exits 2 as
+            second reconcile resumes it to the prestate; a recovery that finishes while the release of its
+            journal lock leaves that lock in place exits 2 as recovery-failed too, the lock named as one that
+            stays. A product root that does not exist exits 2 as
             cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
             the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
             reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
@@ -21592,6 +21594,7 @@ def _cli_self_test():
                               os.path.join(unproven, j_rel, rid + "." + adopt.INIT_STORE_PHASE))
                     failing = interrupted("recoveryfailed", mid_archive)
                     failing_before = product(fixture("recoveryfailedprestate"))
+                    stays = interrupted("lockstays", mid_archive)
                 except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the reconcile fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -21779,6 +21782,25 @@ def _cli_self_test():
                                     "{!r} (expected 2 + REFUSED (recovery-failed), the partial state the "
                                     "journal records, then 0 + rolled-back to the prestate; {} / {})".format(
                                         rc, rc2, out.strip(), out2.strip()))
+
+                # a recovery that finishes while the release of the journal lock it took leaves that lock in place
+                # (one it cannot read): exit 2 as recovery-failed, saying the recovery finished and naming the lock
+                # that STAYS, never exit 0 (red when the release is trusted without observing the lock afterwards)
+                opened = not journal_clean(stays)
+                real_release = journal.release_lock
+
+                def release_unreadable(journal_root):
+                    os.chmod(os.path.join(journal_root, "lock"), 0)
+                    return real_release(journal_root)
+                with mock.patch.object(journal, "release_lock", release_unreadable):
+                    rc, out = run(stays)
+                if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out
+                        and "recovery finished (" in out and "transaction {}: rolled-back".format(rid) not in out
+                        and "{}/lock is still present: that lock STAYS".format(j_rel) in out
+                        and os.path.lexists(os.path.join(stays, j_rel, "lock"))):
+                    failures.append("adopt reconcile over a finished recovery whose journal lock release leaves that "
+                                    "lock in place: rc={!r} (expected 2 + REFUSED (recovery-failed), the recovery "
+                                    "finished, the lock named as one that STAYS; {})".format(rc, out.strip()))
             finally:
                 shutil.rmtree(rbase, ignore_errors=True)
             return None

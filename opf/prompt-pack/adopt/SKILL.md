@@ -76,24 +76,35 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    confirms that no adoption run is live. It works from the adoption journal alone: it rolls each
    interrupted transaction back, or forward when every change had already landed, prints each
    outcome, and names a lock it released from a run that is no longer running. Beside an
-   interrupted transaction other than an `init-store` one, it holds the adoption journal lock and
-   the store lease of each machine directory under `.working/` while it recovers, and it releases
-   only those. Exit 0 with "nothing to reconcile" means it
-   wrote nothing, or, when it says every transaction was already terminal, that it made no
-   recovery write. Exit 2 means stop and report what it printed. A refusal named
-   `journal-lock-held`, `journal-unclassifiable`, `store-lease-held`,
+   interrupted transaction other than an `init-store` one, it holds, while it recovers, the
+   adoption journal lock and the store lease (a `lease.toml`, such as `.working/toml/lease.toml`)
+   of each machine directory under `.working/` that no interrupted transaction's operations name,
+   and it releases the leases it took. It also releases a leftover store lease that an interrupted
+   adoption apply kept (operation `adopt-apply`) beside such a transaction, but only once that
+   apply's process is confirmed dead on this host, and it prints that release whatever the
+   outcome, before a refusal or error too. Any other store lease present beside such a
+   transaction refuses as `store-lease-held`, for example another operation's lease, an adoption
+   apply's lease whose process may still be running or runs on another host, or a lease reconcile
+   cannot read. So does an adoption apply's lease whose path an interrupted transaction's
+   operations name, and a store pointer (`.opf.toml` or `.opf.local.toml`) whose whole content
+   is not the in-root target `"dir:."` that `init-store` writes. Beside an interrupted
+   `init-store` transaction alone, reconcile neither refuses on a store lease nor takes one: that
+   operation may have left its own lease. Reconcile never touches a lease beside no interrupted
+   transaction. Releasing a lease that reconcile does not release is the adopter's own step.
+   Exit 0 with "nothing to reconcile" means it wrote nothing, or, when it says every transaction
+   was already terminal, that it made no recovery write. Exit 2 means stop and report what it
+   printed. A refusal named `journal-lock-held`, `journal-unclassifiable`, `store-lease-held`,
    `init-store-reversal-unproven` or `pre-lock-fault` came before any recovery write.
-   `recovery-failed` means the recovery started and may be partial: the journal records how far
-   it got, and a later reconcile resumes it. `store-lease-release-failed` means the recovery
-   finished but a store lease it took stays. Exit 2 with "cannot evaluate" and no finding means
-   the product root could not be evaluated. This build does not release a leftover store lease
-   (a `lease.toml` in a machine directory under `.working/`, such as `.working/toml/lease.toml`).
-   Reconcile refuses as `store-lease-held` while one sits beside an interrupted transaction,
-   except beside an interrupted `init-store` transaction alone: that operation may have left
-   its own lease, and reconcile neither refuses on it nor takes one. A store pointer
-   (`.opf.toml` or `.opf.local.toml`) beside an interrupted transaction also refuses as
-   `store-lease-held`. Releasing a leftover lease is the adopter's own step. After reconcile,
-   run `opf adopt status` again.
+   `recovery-failed` has three causes. The recovery started and may be partial: the journal
+   records how far it got, and a later reconcile resumes it. A transaction directory was replaced
+   during the recovery, which is never reported as recovered. Or the recovery finished, but
+   releasing the journal lock it took faulted or left that lock in place: the message says so and
+   names the lock if it stays. A later reconcile breaks such a lock once its owner has exited if
+   the lock can be read and is well formed, and refuses on it as `journal-unclassifiable` while it
+   cannot be read or is malformed. `store-lease-release-failed` means the recovery finished but
+   releasing a store lease it took faulted; the message names each lease that stays. Exit 2 with
+   "cannot evaluate" and no finding means the product root could not be evaluated. After
+   reconcile, run `opf adopt status` again.
 4. Keep every working file of this procedure (the worksheet, saved observations and plans)
    outside the product repository. A new file inside an investigated root changes the
    inventory, and the plan then refuses as "inventory changed".
