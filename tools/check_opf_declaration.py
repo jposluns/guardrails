@@ -21,8 +21,9 @@ ships it, never to an installed copy and never taking a field from the documenta
      that gives another value, omits a field or states a field the file does not carry is malformed and a
      finding, so the release cannot be cut, and so is a missing restatement;
   5. each surface states where the implementation carries the digest (DIGEST_LOCATION, both phrases);
-  6. every Markdown or HTML document of the tree (the .git directory aside) with a line that opens a
-     restatement block is a DOC_SURFACES entry, so a surface dropped from that list is a finding.
+  6. every Markdown or HTML document (a .md or .html file) of the tree (the .git directory aside, and no
+     symlinked directory entered) with a line that opens a restatement block is a DOC_SURFACES entry, so a
+     surface dropped from that list is a finding.
 
 A restatement is the block of an HTML surface between a line `<div class="tree"><pre id="opf-declaration">`
 and the next line `</pre></div>`, and of a Markdown surface between a line "```toml opf-declaration" and the
@@ -32,34 +33,46 @@ out is a finding for having none. Where the reader cannot tell whether a comment
 
   - In an HTML surface a `<!--` opens a comment and the next `-->` closes it, read lexically, so a marker that
     is not a comment (in an attribute value, a script or a textarea) still counts and refuses the block.
-  - In a Markdown surface a `<!--` counts unless it is code: inside a fenced code block, or inside a one-line
-    code span outside an HTML block. A fenced code block is skipped only where its opening line starts at the
-    left margin, outside any HTML block and before any fence-like line the reader cannot place (one that is
-    indented or inside a list item, a quote or an HTML block, whose end may close a fence there), and it ends
-    at a closing line of at most three spaces of indentation. So an indented code block, an indented fence
-    and every line after a fence-like line the reader cannot place keep their markers.
-  - In a Markdown surface a line that begins with `<` (after any quote or list markers) may open an HTML
-    block, which lasts until its CommonMark end condition, or the later end of any block one of its lines may
-    open; inside it no fence opens and no code span is removed. A `-->` closes a comment opened on an earlier
-    line only inside an HTML comment block opened by a `<!--` at the left margin (before any fence-like line
-    the reader cannot place); in any other HTML block it closes only a `<!--` on its own line, and an HTML
-    block that ends with a comment open (a raw `<!--` that no raw `-->` closes, so a browser hides the rest of
-    the page) leaves it open to the end of the surface. Outside an HTML block, a `<!--` in a paragraph counts,
-    though CommonMark renders one that the paragraph does not close as text.
+  - In a Markdown surface a `<!--` counts unless it lies in a fenced code block, or, outside an HTML block, in
+    what the reader takes for a code span: a run of backticks to the next run of exactly as many backticks on
+    the same line, found lexically, so a backslash before the opening backtick does not stop it and the run may
+    start inside a longer one (both "a \\`<!--` b" and "a ``<!--` b" lose their `<!--`, though CommonMark
+    renders each as text, not code). Under CommonMark a `<!--` in a paragraph opens no comment the paragraph
+    does not close, so a span read that way hides no comment there; a span over more than one line is not
+    removed. A fenced code block is skipped only where its opening line starts at the left margin, outside any
+    HTML block and before any fence-like line the reader cannot place (one that, after its indentation and any
+    quote or list markers, starts with three backticks or tildes and surely opens no fence: one that is
+    indented, inside a list item, a quote or an HTML block other than a comment block, or a backtick run with a
+    backtick after it; its end may close a fence there), and it ends at a closing line of at most three spaces
+    of indentation. So an indented code block, an indented fence and every line after a fence-like line the
+    reader cannot place keep their markers.
+  - In a Markdown surface a line that begins with `<` (after any indentation and any quote or list markers)
+    may open an HTML block, which lasts until its CommonMark end condition, or the later end of any block one
+    of its lines may open; inside it no fence opens and no code span is removed. Inside an HTML block, a `-->`
+    closes a comment opened on an earlier line only in an HTML comment block opened by a `<!--` at the left
+    margin (before any fence-like line the reader cannot place); in any other HTML block it closes only a
+    `<!--` on its own line, and an HTML block that ends with a comment open (a raw `<!--` that no raw `-->`
+    closes, so a browser hides the rest of the page) leaves it open to the end of the surface. Outside an HTML
+    block, a `<!--` in a paragraph counts, though CommonMark renders one that the paragraph does not close as
+    text, and a `-->` there closes a comment opened on an earlier line.
 
 A block a reader cannot see for another reason (a hidden element, a style, or a Markdown fence around it) is
 not detected.
 
-Every helper module the gate imports that cannot be imported is a cannot-evaluate (exit 2), never a finding:
+Every helper module the gate imports that cannot be imported (it is missing or unreadable, or its import raises
+any Exception, a SyntaxError included) is a cannot-evaluate (exit 2), never a finding:
 tools/_selftest_exit_report.py and tools/check_selftest_execution.py, opf/tools/_opf_declaration.py and
-opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py.
+opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py. So is a declaration file, VERSION, surface
+or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes, cannot be read or (but for the
+declaration file) is not UTF-8, and a directory rule 6 cannot list.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
 `--declaration` and the doctor report) under its own registered check id, shows each red under its revert (a
-mutant of _opf_declaration.py or opf.py loaded from a scratch directory, or a patched attribute of opf.py), and
-runs this gate's own document vectors. Its check ids are registered in tools/selftest_checks.toml (suite
-opf-declaration-selftest) and reconciled by tools/check_selftest_execution.py.
+mutant of _opf_declaration.py or opf.py loaded from a scratch directory, or a patched attribute of opf.py,
+_opf_declaration or _opf_store; under uid 0 the unreadable-mode vector is skipped and so not shown red), and
+runs this gate's own document and helper-import vectors. Its check ids are registered in
+tools/selftest_checks.toml (suite opf-declaration-selftest) and reconciled by tools/check_selftest_execution.py.
 """
 import sys
 
@@ -92,7 +105,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
     import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
-except (ImportError, OSError) as exc:   # a tools-side helper is missing or cannot be read: main() exits 2
+except Exception as exc:   # a tools-side helper is missing, unreadable or fails to import: main() exits 2
     _selftest_exit_report = check_selftest_execution = None
     _HELPER_ERROR = exc
 else:
@@ -226,8 +239,8 @@ def _md_comment_block(line, unsure):
 
 
 def _md_text(line, in_html):
-    """The text of a Markdown line in which comment markers count: outside an HTML block, without its code
-    spans."""
+    """The text of a Markdown line in which comment markers count: outside an HTML block, without what the
+    reader takes for its code spans (_CODE_SPAN, read lexically as the module docstring states)."""
     return line if in_html else _CODE_SPAN.sub("", line)
 
 
@@ -402,16 +415,17 @@ def surface_problems(documents):
 def run(root):
     try:
         _load()
+    except Exception as exc:   # a helper _load() imports is missing, unreadable or fails to import
+        print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
+            type(exc).__name__, exc), file=sys.stderr)
+        return 2
+    try:
         data = _read_regular(Path(root) / DECLARATION_REL, DECLARATION_REL)
         version = _read_regular(Path(root) / VERSION_REL, VERSION_REL).decode("utf-8")
         surfaces = dict((rel, _read_regular(Path(root) / rel, rel).decode("utf-8")) for rel in DOC_SURFACES)
         documents = restating_documents(root)
-    except (CannotEvaluate, UnicodeDecodeError) as exc:
+    except (CannotEvaluate, UnicodeDecodeError, OSError) as exc:
         print("opf-declaration: CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
-        return 2
-    except (ImportError, OSError) as exc:   # a helper _load() imports is missing or cannot be read
-        print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
-            type(exc).__name__, exc), file=sys.stderr)
         return 2
     problems = file_problems(data, version) + doc_problems(data, surfaces) + surface_problems(documents)
     if problems:
@@ -512,7 +526,7 @@ def self_test(report_path=None):
     try:
         _load()
         opf = _load_opf()
-    except (ImportError, OSError) as exc:
+    except Exception as exc:   # a helper or opf.py is missing, unreadable or fails to import
         print("SELF-TEST CANNOT EVALUATE: opf-declaration: a helper module cannot be loaded ({}: {})".format(
             type(exc).__name__, exc))
         return 2
@@ -751,6 +765,16 @@ def self_test(report_path=None):
     with patch.object(here, "_markdown_in_comment", lambda text: _scan_markers(text, False)):
         found = doc_problems(shipped, literal)
     check("revert/markdown-code-not-skipped-red", len(found) == 1 and "restates no declaration" in found[0], found)
+    # the code span read lexically: a backslash before the opening backtick, or an opening run inside a longer
+    # one, still removes the `<!--` (CommonMark renders both as text, not a comment, so the restatement shows),
+    # and a `-->` in a later paragraph closes a comment a paragraph opened
+    for check_id, prefix in (
+        ("doc/backslash-escaped-backtick-marker-passes", "a \\`<!--` b\n\n"),
+        ("doc/longer-backtick-run-marker-passes", "a ``<!--` b\n\n"),
+        ("doc/paragraph-closer-closes-earlier-comment-passes", "a <!-- b\n\nc --> d\n\n"),
+    ):
+        found = doc_problems(shipped, {"doc.md": prefix + sample["doc.md"]})
+        check(check_id, found == [], found)
 
     # Markdown forms a CommonMark reader renders with the restatement inside a comment (raw HTML that opens one
     # and nothing raw closes), whose fence or HTML block a lexical reader misplaces: each is a finding, and red
@@ -867,8 +891,8 @@ def self_test(report_path=None):
         rc = run(ROOT)
     check("revert/surface-list-check-dropped-red", rc == 0, rc)
 
-    # a helper module that cannot be imported is a cannot-evaluate (exit 2), and a finding (exit 1, the escaping
-    # ImportError) with _load() back outside the try
+    # a helper module that cannot be imported is a cannot-evaluate (exit 2), and escapes (exit 1, a finding) with
+    # _load() back outside the try
     def missing_helper():
         raise ModuleNotFoundError("No module named '_opf_declaration'", name="_opf_declaration")
     with patch.object(here, "_load", missing_helper), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -881,8 +905,8 @@ def self_test(report_path=None):
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         unguarded = _copy_mutant(tmp, Path(__file__).resolve(), "opf_declaration_load_mutant",
-                                 "    try:\n        _load()\n        data = _read_regular(",
-                                 "    _load()\n    try:\n        data = _read_regular(")
+                                 "    try:\n        _load()\n    except Exception as exc:   # a helper _load()",
+                                 "    _load()\n    try:\n        pass\n    except Exception as exc:   # a helper _load()")
         with patch.object(unguarded, "_load", missing_helper), contextlib.redirect_stderr(io.StringIO()):
             try:
                 rc = unguarded.run(ROOT)
@@ -895,8 +919,8 @@ def self_test(report_path=None):
         shutil.rmtree(tmp)
     check("revert/load-outside-try-red", rc != 2 and str(rc).startswith("raised"), rc)
 
-    # the self-test too: a missing opf/tools helper or opf.py is a cannot-evaluate, and a finding (the escaping
-    # ImportError) with the load back outside the try
+    # the self-test too: a missing opf/tools helper or opf.py is a cannot-evaluate, and escapes with the load back
+    # outside the try
     def missing_opf():
         raise ModuleNotFoundError("No module named 'opf'", name="opf")
     outcomes = []
@@ -928,8 +952,8 @@ def self_test(report_path=None):
     # mode: a copy of this gate alone in a scratch tools directory, launched as its own process, exits 2; with
     # its imports unguarded it exits 1 on the escaping ModuleNotFoundError
     source = Path(__file__).resolve().read_text(encoding="utf-8")
-    guard = ("except (ImportError, OSError) as exc:   # a tools-side helper "
-             "is missing or cannot be read")
+    guard = ("except Exception as exc:   # a tools-side helper "
+             "is missing, unreadable or fails to import")
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         lone = []
@@ -948,6 +972,62 @@ def self_test(report_path=None):
           lone[:2])
     check("revert/tools-helper-import-unguarded-red", lone[2][0] == 1 and "ModuleNotFoundError" in lone[2][1],
           lone[2])
+
+    # a helper that is present but fails to import (a SyntaxError, or an error it raises) is a cannot-evaluate at
+    # each of the three load sites: a copy of this gate in a scratch tree of stub helpers, one of them broken,
+    # launched as its own process, exits 2; with that site's guard narrowed to (ImportError, OSError) the error
+    # escapes and it exits 1
+    guards = {
+        "tools": guard,
+        "run": "except Exception as exc:   # a helper _load() imports " "is missing, unreadable or fails to import",
+        "self-test": "except Exception as exc:   # a helper or opf.py " "is missing, unreadable or fails to import",
+    }
+    stubs = {"tools/_selftest_exit_report.py": "import sys\nexit_with = sys.exit\n",
+             "tools/check_selftest_execution.py": "", "opf/tools/_opf_declaration.py": "",
+             "opf/tools/_opf_store.py": "", "opf/tools/opf.py": ""}
+    syntax_error, raises = "def broken(:\n", "raise RuntimeError('broken at import')\n"
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        broken = {}
+        for name, site, rel, text, args in (
+            ("tools-syntax", "tools", "tools/check_selftest_execution.py", syntax_error, []),
+            ("tools-raises", "tools", "tools/_selftest_exit_report.py", raises, ["--self-test"]),
+            ("run-syntax", "run", "opf/tools/_opf_declaration.py", syntax_error, []),
+            ("run-raises", "run", "opf/tools/_opf_store.py", raises, []),
+            ("self-test-syntax", "self-test", "opf/tools/_opf_declaration.py", syntax_error, ["--self-test"]),
+            ("self-test-raises", "self-test", "opf/tools/opf.py", raises, ["--self-test"]),
+        ):
+            for narrowed in (False, True):
+                home = Path(tmp, "{}-{}".format(name, int(narrowed)))
+                for stub_rel, stub in dict(stubs, **{rel: text}).items():
+                    (home / stub_rel).parent.mkdir(parents=True, exist_ok=True)
+                    (home / stub_rel).write_text(stub, encoding="utf-8")
+                gate = source.replace(guards[site], "except (ImportError, OSError) as exc:   #") if narrowed else source
+                (home / "tools" / "check_opf_declaration.py").write_text(gate, encoding="utf-8")
+                done = subprocess.run([sys.executable, "-I", "-B", str(home / "tools" / "check_opf_declaration.py")]
+                                      + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+                broken[name, narrowed] = done.returncode, done.stdout + done.stderr
+    finally:
+        shutil.rmtree(tmp)
+
+    def broken_rows(site, narrowed):
+        """The (exit status, error named) of the two broken-helper runs at `site`, guarded or narrowed: a guarded
+        run names the error in its cannot-evaluate line, a narrowed one in its traceback."""
+        rows = []
+        for kind, error in (("syntax", "SyntaxError"), ("raises", "RuntimeError")):
+            rc, output = broken["{}-{}".format(site, kind), narrowed]
+            rows.append((rc, error in output and (narrowed or "CANNOT EVALUATE" in output)))
+        return rows
+    for check_id, site, narrowed, rc in (
+        ("live/broken-tools-helper-cannot-evaluate", "tools", False, 2),
+        ("revert/tools-helper-guard-narrowed-red", "tools", True, 1),
+        ("live/broken-opf-helper-cannot-evaluate", "run", False, 2),
+        ("revert/load-guard-narrowed-red", "run", True, 1),
+        ("live/self-test-broken-helper-cannot-evaluate", "self-test", False, 2),
+        ("revert/self-test-load-guard-narrowed-red", "self-test", True, 1),
+    ):
+        check(check_id, source.count(guards[site]) == 1 and broken_rows(site, narrowed) == [(rc, True)] * 2,
+              broken_rows(site, narrowed))
     check("live/real-tree-passes", run(ROOT) == 0)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
@@ -968,7 +1048,7 @@ def self_test(report_path=None):
           "under its revert; the documentation and file rules red on a changed, omitted or added field, a byte "
           "variant, a missing or commented-out restatement or digest location, a Markdown comment behind a fence "
           "or HTML block the reader cannot place, a surface dropped from the list, a CRLF file and a release "
-          "other than VERSION; a missing helper module, tools-side or opf-side, a cannot-evaluate)".format(
+          "other than VERSION; a missing or broken helper module, tools-side or opf-side, a cannot-evaluate)".format(
               len(results), len(covered), len(cli_covered)))
     return 0
 
