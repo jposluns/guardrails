@@ -60,28 +60,43 @@ out is a finding for having none. Where the reader cannot tell whether a comment
 A block a reader cannot see for another reason (a hidden element, a style, or a Markdown fence around it) is
 not detected.
 
+The gate exits 0 only by an explicit normal return: its entry point calls main() inside a bare except and exits
+with main()'s status only when main() returns exactly the int 0, 1 or 2, through _selftest_exit_report.exit_with
+(which raises that exit itself; should it return, the gate exits 2 after a fixed CANNOT EVALUATE line) or, where
+that helper cannot be imported, sys.exit. Any other return value, and any exception that leaves main() whatever
+its type or MRO, ends the gate with exit 2 after a fixed CANNOT EVALUATE line printed best effort, reading nothing
+from the exception; only a KeyboardInterrupt by its real type propagates (on CPython 3.14.4 the interpreter then
+ends the process by SIGINT, measured for a subclass too, one that is also a SystemExit included).
+
 Every helper module the gate imports that cannot be imported (it is missing or unreadable, or its import raises
-any BaseException other than a KeyboardInterrupt, which is re-raised unchanged; a SyntaxError, a SystemExit of
-any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2), never a finding or a clean exit:
-tools/_selftest_exit_report.py and tools/check_selftest_execution.py, opf/tools/_opf_declaration.py and
-opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each opf/tools helper its _bootstrap()
-imports (one that _bootstrap() itself maps to its exit 2 included). So is a declaration file, VERSION, surface
-or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes, cannot be read or (but for the
-declaration file) is not UTF-8, and a directory rule 6 cannot list. So, last, is any escape from the gate body:
-any BaseException other than a KeyboardInterrupt (re-raised unchanged) that leaves run() or the self-test, a
-SystemExit of any code or an error raised by a helper the gate calls included, ends the gate with exit 2, never
-with that SystemExit's code or a traceback's exit 1. An exception is a KeyboardInterrupt here by its real type
-alone: each such test applies issubclass to the exception's type(), never isinstance, so the gate reads none of
-the exception's attributes (its __class__ included) before printing its CANNOT EVALUATE line, and an exception
-whose __class__ raises (a SystemExit included) or claims KeyboardInterrupt is a cannot-evaluate like any other.
-Each of these cannot-evaluates prints its fixed CANNOT EVALUATE line first, then a cause line with the
-exception's type name and message; where reading the message raises (any BaseException other than a
-KeyboardInterrupt, a SystemExit included), the cause line gives the type name alone, or is left out where that
-cannot be read either, and the exit is 2 all the same. A KeyboardInterrupt raised while the CANNOT EVALUATE
-line or the cause line is printed, or while the message or type name is read (a Ctrl-C, or a __str__ that
-raises one), told by its real type in the same way, propagates instead. The one SystemExit the gate expects,
-the execution-report harness refusing a --execution-report run that tools/check_selftest_execution.py did not
-launch (it prints its own SELF-TEST HARNESS ERROR line), is labelled as that refusal (exit 2), not as an escape.
+any exception other than a KeyboardInterrupt, which is re-raised unchanged; a SyntaxError, a SystemExit of any
+code, a bare sys.exit() and an exception whose MRO leaves out BaseException are included) is a cannot-evaluate
+(exit 2), never a finding or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
+opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
+opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
+declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
+cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list, and any other
+exception (a KeyboardInterrupt aside) raised while these inputs are read. So, last, is any escape from the gate
+body: any exception other than a KeyboardInterrupt (re-raised unchanged) that leaves run() or the self-test,
+whatever its type or MRO, a SystemExit of any code or an error raised by a helper the gate calls included, ends
+the gate with exit 2, never with that SystemExit's code or a traceback's exit 1. Each site that catches one of
+these does so with a bare except, which also catches an exception whose MRO leaves out BaseException (no except
+BaseException clause matches one), and takes it with sys.exception(), which reads nothing from it. The tools-side
+import is the one site that cannot take it so: an import fallback holds no call (tools/check_python_floor.py), so
+it binds what its except BaseException clause catches and records any other exception, unbound, as a fixed
+ImportError that says so, a cannot-evaluate even where that exception's MRO names KeyboardInterrupt. An exception
+is a KeyboardInterrupt here by its real type alone: each such test applies issubclass to the exception's type(),
+never isinstance, so the gate reads none of the exception's attributes (its __class__ included) before printing
+its CANNOT EVALUATE line, and an exception whose __class__ raises (a SystemExit included) or claims
+KeyboardInterrupt is a cannot-evaluate like any other. Each of these cannot-evaluates prints its fixed CANNOT
+EVALUATE line first, then a cause line with the exception's type name and message; where reading the message
+raises (any exception other than a KeyboardInterrupt, whatever its MRO, a SystemExit included), the cause line
+gives the type name alone, or is left out where that cannot be read either, and the exit is 2 all the same. A
+KeyboardInterrupt raised while a CANNOT EVALUATE line or the cause line is printed, or while the message or type
+name is read (a Ctrl-C, or a __str__ that raises one), told by its real type in the same way, propagates
+instead. The one SystemExit the gate expects, the execution-report harness refusing a --execution-report run that
+tools/check_selftest_execution.py did not launch (it prints its own SELF-TEST HARNESS ERROR line), is labelled as
+that refusal (exit 2), not as an escape.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
@@ -120,12 +135,20 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# what the import fallback below records for an exception it cannot bind: one whose MRO leaves out BaseException,
+# which no except BaseException clause matches and a bare except takes only through a call (sys.exception()),
+# which tools/check_python_floor.py admits in no import fallback
+_UNBOUND_HELPER_ERROR = ImportError("a tools-side helper's import raised an exception whose MRO leaves out "
+                                    "BaseException, so it is not bound")
 try:
     import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
     import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
 except BaseException as exc:   # a tools-side helper is missing, unreadable or fails to import: main() exits 2
     _selftest_exit_report = check_selftest_execution = None
     _HELPER_ERROR = exc
+except:   # the same, by an exception whose MRO leaves out BaseException: main() exits 2
+    _selftest_exit_report = check_selftest_execution = None
+    _HELPER_ERROR = _UNBOUND_HELPER_ERROR
 else:
     _HELPER_ERROR = None
 
@@ -175,33 +198,39 @@ class CannotEvaluate(Exception):
 
 def _cannot_evaluate(what, exc, self_test=False):
     """Print the fixed cannot-evaluate line for `what`, then describe the exception `exc` that caused it, and
-    return 2: `exc` may come from a helper, whose own __str__ (or type name) can raise any BaseException, a
-    SystemExit included, so the description falls back to the type name, or to none. A KeyboardInterrupt raised
-    while a line is printed or `exc` is described (a Ctrl-C, or a __str__ that raises one) propagates instead;
-    each step tells one by its real type and never reads the raised exception's __class__, so an exception
-    whose __class__ raises or claims KeyboardInterrupt is no KeyboardInterrupt there."""
+    return 2: `exc` may come from a helper, whose own __str__ (or type name) can raise any exception, whatever
+    its MRO, a SystemExit included, so the description falls back to the type name, or to none. Each step catches
+    with a bare except (so an exception whose MRO leaves out BaseException is caught too) and takes what it caught
+    with sys.exception(). A KeyboardInterrupt raised while a line is printed or `exc` is described (a Ctrl-C, or a
+    __str__ that raises one) propagates instead; each step tells one by its real type and never reads the raised
+    exception's __class__, so an exception whose __class__ raises or claims KeyboardInterrupt is no
+    KeyboardInterrupt there."""
     stream = sys.stdout if self_test else sys.stderr
     try:
         print(("SELF-TEST CANNOT EVALUATE: opf-declaration: " if self_test else
                "opf-declaration: CANNOT EVALUATE: ") + what, file=stream)
-    except BaseException as error:   # the exit status still carries the cannot-evaluate
+    except:   # the exit status still carries the cannot-evaluate
+        error = sys.exception()
         if issubclass(type(error), KeyboardInterrupt):
             raise
     try:
         cause = "{}: {}".format(type(exc).__name__, exc)
-    except BaseException as error:
+    except:
+        error = sys.exception()
         if issubclass(type(error), KeyboardInterrupt):
             raise
         try:
             cause = "{} (its message cannot be read)".format(type(exc).__name__)
-        except BaseException as error:
+        except:
+            error = sys.exception()
             if issubclass(type(error), KeyboardInterrupt):
                 raise
             cause = None
     if cause is not None:
         try:
             print("  cause: " + cause, file=stream)
-        except BaseException as error:
+        except:
+            error = sys.exception()
             if issubclass(type(error), KeyboardInterrupt):
                 raise
     return 2
@@ -467,7 +496,8 @@ def surface_problems(documents):
 def run(root):
     try:
         _load()
-    except BaseException as exc:   # a helper _load() imports is missing, unreadable or fails to import
+    except:   # a helper _load() imports is missing, unreadable or fails to import
+        exc = sys.exception()
         if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("a helper module cannot be loaded", exc)
@@ -476,7 +506,10 @@ def run(root):
         version = _read_regular(Path(root) / VERSION_REL, VERSION_REL).decode("utf-8")
         surfaces = dict((rel, _read_regular(Path(root) / rel, rel).decode("utf-8")) for rel in DOC_SURFACES)
         documents = restating_documents(root)
-    except (CannotEvaluate, UnicodeDecodeError, OSError) as exc:
+    except:   # a CannotEvaluate, a UnicodeDecodeError, an OSError, or any other exception while the inputs are read
+        exc = sys.exception()
+        if issubclass(type(exc), KeyboardInterrupt):
+            raise
         return _cannot_evaluate("an input the gate needs cannot be read", exc)
     problems = file_problems(data, version) + doc_problems(data, surfaces) + surface_problems(documents)
     if problems:
@@ -582,14 +615,16 @@ def self_test(report_path=None):
     try:
         _load()
         opf = _load_opf()
-    except BaseException as exc:   # a helper or opf.py is missing, unreadable or fails to import
+    except:   # a helper or opf.py is missing, unreadable or fails to import
+        exc = sys.exception()
         if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("a helper module cannot be loaded", exc, self_test=True)
     from unittest.mock import patch   # after arm: it imports logging, whose import registers an atexit hook
     try:
         bootstrapped = opf._bootstrap()
-    except BaseException as exc:   # a helper opf.py's _bootstrap() imports raises past its own arms
+    except:   # a helper opf.py's _bootstrap() imports raises past its own arms
+        exc = sys.exception()
         if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("opf.py helpers could not be bootstrapped", exc, self_test=True)
@@ -967,9 +1002,9 @@ def self_test(report_path=None):
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         unguarded = _copy_mutant(tmp, Path(__file__).resolve(), "opf_declaration_load_mutant",
-                                 "    try:\n        _load()\n    except BaseException as exc:   # a helper _load()",
+                                 "    try:\n        _load()\n    except:   # a helper _load()",
                                  "    _load()\n    try:\n        pass\n"
-                                 "    except BaseException as exc:   # a helper _load()")
+                                 "    except:   # a helper _load()")
         with patch.object(unguarded, "_load", missing_helper), contextlib.redirect_stderr(io.StringIO()):
             try:
                 rc = unguarded.run(ROOT)
@@ -1017,11 +1052,17 @@ def self_test(report_path=None):
     source = Path(__file__).resolve().read_text(encoding="utf-8")
     guard = ("except BaseException as exc:   # a tools-side helper "
              "is missing, unreadable or fails to import")
+    # the bare handler after it, which catches what that clause cannot (an exception whose MRO leaves out
+    # BaseException): each revert of the tools-side guard drops it as well
+    unbound = ("except:   # the same, by an exception whose MRO leaves out " "BaseException: main() exits 2\n"
+               "    _selftest_exit_report = check_selftest_execution = None\n"
+               "    _HELPER_ERROR = _UNBOUND_HELPER_ERROR\n")
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         lone = []
         for name, text, args in (("guarded", source, []), ("guarded-self-test", source, ["--self-test"]),
-                                 ("unguarded", source.replace(guard, "except SyntaxError as exc:  # "), [])):
+                                 ("unguarded", source.replace(guard, "except SyntaxError as exc:  # ").replace(
+                                     unbound, ""), [])):
             home = Path(tmp, name, "tools")
             home.mkdir(parents=True)
             (home / "check_opf_declaration.py").write_text(text, encoding="utf-8")
@@ -1030,7 +1071,7 @@ def self_test(report_path=None):
             lone.append((done.returncode, done.stdout + done.stderr))
     finally:
         shutil.rmtree(tmp)
-    check("live/missing-tools-helper-cannot-evaluate", source.count(guard) == 1 and all(
+    check("live/missing-tools-helper-cannot-evaluate", source.count(guard) == source.count(unbound) == 1 and all(
         rc == 2 and "CANNOT EVALUATE" in output and "_selftest_exit_report" in output for rc, output in lone[:2]),
           lone[:2])
     check("revert/tools-helper-import-unguarded-red", lone[2][0] == 1 and "ModuleNotFoundError" in lone[2][1],
@@ -1042,21 +1083,29 @@ def self_test(report_path=None):
     # escapes and it exits 1
     guards = {
         "tools": guard,
-        "run": "except BaseException as exc:   # a helper _load() imports " "is missing, unreadable or fails to import",
-        "self-test": "except BaseException as exc:   # a helper or opf.py " "is missing, unreadable or fails to import",
+        "run": "except:   # a helper _load() imports " "is missing, unreadable or fails to import",
+        "self-test": "except:   # a helper or opf.py " "is missing, unreadable or fails to import",
     }
     stubs = {"tools/_selftest_exit_report.py": "import sys\nexit_with = sys.exit\n",
              "tools/check_selftest_execution.py": "", "opf/tools/_opf_declaration.py": "",
              "opf/tools/_opf_store.py": "", "opf/tools/opf.py": ""}
     syntax_error, raises = "def broken(:\n", "raise RuntimeError('broken at import')\n"
+    # the entry point turns any exception that leaves main(), and any return value but 0, 1 or 2, into exit 2 by
+    # itself, so each revert that must let such an outcome end the gate is applied to a copy (`called`) whose entry
+    # point calls main() bare, as it did before it was guarded
+    entry = source[source.rindex("\nif __name__ == " '"__main__":\n') + 1:]
+    called = source.replace(entry, 'if __name__ == "__main__":\n    (sys.exit if _selftest_exit_report is None else '
+                            '_selftest_exit_report.exit_with)(main())\n')
     # the guard in main() turns any escape from run() or the self-test into exit 2 by itself, so each revert of a
-    # guard inside them is applied to a copy of this gate with that guard in main() removed as well
+    # guard inside them is applied to a copy of this gate with that guard in main() removed as well (and with the
+    # entry point calling main() bare, and the tools-side import's bare handler dropped)
     main_try = "    try:\n        if (len(args) in (2, 3)"
-    main_guard = ("    except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit "
-                  "included\n        if issubclass(type(exc), KeyboardInterrupt):\n            raise\n")
-    at = source.find(main_guard)
-    removed_main = (source[:at] + source[source.find('    print("usage:', at):]).replace(
-        main_try, "    if True:\n        if (len(args) in (2, 3)")
+    main_guard = ("    except:   # anything that escapes the gate body, a helper's SystemExit "
+                  "included\n        exc = sys.exception()\n        if issubclass(type(exc), KeyboardInterrupt):\n"
+                  "            raise\n")
+    at = called.find(main_guard)
+    removed_main = (called[:at] + called[called.find('    print("usage:', at):]).replace(
+        main_try, "    if True:\n        if (len(args) in (2, 3)").replace(unbound, "")
 
     def launch(home, site, rel, text, args, narrowing, helpers=stubs, gate=None):
         """The (exit status, output) of a copy of this gate (or `gate`) in a scratch tree of the stub `helpers` at
@@ -1224,7 +1273,7 @@ def self_test(report_path=None):
     # exit 2 at every site that describes a caught exception: the site prints its fixed line first and the cause
     # line falls back to the type name; with that site reverted to the single print that formats the cause into
     # its line, the SystemExit escapes and the gate exits 0 (a site inside run() or the self-test is reverted in a
-    # copy with the guard in main() removed as well)
+    # copy with the guard in main() removed as well, and every site in a copy whose entry point calls main() bare)
     unprintable = "class Unprintable(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
 
     def single_print(what, name, self_test=False):
@@ -1258,7 +1307,7 @@ def self_test(report_path=None):
              ["--self-test"], with_vectors),
         ):
             for reverted in (False, True):
-                gate = (source if site in ("tools", "main") else removed_main).replace(*describing[site])
+                gate = (called if site in ("tools", "main") else removed_main).replace(*describing[site])
                 undescribed[name, reverted] = launch(Path(tmp, "undescribed-{}-{}".format(name, int(reverted))), None,
                                                      rel, text, args, None, helpers, gate if reverted else source)
     finally:
@@ -1316,15 +1365,17 @@ def self_test(report_path=None):
     # a helper it calls), and so does one that a helper's exception raises from its __str__ while the guard in
     # main() describes it: the process ends by SIGINT, not exit 2; with the site's re-raise dropped it exits 2
     reraise = "\n        if issubclass(type(exc), KeyboardInterrupt):\n            raise\n"
+    bind = "\n        exc = sys.exception()"   # how each bare guard takes what it caught, before its re-raise
     # the four steps of _cannot_evaluate that catch what printing or describing raises, each with its re-raise
     caught = {
-        "print": "   # the exit status still carries the cannot-evaluate\n"
+        "print": "   # the exit status still carries the cannot-evaluate\n        error = sys.exception()\n"
                  "        if issubclass(type(error), KeyboardInterrupt):\n            raise\n",
-        "message": "__name__, exc)\n    except BaseException as error:\n"
+        "message": "__name__, exc)\n    except:\n        error = sys.exception()\n"
                    "        if issubclass(type(error), KeyboardInterrupt):\n            raise\n",
-        "type-name": "        except BaseException as error:\n            if issubclass(type(error), KeyboardInterrupt):\n"
-                     "                raise\n            cause = None\n",
-        "cause-print": "file=stream)\n        except BaseException as error:\n"
+        "type-name": "        except:\n            error = sys.exception()\n"
+                     "            if issubclass(type(error), KeyboardInterrupt):\n                raise\n"
+                     "            cause = None\n",
+        "cause-print": "file=stream)\n        except:\n            error = sys.exception()\n"
                        "            if issubclass(type(error), KeyboardInterrupt):\n                raise\n    return 2\n",
     }
 
@@ -1337,10 +1388,10 @@ def self_test(report_path=None):
         for site, rel, text, helpers, old, new in (
             ("tools", "tools/check_selftest_execution.py", "raise KeyboardInterrupt\n", stubs,
              "            raise _HELPER_ERROR" "   # here:", "            pass   # here:"),
-            ("run", "opf/tools/_opf_store.py", "raise KeyboardInterrupt\n", stubs, guards["run"] + reraise,
-             guards["run"] + "\n"),
+            ("run", "opf/tools/_opf_store.py", "raise KeyboardInterrupt\n", stubs, guards["run"] + bind + reraise,
+             guards["run"] + bind + "\n"),
             ("main", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise KeyboardInterrupt\n",
-             tree, main_guard, main_guard.split("\n")[0] + "\n"),
+             tree, main_guard, main_guard.replace(reraise, "\n")),
             ("describe", "opf/tools/_opf_declaration.py", "class Unsayable(Exception):\n    def __str__(self):\n"
              "        raise KeyboardInterrupt\n\n\ndef parse_declaration(data):\n    raise Unsayable()\n", tree,
              caught["message"], dropped(caught["message"])),
@@ -1367,18 +1418,18 @@ def self_test(report_path=None):
     # whether a caught exception is a KeyboardInterrupt is told by its real type, never by its __class__, which the
     # exception defines: at each site that tells it, a helper's exception whose __class__ raises a SystemExit(0), or
     # claims KeyboardInterrupt, ends the gate with exit 2 and that site's fixed line; with the site's test back on
-    # isinstance (a site inside run() or the self-test in a copy with the guard in main() removed as well) the first
-    # exits 0 on that SystemExit and the second is re-raised, exiting 1 with a traceback
+    # isinstance (a site inside run() or the self-test in a copy with the guard in main() removed as well, and every
+    # site in a copy whose entry point calls main() bare) the first exits 0 on that SystemExit and the second is
+    # re-raised, exiting 1 with a traceback
     class_raises = ("class ClassRaises(Exception):\n    @property\n    def __class__(self):\n"
                     "        raise SystemExit(0)\n\n\n")
     class_claims = "class ClaimsInterrupt(Exception):\n    __class__ = KeyboardInterrupt\n\n\n"
     told = {
         "tools": "    if _HELPER_ERROR is not None:\n"
                  "        if issubclass(type(_HELPER_ERROR), KeyboardInterrupt):\n",
-        "run": guards["run"] + reraise,
-        "self-test": guards["self-test"] + reraise,
-        "bootstrap": "except BaseException as exc:   # a helper opf.py's _bootstrap() " "imports raises past its own "
-                     "arms" + reraise,
+        "run": guards["run"] + bind + reraise,
+        "self-test": guards["self-test"] + bind + reraise,
+        "bootstrap": "except:   # a helper opf.py's _bootstrap() " "imports raises past its own arms" + bind + reraise,
         "main": main_guard,
     }
 
@@ -1395,7 +1446,7 @@ def self_test(report_path=None):
             ("bootstrap", "opf/tools/_opf_worklog.py", "raise {}\n", ["--self-test"], with_opf),
             ("main", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise {}\n", [], tree),
         ):
-            gate = (source if site in ("tools", "main") else removed_main).replace(told[site], on_isinstance(told[site]))
+            gate = (called if site in ("tools", "main") else removed_main).replace(told[site], on_isinstance(told[site]))
             for kind, text in (("raises", class_raises + raising.format("ClassRaises('its __class__ raises')")),
                                ("claims", class_claims + raising.format("ClaimsInterrupt('not an interrupt')"))):
                 for reverted in (False, True):
@@ -1532,6 +1583,107 @@ def self_test(report_path=None):
         found = [steps[step, kind, revert] for step in caught]
         check(check_id, found == [expected] * len(caught), found)
 
+    # an exception whose MRO leaves out BaseException (its metaclass's mro() returns (cls, SystemExit, object), or
+    # (cls, object)), which no except BaseException clause matches, is caught all the same: raised by a helper call
+    # in run(), at the tools-side import, from the __str__ of a helper's exception that the guard in main()
+    # describes, or by main() itself, it ends the gate with exit 2 and that site's line; with the site back on
+    # except BaseException (a site other than the entry point in a copy whose entry point calls main() bare) the
+    # first form ends the gate with its SystemExit code, 0, and the second with a traceback's exit 1
+    forged = ("class Meta(type):\n    def mro(cls):\n        return {}\n\n\n"
+              "class Forged(SystemExit, metaclass=Meta):\n    pass\n\n\n")
+    head = "def main(argv=None):\n"
+    entry_guard = "    try:\n        status = main()\n    except:\n"
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        mro_forged = {}
+        for site, rel, text, helpers, old, new, raising in (
+            ("run", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise Forged(0)\n", tree,
+             main_guard, main_guard.replace("except:", "except BaseException as exc:", 1), ""),
+            ("tools", "tools/check_selftest_execution.py", "raise Forged(0)\n", stubs, unbound, "", ""),
+            ("describe", "opf/tools/_opf_declaration.py", "class Unprintable(Exception):\n    def __str__(self):\n"
+             "        raise Forged(0)\n\n\ndef parse_declaration(data):\n    raise Unprintable()\n", tree,
+             caught["message"], caught["message"].replace("except:", "except BaseException as error:", 1), ""),
+            ("entry", "opf/tools/_opf_declaration.py", "", tree, entry_guard,
+             entry_guard.replace("except:", "except BaseException:"), "    _load()\n    raise _opf_declaration.Forged(0)\n"),
+        ):
+            for kind, mro in (("system-exit", "(cls, SystemExit, object)"), ("object", "(cls, object)")):
+                for reverted in (False, True):
+                    gate = (source if site == "entry" else called).replace(old, new) if reverted else source
+                    mro_forged[site, kind, reverted] = (source.count(old) == 1,) + launch(
+                        Path(tmp, "forged-{}-{}-{}".format(site, kind, int(reverted))), None, rel,
+                        forged.format(mro) + text, [], None, helpers, gate.replace(head, head + raising))
+    finally:
+        shutil.rmtree(tmp)
+    lines = {"run": "CANNOT EVALUATE: an exception escaped the gate body\n  cause: Forged",
+             "tools": "CANNOT EVALUATE: a helper module cannot be loaded\n  cause: ImportError: a tools-side helper's "
+                      "import raised an exception whose MRO leaves out BaseException",
+             "describe": "CANNOT EVALUATE: an exception escaped the gate body\n  cause: Unprintable (its message "
+                         "cannot be read)\n",
+             "entry": "opf-declaration: CANNOT EVALUATE: an exception escaped main()\n"}
+    for check_id, site, kind, reverted, rc in (
+        ("live/run-helper-call-forged-system-exit-mro-cannot-evaluate", "run", "system-exit", False, 2),
+        ("revert/main-guard-base-exception-forged-system-exit-mro-red", "run", "system-exit", True, 0),
+        ("live/run-helper-call-forged-object-mro-cannot-evaluate", "run", "object", False, 2),
+        ("revert/main-guard-base-exception-forged-object-mro-red", "run", "object", True, 1),
+        ("live/tools-helper-forged-system-exit-mro-cannot-evaluate", "tools", "system-exit", False, 2),
+        ("revert/tools-helper-guard-base-exception-forged-system-exit-mro-red", "tools", "system-exit", True, 0),
+        ("live/tools-helper-forged-object-mro-cannot-evaluate", "tools", "object", False, 2),
+        ("revert/tools-helper-guard-base-exception-forged-object-mro-red", "tools", "object", True, 1),
+        ("live/run-helper-call-undescribable-forged-system-exit-mro-cannot-evaluate", "describe", "system-exit",
+         False, 2),
+        ("revert/cannot-evaluate-message-base-exception-forged-system-exit-mro-red", "describe", "system-exit",
+         True, 0),
+        ("live/run-helper-call-undescribable-forged-object-mro-cannot-evaluate", "describe", "object", False, 2),
+        ("revert/cannot-evaluate-message-base-exception-forged-object-mro-red", "describe", "object", True, 1),
+        ("live/main-forged-system-exit-mro-cannot-evaluate", "entry", "system-exit", False, 2),
+        ("revert/entry-guard-base-exception-forged-system-exit-mro-red", "entry", "system-exit", True, 0),
+        ("live/main-forged-object-mro-cannot-evaluate", "entry", "object", False, 2),
+        ("revert/entry-guard-base-exception-forged-object-mro-red", "entry", "object", True, 1),
+    ):
+        anchored, found, output = mro_forged[site, kind, reverted]
+        check(check_id, anchored and found == rc and (
+            ("Traceback" in output or rc == 0) if reverted else lines[site] in output), (found, output))
+
+    # and so does main() returning anything but exactly the int 0, 1 or 2: a copy of this gate whose main() returns
+    # None, or the int 3, exits 2 with the entry point's fixed line; with its entry point calling main() bare it
+    # exits 0 on the None and 3 on the 3
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        statusless = {}
+        for value in ("None", "3"):
+            for reverted in (False, True):
+                statusless[value, reverted] = launch(
+                    Path(tmp, "statusless-{}-{}".format(value, int(reverted))), None, "opf/tools/_opf_declaration.py",
+                    "", [], None, tree, (called if reverted else source).replace(head, head + "    return " + value + "\n"))
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, value, reverted, rc in (
+        ("live/main-non-int-return-cannot-evaluate", "None", False, 2),
+        ("revert/entry-point-bare-call-non-int-return-red", "None", True, 0),
+        ("live/main-out-of-range-int-return-cannot-evaluate", "3", False, 2),
+        ("revert/entry-point-bare-call-out-of-range-int-return-red", "3", True, 3),
+    ):
+        found, output = statusless[value, reverted]
+        check(check_id, source.count(head) == 1 and called != source and found == rc and (
+            reverted or "opf-declaration: CANNOT EVALUATE: main() returned no exit status\n" in output), (found, output))
+
+    # and an exit_with() that returns instead of ending the process ends the gate with exit 2 and the entry point's
+    # fixed line even where main() returned 0: a copy of this gate whose main() returns 0, beside a stub
+    # _selftest_exit_report whose exit_with() returns, exits 2; with the entry point's last line dropped it exits 0
+    fallback = '    sys.exit(_entry_cannot_evaluate("exit_with() ' 'returned instead of ending the process"))\n'
+    returning = dict(tree, **{"tools/_selftest_exit_report.py": "def exit_with(code):\n    return None\n"})
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        unended = [launch(Path(tmp, "unended-{}".format(int(reverted))), None, "opf/tools/_opf_declaration.py", "", [],
+                          None, returning, (source.replace(fallback, "") if reverted else source).replace(
+                              head, head + "    return 0\n")) for reverted in (False, True)]
+    finally:
+        shutil.rmtree(tmp)
+    check("live/exit-with-returning-cannot-evaluate", source.count(fallback) == 1 and unended[0][0] == 2
+          and "opf-declaration: CANNOT EVALUATE: exit_with() returned instead of ending the process\n" in unended[0][1],
+          unended[0])
+    check("revert/exit-with-fallback-dropped-red", unended[1][0] == 0, unended[1])
+
     # the execution-report harness refusing a --execution-report run it did not launch is labelled as that
     # refusal, not as an escape: a copy of this gate beside the real tools/_selftest_exit_report.py, launched
     # directly, exits 2 with the harness error and the refusal; with arm() moved out of its try the same run is
@@ -1593,7 +1745,8 @@ def main(argv=None):
             return self_test()
         if not args:
             return run(ROOT)
-    except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit included
+    except:   # anything that escapes the gate body, a helper's SystemExit included
+        exc = sys.exception()
         if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("an exception escaped the gate body", exc)
@@ -1602,5 +1755,32 @@ def main(argv=None):
     return 2
 
 
+def _entry_cannot_evaluate(what):
+    """Print the entry point's fixed cannot-evaluate line for `what`, best effort, reading nothing from any
+    exception, and return 2; a KeyboardInterrupt raised while it is printed, told by its real type, propagates."""
+    try:
+        print("opf-declaration: CANNOT EVALUATE: " + what, file=sys.stderr)
+    except:   # the exit status still carries the cannot-evaluate
+        if issubclass(type(sys.exception()), KeyboardInterrupt):
+            raise
+    return 2
+
+
 if __name__ == "__main__":
-    (sys.exit if _selftest_exit_report is None else _selftest_exit_report.exit_with)(main())
+    # exit 0 (or 1) only by an explicit normal return: the status is main()'s only when it returns exactly the
+    # int 0, 1 or 2; any other return value, and any exception that leaves main() whatever its type or MRO (the
+    # bare except catches one whose MRO leaves out BaseException too), ends the gate with exit 2, but for a
+    # KeyboardInterrupt by its real type, which propagates
+    try:
+        status = main()
+    except:
+        if issubclass(type(sys.exception()), KeyboardInterrupt):
+            raise
+        status = _entry_cannot_evaluate("an exception escaped main()")
+    else:
+        if type(status) is not int or status not in (0, 1, 2):
+            status = _entry_cannot_evaluate("main() returned no exit status")
+    if _selftest_exit_report is None:
+        sys.exit(status)
+    _selftest_exit_report.exit_with(status)   # raises the exit itself (sys.exit when no report is armed)
+    sys.exit(_entry_cannot_evaluate("exit_with() returned instead of ending the process"))
