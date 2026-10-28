@@ -19264,10 +19264,14 @@ def _cmd_adopt(rest):
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
           creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
           seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
-          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
-          claimed by another writer, in a machine subdirectory, beside an open transaction other than
-          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
+          classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
+          listing, or an open transaction whose journal records another product root's binding or none:
+          one copied in from another tree, and equally this tree's own after the tree moved to another
+          filesystem, was restored from a backup or was remounted under another device number, which
+          changes the identity the journal is bound to; reconcile never consumes it, and clearing it is
+          the operator's own act outside any OPF operation), store-lease-held (a store pointer at the
+          product root, or a store lease present, or claimed by another writer, in a machine
+          subdirectory, beside an open transaction other than init-store's), init-store-reversal-unproven (the reversal could remove content the operation
           did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
