@@ -18073,6 +18073,20 @@ def _init_store_git_checks(check, ctx, refused):
             for path in reversed(made):
                 os.chmod(path, 0o755)
 
+        def copy_in(src, dst):
+            """Copy the directory `src` to `dst` (symlinks kept), first creating each missing directory above
+            `dst` one level at a time pinned to EXACTLY 0755, the mode a run itself makes. A bare copytree
+            creates those with the ambient umask (0775 under umask 002) or a default ACL on the TMPDIR, and a
+            fresh run in the product root then refuses on `.working`'s mode instead of the fact a row pins."""
+            made, parent = [], os.path.dirname(dst)
+            while not os.path.lexists(parent):
+                made.append(parent)
+                parent = os.path.dirname(parent)
+            for path in reversed(made):
+                os.mkdir(path)
+                os.chmod(path, init_op.DIR_MODE)
+            shutil.copytree(src, dst, symlinks=True)
+
         def kept_by_hand(root, runs):
             """What the init-store remedy has the operator move, never delete, before any removal
             (_binding_cleared_by_hand), product-root-relative: the Move destinations, then each run's adoption
@@ -18796,8 +18810,7 @@ def _init_store_git_checks(check, ctx, refused):
         published = dispatch(row, ctx(sibling, run_id=rid()))
         own_records = substrate_records(sibling)
         if len(opened) == 1:
-            os.makedirs(_journal_root(sibling), exist_ok=True)
-            shutil.copytree(_journal_root(live) / opened[0], _journal_root(sibling) / opened[0], symlinks=True)
+            copy_in(_journal_root(live) / opened[0], _journal_root(sibling) / opened[0])
         found = outside_journal(sibling)
         why = reconcile_refusal(sibling)
         if len(opened) == 1:
@@ -18825,8 +18838,7 @@ def _init_store_git_checks(check, ctx, refused):
         init_op.run_init_operation(worktree, recover=True)
         copied = os.path.join(base, "linkedwtcopy")
         shutil.copytree(worktree, copied, symlinks=True)
-        shutil.copytree(os.path.join(worktree, store.JOURNALS_REL), os.path.join(main, store.JOURNALS_REL),
-                        symlinks=True)
+        copy_in(os.path.join(worktree, store.JOURNALS_REL), os.path.join(main, store.JOURNALS_REL))
         opened = [n for n in os.listdir(_journal_root(copied)) if n.endswith("." + INIT_STORE_PHASE)]
         records = substrate_records(main)
         linked_op = os.path.basename(records[0]) if len(records) == 1 else None
@@ -18866,7 +18878,7 @@ def _init_store_git_checks(check, ctx, refused):
         rc = _init_store_child(vwt, env, "source:2", row, ctx(vwt, run_id=rid()))
         init_op.run_init_operation(vwt, recover=True)
         v_outcomes = reconcile(vwt)
-        shutil.copytree(os.path.join(vwt, store.JOURNALS_REL), os.path.join(nmain, store.JOURNALS_REL), symlinks=True)
+        copy_in(os.path.join(vwt, store.JOURNALS_REL), os.path.join(nmain, store.JOURNALS_REL))
         killed = [n.split(".", 1)[0] for n in os.listdir(_journal_root(nmain)) if n.endswith("." + INIT_STORE_PHASE)]
         records = substrate_records(nmain)
         orphan_op = os.path.basename(records[0]) if len(records) == 1 else None
@@ -18898,7 +18910,8 @@ def _init_store_git_checks(check, ctx, refused):
         rc = _init_store_child(owt, env, "source:2", row, ctx(owt, run_id=rid()))
         init_op.run_init_operation(owt, recover=True)
         o_outcomes = reconcile(owt)
-        shutil.copytree(os.path.join(owt, store.JOURNALS_REL), os.path.join(omain, store.JOURNALS_REL), symlinks=True)
+        copy_in(os.path.join(owt, store.JOURNALS_REL), os.path.join(omain, store.JOURNALS_REL))
+        working_mode = "%o" % stat.S_IMODE(os.lstat(os.path.join(omain, store.WORKING_DIRNAME)).st_mode)
         killed = [n.split(".", 1)[0] for n in os.listdir(_journal_root(omain)) if n.endswith("." + INIT_STORE_PHASE)]
         records = substrate_records(omain)
         order_op = os.path.basename(records[0]) if len(records) == 1 else None
@@ -18914,7 +18927,9 @@ def _init_store_git_checks(check, ctx, refused):
               and len(records) == 1 and remedy_said(again, killed[0], order_op, records[0])
               and early.status == valid and refused(late, "already records init history")
               and store.resolve_store(owt).status != store.RESOLVED,
-              observed=(records, again.findings, early.findings, late.findings))
+              observed=dict(rc=rc, reconciled=o_outcomes, killed=killed, records=records, working_mode=working_mode,
+                            said=said, remedy=again.findings, early=(early.status, early.findings),
+                            late=(late.status, late.findings), store=store.resolve_store(owt).status))
         # files_beneath, the helper every keep-originals row reads, raises on a directory it cannot list, never
         # reading it as holding nothing (red against an os.walk that drops the error and reports no file).
         unlisted = os.path.join(base, "unlisted")
