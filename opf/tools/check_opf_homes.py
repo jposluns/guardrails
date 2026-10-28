@@ -2966,6 +2966,24 @@ def boundary_self_test():
                                ("symlink", home_symlink, False), ("sibling-kind", sibling_kind, False),
                                ("absent", lambda root: (root / ".working").mkdir(), False)):
         check("adoption-journal-probe-" + label, lambda p=plant, w=want: probe_tree(p) == (w, [adoption_journal]))
+
+    # A probe that cannot observe the home reads False even over a real home directory, so journals/ keeps
+    # its legacy grading: a fault grades, never exempts (red against a probe that reads its fault as present).
+    def probe_faulting(fault):
+        def faulty(_fd, rel):
+            raise fault
+        with tempfile.TemporaryDirectory(prefix="opf-homes-probe-") as tmp:
+            home_dir(Path(tmp))
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(journal, "_lstat_contained", faulty):
+                    return doctor._adoption_journal_present(fd)
+            finally:
+                os.close(fd)
+
+    for label, fault in (("oserror", PermissionError(13, "an injected EACCES")),
+                         ("journal-error", journal.JournalError("an injected containment refusal"))):
+        check("adoption-journal-probe-unobservable-grades-" + label, lambda f=fault: probe_faulting(f) is False)
     # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
     # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
     flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
