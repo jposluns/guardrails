@@ -39,8 +39,9 @@ wrapper form that hides a real `git reset --hard` while the raw scan still sees 
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
 wrappers sudo/nice/timeout/nohup/sh -c/bash -c/...) now ASKS (pristine-* cases); a wrapper that ALSO
 fragments the command word `git` or the verb with quotes or a backslash is in scope through the de-quoted
-reading (gd-dequoted-* cases), while a word no raw, joined or de-quoted reading assembles (an escape decoded
-inside $'...', a parameter expansion) is a DISCLOSED best-effort residual, silently ALLOWED
+reading (gd-dequoted-* cases), while a subcommand word no raw, joined or de-quoted reading assembles now
+denies as a git alias where an unquoted parameter expansion or an ANSI-C quote builds it, and is a DISCLOSED
+best-effort residual, silently ALLOWED, only where a double-quoted expansion builds it
 (gd-dequoted-residual-* cases); the de-quoted reading also reads quoted prose, a DISCLOSED over-refusal (an
 echo or printf of fragmented work-losing prose is in scope and the closed allowlist grammar denies it:
 gd-dequote-prose-* cases). It also proves the four accuracy fixes: (1) a config-forced probe defeats
@@ -73,7 +74,17 @@ handler's structured decision.
 
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
-commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
+commit/am, where -n IS --no-verify, with a value-aware '--' boundary so a '--' eaten as an option value
+does not hide a following -n) denies; every raw git naming is held to a closed literal allowlist
+grammar (bare literal words, one standalone single-quoted literal per word, one standalone
+double-quoted literal per word on one line holding no $, backquote, backslash or !, literal global-option
+values, the >/dev/null, 2>/dev/null and 2>&1 redirections), so on a roster verb any expansion,
+substitution, process substitution, backslash, glob, brace, comment, here-document or
+other redirection denies fail-closed (on a parsed command the one exception is the git commit message
+form git commit -m "$(cat <<'EOF' ... EOF)", a single-quoted delimiter, nothing but that cat in the
+substitution and no $ or backquote in the body), as does a double-quoted word that is glued, unterminated or
+spans a newline, and a git whose subcommand cannot be resolved, while an
+off-roster verb and data an accepted scan consumed stay allowed; a checker-shaped segment whose failure is swallowed
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
@@ -100,9 +111,12 @@ kind=block entry ALLOW, Bash is out of scope, and component-boundary matching me
 GEN.md.bak do not match gen/ and GEN.md. A PRESENT registry it cannot read (unreadable, malformed, or
 unknown-version, or a malformed entry) DENIES, fail closed; the other cannot-evaluate branches (an
 unresolvable repo root, a non-contained target, an unreadable payload field) ALLOW with a note; an absent
-registry is the inert ALLOW, and a missing tool_name also denies.
-Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
-mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
+registry is the inert ALLOW, and a missing tool_name also denies. An entry scoped "authoring" (the shipped
+.claude/settings.json entry) allows silently in a tree with no .aiqt/authoring.toml (an adopter tree), denies
+naming gen_hooks with the exact marker, and denies fail-closed on a present malformed marker; an unknown
+scope is a malformed entry. Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a
+registry-less repo, a mutable-bad-registry repo, a plain non-git dir, and adopter, authoring and
+malformed-marker repos holding the real registry), removed in the finally.
 
 It also covers the write-scope guard (write_scope_guard, wrtscp, EN-8): a Write/Edit/MultiEdit is confined
 to a harness-set per-slice declaration (write-scope.json at the registry-declared state_dir, out of the
@@ -170,7 +184,7 @@ import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import load_toml, repo_root  # noqa: E402
 from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_environment  # noqa: E402
 import gen_hooks  # noqa: E402  (the one source of the hook timeout the deadline derives from)
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
@@ -1381,6 +1395,26 @@ def _test_note_literal_sites(failures, tmp):
              sched("NL-2"), "NL-SPOOF-UNRECORDED")
     finally:
         aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof = saved
+    # the attended-ask judgement's two note sites: the cap-relieved findings allow, and the clean allow
+    # whose only signal is a recording-failure tail (here an unrecorded escape spoof)
+    y.mode.write_text("Operating-mode: attended\n", encoding="utf-8")
+    y.enum_exit.write_text("3", encoding="utf-8")
+    y.set_turn_state(dict(ask_denials=aiqt_hooks._ORCH_SCHEDULE_CAP, ask_basis="ENUMERATOR_ERROR"))
+    note("(nl-question-cap) a cap-relieved attended question past an unenumerable backlog allows with a note",
+         aiqt_hooks.orch_ask_guard(y.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))),
+         "ask denials on an unchanged basis")
+    y.enum_exit.write_text("0", encoding="utf-8")
+    saved = (aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof)
+    try:
+        aiqt_hooks._orch_escape_active = lambda reg, root: (False, "nl-ask-spoof-detail")
+        aiqt_hooks._orch_record_escape_spoof = lambda root, detail: "NL-ASK-SPOOF-UNRECORDED"
+        y.set_items([])
+        y.set_turn_state(dict())
+        note("(nl-question-spoof) a clean attended question with an unrecorded escape spoof allows with a note",
+             aiqt_hooks.orch_ask_guard(y.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))),
+             "NL-ASK-SPOOF-UNRECORDED")
+    finally:
+        aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof = saved
     r = orch.Fixture(base, "barrier")
     state = Path(aiqt_hooks._orch_state_dir_for_root(str(r.root)))
     state.mkdir(parents=True, exist_ok=True)
@@ -1511,6 +1545,24 @@ def _test_note_literal_sites(failures, tmp):
     rd = orch.RdpFixture(base, "review-dispatch")
     note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
          rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
+    rw = base / "review-hold"
+    rw.mkdir()
+    orch._rdp_git(base, "init", "-q", "-b", "main", str(rw))
+    (rw / "seed.txt").write_text("s\n", encoding="utf-8")
+    orch._rdp_git(rw, "add", "seed.txt")
+    orch._rdp_git(rw, "commit", "-q", "-m", "seed")
+    rw_holds = rw / ".git" / "aiqt" / "review-holds"
+    rw_holds.mkdir(parents=True)
+    (rw_holds / "expired.json").write_text(json.dumps(dict(
+        version=1, workdir=str(rw), head=orch._rdp_git(rw, "rev-parse", "HEAD"),
+        dispatch_id="nl-hold", created_utc=orch._rwh_iso(-2), expires_utc=orch._rwh_iso(-1))),
+        encoding="utf-8")
+    note("(nl-review-hold-expired) an expired review-hold marker is ignored with a note on the next "
+         "Bash call, so a crashed dispatcher cannot pin a worktree forever",
+         aiqt_hooks.review_workdir_hold(dict(
+             hook_event_name="PreToolUse", cwd=str(rw), session_id="s1", tool_name="Bash",
+             tool_input=dict(command="ls"))),
+         "expired review-hold marker")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -2226,6 +2278,20 @@ def _make_badname_fixture(badname, failures):
         return False
 
 
+def _make_linesep_fixture(path, failures):
+    """Create the untracked U+2028-named fixture file of the blank-probe-linesep case and return True. A
+    filesystem that refuses the name cannot evaluate that case: record the NAMED failure and return False, so
+    the precedence assertion is never silently omitted from a passing run."""
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("junk\n")
+        return True
+    except OSError as exc:
+        failures.append("(blank-probe-linesep-cannot-evaluate) the U+2028 fixture filename could not be "
+                        "created ({}), so the blank-fragment precedence case was not evaluated".format(exc))
+        return False
+
+
 def _make_stash_fixture(repo, failures):
     """Create the one stash entry the cf4 stash-recovery case preserves and return True; on a setup fault
     record the NAMED cannot-evaluate failure and return False."""
@@ -2262,6 +2328,8 @@ def _test_cannot_evaluate_paths(failures, tmp):
              lambda probe: _make_badname_fixture(os.fsencode(str(missing / "bad")), probe)),
             ("cf4-stash-cannot-evaluate", lambda probe: _make_stash_fixture(missing, probe)),
             ("ws-cs-symlink-cannot-evaluate", lambda probe: _symlink_probe(tmp, missing / "link", probe)),
+            ("blank-probe-linesep-cannot-evaluate",
+             lambda probe: _make_linesep_fixture(missing / "\u2028", probe)),
     ):
         probe = []
         made = inject(probe)
@@ -2327,7 +2395,14 @@ def _test_git_stash_ref(failures):
              "FOO=x command env git -C /tmp/repo stash pop"),
             ("(sr-w20) several bare segments", "git stash pop; git stash apply"),
             ("(sr-w21) quote-decoded command and verb", "g'it' stash p'op'"),
-            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }")):
+            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }"),
+            # An ordinary parse failure is not passed clean where a bare pop/apply cannot be ruled out: text
+            # naming git and then stash, as written or de-quoted, keeps the note.
+            ("(sr-w23) parse failure naming stash pop notes", 'git stash pop "unbalanced'),
+            ("(sr-w24) parse failure with visible relocation notes", 'cd /abs && git stash pop "unbalanced'),
+            ("(sr-w25) here-string beside stash pop notes", "git stash pop <<<x"),
+            ("(sr-w26) here-string + quote-fragmented stash notes", "git st'ash' pop <<<x"),
+            ("(sr-w27) here-string + ANSI-C escape spelling stash notes", "git $'\\x73'tash pop <<<x")):
         expect_warn(label, command)
 
     for label, command in (
@@ -2352,7 +2427,6 @@ def _test_git_stash_ref(failures):
             ("(sr-a18) echo quoted prose", 'echo "git stash pop"'),
             ("(sr-a19) decoded subcommand with ref", "git 'st''ash' pop stash@{1}"),
             ("(sr-a20) unrelated command", "ls -la"),
-            ("(sr-a21) unbalanced quote", 'git stash pop "unbalanced'),
             ("(sr-a22) wrapper option", "env -i git stash pop"),
             ("(sr-a23) sudo option", "sudo -u u git stash apply"),
             ("(sr-a24) wrapper assignment", "env FOO=x git stash pop"),
@@ -2365,10 +2439,11 @@ def _test_git_stash_ref(failures):
             ("(sr-a31) empty quoted operand", 'git stash apply ""'),
             ("(sr-a32) dash operand after separator", "git stash apply -- -ref"),
             ("(sr-a33) command substitution operand", "git stash apply $(printf x)"),
-            ("(sr-a34) parse failure with visible relocation",
-             'cd /abs && git stash pop "unbalanced'),
             ("(sr-a35) parse failure with sibling hazard",
              'git add -A && git push "unbalanced'),
+            ("(sr-a40) parse failure naming no stash", "wc -l <<<x"),
+            ("(sr-a41) parse failure with a quoted commit message naming no stash",
+             'git commit -m "fix bug" <<<x'),
             ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
             ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
             ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
@@ -2438,8 +2513,9 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_DIFF_PRODUCER_RE",),
      r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b"),
     (("_RAW_EXPBND_MUTATE_RE",),
-     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b"),
+     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|"
+     r"notes|pull|push|rebase|refs(?!/)|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
+     r"worktree)\b"),
     (("_RAW_EXPBND_PRUNING_FETCH_RE",), r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)"),
     (("_RAW_EXPBND_ADD_BREADTH_RE", "_RAW_EXPBND_COMMIT_BREADTH_RE"),
      r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
@@ -2450,6 +2526,8 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b"),
     (("_RAW_SHORT_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|am)\b"),
     (("_RAW_COMMIT_MSG_GIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
+    (("_STASH_WORD_RE",), r"(?is)\bgit\b.*?\bstash\b"),
+    (("_BRANCH_CREATE_WORD_RE",), r"(?is)\bgit\b.*?\b(?:checkout|switch|branch|worktree)\b"),
 )
 # Words and joiners the differential corpus is drawn from: each verb, its case and word-boundary
 # neighbours, the breadth and prune selectors and their near misses, quotes, and the two non-ASCII letters
@@ -2458,7 +2536,8 @@ _RAW_SEQUENCE_WORDS = (
     "git", "GIT", "Git", "xgit", "gitx", "git-x", "x-git", "push", "PUSH", "pushx", "commit", "Commit", "am",
     "merge", "pull", "rebase", "add", "fetch", "diff", "show", "ſhow", "log", "range-diff", "worKtree",
     "-A", "-a", "-xA", "-xa", "a-a", "--all", "--allx", "--prune", "--prune-tags", "--prunex", "-p", "-xp", "-P",
-    "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")")
+    "p-p", ".", "..", ":/", ":/x", "./", "x", "-", "'", '"', "$(", ")", "stash", "stashx", "checkout", "switch",
+    "branch", "history", "refs", "repack")
 _RAW_SEQUENCE_JOINERS = (" ", "  ", "\n", "\t", ";", "", "/", "=", "-")
 # Half the corpus is drawn from the words the three-step probes need, so their orderings are well covered.
 _RAW_SEQUENCE_FOCUS = ("git", "Git", "xgit", "fetch", "add", "commit", "push", "-p", "-xp", "-A", "-a", "-xa",
@@ -2497,6 +2576,238 @@ def _raw_sequence_failures(count=20000, seed=20261015):
         if not 0 < hits < len(texts):
             out.append("(dl-linear-{}) the corpus gives the reference only one outcome ({} of {} texts match)"
                        .format(label, hits, len(texts)))
+    return out
+
+
+# The single regex the _RawMirrorConfig probe _RAW_PUSH_MIRRORCFG_RE replaced: the reference the differential
+# check holds the probe equal to, over short texts where its quadratic cost does not matter.
+_RAW_MIRROR_REFERENCE = (r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
+                         r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
+# Words and joiners its corpus is drawn from: each option word, its case and near misses, the key and its
+# case, '.mirror' and its near misses, quotes, '=', blanks (a vertical tab and a no-break space among them),
+# whole quoted options, and the two letters the case-folded 'i' also matches (a dotless i, a dotted capital I).
+_RAW_MIRROR_WORDS = (
+    "-c", "-C", "-cx", "--config-env", "--CONFIG-ENV", "--config-envx", "remote.", "REMOTE.", "remote", "Remote",
+    ".mirror", ".MIRROR", ".mirro", "mirror", "remote..mirror", "remote.x.mirror", ".", "origin", "x", "-", "c",
+    "'", '"', "''", " ", "\t", "\n", "\x0b", "\u00a0", "=", "\u0131", "\u0130", "git", "push", "'-c'remote.",
+    "-c 'remote.", "--config-env='remote.")
+_RAW_MIRROR_JOINERS = ("", "", " ", "'", '"', "=", "\n")
+
+
+def _raw_mirror_first_only(text):
+    """A wrong mirror probe for _raw_mirror_failures: it reads only the first option."""
+    probe = aiqt_hooks._RAW_PUSH_MIRRORCFG_RE
+    found = probe.option.search(text)
+    if found is None:
+        return None
+    run = probe.key.match(text, found.end())
+    end = run.end() if run else found.end()
+    return probe.pattern.match(text, found.start()) if probe.mirror.search(text, found.end() + 1, end) else None
+
+
+def _raw_mirror_mismatches(search, texts, reference):
+    """The texts on which search(text) gives another span and text than the reference regex: at most three."""
+    out = []
+    for text in texts:
+        want, got = reference.search(text), search(text)
+        if (want and (want.span(), want.group())) != (got and (got.span(), got.group())):
+            out.append(text)
+            if len(out) == 3:
+                break
+    return out
+
+
+def _raw_mirror_failures(count=20000, seed=20261018):
+    """(dl-linear-mirror) _RAW_PUSH_MIRRORCFG_RE is a _RawMirrorConfig probe of the regex it replaced and
+    returns the match that regex returns (the same span and text, or None), over every corpus word alone and
+    `count` seeded random joins of one to twelve words. The corpus must give the regex both outcomes and hold
+    texts whose match starts at a later option than the first one. Two wrong probes (one reading only the
+    first option, one reading each key run on to the end of the text) must each be caught by the same
+    comparison, so it discriminates."""
+    out = []
+    probe = aiqt_hooks._RAW_PUSH_MIRRORCFG_RE
+    if not isinstance(probe, getattr(aiqt_hooks, "_RawMirrorConfig", ())):
+        return ["(dl-linear-mirror-type) _RAW_PUSH_MIRRORCFG_RE is not a _RawMirrorConfig probe"]
+    reference = re.compile(_RAW_MIRROR_REFERENCE)
+    if probe.pattern.pattern != _RAW_MIRROR_REFERENCE:
+        out.append("(dl-linear-mirror-pattern) the probe's regex is {!r}, not the regex it replaced".format(
+            probe.pattern.pattern))
+    rng = random.Random(seed)
+    texts = list(_RAW_MIRROR_WORDS)
+    for _ in range(count):
+        text = rng.choice(_RAW_MIRROR_WORDS)
+        for _ in range(rng.randint(0, 11)):
+            text += rng.choice(_RAW_MIRROR_JOINERS) + rng.choice(_RAW_MIRROR_WORDS)
+        texts.append(text)
+    hits = later = 0
+    for text in texts:
+        want = reference.search(text)
+        if want:
+            hits += 1
+            later += want.start() != probe.option.search(text).start()
+    if not (0 < hits < len(texts) and later):
+        out.append("(dl-linear-mirror-corpus) the corpus must give the regex both outcomes ({} of {} texts match) "
+                   "and hold a match that starts at a later option ({})".format(hits, len(texts), later))
+    for text in _raw_mirror_mismatches(probe.search, texts, reference):
+        out.append("(dl-linear-mirror) gives {!r} on {!r}, the regex it replaced {!r}".format(
+            probe.search(text), text, reference.search(text)))
+    wrong = (
+        ("first-only", _raw_mirror_first_only),
+        ("whole-text", aiqt_hooks._RawMirrorConfig(
+            _RAW_MIRROR_REFERENCE, probe.option.pattern, r"(?s).+", probe.mirror.pattern).search),
+    )
+    for name, search in wrong:
+        if not _raw_mirror_mismatches(search, texts, reference):
+            out.append("(dl-linear-mirror-red-{}) a wrong mirror probe passes the comparison".format(name))
+    return out
+
+
+# Texts for the in-place walk past a '<(' or '>(' process substitution in _raw_push_segments: nested quotes,
+# substitutions, expansions and escapes inside it, and forms left unterminated.
+_PROCSUBST_TEXTS = (
+    "<(x)", ">(a 'b)' c)", "<(a $(b) \"c)\" `d)`)", "<(a", "<(a " + chr(92) + ")", "<(${x)})", "<((x))",
+    "<(a)b<(c)", "<(a 'b", "<(a \"$(b)", ">(`)", "<(a" + chr(92))
+_PROCSUBST_ALPHABET = ("(", ")", "<(", "'", '"', "`", "$(", "${", "}", chr(92), " ", "x", "\n", ";")
+
+
+def _procsubst_skip_outcome(call):
+    """call()'s result, or ("ValueError", its message) when it raises ValueError."""
+    try:
+        return call()
+    except ValueError as exc:
+        return ("ValueError", str(exc))
+
+
+def _procsubst_skip_failures(count=20000, seed=20261018):
+    """(dl-procsubst-skip) _raw_push_segments walks past a '<(' or '>(' process substitution in place with
+    _skip_quoting_from(text, i + 1, n, ["paren"]); at each '(' of _PROCSUBST_TEXTS and of `count` seeded random
+    texts over _PROCSUBST_ALPHABET that gives the index _skip_quoting gives on the copy "$" + text[i:] it
+    walked before (mapped back to text), or the same ValueError. The corpus must hold both outcomes. Copying
+    the rest of the command for each one cost time quadratic in the length of a command that holds many."""
+    if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
+        return ["(dl-procsubst-skip-missing) aiqt_hooks has no _skip_quoting_from to walk a substitution in place"]
+    out = []
+    rng = random.Random(seed)
+    texts = list(_PROCSUBST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_PROCSUBST_ALPHABET) for _ in range(rng.randint(1, 12))))
+    closed = raised = 0
+    for text in texts:
+        n = len(text)
+        for i in range(n):
+            if text[i] != "(":
+                continue
+            want = _procsubst_skip_outcome(lambda: aiqt_hooks._skip_quoting("$" + text[i:], 0, n - i + 1) - 1 + i)
+            got = _procsubst_skip_outcome(lambda: aiqt_hooks._skip_quoting_from(text, i + 1, n, ["paren"]))
+            closed += isinstance(want, int)
+            raised += not isinstance(want, int)
+            if got != want and len(out) < 3:
+                out.append("(dl-procsubst-skip) the in-place walk from {!r} at {} gave {!r}, the copy {!r}".format(
+                    text, i, got, want))
+    if not (closed and raised):
+        out.append("(dl-procsubst-skip-corpus) the corpus must hold a substitution that closes ({}) and one that "
+                   "does not ({})".format(closed, raised))
+    return out
+
+
+def _procsubst_walk_calls(walk, command):
+    """[(text, start, stack)] for each _skip_quoting_from call walk(command) makes, recorded by a wrapper
+    installed on that module attribute for the run and restored after it; _skip_quoting reaches the walk
+    through the same attribute, so a call through it is recorded too, with the text it passed."""
+    inner = aiqt_hooks._skip_quoting_from
+    calls = []
+
+    def recording(text, i, n, stack):
+        calls.append((text, i, list(stack)))
+        return inner(text, i, n, stack)
+
+    aiqt_hooks._skip_quoting_from = recording
+    try:
+        walk(command)
+    finally:
+        aiqt_hooks._skip_quoting_from = inner
+    return calls
+
+
+def _procsubst_walk_problems(walk, command):
+    """What walk(command)'s recorded _skip_quoting_from calls (_procsubst_walk_calls) get wrong against the
+    in-place read of a command whose only quoting constructs are its process substitutions: one call for
+    each substitution's '(', in order, each passing `command` ITSELF, compared by object identity, so
+    neither a copy of its tail nor a fresh full-length copy equal in value passes, from just past that
+    '(' with the one open paren context. The caller passes a command the continuation join returns
+    unchanged (no backslash-newline pair), so the walked text and the command can be one object.
+    Phrases, [] for none, at most three."""
+    wants = [i for i in range(1, len(command)) if command[i] == "(" and command[i - 1] in "<>"]
+    calls = _procsubst_walk_calls(walk, command)
+    out = []
+    if len(calls) != len(wants):
+        out.append("made {} _skip_quoting_from call(s) for {} substitution(s)".format(len(calls), len(wants)))
+    for (text, start, stack), i in zip(calls, wants):
+        if text is not command:
+            out.append("walked a copy of {} character(s) for the substitution at {} (want the command "
+                       "object itself in place, {} characters)".format(len(text), i, len(command)))
+        elif (start, stack) != (i + 1, ["paren"]):
+            out.append("walked from {} with contexts {} for the substitution at {} (want from {} with "
+                       "['paren'])".format(start, stack, i, i + 1))
+        if len(out) == 3:
+            break
+    return out
+
+
+def _procsubst_copying_walk(command):
+    """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
+    copy of the rest of the command prefixed with '$', the call shape the in-place read replaced."""
+    n = len(command)
+    for i in range(1, n):
+        if command[i] == "(" and command[i - 1] in "<>":
+            aiqt_hooks._skip_quoting("$" + command[i:], 0, n - i + 1)
+
+
+def _procsubst_equal_copy_walk(command):
+    """A wrong segments walk for _procsubst_taken_failures: at each process substitution's '(' it walks a
+    fresh full-length copy EQUAL to the command in value, which still allocates per substitution in time
+    quadratic in the command's length. A value comparison and segment equality both pass it. The 1 MB
+    timed row failed it when measured (about 7.9 to 8.2 s of CPU for one protected_line call, over its
+    7-second bound, in-process on a 24-core host with Python 3.14.4, 2026-10-18), but a faster host can
+    bring it under that bound, so the object-identity record is what catches it by design."""
+    n = len(command)
+    for i in range(1, n):
+        if command[i] == "(" and command[i - 1] in "<>":
+            aiqt_hooks._skip_quoting_from((command + " ")[:-1], i + 1, n, ["paren"])
+
+
+def _procsubst_taken_failures():
+    """(dl-procsubst-taken) The in-place walk is TAKEN by the production split: on a command of many
+    adjacent process substitutions ending in a protected force-push, _raw_push_segments calls
+    _skip_quoting_from once per substitution passing the command OBJECT ITSELF, never a copy of its tail
+    nor a fresh full-length copy equal in value (_procsubst_walk_problems compares by identity; the
+    command holds no backslash-newline pair, so the joined text the split walks IS the command,
+    dl-procsubst-taken-joined), and _raw_push_match still matches the force-push segment
+    (dl-procsubst-taken-match). The equivalence
+    check above holds just as well for a split that copies, so only this record pins the call site; the
+    bounded timed rows do not (the copying split stayed under the 1 MB CPU bound when measured). The
+    copying call shape it replaced must be caught by the same record (dl-procsubst-taken-red), and so
+    must a per-substitution full-length copy equal in value, which of the record's comparisons only the
+    identity comparison can see (dl-procsubst-taken-red-equal), so the record discriminates."""
+    if not callable(getattr(aiqt_hooks, "_skip_quoting_from", None)):
+        return ["(dl-procsubst-taken-missing) aiqt_hooks has no _skip_quoting_from to record the walk on"]
+    command = "cat " + "<(x) >(x) " * 1200 + "; git push --force origin main"
+    out = []
+    if aiqt_hooks._join_continuations(command)[0] is not command:
+        out.append("(dl-procsubst-taken-joined) the continuation join must return this fixture (it holds "
+                   "no backslash-newline pair) as the same object, so the split can walk the command "
+                   "itself and the identity record below can read anything else as a copy")
+    for problem in _procsubst_walk_problems(aiqt_hooks._raw_push_segments, command):
+        out.append("(dl-procsubst-taken) _raw_push_segments {}".format(problem))
+    if not aiqt_hooks._raw_push_match(command):
+        out.append("(dl-procsubst-taken-match) _raw_push_match misses the protected force-push after {} "
+                   "process substitutions".format(command.count("(x)")))
+    if not _procsubst_walk_problems(_procsubst_copying_walk, command):
+        out.append("(dl-procsubst-taken-red) a walk that copies the rest of the command for each substitution "
+                   "passes the call record")
+    if not _procsubst_walk_problems(_procsubst_equal_copy_walk, command):
+        out.append("(dl-procsubst-taken-red-equal) a walk that passes a fresh full-length copy, equal to the "
+                   "command in value, for each substitution passes the call record")
     return out
 
 
@@ -2605,14 +2916,364 @@ def _join_fast_failures(count=4000, seed=20261017):
     return out
 
 
+# Texts for the de-quoted reading's fast path (_gate_text_may_name_git): git plainly, in either case and behind a
+# path; split by quote characters, by a '$' before a quote, by a backslash and by a backslash-newline pair; coded
+# in an ANSI-C escape, outside quotes and one shell level in; added after an option word's attached value; and
+# texts naming no git that hold quotes, a '$', a backslash, both, or a backslash-newline pair.
+_GATE_READ_FAST_TEXTS = (
+    "", "echo a b", "git status", "GIT push -nv", "/usr/bin/Git commit -nv", "g'i't commit -nv", 'g"I"t push',
+    "g$'i't commit -nv", 'g$"i"T commit', "g" + chr(92) + "it commit -n", "g" + chr(92) + "\nit commit -n",
+    "echo $'g" + chr(92) + "x69t' commit -nv", "$'" + chr(92) + "147it' commit -n", "$'g" + chr(92) + "x{169}t'",
+    'sh -c "$' + "'g" + chr(92) * 2 + "x69t' commit -nv" + '"', "env --split-string=g'i't x", "env -S'g\"i\"t' x",
+    "echo 'a b' \"c\" d", "echo $HOME 'x'", "echo a" + chr(92) + "b c", "echo $'a" + chr(92) + "tb'",
+    "echo a" + chr(92) + "\nb", "digit gi t", "g it", "tig")
+_GATE_READ_FAST_ALPHABET = ("g", "i", "t", "G", "I", "T", "gi", "Gi", "it", "iT", "'", '"', "$", chr(92), "\n", " ",
+                            "x", "69", "/", "-", "=", "_", ";", "{")
+# Texts _gate_text_bypass must pass over without building a reading, and texts for which it must build both.
+_GATE_READ_FREE_TEXTS = ("", "echo a b", "echo 'a b' \"c\" d", "echo $HOME 'x'", "echo a" + chr(92) + "b c",
+                         "echo " + "a " * (128 * 1024))
+_GATE_READ_NAMING_TEXTS = ("git status", "g'i't commit -nv", "echo $'g" + chr(92) + "x69t' commit -nv")
+
+
+def _gate_read_git_named(text):
+    """True when a de-quoted reading of text (_gate_dequoted_words, _gate_bash_readings) holds a word that
+    _gate_word reads as git."""
+    readings = (aiqt_hooks._gate_dequoted_words(text),) + aiqt_hooks._gate_bash_readings(text)
+    return any(aiqt_hooks._gate_word(w) == "git" for words in readings for w in words)
+
+
+def _gate_read_full(text, skip_own):
+    """_gate_text_bypass(text, skip_own) with every reading built: its fast-path test is replaced by one that is
+    always True for the call and restored after it."""
+    may = aiqt_hooks._gate_text_may_name_git
+    aiqt_hooks._gate_text_may_name_git = lambda _text: True
+    try:
+        return aiqt_hooks._gate_text_bypass(text, skip_own)
+    finally:
+        aiqt_hooks._gate_text_may_name_git = may
+
+
+def _gate_read_misbuilt(free, naming):
+    """The texts for which _gate_text_bypass(text) built a reading though text is in free, or did not build both
+    though text is in naming: [(text, builds, wanted)], at most three. The builds are counted by wrappers
+    installed on _gate_dequoted_words and _gate_bash_readings for the run and restored after it."""
+    dequoted, bash = aiqt_hooks._gate_dequoted_words, aiqt_hooks._gate_bash_readings
+    calls = [0]
+
+    def counted_dequoted(text):
+        calls[0] += 1
+        return dequoted(text)
+
+    def counted_bash(text):
+        calls[0] += 1
+        return bash(text)
+
+    out = []
+    aiqt_hooks._gate_dequoted_words, aiqt_hooks._gate_bash_readings = counted_dequoted, counted_bash
+    try:
+        for text in free + naming:
+            calls[0] = 0
+            aiqt_hooks._gate_text_bypass(text)
+            wanted = 2 if text in naming else 0
+            if calls[0] != wanted and len(out) < 3:
+                out.append((text, calls[0], wanted))
+    finally:
+        aiqt_hooks._gate_dequoted_words, aiqt_hooks._gate_bash_readings = dequoted, bash
+    return out
+
+
+def _gate_read_fast_failures(count=4000, seed=20261026):
+    """(gw-read-fast) _gate_text_bypass, which passes over text that _gate_text_may_name_git says no de-quoted
+    reading can make name git, gives the full walk's result (every reading built, _gate_read_full) for both
+    skip_own values on _GATE_READ_FAST_TEXTS and `count` seeded random texts over _GATE_READ_FAST_ALPHABET, and
+    (gw-read-fast-named) that test is never False on a text one of whose readings holds a git word
+    (_gate_read_git_named). The corpus must hold texts the test passes over, texts whose readings name git, some
+    of them only once quotes, a backslash or an escape are read, and a text the full walk denies. Five wrong
+    tests (one reading the raw text, one not lowercasing, one ignoring escapes, one keeping the newline and one
+    keeping the '$') must each be caught by the gw-read-fast-named check, so it discriminates.
+    (gw-read-fast-taken) The fast path is taken: with the readings' builds counted (_gate_read_misbuilt),
+    _gate_text_bypass builds none for _GATE_READ_FREE_TEXTS, a long git-free segment among them, and both for
+    _GATE_READ_NAMING_TEXTS, since the equivalence above holds just as well for a test that is always True. A
+    test that is always True must be caught by the same count (gw-read-fast-taken-red)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_GATE_READ_FAST_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_GATE_READ_FAST_ALPHABET) for _ in range(rng.randint(0, 10))))
+    named = [text for text in texts if _gate_read_git_named(text)]
+    passed = [text for text in texts if not aiqt_hooks._gate_text_may_name_git(text)]
+    hidden = [text for text in named if "git" not in text.lower()]
+    denied = [text for text in texts if _gate_read_full(text, False) is not None]
+    if not passed or not named or not hidden or not denied:
+        out.append("(gw-read-fast-corpus) the corpus must hold texts the test passes over ({}), texts whose "
+                   "readings name git ({}), some only once quotes, a backslash or an escape are read ({}), and a "
+                   "text the full walk denies ({})".format(len(passed), len(named), len(hidden), len(denied)))
+    missed = [text for text in named if not aiqt_hooks._gate_text_may_name_git(text)]
+    for text in missed[:3]:
+        out.append("(gw-read-fast-named) _gate_text_may_name_git({!r}) is False, but a reading of it names "
+                   "git".format(text))
+    mismatches = [(text, skip_own, aiqt_hooks._gate_text_bypass(text, skip_own), _gate_read_full(text, skip_own))
+                  for text in texts for skip_own in (False, True)]
+    for text, skip_own, got, want in [m for m in mismatches if m[2] != m[3]][:3]:
+        out.append("(gw-read-fast) _gate_text_bypass({!r}, {}) gave {!r}, the full walk {!r}".format(
+            text, skip_own, got, want))
+    drops = aiqt_hooks._GATE_READING_DROPS
+    no_newline = str.maketrans("", "", "'\"$" + chr(92))
+    no_dollar = str.maketrans("", "", "'\"\n" + chr(92))
+    wrong = (
+        ("raw", lambda text: "git" in text.lower()),
+        ("case", lambda text: ("$" in text and chr(92) in text) or "git" in text.translate(drops)),
+        ("escape", lambda text: "git" in text.translate(drops).lower()),
+        ("newline", lambda text: ("$" in text and chr(92) in text) or "git" in text.translate(no_newline).lower()),
+        ("dollar", lambda text: ("$" in text and chr(92) in text) or "git" in text.translate(no_dollar).lower()),
+    )
+    for name, may in wrong:
+        if all(may(text) for text in named):
+            out.append("(gw-read-fast-red-{}) a wrong fast-path test passes the git-naming check".format(name))
+    for text, builds, wanted in _gate_read_misbuilt(_GATE_READ_FREE_TEXTS, _GATE_READ_NAMING_TEXTS):
+        out.append("(gw-read-fast-taken) _gate_text_bypass({!r}) built {} reading(s), want {}: none for a text no "
+                   "reading can make name git, both for one that names it".format(text[:60], builds, wanted))
+    may = aiqt_hooks._gate_text_may_name_git
+    aiqt_hooks._gate_text_may_name_git = lambda _text: True
+    try:
+        always = _gate_read_misbuilt(_GATE_READ_FREE_TEXTS, _GATE_READ_NAMING_TEXTS)
+    finally:
+        aiqt_hooks._gate_text_may_name_git = may
+    if not always:
+        out.append("(gw-read-fast-taken-red) a test that is always True passes the build count")
+    return out
+
+
+# The budget of the de-quoted reading's cost row (gw-read-cost): the CPU time of _gate_behind_bypass over every
+# segment of a command must stay under this share of the CPU time of one lex of the same command.
+_GATE_READ_COST_SHARE = 0.25
+# The row's inputs must hold a segment of more than this many words, so the row times the long git-free reading.
+_GATE_READ_COST_WORDS = 128 * 1024
+
+
+def _gate_read_cost_problems(lex, read, longest, results):
+    """What one timing of the gw-read-cost row got wrong, as a list of phrases ([] for none): lex and read are the
+    CPU seconds of one lex of the command and of _gate_behind_bypass over every segment of it, longest is the
+    word count of its longest segment and results is what _gate_behind_bypass gave each segment."""
+    problems = []
+    if longest <= _GATE_READ_COST_WORDS:
+        problems.append("its longest segment holds {} words, not more than {}, so the row no longer times the long "
+                        "reading".format(longest, _GATE_READ_COST_WORDS))
+    found = [got for got in results if got is not None]
+    if found:
+        problems.append("the reading found {!r}, so the row no longer times it to its end".format(found[0]))
+    if read >= _GATE_READ_COST_SHARE * lex:
+        problems.append("the reading took {:.3f} s of CPU, {:.2f} times one lex of the command ({:.3f} s); the "
+                        "budget is under {:g} of the lex".format(read, read / lex if lex > 0 else float("inf"), lex,
+                                                                _GATE_READ_COST_SHARE))
+    return problems
+
+
+def _gate_read_cost_edge_failures():
+    """(gw-read-cost-edge) The row's own checks at each end: a reading just under, exactly at and just over the
+    budget's share of the lex (the last two fail), a longest segment of exactly the word floor and one word over
+    it (the first fails), and a segment the reading denies (it fails), so a comparison turned the wrong way or
+    made inclusive at the wrong end is caught here rather than by a timing."""
+    out = []
+    lex = 0.4
+    budget = _GATE_READ_COST_SHARE * lex
+    over_floor = _GATE_READ_COST_WORDS + 1
+    for label, read, longest, results, wanted in (
+            ("under", budget * 0.99, over_floor, [None], 0),
+            ("at", budget, over_floor, [None], 1),
+            ("over", budget * 1.01, over_floor, [None], 1),
+            ("floor-at", 0.0, _GATE_READ_COST_WORDS, [None], 1),
+            ("floor-over", 0.0, over_floor, [None], 0),
+            ("found", 0.0, over_floor, [None, ("commit", "a --no-verify spelling")], 1)):
+        got = _gate_read_cost_problems(lex, read, longest, results)
+        if len(got) != wanted:
+            out.append("(gw-read-cost-edge-{}) the row's checks gave {} problem(s), want {}: {}".format(
+                label, len(got), wanted, got))
+    return out
+
+
+_GW_FLOOR = 0.1
+_GW_SIZES = 9
+# The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
+# system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
+_GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
+_GW_USAGE_LABELS = (("user CPU", "{:.3f}s"), ("system CPU", "{:.3f}s"), ("minor page faults", "{}"),
+                    ("involuntary context switches", "{}"), ("cyclic collections", "{}"))
+
+
+def _gw_usage():
+    """(user CPU s, system CPU s, minor page faults, involuntary context switches, cyclic collections) this
+    process has used so far, best effort: an entry is None when it cannot be read (no resource module, a
+    getrusage result without that field, or a collector statistic without 'collections'), so a host that lacks
+    one still runs the gw-lin rows to their verdict and a failing row reports what it can. Both modules are
+    imported here, at each reading, so a check can stand one in through sys.modules."""
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+    except (ImportError, AttributeError, OSError):
+        rusage = None
+    usage = [getattr(rusage, name, None) for name in _GW_RUSAGE_FIELDS]
+    try:
+        import gc
+        usage.append(sum(stats["collections"] for stats in gc.get_stats()))
+    except (ImportError, AttributeError, KeyError, TypeError):
+        usage.append(None)
+    return tuple(usage)
+
+
+def _gw_usage_text(use_n, use_2n):
+    """The usage clause of a failed gw-lin row: each reading for both timed calls, or '<reading> usage
+    unavailable' for one that could not be read for either call."""
+    parts = []
+    for (name, form), used_n, used_2n in zip(_GW_USAGE_LABELS, use_n, use_2n):
+        if used_n is None or used_2n is None:
+            parts.append("{} usage unavailable".format(name))
+        else:
+            parts.append(("{} " + form + " then " + form).format(name, used_n, used_2n))
+    return ", ".join(parts)
+
+
+def _gw_scan_once(cmd, scan):
+    """(CPU seconds, decision, usage) for one scan of cmd; usage is what _gw_usage grew by across the call,
+    read outside the timed region, with None for a reading unavailable before or after it."""
+    u0 = _gw_usage()
+    t0 = time.process_time()
+    decision = scan(cmd)
+    t = time.process_time() - t0
+    return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
+
+
+def _gw_scan_ratio(unit, prefix, suffix, scan):
+    """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
+    t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions, (usage_n, usage_2n)), or (None, t_n, None,
+    length, decisions, None) when the floor was never cleared in the bound, so the caller fails 'linearity not
+    evaluated'; decisions lists every timed scan's decision, in order. The input is a command string for the
+    whole-command scan or a word list for the dequoted-word scan."""
+    reps = 4000
+    decisions = []
+    for _ in range(_GW_SIZES):
+        t_n, decision, use_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
+        decisions.append(decision)
+        if t_n > _GW_FLOOR:
+            cmd_2n = prefix + unit * (reps * 2) + suffix
+            t_2n, decision, use_2n = _gw_scan_once(cmd_2n, scan)
+            decisions.append(decision)
+            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n)
+        reps *= 2
+    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None
+
+
+def _gw_lin_failures(cases):
+    """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
+    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
+    floor, or on a ratio over 3 (reporting the usage of both timed calls)."""
+    out = []
+    for label, unit, prefix, suffix, scan, want in cases:
+        ratio, t_n, t_2n, length_2n, got, use = _gw_scan_ratio(unit, prefix, suffix, scan)
+        wrong = [decision for decision in got if decision != want]
+        if wrong:
+            out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
+                       .format(label, wrong[0], len(wrong), len(got), want))
+        if ratio is None:
+            out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
+                       "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
+        elif ratio > 3.0:
+            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
+                       "{:.3f}s then {:.3f}s for an input of length {} ({})"
+                       .format(label, ratio, t_n, t_2n, length_2n, _gw_usage_text(*use)))
+    return out
+
+
+def _gw_spin_scan(power):
+    """A stand-in scan that spends CPU time growing with the input's length to the given power: 0.12 s at
+    4000 characters, so the first size clears the floor and the ratio is about 2 ** power."""
+    def scan(cmd):
+        until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power
+        while time.process_time() < until:
+            pass
+        return None
+    return scan
+
+
+@contextlib.contextmanager
+def _gw_module_as(name, stand_in):
+    """sys.modules[name] is stand_in inside the block (None makes importing it raise ModuleNotFoundError),
+    restored after it."""
+    had = name in sys.modules
+    saved = sys.modules.get(name)
+    sys.modules[name] = stand_in
+    try:
+        yield
+    finally:
+        if had:
+            sys.modules[name] = saved
+        else:
+            del sys.modules[name]
+
+
+def _gw_lin_usage_failures():
+    """(gw-lin-usage-readable, gw-lin-usage-no-resource, gw-lin-usage-no-field, gw-lin-usage-no-collections)
+    The gw-lin rows' usage report, through stand-in scans that spend CPU time in proportion to the input
+    (linear) or to its square (super-linear). With every reading available, a super-linear row fails with each
+    usage field for both timed calls. With no resource module, with a getrusage result missing a field and
+    with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
+    their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
+    unavailable' for each reading it lost and the readings it kept."""
+    pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
+    pair = r"\d+ then \d+"
+    lost = "usage unavailable"
+
+    def rusage_without_nivcsw(_who):
+        return types.SimpleNamespace(ru_utime=time.process_time(), ru_stime=0.0, ru_minflt=0)
+
+    no_field = types.SimpleNamespace(RUSAGE_SELF=0, getrusage=rusage_without_nivcsw)
+    no_collections = types.SimpleNamespace(get_stats=lambda: [{"collected": 0}])
+    out = []
+    for label, module, stand_in, clause in (
+            ("gw-lin-usage-readable", None, None,
+             "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
+             "cyclic collections {1}".format(pair_s, pair)),
+            ("gw-lin-usage-no-resource", "resource", None,
+             "user CPU {0}, system CPU {0}, minor page faults {0}, involuntary context switches {0}, "
+             "cyclic collections {1}".format(lost, pair)),
+            ("gw-lin-usage-no-field", "resource", no_field,
+             "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {2}, "
+             "cyclic collections {1}".format(pair_s, pair, lost)),
+            ("gw-lin-usage-no-collections", "gc", no_collections,
+             "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
+             "cyclic collections {2}".format(pair_s, pair, lost))):
+        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
+                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s for an input of "
+                          r"length 8000 \(" + clause + r"\)\Z")
+        rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
+        if module is not None:
+            rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
+        try:
+            with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
+                got = _gw_lin_failures(rows)
+        except Exception as exc:
+            out.append("({}) the gw-lin rows raised {}: {} instead of reaching their verdict"
+                       .format(label, type(exc).__name__, exc))
+            continue
+        if len(got) != 1 or not want.match(got[0]):
+            out.append("({}) the gw-lin rows gave {!r}, want only the super-linear row's failure matching {!r}"
+                       .format(label, got, want.pattern))
+    return out
+
+
 # Commands for the lexer's skip_empty reading: runs of separators, blank lines, a comment and a quoted heredoc
 # opener (segments with no word and no redirect, some with a raw slice that is not blank), redirect-only
 # segments (kept), and commands the lexer refuses or, in partial mode, recovers in part.
 _LEX_SKIP_TEXTS = (
     "", "((((true))))", "true;;", ";(;)", "a; ;b", "a &&\n\n b", "# c\ngit status", "> out; ;", "( > out )",
     "cat <<'E'\nx\nE\n;", "<<'E'\nx\nE\n(a)", "a | (b) || c", "x 'y", ";;; 'y", "> o 'y", "a\n#c\n\n",
-    "(cd /x && git reset --hard)", "((true)) <(x)", "git stash pop; ;", "\t;\t")
-_LEX_SKIP_ALPHABET = ("(", ")", ";", "&", "|", " ", "\n", "a", ">", "'", "#", "x\t", "<<'E'\nE\n", "{", "$", "<(")
+    "(cd /x && git reset --hard)", "((true)) <(x)", "git stash pop; ;", "\t;\t",
+    # A '#' inside a double-quoted command substitution, with and without a backslash-newline before it: the
+    # pair is removed before bash reads the line, so the '#' keeps its word-boundary class and opens a comment
+    # under both readings (the skip-empty equivalence must hold either way).
+    'echo "$(echo a \\\n#b\nc\n)"', 'echo "$(echo a #b\nc\n)"', 'echo "$(echo a \\\n\\\n#b\n)"')
+_LEX_SKIP_ALPHABET = ("(", ")", ";", "&", "|", " ", "\n", "a", ">", "'", '"', "#", "x\t", "<<'E'\nE\n", "{", "$",
+                      "<(", '"$(a \\\n#b\n)"')
 
 
 def _lex_outcome(call):
@@ -2663,10 +3324,12 @@ def _lex_skip_failures(count=4000, seed=20261017):
     caught by the same comparison, so it discriminates.
     (dl-lex-skip-taken) git_discard, its per-line reread (_uncertain_line_lossy), git_stash_ref,
     bash_absolute_paths and branch_root (on a command the full lex refuses as well, so their partial reads
-    run) each build at least one record and none with no word and no redirect on commands with runs of
-    parentheses, counted with aiqt_hooks._Segment wrapped (_lex_skip_callers, _lex_records_built). The
-    default lex of such a command must build some under the same count (dl-lex-skip-taken-red), so the count
-    discriminates."""
+    run), git_explicit_binding and commit_msg_subst each build at least one record and none with no word and
+    no redirect on commands with runs of parentheses, counted with aiqt_hooks._Segment wrapped
+    (_lex_skip_callers, _lex_records_built); git_stash_ref and bash_absolute_paths also do on a command whose
+    lex reads main's floor reading (_LEX_SKIP_FLOOR, held to reaching it by dl-lex-skip-floor), so dropping
+    skip_empty from _main_reading or _beside_main_reading fails here. The default lex of such a command must
+    build some under the same count (dl-lex-skip-taken-red), so the count discriminates."""
     out = []
     rng = random.Random(seed)
     texts = list(_LEX_SKIP_TEXTS)
@@ -2721,11 +3384,53 @@ def _lex_skip_callers():
         ("git_discard", handler("git_discard", nested), nested),
         ("_uncertain_line_lossy", lambda: aiqt_hooks._uncertain_line_lossy(reread), reread),
         ("git_stash_ref", handler("git_stash_ref", nested), nested),
+        ("git_stash_ref", handler("git_stash_ref", _LEX_SKIP_FLOOR), _LEX_SKIP_FLOOR),
         ("bash_absolute_paths", handler("bash_absolute_paths", nested), nested),
         ("bash_absolute_paths", handler("bash_absolute_paths", refused), refused),
+        ("bash_absolute_paths", handler("bash_absolute_paths", _LEX_SKIP_FLOOR), _LEX_SKIP_FLOOR),
         ("branch_root", handler("branch_root", nested), nested),
         ("branch_root", handler("branch_root", refused), refused),
+        ("git_explicit_binding", handler("git_explicit_binding", nested), nested),
+        ("commit_msg_subst", handler("commit_msg_subst", nested), nested),
     )
+
+
+# Runs of parentheses before the commit message form whose quoted here-document body holds an apostrophe: the
+# lex reads the body, main's substitution skip does not (it pairs the apostrophe past the ')'), so the lexer
+# also lexes main's reading of the command (_main_reading, _beside_main_reading), whose runs of parentheses
+# end segments with no word and no redirect before main's skip fails.
+_LEX_SKIP_FLOOR = "((((true)))); x=\"$(cat <<'EOF'\nDon't merge yet\nEOF\n)\""
+
+
+def _lex_skip_floor_failures():
+    """(dl-lex-skip-floor) The callers on _LEX_SKIP_FLOOR (_lex_skip_callers) reach main's floor reading:
+    each calls _main_reading with skip_empty True at least once, counted with aiqt_hooks._main_reading
+    wrapped, so dl-lex-skip-taken sees a floor reading that builds a record with no word and no redirect."""
+    out = []
+    main_reading = aiqt_hooks._main_reading
+    floor_callers = 0
+    for label, call, command in _lex_skip_callers():
+        if command != _LEX_SKIP_FLOOR:
+            continue
+        floor_callers += 1
+        calls = []
+
+        def counted(*args, **kwargs):
+            calls.append(kwargs.get("skip_empty", args[3] if len(args) > 3 else False))
+            return main_reading(*args, **kwargs)
+
+        aiqt_hooks._main_reading = counted
+        try:
+            call()
+        finally:
+            aiqt_hooks._main_reading = main_reading
+        if True not in calls:
+            out.append("(dl-lex-skip-floor) {} on {!r} made main's floor reading with skip_empty {!r}; it must "
+                       "make it at least once with skip_empty True".format(label, command, calls))
+    if floor_callers < 2:
+        out.append("(dl-lex-skip-floor-callers) only {} caller(s) run on the floor input; _lex_skip_callers "
+                   "must keep at least two so the skip_empty floor reading stays covered".format(floor_callers))
+    return out
 
 
 def _lex_words_only(result):
@@ -2754,6 +3459,188 @@ def _lex_records_built(call):
     finally:
         aiqt_hooks._Segment = segment
     return counts[0], counts[1]
+
+
+def _lex_readings_restart(command, partial=False, locale=False, skip_empty=False):
+    """The readings _lex_readings gives, each lexed from the start of the command (aiqt_hooks._lex_reading
+    with no _LexFork) as the lexer did before a reading resumed where an earlier one stopped: the reference
+    _lex_fork_failures compares against."""
+    readings = []
+    misread = False
+    pending = [{}]
+    while pending:
+        reading = pending.pop()
+        try:
+            lexed, body = aiqt_hooks._lex_reading(command, partial, reading, locale, skip_empty)
+        except aiqt_hooks._UncertainHashError as exc:
+            if (exc.backquote or exc.at is None or exc.at in reading
+                    or len(reading) >= aiqt_hooks._HASH_READING_LIMIT):
+                raise
+            pending.append(aiqt_hooks._hash_reading_with(reading, exc.at, False))
+            pending.append(aiqt_hooks._hash_reading_with(reading, exc.at, True))
+        except ValueError as exc:
+            if not reading:
+                raise
+            raise aiqt_hooks._UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc))
+        else:
+            readings.append(lexed)
+            misread = misread or body
+    return aiqt_hooks._beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings
+
+
+def _lex_fork_outcome(call):
+    """call()'s result with _SubstHeredocs.reads's change, or the ValueError's type, text and index."""
+    reads = aiqt_hooks._SubstHeredocs.reads
+    try:
+        return call(), aiqt_hooks._SubstHeredocs.reads - reads
+    except ValueError as exc:
+        return type(exc).__name__, str(exc), getattr(exc, "at", None), aiqt_hooks._SubstHeredocs.reads - reads
+
+
+def _lex_fork_mismatches(texts):
+    """The (text, partial, skip_empty, locale) readings on which _lex_readings differs from
+    _lex_readings_restart, or a partial _lex_command from that reference's partial recovery: at most three."""
+    out = []
+    modes = [(partial, skip_empty, locale) for partial in (False, True) for skip_empty in (False, True)
+             for locale in (False, True)]
+    for text in texts:
+        for partial, skip_empty, locale in modes:
+            got = _lex_fork_outcome(lambda: aiqt_hooks._lex_readings(text, partial, locale, skip_empty))
+            want = _lex_fork_outcome(lambda: _lex_readings_restart(text, partial, locale, skip_empty))
+            if got == want and partial and got[0] == "_UncertainHashError":
+                got = _lex_fork_outcome(lambda: aiqt_hooks._lex_command(text, True, locale, skip_empty))
+                want = _lex_fork_outcome(lambda: _lex_partial_restart(text, locale, skip_empty))
+            if got != want:
+                out.append((text, partial, skip_empty, locale, got, want))
+                if len(out) == 3:
+                    return out
+    return out
+
+
+def _lex_partial_restart(command, locale, skip_empty):
+    """A partial _lex_command of a command whose readings cannot be judged, lexed from the start."""
+    lexed, misread = aiqt_hooks._lex_reading(command, True, None, locale, skip_empty)
+    readings = aiqt_hooks._beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+    return ([seg for segs, _complete, _open in readings for seg in segs],
+            all(done for _segs, done, _open in readings), readings[-1][2])
+
+
+# Commands for the resumed readings: uncertain '#' characters at a word boundary, at a redirect target, after
+# backslash-newlines that begin a word, inside a double-quoted substitution, near here-documents and backquotes,
+# and '#' lines whose readings leave different nesting stacks at their newline.
+_LEX_FORK_TEXTS = (
+    "(;;; #a #b #c #d\n)", "( #a\n #b\n #c\n #d\n)", "((( #a #b\n)))", "( #a #b #c #d #e\n)", "( > #a #b\n)",
+    "( 2> #a\n x)", ")\\\n#a\\\n", "(\\\n#a b\n)", "( #a (\n true ) )", "( #a `x` #b\n)", "( #a\n$(true) #b\n)",
+    "echo \"$( #a(\n)\" ( #b\n)", "x=$(cat <<'EOF'\n# Don't\nEOF\n) ( #a\n git status)", "( #a ${x\n} #b\n)",
+    "((((true)))); ( #a\n git reset --hard)", "( #a <<'E'\nbody\nE\n #b\n)", "( #a (\n) #b\n)")
+_LEX_FORK_ALPHABET = ("(", ")", ";", " ", "\n", "#", " #", "#a", "a", " x", "'", '"', "`", "$(", "${", "}",
+                      ">", "2>", "<<'E'\n", "\nE\n", "\\\n", "&&", "|", "\"$(", ")\"", "(#", ")#")
+
+
+def _lex_fork_failures(count=6000, seed=20261018):
+    """(dl-lex-fork) _lex_readings, whose readings resume where an earlier reading stopped at an uncertain
+    '#' (_LexFork), gives what lexing every reading from the start gives (_lex_readings_restart: the same
+    segments, flags and _SubstHeredocs.reads change, or the same ValueError), and a partial _lex_command
+    whose readings cannot be judged gives the reference's recovery, on _LEX_FORK_TEXTS and `count` seeded
+    texts over _LEX_FORK_ALPHABET, in every partial, skip_empty and locale mode. The corpus must hold commands
+    whose first reading stops where a reading can resume (dl-lex-fork-corpus).
+    (dl-lex-fork-red-nest, dl-lex-fork-red-tail) Two wrong resumptions, one with an empty nesting stack and
+    one taking a recorded rest by its index alone, must each be caught by the same comparison.
+    (dl-lex-fork-taken) The text before the first uncertain '#' is lexed once: on a run of separators before
+    four '#' lines (sixteen readings) one pass starts at the beginning. (dl-lex-fork-rest) On runs of
+    parentheses around a '#' line the rest after its newline is built once, counted in records, not once per
+    reading."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_FORK_ALPHABET) for _ in range(rng.randint(1, 12))))
+    resumable = 0
+    for text in texts:
+        try:
+            aiqt_hooks._lex_reading(text, False, {})
+        except ValueError as exc:
+            resumable += getattr(exc, "fork", None) is not None
+    if resumable < 100:
+        out.append("(dl-lex-fork-corpus) only {} of {} commands stop where a reading can resume".format(
+            resumable, len(texts)))
+    for text, partial, skip_empty, locale, got, want in _lex_fork_mismatches(texts):
+        out.append("(dl-lex-fork) _lex_readings({!r}, partial={}, locale={}, skip_empty={}) gave {!r}, lexing "
+                   "every reading from the start gives {!r}".format(text, partial, locale, skip_empty, got, want))
+    for name, patch in (("nest", _lex_fork_empty_nest), ("tail", _lex_fork_tail_by_index)):
+        with patch():
+            if not _lex_fork_mismatches(texts):
+                out.append("(dl-lex-fork-red-{}) a wrong resumption passes the comparison".format(name))
+    lines = "(" + ";" * 200 + " #a\n #b\n #c\n #d\n)"
+    starts = _lex_pass_starts(lambda: aiqt_hooks._lex_command(lines))
+    if starts != 1:
+        out.append("(dl-lex-fork-taken) {} passes of {!r} started at the beginning; one must".format(
+            starts, lines[:12] + "..."))
+    parens = "(" * 50 + " #a #b #c #d\n" + ")" * 50
+    built, _empty = _lex_records_built(lambda: aiqt_hooks._lex_command(parens))
+    if not 100 <= built < 150:
+        out.append("(dl-lex-fork-rest) the readings of {!r} built {} records; the 50 before the '#' line and "
+                   "the 51 after it must each be built once (100 to 149 in all)".format(parens[:8] + "...", built))
+    return out
+
+
+def _lex_pass_starts(call):
+    """How many _lex_pass calls call() made from the start of the command (no _LexFork)."""
+    lex_pass = aiqt_hooks._lex_pass
+    starts = [0]
+
+    def counted(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
+        starts[0] += fork is None
+        return lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty, fork)
+
+    aiqt_hooks._lex_pass = counted
+    try:
+        call()
+    finally:
+        aiqt_hooks._lex_pass = lex_pass
+    return starts[0]
+
+
+@contextlib.contextmanager
+def _lex_fork_empty_nest():
+    """A wrong resumption for _lex_fork_failures: each resumed pass starts with an empty nesting stack."""
+    copy = aiqt_hooks._NestStack.copy
+    aiqt_hooks._NestStack.copy = lambda self: aiqt_hooks._NestStack()
+    try:
+        yield
+    finally:
+        aiqt_hooks._NestStack.copy = copy
+
+
+class _TailsByIndex(dict):
+    """A recorded-rest map keyed by the newline's index alone (a wrong _LexFork.tails)."""
+
+    def get(self, key, default=None):
+        return super().get(key[0], default)
+
+    def __contains__(self, key):
+        return super().__contains__(key[0])
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key[0], value)
+
+
+@contextlib.contextmanager
+def _lex_fork_tail_by_index():
+    """A wrong resumption for _lex_fork_failures: a later reading takes a recorded rest by index alone."""
+    fork_class = aiqt_hooks._LexFork
+
+    class _WrongFork(fork_class):
+        def __init__(self, *args):
+            super().__init__(*args)
+            if not isinstance(self.tails, _TailsByIndex):
+                self.tails = _TailsByIndex()
+
+    aiqt_hooks._LexFork = _WrongFork
+    try:
+        yield
+    finally:
+        aiqt_hooks._LexFork = fork_class
 
 
 def _repeat(unit, size, tail=""):
@@ -2787,6 +3674,29 @@ _DEADLINE_SHAPES = {
     "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
+    # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
+    # mirror-configuration regex read in time quadratic in its length (about 0.8 s of CPU at 64 KB and 6.2
+    # to 6.5 s at 180 KB for one call of the push backstop alone, in-process on a 24-core host with Python
+    # 3.14.4, 2026-10-18), then a force-push to a protected branch.
+    "mirror_cfg_run_after": lambda n, base: ("Bash", {"command": "git push " + _repeat(
+        "'-c'remote.", n - 9, "; git push --force origin main")}),
+    # A run of adjacent process substitutions, which the push backstop's segment split walked by copying
+    # the rest of the command for each one, in time quadratic in the length of the run (about 3.4 s of
+    # CPU for one call of the copying split alone at 1 MB, in-process on a 24-core host with Python
+    # 3.14.4, 2026-10-18, against about 0.11 s for the in-place walk), then a force-push to a protected
+    # branch. The bounds here are not what pins the in-place walk (the copying split stayed under the
+    # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does.
+    "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
+        "<(x) >(x) ", n - 4, "; git push --force origin main")}),
+    # A run of ANSI-C quotes beside a here-string (an ordinary parse failure), whose escapes the gatdis and
+    # stash fallbacks decode for their de-quoted reading (_decoded_readings), and the same run before a
+    # --no-verify spelled through an escape, which only the decoded reading shows, so that deny has to
+    # arrive within the bound as well (at 1 MB about 0.65 s of CPU for gate_weakening on the run, 0.50 s for
+    # its deny after it, and 0.21 s for git_stash_ref, in-process on a 24-core host with Python 3.14.4,
+    # 2026-10-25 UTC).
+    "ansi_c_herestr": lambda n, base: ("Bash", {"command": _repeat("git $'\\x41' ", n, " <<<x")}),
+    "ansi_c_noverify_after": lambda n, base: ("Bash", {"command": _repeat(
+        "git $'\\x41' ", n, "; git commit --no-$'\\x76'erify -m x <<<x")}),
     "write_content": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": "a" * n}),
     "write_secretish": lambda n, base: ("Write", {"file_path": base + "/notes.txt", "content": _repeat("a=", n)}),
     "write_deep_path": lambda n, base: ("Write", {"file_path": base + _repeat("/a", n - len(base)),
@@ -2796,7 +3706,66 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
+    "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
+    "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
+    "fg_heredocs_plain": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na b\nE\n", n)}),
+    "fg_heredoc_ops_open": lambda n, base: ("Bash", {"command": _repeat("cat <<A ", n, "\nx & y")}),
+    "fg_subshells": lambda n, base: ("Bash", {"command": "(" * (n // 2 - 2) + "true" + ")" * (n // 2 - 2)}),
+    # Nested GLUED command substitutions: each `(` sits directly after a `$`, so, unlike the bare
+    # subshell parentheses above, every closer takes the glued branch of the note scan's `)` handling.
+    # That branch once tested the enclosed text for emptiness by slicing it (one copy per closer, so
+    # the characters copied grew with the square of the nesting depth); the running-index test reads
+    # each enclosed position at most once, keeping the scan linear on this shape. The bounds here are
+    # not what pins the running-index test (the sliced test measured about 3.6 s of CPU for both scan
+    # passes at 1 MB, in-process on a 24-core host with Python 3.14.4, 2026-10-24, under that size's
+    # 7 s bound, against about 0.49 s for the running index); the orch-behaviour self-test's
+    # running-index-walk row does.
+    "fg_nested_glued_substs": lambda n, base: ("Bash", {"command": "x=$(" * (n // 5 - 1) + "true"
+                                                        + ")" * (n // 5 - 1)}),
+    # A here-document under a quoted delimiter whose body is a run of lines each holding a bare `&`: the raw
+    # scan reads each `&` as a detach and the shared lexer places each in the body, so the detector lifts
+    # every one (_orch_foreground_detach_lexed), the only shape here that reads every `&` under both scan
+    # rules and places each through the lexer's spans, and the note scan then skips the body as data in its
+    # lifted mode.
+    "fg_quoted_heredoc_amps": lambda n, base: ("Bash", {"command": "cat > f <<'E'\n" + _repeat(
+        "a & b\n", n - 14, "E\n")}),
+    "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
+    # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
+    # characters whose comment reading depends on context (five readings), the same with each '#' on its own
+    # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
+    # fifth '#' (past the readings bound, so each guard takes its fallback).
+    "seps_hash": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 20) + " #a #b #c #d\n)"}),
+    "seps_hash_lines": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 26) + " #a\n #b\n #c\n #d\n)"}),
+    "seps_hash_nested": lambda n, base: ("Bash", {"command": "(((" + ";" * (n - 24) + " #a #b #c #d\n)))"}),
+    "paren_hash4": lambda n, base: ("Bash", {"command": "(" * ((n - 12) // 2) + " #a #b #c #d\n"
+                                             + ")" * ((n - 12) // 2)}),
+    "seps_hash5": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 24) + " #a #b #c #d #e\n)"}),
 }
+# Every PreToolUse handler is timed on each uncertain '#' shape as well, and must reach the decision the pinned
+# base commit reached on it: "allow", except where this map names another for the (handler, shape) or, first,
+# the (handler, shape, size): protected_line denies seps_hash5 past 64 KB, where the size cap of its commit
+# reading denies a command longer than 65,536 characters. Before the readings resumed where an earlier reading
+# stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
+# seps_hash_lines took about 30 s. With the long separator runs these shapes hold built in one batch, the
+# sink check on a failed lex resuming where the lex stopped, and the commit-identity reader skipping records
+# with no word and no redirect, the two costliest cases measured on one host (max of five runs) are
+# gate_weakening on seps_hash5 at 1 MB, 0.63 s against the 7 s bound, and commit_identity on seps_hash_lines
+# at 64 KB, under 0.01 s against the 1.5 s bound; before those changes they measured 3.1 s and 0.7 s on the
+# same host, which overran those bounds on hosts 3 to 4.5 times slower.
+_DEADLINE_HASH_SHAPES = ("seps_hash", "seps_hash_lines", "seps_hash_nested", "paren_hash4", "seps_hash5")
+_DEADLINE_HASH_DECISIONS = {
+    ("orch_truncation_guard", "seps_hash"): "deny", ("orch_truncation_guard", "seps_hash_lines"): "deny",
+    ("orch_truncation_guard", "seps_hash_nested"): "deny", ("orch_truncation_guard", "paren_hash4"): "deny",
+    ("orch_truncation_guard", "seps_hash5"): "deny", ("protected_line", "seps_hash"): "deny",
+    ("protected_line", "seps_hash_lines"): "deny", ("protected_line", "seps_hash_nested"): "deny",
+    ("protected_line", "paren_hash4"): "deny", ("protected_line", "seps_hash5", 262144): "deny",
+    ("protected_line", "seps_hash5", 1048576): "deny"}
+
+
+def _deadline_hash_decision(name, shape, size):
+    """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
+    return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens"),
@@ -2804,26 +3773,63 @@ _DEADLINE_CASES = {
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
-    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after"),
+    "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
+                       "ansi_c_herestr", "ansi_c_noverify_after"),
     "gensrc_guard": ("write_content", "write_deep_path"),
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
-    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens"),
+    "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
-    "protected_line": ("git_words_unbal_dq", "push_force_after"),
+    "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
+                       "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
+    "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
+}
+# Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
+# from the orchestration repository: the truncation guard scans a foreground command there too, for its
+# out-of-scope detach note.
+_DEADLINE_PLAIN_CASES = {
+    "orch_truncation_guard": ("fg_detach_after", "fg_arith_open", "fg_heredocs_amp", "fg_heredocs_plain",
+                              "fg_heredoc_ops_open", "fg_subshells", "fg_nested_glued_substs",
+                              "fg_quoted_heredoc_amps", "fg_setsid_options"),
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
-    ("gate_weakening", "noverify_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
-    ("protected_line", "push_force_after")))
+    ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
+    ("git_explicit_binding", "breadth_push_after_unbal"),
+    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
+    ("protected_line", "procsubst_run_after")))
+# The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
+# a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
+# scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
+# unreadable instead of a silent allow, and the `&` in a body under an unquoted delimiter
+# (fg_heredocs_amp), which the in-scope detector reads as a bare detach (an accepted over-note).
+_DEADLINE_NOTE_CASES = frozenset((
+    ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
+    ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
+    ("orch_truncation_guard", "fg_heredocs_amp")))
+# The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
+# bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
+# `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
+# a quoted delimiter would note, and its early
+# note would also cut the
+# timing short), the balanced subshells and the nested glued command
+# substitutions are all skipped, provably closed or carry no outer
+# detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
+# the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
+# timing shapes from passing a scanner that mistook one for a detach.
+_DEADLINE_ALLOW_CASES = frozenset((
+    ("orch_truncation_guard", "fg_heredocs_plain"),
+    ("orch_truncation_guard", "fg_subshells"),
+    ("orch_truncation_guard", "fg_nested_glued_substs"),
+    ("orch_truncation_guard", "fg_quoted_heredoc_amps")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -2897,10 +3903,39 @@ def _deadline_shape_runs(tmp, sizes):
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
         cwd = str(orch if name.startswith(("orch_", "review_")) else plain)
-        for shape in shapes:
+        for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+    with _no_registry_above(plain):
+        for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
+            for shape in shapes:
+                for size in sorted(sizes):
+                    runs.append((name, shape, size, str(plain))
+                                + _deadline_shape_case(name, shape, size, str(plain)))
     return runs
+
+
+@contextlib.contextmanager
+def _no_registry_above(root):
+    """While the block runs, every directory STRICTLY ABOVE root (matched by device and inode on root's
+    resolved path) reads as carrying no orchestration registry, so a registry on the host above the
+    fixture cannot scope a no-registry case in; root and the directories under it are probed as usual."""
+    above = set()
+    path = os.path.realpath(str(root))
+    while os.path.dirname(path) != path:
+        path = os.path.dirname(path)
+        st = os.stat(path)
+        above.add((st.st_dev, st.st_ino))
+    probe = aiqt_hooks._orch_dirfd_has_registry
+
+    def ceiling(dirfd):
+        st = os.fstat(dirfd)
+        return False if (st.st_dev, st.st_ino) in above else probe(dirfd)
+    aiqt_hooks._orch_dirfd_has_registry = ceiling
+    try:
+        yield
+    finally:
+        aiqt_hooks._orch_dirfd_has_registry = probe
 
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
@@ -2915,6 +3950,12 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
+        problems.append("expected allow-note, got {}".format(outcome))
+    elif (name, shape) in _DEADLINE_ALLOW_CASES and outcome != "allow":
+        problems.append("expected allow, got {}".format(outcome))
+    elif shape in _DEADLINE_HASH_SHAPES and outcome != _deadline_hash_decision(name, shape, size):
+        problems.append("expected {}, got {}".format(_deadline_hash_decision(name, shape, size), outcome))
     elif outcome not in ("allow", "allow-note", "deny"):
         problems.append("ended {}".format(outcome))
     return problems
@@ -2946,8 +3987,9 @@ def _deadline_shape_verdicts(runs, retime):
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
     reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard (_deadline_shape_verdicts: a run over the wall-clock bound fails, and a
-    diagnostic re-run is reported beside it, never in its place)."""
+    where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
+    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a run over the
+    wall-clock bound fails, and a diagnostic re-run is reported beside it, never in its place)."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -3842,48 +4884,127 @@ def _deadline_enclosing_restore_failures():
 
 
 def _deadline_rearm_failures():
-    """(dl-rearm-once) A caller timer re-armed by the restore whose expiry falls due before the restore has
-    finished is delivered once. A one-shot 30-second caller timer with a handler that raises; the body moves
-    the window's clock so the restore finds 3 ms left, and the first instruction of the window's frames
-    after that re-arm waits 50 ms, past the expiry. The caller's handler must run exactly once, its
-    exception must leave the with statement, and the caller must get back its handler with the timer
-    inactive."""
+    """(dl-rearm-once, dl-rearm-delayed-exit) A caller timer re-armed by the restore whose expiry falls due
+    before the restore has finished is delivered once. A caller handler that raises, with no real caller
+    timer behind it: stand-ins for aiqt_hooks.signal and aiqt_hooks.time, installed before the take, report
+    a one-shot 30-second caller timer at the take's cancel, arm no real timer for the window's own deadline,
+    and report the restore's cancel of that timer as still running, so neither the caller's timer nor the
+    window's is a real timer a scheduling delay could expire, and no delay can send the restore down its
+    discard path. The window's clock returns the real time at its first read (the take) and, at every later
+    read, that time plus the reported 30 seconds less 3 ms, so the restore finds exactly 3 ms left however
+    long the run takes. The one real timer in the run is the restore's re-arm (a setitimer call from
+    _DeadlineWindow._twice with an interval), armed with the mask still held; the stand-in then waits, once
+    it has returned, until that timer's expiry is pending (the one time bound inside the run: up to 1 s for
+    the kernel to expire the 3 ms timer). Just before the take's cancel, signal.getitimer must
+    read no real timer armed, so a real caller timer put back in the fixture fails both cases. The restore
+    must re-arm the timer once, with the 3 ms left (to within a microsecond) and no interval, and its expiry
+    must come pending in the restore, with no discard (SIG_IGN) installed along the way; the caller's
+    handler must then run exactly once, its exception must leave the with statement, and the caller must
+    get back its handler with the timer inactive.
+    dl-rearm-once runs this under a 5-second window with no delay beyond the trace stage itself.
+    dl-rearm-delayed-exit repeats it under a 0.05-second window with 0.25 seconds slept at the entry of
+    __exit__, past the deadline the window would otherwise have armed for real: it stands in for a
+    scheduling delay at the exit, and fails if the window's own timer is armed for real again.
+    Neither case shows that no delay can fail the run: two bounds remain that these checks do not remove,
+    the 1 s allowed for the kernel to expire the re-armed timer and the deadline child's
+    _DEADLINE_CHILD_TIMEOUT (900 s)."""
     out = []
-    calls = []
+    take = aiqt_hooks._DeadlineWindow._take.__code__
+    twice = aiqt_hooks._DeadlineWindow._twice.__code__
+    exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
 
-    def raising(signum, frame):
-        calls.append(signum)
-        raise _CallerAlarm("caller alarm")
+    def run(seconds, delay):
+        calls = []
+        held = []
+        taken = []
+        rearms = []
+        discards = []
 
-    window = aiqt_hooks._DeadlineWindow(5.0)
-    tracer, at = _window_tracer(window, (
-        lambda frame: (signal.getsignal(signal.SIGALRM) is raising
-                       and 0 < signal.getitimer(signal.ITIMER_REAL)[0] < 0.01),
-        lambda: time.sleep(0.05)))
-    signal.signal(signal.SIGALRM, raising)
-    signal.setitimer(signal.ITIMER_REAL, 30.0)
-    escaped = None
-    try:
+        def raising(signum, frame):
+            calls.append(signum)
+            raise _CallerAlarm("caller alarm")
+
+        def signal_stand_in():
+            names = types.SimpleNamespace(**vars(signal))
+
+            def setitimer(*args):
+                caller = sys._getframe(1).f_code
+                if caller is take and args[1:] == (0,):
+                    held.append(signal.getitimer(signal.ITIMER_REAL))  # a real caller timer would show here
+                    signal.setitimer(*args)
+                    taken.append((30.0, 0.0))  # the reported caller timer: no real one backs it
+                    return taken[0]
+                if caller is take and len(args) == 2:
+                    return (0.0, 0.0)  # the window's own timer is never really armed
+                if caller is twice and args[1:] == (0,):
+                    signal.setitimer(*args)
+                    return (seconds / 2, 0.0)  # the window's timer reads as still running
+                timer = signal.setitimer(*args)
+                if caller is twice and len(args) == 3:
+                    waited = time.monotonic() + 1.0
+                    while signal.SIGALRM not in signal.sigpending() and time.monotonic() < waited:
+                        time.sleep(1e-3)
+                    rearms.append((args[1], args[2], signal.SIGALRM in signal.sigpending()))
+                return timer
+
+            def installing(*args):
+                if sys._getframe(1).f_code is twice and args[1:] == (signal.SIG_IGN,):
+                    discards.append(args)
+                return signal.signal(*args)
+            names.setitimer = setitimer
+            names.signal = installing
+            return names
+
+        def time_stand_in():
+            names = types.SimpleNamespace(**vars(time))
+            reads = []
+
+            def monotonic():
+                if not reads:
+                    reads.append(time.monotonic())
+                    return reads[0]
+                return reads[0] + taken[0][0] - 0.003
+            names.monotonic = monotonic
+            return names
+
+        window = aiqt_hooks._DeadlineWindow(seconds)
+        tracer, at = _window_tracer(window, (lambda frame: frame.f_code is exit_code,
+                                             lambda: time.sleep(delay)))
+        signal.signal(signal.SIGALRM, raising)
+        escaped = None
         try:
-            with window:
-                aiqt_hooks.time = _Later(30.0 - 0.003)
-                sys.settrace(tracer)
-        except _CallerAlarm:
-            escaped = "the caller's exception"
-        except BaseException as exc:
-            escaped = type(exc).__name__
+            try:
+                aiqt_hooks.signal, aiqt_hooks.time = signal_stand_in(), time_stand_in()
+                with window:
+                    sys.settrace(tracer)
+            except _CallerAlarm:
+                escaped = "the caller's exception"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+            finally:
+                sys.settrace(None)
+                aiqt_hooks.signal = signal
+                aiqt_hooks.time = time
+            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
         finally:
-            sys.settrace(None)
-            aiqt_hooks.time = time
-        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    if not (at and escaped == "the caller's exception" and calls == [signal.SIGALRM] and handler is raising
-            and timer == (0.0, 0.0) and not window.armed):
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        if (held == [(0.0, 0.0)] and at and len(rearms) == 1 and abs(rearms[0][0] - 0.003) < 1e-6
+                and rearms[0][1:] == (0.0, True) and not discards and escaped == "the caller's exception"
+                and calls == [signal.SIGALRM] and handler is raising and timer == (0.0, 0.0) and not window.armed):
+            return ""
+        return ("real timer at the take's cancel {!r}, got stage at {!r}, re-arms {!r} (left, interval, pending "
+                "after the wait), discards {}, escaped {}, caller deliveries {}, handler {!r}, timer {!r}".format(
+                    held, at, rearms, len(discards), escaped, len(calls), handler, timer))
+
+    problem = run(5.0, 0.0)
+    if problem:
         out.append("(dl-rearm-once) a re-armed caller timer falling due during the restore must be delivered "
-                   "once, got wait at {!r}, escaped {}, caller deliveries {}, handler {!r}, timer {!r}".format(
-                       at, escaped, len(calls), handler, timer))
+                   "once, " + problem)
+    problem = run(0.05, 0.25)
+    if problem:
+        out.append("(dl-rearm-delayed-exit) a re-armed caller timer must be delivered once when the exit runs "
+                   "past the window's deadline, " + problem)
     return out
 
 
@@ -5088,8 +6209,13 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
     failures.extend(_raw_sequence_failures())
+    failures.extend(_raw_mirror_failures())
+    failures.extend(_procsubst_skip_failures())
+    failures.extend(_procsubst_taken_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
+    failures.extend(_lex_skip_floor_failures())
+    failures.extend(_lex_fork_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
@@ -5603,16 +6729,145 @@ def _main_isolated(monitor):
                "cd sub & git reset --hard", "deny", cwd=rp)
         expect("(dir-c) subshell cd misdirect DENIES (F-62.2; R8: a parenthesis is outside the grammar)",
                "( cd {} ) ; git reset --hard".format(str(clean_repo)), "deny", cwd=rp)
-        expect("(dir-d) -C global option not-certain allows with a note (F-66.2)", "git -C {} reset --hard".format(rp),
-               "allow-note", cwd=rp)
-        expect("(dir-e) --git-dir global option not-certain allows with a note (F-66.4)",
-               "git --git-dir={}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-f) --work-tree global option not-certain allows with a note",
-               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-g) GIT_WORK_TREE= env not-certain allows with a note (F-62.3)", "GIT_WORK_TREE=sub git reset --hard",
-               "allow-note", cwd=rp)
-        expect("(dir-h) GIT_DIR= env not-certain allows with a note (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
-               "allow-note", cwd=rp)
+        # FLIPPED (was "allow-note"): each redirect below resolves to this dirty repo, and a whole-tree clobber
+        # whose resolved target probes dirty now DENIES (with its snapshot) exactly like the bare (rs-a), so a
+        # global option or a leading assignment can no longer turn the bare deny into a snapshot-then-allow.
+        expect("(dir-d) -C global option on a dirty target denies like the bare form (F-66.2)",
+               "git -C {} reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-e) --git-dir global option on a dirty target denies like the bare form (F-66.4)",
+               "git --git-dir={}/.git reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-f) --work-tree global option on a dirty target denies like the bare form",
+               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "deny", cwd=rp)
+        expect("(dir-g) GIT_WORK_TREE= env on a dirty target denies like the bare form (F-62.3)",
+               "GIT_WORK_TREE=sub git reset --hard", "deny", cwd=rp)
+        expect("(dir-h) GIT_DIR= env on a dirty target denies like the bare form (F-62.3/F-66.4)",
+               "GIT_DIR=.git git reset --hard", "deny", cwd=rp)
+        # A plain leading assignment redirects nothing, yet it routes the command off the pristine bare path all
+        # the same; the whole-tree clobber on this dirty repo must still deny like the bare form.
+        expect("(dir-i) a plain leading assignment on a dirty target denies like the bare form",
+               "FOO=1 git reset --hard", "deny", cwd=rp)
+
+        # === a git global option never changes the verdict on a discarding form ===========================
+        # Every global option spelling (each value-taking member of _GIT_ARG_OPTS, separated and, for a long
+        # one, '='-attached; the flag-only ones; and an option git does not know) in front of every discarding
+        # form gets the bare command's decision on the same dirty repo, and takes exactly the bare form's
+        # recovery snapshots (counted as new refs). A whole-tree clobber there used to snapshot-then-allow
+        # behind any global option while the bare form denied; reverting the clobber deny in the
+        # view-override branch turns every clobber row back to allow-note. The two pinned exceptions are
+        # stricter, never looser: a --git-dir stash drop/clear denies, since the stash it would clear cannot
+        # be preserved under a --git-dir redirect; and --bare before a form git_discard treats as destructive
+        # (a snapshottable verb in a non-allow form) denies with no snapshot, since git, asked read-only
+        # which git dir and worktree the command acts on, cannot open this worktree directory as a git dir.
+        go_repo = _init_repo(tmp / "globalopt")
+        (go_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        go = str(go_repo)
+        _go_sep = ("-C " + go, "-c x.y=z", "--git-dir " + go + "/.git", "--work-tree " + go, "--namespace ns",
+                   "--exec-path /nonexistent-exec", "--super-prefix sp/", "--config-env x.y=HOME",
+                   "--attr-source HEAD", "--shallow-file x")
+        if {_g.split(" ", 1)[0] for _g in _go_sep} != set(aiqt_hooks._GIT_ARG_OPTS):
+            failures.append("(go-argopts-covered) the separated global option vectors must cover exactly "
+                            "_GIT_ARG_OPTS, got {} against {}".format(sorted(_g.split(" ", 1)[0] for _g in _go_sep),
+                                                                     sorted(aiqt_hooks._GIT_ARG_OPTS)))
+        _go_globals = (_go_sep
+                       + tuple(_g.replace(" ", "=", 1) for _g in _go_sep if _g.startswith("--"))
+                       + ("--no-pager", "-p", "--paginate", "-P", "--no-replace-objects", "--literal-pathspecs",
+                          "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
+                          "--no-lazy-fetch", "--no-advice", "--bare", "--frobnicate"))
+        _go_clobbers = ("reset --hard", "checkout -f", "switch -f other", "switch --discard-changes other")
+        _go_forms = _go_clobbers + (
+            "reset --merge", "reset", "checkout -- file.txt", "checkout .", "restore file.txt",
+            "restore --staged file.txt", "rm -f file.txt", "clean -fd", "branch -D other", "checkout -B other",
+            "switch -C other", "stash drop", "stash clear")
+        _go_saved = "A pre-command recovery snapshot was saved"
+
+        def _go_run(command, cwd):
+            """(reduced decision, deny reason or note text, new recovery refs in go_repo) for one command."""
+            _r0 = len(_recovery_refs(go_repo))
+            _data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                     "cwd": cwd}
+            _code, _out, _err = handler(_data)
+            _text = ""
+            if isinstance(_out, dict):
+                _hso = _out.get("hookSpecificOutput")
+                _text = (_hso.get("permissionDecisionReason", "") if isinstance(_hso, dict)
+                         else str(_out.get("systemMessage", "")))
+            return _reduce_result(_code, _out), _text, len(_recovery_refs(go_repo)) - _r0
+
+        for _form in _go_forms:
+            _bare, _bare_text, _bare_refs = _go_run("git " + _form, go)
+            if _form in _go_clobbers and (_bare != "deny" or _bare_refs != 1 or _go_saved not in _bare_text):
+                failures.append("(go-bare-clobber) the bare 'git {}' on a dirty tree must deny with one recovery "
+                                "snapshot named in its reason, got {} with {} new ref(s)"
+                                .format(_form, _bare, _bare_refs))
+            _go_sub, _go_args = aiqt_hooks._git_sub_and_args(["git"] + _form.split(" "))
+            _go_destructive = (_go_sub in aiqt_hooks._SNAPSHOTTABLE_VERBS
+                               and aiqt_hooks._discard_role(_go_sub, _go_args)[0] != "allow")
+            for _g in _go_globals:
+                _cmd = "git {} {}".format(_g, _form)
+                _bare_pin = _g == "--bare" and _go_destructive
+                _want = ("deny" if (_g.startswith("--git-dir") and _form.startswith("stash ")) or _bare_pin
+                         else _bare)
+                _want_refs = 0 if _bare_pin else _bare_refs
+                _got, _got_text, _got_refs = _go_run(_cmd, go)
+                if _got != _want or _got_refs != _want_refs:
+                    failures.append("(go-parity) {!r} must get {} with {} new recovery ref(s) like the bare "
+                                    "'git {}', got {} with {}".format(_cmd, _want, _want_refs, _form, _got,
+                                                                      _got_refs))
+                elif _bare_pin and "git could not report, read-only" not in _got_text:
+                    failures.append("(go-bare-pin) {!r} denies but its reason must say git could not resolve "
+                                    "the target read-only, got {!r}".format(_cmd, _got_text[:220]))
+                elif _form in _go_clobbers and not _bare_pin and _go_saved not in _got_text:
+                    failures.append("(go-clobber-pointer) {!r} denies but its reason must name the recovery "
+                                    "snapshot as the bare deny does, got {!r}".format(_cmd, _got_text[:220]))
+
+        # The boundary of the new deny is the probe's verdict on the resolved target: dirty denies (above);
+        # a provably clean target allows with the existing note and no snapshot; a probe that did not
+        # complete snapshot-then-allows exactly as the bare form does; a failed snapshot on a dirty target
+        # denies on both forms.
+        go_clean = str(_init_repo(tmp / "globalopt-clean"))
+        for _cmd, _want in (("git reset --hard", "allow"), ("git --no-pager reset --hard", "allow-note"),
+                            ("git -c x.y=z checkout -f", "allow-note")):
+            expect("(go-clean-target) {!r} on a provably clean tree is not denied".format(_cmd), _cmd, _want,
+                   cwd=go_clean)
+        _orig_go_clean = aiqt_hooks._tree_is_clean
+        aiqt_hooks._tree_is_clean = lambda repo: None
+        try:
+            _go_unk = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard",
+                                                          "git --frobnicate switch -f other")]
+        finally:
+            aiqt_hooks._tree_is_clean = _orig_go_clean
+        for _c, _dec, _text, _refs in _go_unk:
+            if _dec != "allow-note" or _refs != 1:
+                failures.append("(go-probe-uncertain) {!r} with a probe that did not complete must "
+                                "snapshot-then-allow like the bare form, got {} with {} new ref(s)"
+                                .format(_c, _dec, _refs))
+        _orig_go_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced failure (self-test)")
+        try:
+            _go_fail = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard",
+                                                           "git -C {} checkout -f".format(go))]
+        finally:
+            aiqt_hooks._record_recovery = _orig_go_rec
+        for _c, _dec, _text, _refs in _go_fail:
+            if _dec != "deny":
+                failures.append("(go-snapshot-fail) {!r} whose snapshot fails on a dirty tree must deny, got {}"
+                                .format(_c, _dec))
+        # An ambient GIT_* override is unreadable from the command and keeps its best-effort
+        # snapshot-then-allow; the global option still changes nothing there.
+        os.environ["GIT_NAMESPACE"] = "globalopt-selftest"
+        try:
+            _go_amb = [(_c,) + _go_run(_c, go) for _c in ("git reset --hard", "git --no-pager reset --hard")]
+        finally:
+            os.environ.pop("GIT_NAMESPACE", None)
+        for _c, _dec, _text, _refs in _go_amb:
+            if _dec != "allow-note" or _refs != 1:
+                failures.append("(go-ambient) {!r} under an ambient GIT_NAMESPACE must keep the best-effort "
+                                "snapshot-then-allow, got {} with {} new ref(s)".format(_c, _dec, _refs))
+        # The closed allowlist grammar still refuses an unknown global option in a compound command.
+        _go_cmp, _go_cmp_text, _go_cmp_refs = _go_run("git --frobnicate reset --hard && true", go)
+        if _go_cmp != "deny" or "--frobnicate" not in _go_cmp_text or "closed allowlist grammar" not in _go_cmp_text:
+            failures.append("(go-unknown-compound) an unknown global option in a compound must get the grammar "
+                            "deny naming it, got {} {!r}".format(_go_cmp, _go_cmp_text[:220]))
 
         # === tombstones of the retired GUARDRAIL_ALLOW_DISCARD opt-out (F-65.F3, blocker 4) ==============
         # The override is removed; each vector below keeps its input and now asserts the outcome of the same
@@ -5733,7 +6988,7 @@ def _main_isolated(monitor):
             ("pristine-clean", "git reset --hard", _rmo_clean, None, "allow", "allow"),
             ("pristine-dirty-clobber", "git reset --hard", rp, None, "deny", "deny"),
             ("pristine-dirty-scoped", "git checkout -- file.txt", rp, None, "allow-note", "allow-note"),
-            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "allow-note", "allow-note"),
+            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "deny", "deny"),
             ("ambient-git-var", "git reset --hard", rp, "GIT_NAMESPACE", "allow-note", "allow-note"),
             ("compound", "git reset --hard ; true", rp, None, "allow-note", "deny"),
             ("heredoc", "git reset --hard" + _hd, rp, None, "deny", "deny"),
@@ -6014,8 +7269,10 @@ def _main_isolated(monitor):
         (f4_target / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")  # dirty it
         f4_before_target = len(_recovery_refs(f4_target))
         f4_before_sess = len(_recovery_refs(repo))
-        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and allows",
-               "git -C {} reset --hard".format(str(f4_target)), "allow-note", cwd=rp)
+        # FLIPPED (was "allow-note"): the TARGET probes dirty, so the whole-tree clobber DENIES as the bare
+        # form run in that repo does; the target snapshot is still taken first (the ref counts below).
+        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and denies",
+               "git -C {} reset --hard".format(str(f4_target)), "deny", cwd=rp)
         if len(_recovery_refs(f4_target)) != f4_before_target + 1:
             failures.append("(f4-C-target-ref) the recovery snapshot for a -C-redirected discard must land "
                             "in the -C TARGET repo (finding 4): expected exactly one new ref there")
@@ -6025,9 +7282,10 @@ def _main_isolated(monitor):
         # (b) -C into a NON-repo target cannot be snapshotted -> DENY (was an allow-note in round 1).
         expect("(f4-C-nonrepo) -C into a NON-repo target DENIES (the target snapshot cannot be taken)",
                "git -C {} reset --hard".format(str(tmp / "f4nonrepo")), "deny", cwd=rp)
-        # (c) -C into the SAME repo as the session cwd still ALLOWS (target resolves to the session repo).
-        expect("(f4-C-samerepo) -C into the SAME repo as cwd still allows (target == session repo)",
-               "git -C {} reset --hard".format(rp), "allow-note", cwd=rp)
+        # (c) -C into the SAME repo as the session cwd resolves to the session repo; FLIPPED (was
+        # "allow-note"): that repo is dirty, so the whole-tree clobber DENIES like the bare (rs-a).
+        expect("(f4-C-samerepo) -C into the SAME dirty repo as cwd denies like the bare form",
+               "git -C {} reset --hard".format(rp), "deny", cwd=rp)
         # (d) a --work-tree redirect to a NON-repo dir also DENIES a destructive discard.
         expect("(f4-worktree-nonrepo) --work-tree to a non-repo dir DENIES a destructive discard",
                "git --work-tree={0} --git-dir={0}/.git reset --hard".format(str(tmp / "f4nonrepo2")),
@@ -6035,13 +7293,13 @@ def _main_isolated(monitor):
         # (e) a NON-destructive redirected form (reset --soft) still ALLOWS regardless of the target.
         expect("(f4-soft-redirect) a non-destructive reset --soft under -C to a non-repo still allows",
                "git -C {} reset --soft".format(str(tmp / "f4nonrepo")), "allow-note", cwd=rp)
-        # (f) the same-repo -C allow-note still names the prsunc rule (round-19 Fix B carry-forward).
+        # (f) the same-repo -C banner (a deny now that the dirty clobber denies) still names the prsunc rule.
         _f4d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                 "tool_input": {"command": "git -C {} reset --hard".format(rp)}, "cwd": rp}
         _f4c, _f4o, _ = handler(_f4d)
         _f4banner = _f4o.get("systemMessage", "") if isinstance(_f4o, dict) else ""
         if "prsunc" not in _f4banner:
-            failures.append("(f4-note-rule) the same-repo -C redirect allow-note must name the prsunc rule")
+            failures.append("(f4-note-rule) the same-repo -C redirect banner must name the prsunc rule")
 
         # === ROUND-2 FINDING 5: the recovery snapshot preserves the STAGED (index) state as the ref's
         # === SECOND PARENT, so staged-only content a `git restore --staged` discards stays recoverable.
@@ -6321,16 +7579,48 @@ def _main_isolated(monitor):
                cwd=rh)
 
         # === malformed / robustness (F-66.7) ================================================
-        # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash. This is
-        # the DELIBERATE true-boundary fail-open the module and git_discard docstrings state (F-86): a
-        # malformed/missing command is input git_discard cannot read as a discard, so it fails OPEN here
-        # rather than fail-CLOSED like the other PreToolUse controls; it never silently allows a RECOGNIZED
-        # discard, only input it cannot recognize as one.
+        # A malformed tool_input (a string, not a dict) is a Bash call whose command cannot be read: a
+        # cannot-evaluate input, NOT the true fail-open boundary (which is a non-Bash tool, a non-git
+        # command, or no recognized lossy verb). A discard could hide in what was not read, so it DENIES
+        # under the shared fail-closed contract rather than passing clean, and never crashes.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
         code, stdout_obj, _stderr = handler(malformed)
-        if not (code == 0 and stdout_obj is None):
-            failures.append("(robust-a) malformed tool_input: expected allow, got code={!r}, stdout={!r}"
-                            .format(code, stdout_obj))
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a) malformed tool_input: expected the fail-closed deny, got code={!r}, "
+                            "stdout={!r}".format(code, stdout_obj))
+        # The same contract for an EMPTY tool_input object (no command member at all): deny, fail closed.
+        missing_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
+        code, stdout_obj, _stderr = handler(missing_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a2) missing tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        # And for a present but non-string command; a present EMPTY STRING is readable (it runs nothing)
+        # and stays at the true boundary (allow), the just-inside case of the same boundary.
+        nonstr_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": 42}}
+        code, stdout_obj, _stderr = handler(nonstr_cmd)
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(robust-a3) non-string tool_input.command: expected the fail-closed deny, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
+        empty_cmd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": ""}}
+        code, stdout_obj, _stderr = handler(empty_cmd)
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a4) empty-string command is readable and out of scope: expected allow, "
+                            "got code={!r}, stdout={!r}".format(code, stdout_obj))
+        # A Bash-shaped payload (a tool_input with a discard command) whose tool_name is missing or null is
+        # malformed, not another tool: the shared missing-tool_name deny. A PRESENT non-Bash tool_name stays
+        # out of scope (allow), even carrying the same command.
+        for _rb_label, _rb_fields in (("(robust-a5) missing tool_name", {}),
+                                      ("(robust-a6) null tool_name", {"tool_name": None})):
+            _rb_result = handler(dict({"hook_event_name": "PreToolUse",
+                                       "tool_input": {"command": "git reset --hard"}}, **_rb_fields))
+            if _rb_result != aiqt_hooks._deny_missing_tool_name("prsunc"):
+                failures.append("{} on a Bash-shaped payload: expected the shared missing-tool_name deny, got "
+                                "{!r}".format(_rb_label, _rb_result))
+        code, stdout_obj, _stderr = handler({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                             "tool_input": {"command": "git reset --hard"}})
+        if _reduce_result(code, stdout_obj) != "allow":
+            failures.append("(robust-a7) a present non-Bash tool_name is out of scope: expected allow, got "
+                            "code={!r}, stdout={!r}".format(code, stdout_obj))
         # No cwd and a dir-simple lossy verb: the worktree cannot be resolved -> ASK, never silent-allow.
         expect("(robust-b) no-cwd reset --hard denies", "git reset --hard", "deny")
 
@@ -7278,6 +8568,72 @@ def _main_isolated(monitor):
                             "the allowlist scrub must drop it so the probe reads the REAL dirty repo (False), "
                             "got {}".format(probe_as))
 
+        # (blank-probe) a zero-exit status answer holding only blank lines is MALFORMED (porcelain prints one
+        # 'XY PATH' record per line), and so is one holding '!!' lines (porcelain prints '!!' only under
+        # --ignored, which the probe never passes), so _tree_is_clean reads either as None (cannot evaluate),
+        # never clean; a change line still wins (False). Only the non -z porcelain call (the clean probe) is
+        # injected; every other git call, the snapshot's own -z probe included, runs for real.
+        rec_bp = _init_repo(tmp / "rec-blank-probe")
+        _orig_run_bp = aiqt_hooks.subprocess.run
+        _bp_reads = []
+
+        def _bp_run(stdout):
+            def _run(cmd, *a, **kw):
+                if isinstance(cmd, list) and "--porcelain" in cmd and "-z" not in cmd:
+                    _bp_reads.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+                return _orig_run_bp(cmd, *a, **kw)
+            return _run
+
+        for _case, _stdout, _want in (("one-blank", "\n", None), ("many-blank", "\n\n\n", None),
+                                      ("crlf-blank", "\r\n", None), ("ignored-blank", "!! build/\n\n", None),
+                                      ("blank-then-change", "\n M file.txt\n", False),
+                                      ("change-then-blank", " M file.txt\n\n", False),
+                                      ("ignored-only", "!! build/\n", None),
+                                      ("ignored-bare", "!!\n!!x\n", None),
+                                      ("change-then-ignored", " M file.txt\n!! build/\n", False),
+                                      ("ignored-then-change", "!! build/\n?? new.txt\n", False),
+                                      ("empty", "", True)):
+            _bp_reads.clear()
+            aiqt_hooks.subprocess.run = _bp_run(_stdout)
+            try:
+                _got = aiqt_hooks._tree_is_clean(str(rec_bp))
+            finally:
+                aiqt_hooks.subprocess.run = _orig_run_bp
+            if _got is not _want or len(_bp_reads) != 1:
+                failures.append("(blank-probe-{}) a zero-exit status answer {!r} must read as {}, got {} "
+                                "(injection reached {} time(s))".format(_case, _stdout, _want, _got,
+                                                                         len(_bp_reads)))
+        for _verb, _bp_tag, _bp_out in (("reset --hard", "reset", "\n"),
+                                        ("checkout -- file.txt", "checkout", "\n"),
+                                        ("clean -fd", "clean", "\n"),
+                                        ("reset --hard", "ignored-reset", "!! build/\n")):
+            _bp_repo = _init_repo(tmp / "rec-blank-probe-{}".format(_bp_tag))
+            _bp_reads.clear()
+            aiqt_hooks.subprocess.run = _bp_run(_bp_out)
+            try:
+                expect("(blank-probe-handler-{}) a malformed status answer {!r} on a clean tree snapshots then "
+                       "allows git {}, never a silent allow".format(_bp_tag, _bp_out, _verb), "git " + _verb,
+                       "allow-note", cwd=str(_bp_repo))
+            finally:
+                aiqt_hooks.subprocess.run = _orig_run_bp
+            _bp_refs = len(_recovery_refs(_bp_repo))
+            if not _bp_reads or _bp_refs != 1:
+                failures.append("(blank-probe-handler-{}-snap) expected the injected probe reached and one "
+                                "recovery ref, got {} read(s) and {} ref(s)".format(_bp_tag, len(_bp_reads),
+                                                                                 _bp_refs))
+        # (blank-probe-linesep) the blank fragment is reachable from REAL porcelain: with core.quotePath=false
+        # an untracked U+2028 name prints raw and str.splitlines() cuts its record into '?? ' plus ''. The
+        # change line must win, so the probe stays False and the whole-tree clobber still DENIES; a pre-scan
+        # reading any blank line as None turns this deny into a snapshot-then-allow.
+        rec_ls = _init_repo(tmp / "rec-blank-probe-linesep")
+        _git(rec_ls, "config", "core.quotePath", "false")
+        if _make_linesep_fixture(rec_ls / "\u2028", failures):
+            if aiqt_hooks._tree_is_clean(str(rec_ls)) is not False:
+                failures.append("(blank-probe-linesep) a raw U+2028 untracked name must keep the probe False")
+            expect("(blank-probe-linesep-clobber) git reset --hard on that dirty tree denies",
+                   "git reset --hard", "deny", cwd=str(rec_ls))
+
         # (rec-ledger-nonfatal) Fix B: the best-effort ledger must NEVER flip a SUCCESSFUL snapshot to a
         # failure. Monkeypatch _write_recovery_ledger to raise a non-OSError (a ValueError) AFTER the
         # snapshot succeeds; _record_recovery must still return ('ok', info) with the ref present (the ledger
@@ -7783,6 +9139,364 @@ def _main_isolated(monitor):
         # so it DENIES. (Before the fix it snapshotted the clean decoy and allow-noted a false recovery.)
         expect("(cf1c-worktree-split-denies) --work-tree (outside) worktree discard DENIES (split state)",
                "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+
+        # === -C beside a path-valued global option: git takes a relative --git-dir/--work-tree (and an inline
+        # GIT_DIR=/GIT_WORK_TREE=) only after the WHOLE -C chain, so git_discard asks git itself (a read-only
+        # rev-parse --absolute-git-dir --show-toplevel carrying the same options) which git dir and worktree a
+        # destructive discard acts on. A worktree whose own repository is that git dir is snapshotted there and
+        # allowed (a whole-tree clobber on a dirty target still DENIES there, with that snapshot, exactly as the
+        # bare form does); a git dir and worktree split across repositories, or a target git cannot resolve
+        # read-only, DENIES, with a best-effort snapshot of the worktree's own repository when it is not
+        # provably clean. The unfixed guard joined a relative --git-dir to the SESSION directory and ignored
+        # that -C moves the worktree, so 'git -C <dirty repo> --git-dir=.git reset --hard' from a clean session
+        # allowed with NO snapshot anywhere, as did an absolute --git-dir naming the session repository beside
+        # -C <other repo>. The two denies that read the redirect from the session directory stay as a floor
+        # under git's answer (the '(gdc-keep-*)' vectors): a --git-dir that is not the session repository's
+        # and a --work-tree outside the -C or session repository still DENY where git resolves one repository,
+        # with that repository snapshotted first when it is not provably clean. The session directory such a
+        # --git-dir/GIT_DIR form was read from stays a floor too: it is snapshotted as well when it is not
+        # provably clean, and a failed snapshot there is allowed with that failure named only when the target
+        # git resolved was probed and is provably clean or was snapshotted, and DENIES otherwise (the
+        # '(gdc-floor-*)' vectors). Each fixture is a session repository 'sess' (clean unless the vector names a
+        # sess_cause: uncommitted session work, whose snapshot fails through a lowered size cap or a temp dir
+        # inside sess), a target repository 'tgt' (with a committed sub/ directory) and, where named, a third
+        # repository 'oth', all siblings, the hook running from sess. Each vector asserts the verdict,
+        # the recovery refs written in every fixture repository and, where named, the text the reason or note
+        # carries, so each is red on revert of the fix ('(gdc-*-control)' vectors excepted: they pin unchanged
+        # neighbours).
+        def _gdc_fixture(name, tgt_state, oth_state):
+            base = tmp / "gdc" / name
+            repos = {"sess": _init_repo(base / "sess"), "tgt": _init_repo(base / "tgt")}
+            (repos["tgt"] / "sub").mkdir()
+            (repos["tgt"] / "sub" / "keep.txt").write_text("kept\n", encoding="utf-8")
+            _git(repos["tgt"], "add", "sub/keep.txt")
+            _git(repos["tgt"], "commit", "-q", "-m", "sub", env_identity=True)
+            if oth_state is not None:
+                repos["oth"] = _init_repo(base / "oth")
+            for role, state in (("tgt", tgt_state), ("oth", oth_state)):
+                if state in ("dirty", "staged"):
+                    (repos[role] / "file.txt").write_text("committed line\nuncommitted work\n", encoding="utf-8")
+                if state == "staged":
+                    _git(repos[role], "add", "file.txt")
+                if state == "big":
+                    # 4 KiB of uncommitted work: over the 1 KiB cap sess_cause "sizecap" sets, so the target's
+                    # own snapshot fails beside the session's.
+                    (repos[role] / "file.txt").write_text("committed line\n" + "w" * 4095 + "\n", encoding="utf-8")
+            return base, repos
+
+        def gdc(label, template, want, tgt_state, refs_want, needle=None, oth_state=None, ambient=None,
+                sess_cause=None, tgt_probe=None):
+            try:
+                base, repos = _gdc_fixture(label[1:label.index(")")], tgt_state, oth_state)
+                if sess_cause is not None:
+                    # 4 KiB of untracked session work: over the 1 KiB cap "sizecap" sets, while the target's
+                    # change (under 100 bytes) stays under it; "tmpdir" points the temp snapshot dir inside sess.
+                    (repos["sess"] / "session-work.txt").write_text("w" * 4095 + "\n", encoding="utf-8")
+                    (repos["sess"] / "tmpd").mkdir()
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("{}: could not build the fixture: {}".format(label, exc))
+                return
+            fmt = {"B": str(base), "S": str(repos["sess"]), "T": str(repos["tgt"]),
+                   "O": str(repos.get("oth", "")), "TR": os.path.realpath(str(repos["tgt"]))}
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": template.format(**fmt)}, "cwd": str(repos["sess"])}
+            for _k, _v in (ambient or {}).items():
+                os.environ[_k] = _v
+            _orig_gdc_cap, _orig_gdc_tempdir = aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir
+            _orig_gdc_clean = aiqt_hooks._tree_is_clean
+            if sess_cause == "sizecap":
+                aiqt_hooks._RECOVERY_SIZE_CAP = 1024
+            elif sess_cause == "tmpdir":
+                tempfile.tempdir = str(repos["sess"] / "tmpd")
+            if tgt_probe == "incomplete":
+                # The clean probe of the target alone does not complete; every other probe runs as it is.
+                _gdc_tgt_real = os.path.realpath(str(repos["tgt"]))
+                aiqt_hooks._tree_is_clean = lambda repo: (
+                    None if os.path.realpath(repo) == _gdc_tgt_real else _orig_gdc_clean(repo))
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                for _k in (ambient or {}):
+                    os.environ.pop(_k, None)
+                aiqt_hooks._RECOVERY_SIZE_CAP, tempfile.tempdir = _orig_gdc_cap, _orig_gdc_tempdir
+                aiqt_hooks._tree_is_clean = _orig_gdc_clean
+            got = _reduce_result(code, stdout_obj)
+            text = ""
+            if isinstance(stdout_obj, dict):
+                hso = stdout_obj.get("hookSpecificOutput")
+                text = str(hso.get("permissionDecisionReason", "")) if isinstance(hso, dict) else str(
+                    stdout_obj.get("systemMessage", ""))
+            if got != want:
+                failures.append("{}: expected {}, got {} {!r}".format(label, want, got, text[:300]))
+            for role, count in sorted(refs_want.items()):
+                have = len(_recovery_refs(repos[role]))
+                if have != count:
+                    failures.append("{}: expected {} recovery ref(s) in {}, found {}".format(
+                        label, count, role, have))
+            for _nd in ((needle,) if isinstance(needle, str) else (needle or ())):
+                if _nd.format(**fmt) not in text:
+                    failures.append("{}: expected the reason or note to carry {!r}, got {!r}".format(
+                        label, _nd.format(**fmt), text[:300]))
+
+        _gdc_at = "the repository git resolves for it ({TR})"
+        _gdc_saved = "A pre-command recovery snapshot was saved"
+        _gdc_keep_gitdir = "does not name the session repository's git dir"
+        _gdc_keep_wt = "whose worktree lies outside the repository this guard reads from the -C or session"
+        # Snapshot then allow: git resolves the worktree to the target, whose own repository is the git dir.
+        # A whole-tree clobber on a DIRTY target there denies like the bare form, with the target snapshot
+        # named in its reason (so the snapshot still lands in the target, never the session).
+        gdc("(gdc-shape1) -C <abs dirty repo> --git-dir=.git snapshots the TARGET, not the session, and denies",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-shape1-clean) the same on a CLEAN target allows, naming the target, with no snapshot",
+            "git -C {T} --git-dir=.git reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0}, _gdc_at)
+        gdc("(gdc-shape1-scoped) a scoped discard under -C <dirty repo> --git-dir=.git snapshots the target",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        gdc("(gdc-rel-sep) -C <relative> --git-dir .git (separated) snapshots the target and denies",
+            "git -C ../tgt --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-chain-rel) a relative -C chain then --git-dir=.git snapshots the target and denies",
+            "git -C .. -C tgt --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-chain-abs) an absolute then relative -C chain with --git-dir .git snapshots the target",
+            "git -C {B} -C tgt --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-reversed) --git-dir=.git BEFORE -C still resolves after the -C chain",
+            "git --git-dir=.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-reversed-scoped) a scoped restore with --git-dir=.git before -C snapshots the target",
+            "git --git-dir=.git -C ../tgt restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        # FLIPPED (was "allow-note"): kept denied, as before git resolved the redirect (see the gdc-keep-*
+        # vectors below); the target is snapshotted first.
+        gdc("(gdc-abs-own) -C <target> --git-dir=<target>/.git (absolute) stays denied, snapshotting the target",
+            "git -C {T} --git-dir={T}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-abs-own-sep-clean) --git-dir <target>/.git (separated) -C <relative>, clean: stays denied",
+            "git --git-dir {T}/.git -C ../tgt reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-env-gitdir) an inline GIT_DIR=.git with -C <target> snapshots the target and denies",
+            "GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-gitdir-append) an inline GIT_DIR+=.git is resolved by git like GIT_DIR=",
+            "GIT_DIR+=.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-gitdir-append-scoped) a scoped discard under GIT_DIR+=.git snapshots the target",
+            "GIT_DIR+=.git git -C {T} restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_saved))
+        # FLIPPED (was "allow-note"): kept denied, as before git resolved the redirect.
+        gdc("(gdc-wt-rel) -C <target> --git-dir=.git --work-tree=. stays denied, snapshotting the target",
+            "git -C {T} --git-dir=.git --work-tree=. reset --hard", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-wt-sep-clean) -C <relative> --work-tree . --git-dir .git (separated), clean: stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git reset --hard", "deny", "clean",
+            {"tgt": 0, "sess": 0}, _gdc_keep_wt)
+        gdc("(gdc-wt-sub) -C <target> --work-tree=sub snapshots the target repository holding sub/",
+            "git -C {T} --work-tree=sub reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-wt-abs) --work-tree=<target> -C <target> snapshots the target and denies",
+            "git --work-tree={T} -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0}, _gdc_saved)
+        gdc("(gdc-env-wt) an inline GIT_WORK_TREE=sub with -C <relative> snapshots the target and denies",
+            "GIT_WORK_TREE=sub git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            _gdc_saved)
+        gdc("(gdc-env-wt-scoped) a scoped discard under GIT_WORK_TREE=sub -C <relative> snapshots the target",
+            "GIT_WORK_TREE=sub git -C ../tgt checkout -- keep.txt", "allow-note", "dirty",
+            {"tgt": 1, "sess": 0}, ("the repository git resolves for it ({TR}/sub)", _gdc_saved))
+        # Kept denied: the four forms that denied before git resolved the redirect still DENY, on a clean
+        # target with no snapshot and on a dirty one with the target snapshotted first, for a whole-tree
+        # clobber, a scoped discard and an index-only form alike. Each is red when the two session-read
+        # denies under git's answer are removed (the scoped, clean and index-only ones then allow).
+        gdc("(gdc-keep-abs-own-clean) -C <target> --git-dir=<target>/.git on a clean target stays denied",
+            "git -C {T} --git-dir={T}/.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-keep-abs-own-scoped) -C <target> --git-dir=<target>/.git scoped discard stays denied",
+            "git -C {T} --git-dir={T}/.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-abs-own-index) -C <target> --git-dir=<target>/.git restore --staged stays denied",
+            "git -C {T} --git-dir={T}/.git restore --staged file.txt", "deny", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-rev-sep-dirty) --git-dir <target>/.git -C <relative> on a dirty target stays denied",
+            "git --git-dir {T}/.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-rev-sep-scoped) --git-dir <target>/.git -C <relative> scoped restore stays denied",
+            "git --git-dir {T}/.git -C ../tgt restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-keep-wt-rel-clean) -C <target> --git-dir=.git --work-tree=. on a clean target stays denied",
+            "git -C {T} --git-dir=.git --work-tree=. reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_wt)
+        gdc("(gdc-keep-wt-rel-scoped) -C <target> --git-dir=.git --work-tree=. scoped discard stays denied",
+            "git -C {T} --git-dir=.git --work-tree=. checkout -- file.txt", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-keep-wt-sep-dirty) -C <relative> --work-tree . --git-dir .git on a dirty target stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-keep-wt-sep-scoped) -C <relative> --work-tree . --git-dir .git checkout . stays denied",
+            "git -C ../tgt --work-tree . --git-dir .git checkout .", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_wt, _gdc_saved))
+        gdc("(gdc-index-staged) -C <target> --git-dir=.git restore --staged snapshots the target's index",
+            "git -C {T} --git-dir=.git restore --staged file.txt", "allow-note", "staged",
+            {"tgt": 1, "sess": 0}, _gdc_at)
+        gdc("(gdc-index-split) an index-only form under --work-tree=<other> snapshots the -C repository",
+            "git -C ../tgt --work-tree={O} restore --staged file.txt", "allow-note", "staged",
+            {"tgt": 1, "sess": 0, "oth": 0}, "the repository git resolves for it (", oth_state="dirty")
+        # Deny: git splits the git dir and the worktree across repositories, or cannot resolve the target.
+        gdc("(gdc-shape2) -C <dirty repo> --git-dir=<session>/.git DENIES, snapshotting the worktree's repo",
+            "git -C {T} --git-dir={S}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-clean) the same on a CLEAN worktree DENIES with no snapshot",
+            "git -C {T} --git-dir={S}/.git reset --hard", "deny", "clean", {"tgt": 0, "sess": 0})
+        gdc("(gdc-shape2-rev-sep) --git-dir <session>/.git (separated) before -C <relative> DENIES",
+            "git --git-dir {S}/.git -C ../tgt reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-chain) a -C chain beside --git-dir=<session>/.git DENIES",
+            "git -C .. -C tgt --git-dir={S}/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-rel) -C <target> --git-dir=../sess/.git (relative, naming the session) DENIES",
+            "git -C {T} --git-dir=../sess/.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-shape2-env) an inline GIT_DIR=<session>/.git with -C <target> DENIES",
+            "GIT_DIR={S}/.git git -C {T} reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0})
+        gdc("(gdc-wt-other) -C <target> --work-tree=<other dirty repo> DENIES, snapshotting the other repo",
+            "git -C {T} --work-tree={O} reset --hard", "deny", "clean", {"tgt": 0, "sess": 0, "oth": 1},
+            oth_state="dirty")
+        gdc("(gdc-wt-other-rel-sep) -C <target> --work-tree ../oth (separated, relative) DENIES",
+            "git -C {T} --work-tree ../oth reset --hard", "deny", "clean", {"tgt": 0, "sess": 0, "oth": 1},
+            oth_state="dirty")
+        gdc("(gdc-index-nocand) an index-only form whose git dir no candidate directory discovers DENIES",
+            "git -C {O} --git-dir={T}/.git restore --staged file.txt", "deny", "staged",
+            {"tgt": 0, "sess": 0, "oth": 1}, oth_state="dirty")
+        gdc("(gdc-unresolvable) a --git-dir git cannot open DENIES with no snapshot",
+            "git -C {T} --git-dir=nonexistent reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0},
+            "git could not report, read-only")
+        gdc("(gdc-other-opt) a -c global option beside --git-dir leaves the oracle unasked and DENIES",
+            "git -c core.abbrev=12 --git-dir=.git -C {T} reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-other-env) another inline GIT_* assignment beside GIT_DIR= DENIES",
+            "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} reset --hard", "deny", "dirty",
+            {"tgt": 0, "sess": 0})
+        # The scoped form pins the verdict itself: no clobber deny stands behind it, so an oracle that ignored
+        # the other inline GIT_* would snapshot the target and allow.
+        gdc("(gdc-other-env-scoped) another inline GIT_* beside GIT_DIR= on a scoped discard DENIES",
+            "GIT_INDEX_FILE={B}/alt.index GIT_DIR=.git git -C {T} restore file.txt", "deny", "dirty",
+            {"tgt": 0, "sess": 0}, "git could not report, read-only")
+        gdc("(gdc-bare) --bare after -C makes the -C directory the git dir, which git cannot open: DENIES",
+            "git -C {T} --bare reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-ambient) a non-cosmetic ambient GIT_* beside --git-dir DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 0, "sess": 0},
+            "a non-cosmetic ambient GIT_* variable", ambient={"GIT_NAMESPACE": "gdc"})
+        # Controls: a non-destructive form and the compound grammar path are unchanged by the fix.
+        gdc("(gdc-soft-control) a non-destructive reset --soft under the same redirect still allows",
+            "git -C {T} --git-dir=.git reset --soft", "allow-note", "dirty", {"tgt": 0, "sess": 0})
+        gdc("(gdc-compound-control) the compound form stays outside the closed grammar and DENIES",
+            "git -C {T} --git-dir=.git reset --hard && true", "deny", "dirty", {"tgt": 0, "sess": 0})
+        # The session-directory floor: a --git-dir/GIT_DIR form beside -C was read from the session directory
+        # before git resolved it, and that directory is still probed and snapshotted when it is not provably
+        # clean. When that snapshot fails (the size cap, or a temp dir inside the session repository) and the
+        # target git resolved was probed and is provably clean, or was snapshotted, the discard is allowed with
+        # that failure named, in each prefix order, on a clean target and on a dirty one (whose own snapshot is
+        # taken and named); each of those is red under a floor that denies every failed session snapshot.
+        # When the target's own snapshot also fails, or its probe does not complete, it DENIES with the session
+        # failure named; each of those is red when the floor stops requiring that target outcome. A whole-tree
+        # clobber on a dirty target still denies there, naming the session failure. When the session snapshot
+        # succeeds, both repositories are snapshotted and it allows.
+        _gdc_floor = "but this guard also snapshots the session directory"
+        _gdc_cap = "exceeds the 0 MiB recovery snapshot size cap"
+        _gdc_tmp = "the temp snapshot dir resolved inside the repo"
+        _gdc_floor_note = ("The session directory, the directory this guard reads the redirect from without asking "
+                           "git, could not be snapshotted (")
+        _gdc_floor_pass = "that failure alone does not deny the command"
+        _gdc_tgt_clean = "which it acts on, was probed and is provably clean"
+        _gdc_tgt_snap = "which it acts on, was snapshotted first"
+        # FLIPPED (was "deny"): a failed session snapshot is allowed past once the target is provably clean or
+        # snapshotted.
+        gdc("(gdc-floor-cap-clean) -C <target> --git-dir=.git, session over the size cap, clean target: allows",
+            "git -C {T} --git-dir=.git reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_at, _gdc_floor_note, _gdc_cap, _gdc_floor_pass, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-dirty) -C <target> --git-dir=.git, session over the size cap, dirty target: allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_at, _gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-clean) --git-dir=.git -C <relative>, session over the size cap, clean: allows",
+            "git --git-dir=.git -C ../tgt restore --staged file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-dirty) --git-dir=.git -C <relative>, session over the size cap, dirty: allows",
+            "git --git-dir=.git -C ../tgt reset", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-clean) GIT_DIR=.git with -C <target>, session over the size cap, clean: allows",
+            "GIT_DIR=.git git -C {T} clean -fd", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_clean), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-dirty) GIT_DIR=.git with -C <target>, session over the size cap, dirty: allows",
+            "GIT_DIR=.git git -C {T} restore file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved), sess_cause="sizecap")
+        gdc("(gdc-floor-tmp-clean) -C <target> --git-dir=.git, temp dir inside the session, clean: allows",
+            "git -C {T} --git-dir=.git restore file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-dirty) -C <target> --git-dir=.git, temp dir inside the session, dirty: allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-clean) --git-dir=.git -C <relative>, temp dir inside the session, clean: allows",
+            "git --git-dir=.git -C ../tgt reset --hard", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-rev-dirty) --git-dir=.git -C <relative>, temp dir inside the session, dirty: allows",
+            "git --git-dir=.git -C ../tgt clean -fd", "allow-note", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-clean) GIT_DIR=.git with -C <target>, temp dir inside the session, clean: allows",
+            "GIT_DIR=.git git -C {T} reset", "allow-note", "clean", {"tgt": 0, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_clean), sess_cause="tmpdir")
+        gdc("(gdc-floor-tmp-env-staged) GIT_DIR=.git with -C <target>, temp dir inside the session, staged: allows",
+            "GIT_DIR=.git git -C {T} restore --staged file.txt", "allow-note", "staged", {"tgt": 1, "sess": 0},
+            (_gdc_floor_note, _gdc_tmp, _gdc_tgt_snap, _gdc_saved), sess_cause="tmpdir")
+        # The target's own snapshot fails too (its 4 KiB change is over the same lowered cap): DENIES in each
+        # prefix order, with both failures named and no snapshot anywhere.
+        _gdc_tgt_fail = "NOTE: no pre-command recovery snapshot could be created (the working tree exceeds"
+        gdc("(gdc-floor-cap-tgtfail) -C <target> --git-dir=.git, session and target over the size cap: DENIES",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-rev-tgtfail) --git-dir=.git -C <relative>, session and target over the cap: DENIES",
+            "git --git-dir=.git -C ../tgt restore file.txt", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        gdc("(gdc-floor-cap-env-tgtfail) GIT_DIR=.git with -C <target>, session and target over the cap: DENIES",
+            "GIT_DIR=.git git -C {T} reset", "deny", "big", {"tgt": 0, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its snapshot failed", _gdc_tgt_fail), sess_cause="sizecap")
+        # The target's clean probe does not complete (its snapshot is still taken and named): DENIES in each
+        # prefix order, though the same target snapshot would allow a discard whose session snapshot succeeded.
+        gdc("(gdc-floor-cap-noprobe) -C <target> --git-dir=.git, session over the cap, target probe unfinished: "
+            "DENIES", "git -C {T} --git-dir=.git checkout -- file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_floor, _gdc_cap, "and its probe did not complete", _gdc_saved), sess_cause="sizecap",
+            tgt_probe="incomplete")
+        gdc("(gdc-floor-tmp-rev-noprobe) --git-dir=.git -C <relative>, temp dir in the session, target probe "
+            "unfinished: DENIES", "git --git-dir=.git -C ../tgt restore file.txt", "deny", "dirty",
+            {"tgt": 1, "sess": 0}, (_gdc_floor, _gdc_tmp, "and its probe did not complete", _gdc_saved),
+            sess_cause="tmpdir", tgt_probe="incomplete")
+        gdc("(gdc-floor-tmp-env-noprobe) GIT_DIR=.git with -C <target>, temp dir in the session, target probe "
+            "unfinished: DENIES", "GIT_DIR=.git git -C {T} restore --staged file.txt", "deny", "staged",
+            {"tgt": 1, "sess": 0}, (_gdc_floor, _gdc_tmp, "and its probe did not complete", _gdc_saved),
+            sess_cause="tmpdir", tgt_probe="incomplete")
+        # A whole-tree clobber on a dirty target still DENIES as the bare form does, with the target snapshot
+        # and the session failure named.
+        gdc("(gdc-floor-cap-clobber) -C <target> --git-dir=.git reset --hard, session over the cap, dirty: DENIES",
+            "git -C {T} --git-dir=.git reset --hard", "deny", "dirty", {"tgt": 1, "sess": 0},
+            ("would overwrite the working tree", _gdc_floor_note, _gdc_cap, _gdc_tgt_snap, _gdc_saved),
+            sess_cause="sizecap")
+        gdc("(gdc-floor-both) a dirty session whose snapshot succeeds is snapshotted beside the target; allows",
+            "git -C {T} --git-dir=.git checkout -- file.txt", "allow-note", "dirty", {"tgt": 1, "sess": 1},
+            (_gdc_at, "The session directory, the directory this guard reads the redirect from without asking "
+                      "git, was snapshotted as well."), sess_cause="dirty")
+        # A leading GIT_DIR+= reaches the session-read --git-dir deny exactly as GIT_DIR= does; two GIT_DIR
+        # assignments joined by += build a value that read does not trust, so they DENY.
+        gdc("(gdc-env-gitdir-append-own) GIT_DIR+=<target>/.git with -C <target> on a clean target DENIES",
+            "GIT_DIR+={T}/.git git -C {T} reset --hard", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        gdc("(gdc-env-gitdir-append-own-scoped) GIT_DIR+=<target>/.git with -C <target>, scoped discard DENIES",
+            "GIT_DIR+={T}/.git git -C {T} restore file.txt", "deny", "dirty", {"tgt": 1, "sess": 0},
+            (_gdc_keep_gitdir, _gdc_saved))
+        gdc("(gdc-env-gitdir-append-joined) two GIT_DIR+= assignments joined into one value DENY",
+            "GIT_DIR+=.gi GIT_DIR+=t git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
+            _gdc_keep_gitdir)
+        # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
+        # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
+        # while the command clears the stash of the repository GIT_DIR names.
+        try:
+            gdc_st = _init_repo(tmp / "gdc" / "stash-sess")
+            (gdc_st / "file.txt").write_text("to stash\n", encoding="utf-8")
+            _git(gdc_st, "stash", "push", "-m", "wip", env_identity=True)
+            gdc_st_other = _init_repo(tmp / "gdc" / "stash-other")
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(gdc-stash-fixture) could not build the stash fixture: {}".format(exc))
+        else:
+            expect("(gdc-stash-append) GIT_DIR+=<session>/.git with -C <other> on stash clear DENIES",
+                   "GIT_DIR+={}/.git git -C {} stash clear".format(gdc_st, gdc_st_other), "deny",
+                   cwd=str(gdc_st))
+            expect("(gdc-stash-eq-control) the GIT_DIR= spelling of the same stash clear still DENIES",
+                   "GIT_DIR={}/.git git -C {} stash clear".format(gdc_st, gdc_st_other), "deny",
+                   cwd=str(gdc_st))
 
         # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
         # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
@@ -8660,6 +10374,25 @@ def _main_isolated(monitor):
         if _stash_refs(g423_S) != _g423_s_stash_before:
             failures.append("(g423-p4-other) a -C stash removal must preserve NO new stash ref in S")
         _g423_unchanged("(g423-p4-other-state)", g423_S, g423_S_pre, "S")
+
+        # A separated --shallow-file is a value-taking global option, so git_discard reads the discard behind it
+        # exactly as behind --attr-source: the global-option branch snapshots the session repository, then
+        # decides. Before --shallow-file joined _GIT_ARG_OPTS its value read as an unrecognized subcommand and
+        # the two verdicts differed (deny against allow-note). The recovery ref is the safety property kept.
+        gsf_repo = _init_repo(tmp / "gsf-discard")
+        (gsf_repo / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _gsf_ref_count = len(_recovery_refs(gsf_repo))
+        _gsf_attr = _decision(aiqt_hooks.git_discard, "git --attr-source HEAD reset --hard", cwd=str(gsf_repo))
+        _gsf_after_attr = len(_recovery_refs(gsf_repo))
+        _gsf_shallow = _decision(aiqt_hooks.git_discard, "git --shallow-file x reset --hard", cwd=str(gsf_repo))
+        if _gsf_shallow != _gsf_attr:
+            failures.append("(gsf-discard-parity) git_discard must judge 'git --shallow-file x reset --hard' as "
+                            "it judges 'git --attr-source HEAD reset --hard': got {} against {}"
+                            .format(_gsf_shallow, _gsf_attr))
+        if not (_gsf_after_attr > _gsf_ref_count and len(_recovery_refs(gsf_repo)) > _gsf_after_attr):
+            failures.append("(gsf-discard-snapshot) each global-option reset --hard on a dirty tree must write a "
+                            "recovery ref before deciding (counts {} -> {} -> {})".format(
+                                _gsf_ref_count, _gsf_after_attr, len(_recovery_refs(gsf_repo))))
 
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
@@ -9945,7 +11678,7 @@ def _main_isolated(monitor):
         # and each was therefore a SILENT ALLOW before this gate, where the leading
         # 'git status' set saw_git and suppressed the fallback. The pl-mispair shapes that had no
         # leading benign segment get one HERE: that suppression is exactly what these vectors
-        # must defeat. Each must DENY with the fallback's fail-safe reason.
+        # must defeat. Each must DENY, and the fallback's fail-safe reason is witnessed on each.
         _unc_shapes = (
             ('comment-paren', 'git status\necho "$(echo hi # (\n)"\ngit push --force origin main\necho ")"'),
             ('comment-apostrophe', 'git status\necho "$(echo hi # it\'s\n)"\ngit push --force origin main\necho "\')"'),
@@ -9956,6 +11689,18 @@ def _main_isolated(monitor):
             ('commented-close', 'git status\necho "$(echo ok # )\n echo "<<\'EOF\'"\n)"\ngit push --force origin main'),
             ('commented-close-heredoc', 'git status\necho "$(echo a # )" <<\'EOF\'\n)"\ngit push --force origin main\nEOF'),
         )
+        # The four shapes whose '#' sits inside a double-quoted command substitution, with a quote or
+        # parenthesis after it on its line, are judged under both readings of that '#' (the shared lexer's
+        # comment rule, applied inside _skip_quoting): the comment reading, the one bash takes, ends the
+        # substitution at the next line's ')"' and lexes the push as its own segment, so the parsed
+        # classifier denies it first with its own reason. The three whose quoted here-document sits inside a
+        # double-quoted command substitution are lexed as bash reads them too: the skip reads the body as
+        # text, so the substitution ends at the ')"' after the delimiter line and the push is its own
+        # segment, which the parsed classifier denies first (the unquoted one's body is still read as code,
+        # so the fallback decides it). Each still denies; the fallback beneath it stays witnessed on the same
+        # command (pl-uncertain-<shape>-<spelling>-fallback).
+        _unc_parsed_shapes = ('comment-paren', 'comment-apostrophe', 'commented-close', 'commented-close-heredoc',
+                              'heredoc-paren', 'heredoc-quote', 'nested-heredoc-close')
         for _unm, _ucmd in _unc_shapes:  # each _ucmd still spells the pl-mispair push; re-spelled below
             for _usn, _usp in (
                 ('head', 'git push --force origin HEAD'),
@@ -9965,9 +11710,18 @@ def _main_isolated(monitor):
             ):
                 _ucmdx = _ucmd.replace('git push --force origin main', _usp)
                 _udetail = 'appears to force-push or delete'
+                if _unm in _unc_parsed_shapes:
+                    _ufall = aiqt_hooks._protected_line_fallback(_ucmdx)
+                    _ufall_obj = _ufall[1] if isinstance(_ufall[1], dict) else {}
+                    _ufall_reason = _ufall_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                    if not aiqt_hooks._lex_uncertain(_ucmdx) or _udetail not in _ufall_reason:
+                        failures.append('(pl-uncertain-{}-{}-fallback) the uncertain-lex fallback must deny the '
+                                        'shape on its own, with its reason; got uncertain={} reason={!r}'.format(
+                                            _unm, _usn, aiqt_hooks._lex_uncertain(_ucmdx), _ufall_reason))
+                    _udetail = 'this git push force-pushes'
                 if _usn == 'frag':
                     # The backstop's de-quoted reading now denies the fragmented protected name
-                    # first (deny reason changed, decision unchanged); the fallback beneath it stays
+                    # first (deny reason changed, decision unchanged); the layer beneath it stays
                     # witnessed with the backstop stood down.
                     pexpect_layer('(pl-uncertain-{}-frag-layer) with the backstop stood down the fallback still '
                                   'denies'.format(_unm), _ucmdx, 'deny', cwd=plr, detail=_udetail)
@@ -10000,8 +11754,16 @@ def _main_isolated(monitor):
         _hc5 = '# <<\'true\'\ngit status\necho "$(echo hi # (\n)"\ngit push --force origin ma""in\necho ")"\ntrue'
         pexpect('(pl-comment-heredoc) a commented heredoc opener no longer suppresses the uncertainty signal; denies',
                 _hc5, 'deny', cwd=plr, detail='raw command text pairs a git push')
-        pexpect_layer('(pl-comment-heredoc-layer) with the backstop stood down the fallback still denies',
-                      _hc5, 'deny', cwd=plr, detail='appears to force-push or delete')
+        # With the backstop stood down, the comment reading of the '#' inside the double-quoted substitution
+        # lexes the push as its own segment and the parsed classifier denies it first (the comment rule,
+        # applied inside _skip_quoting); the fallback beneath it is witnessed on the same command directly.
+        pexpect_layer('(pl-comment-heredoc-layer) with the backstop stood down the push still denies',
+                      _hc5, 'deny', cwd=plr, detail='this git push force-pushes')
+        _hc5_fall = aiqt_hooks._protected_line_fallback(_hc5)[1] or {}
+        if 'appears to force-push or delete' not in _hc5_fall.get("hookSpecificOutput", {}).get(
+                "permissionDecisionReason", ""):
+            failures.append('(pl-comment-heredoc-fallback) the uncertain-lex fallback must deny the commented '
+                            'heredoc shape on its own; got {!r}'.format(_hc5_fall))
         # The signal itself for each commented opener FORM (quoted, bare, tab-strip, single-char),
         # pinned directly; each reads True at head and False at the pin (the pin skipped the top-level
         # comment and, for the quoted forms, stripped it away before the scan).
@@ -10069,8 +11831,19 @@ def _main_isolated(monitor):
         _p6 = 'git status\n(# "\nenv git push --force "origin&other" main\n# "\n)'
         pexpect('(pl-paren-comment) a comment after "(" no longer splits the wrapped protected push; denies',
                 _p6, 'deny', cwd=plr, detail='raw command text pairs a git push')
-        pexpect('(pl-paren-comment-head) the same shape pushing HEAD denies via the uncertain-lex fallback',
-                _p6.replace(' main\n', ' HEAD\n'), 'deny', cwd=plr, detail='appears to force-push or delete')
+        # Pushing HEAD it denies before the push fallback: the '#' right after '(' is uncertain and one of its
+        # readings does not lex (the second '# "' read as word text opens an unclosed quote), so the shared
+        # lexer cannot judge it under both readings, and the commit recognizer reads text holding quoting its
+        # fallback does not decode ("origin&other") as an apparent commit, which denies. The uncertain-lex
+        # push fallback's own predicate (an uncertain lex, and a force-push spelling in the text) is witnessed
+        # on the same command directly; the fallback runs the commit recognizer first, so it denies there too.
+        _p6h = _p6.replace(' main\n', ' HEAD\n')
+        pexpect('(pl-paren-comment-head) the same shape pushing HEAD denies',
+                _p6h, 'deny', cwd=plr, detail='incomplete shell parse')
+        if not (aiqt_hooks._lex_uncertain(_p6h) and aiqt_hooks._fallback_push_hit(_p6h)):
+            failures.append('(pl-paren-comment-head-fallback) the HEAD shape must read as an uncertain lex whose '
+                            'text the push fallback matches; got uncertain={} hit={}'.format(
+                                aiqt_hooks._lex_uncertain(_p6h), aiqt_hooks._fallback_push_hit(_p6h)))
         _p6seg = aiqt_hooks._raw_push_segments(_p6)
         if _p6seg != ['git status', '(# "', 'env git push --force "origin&other" main', '# "', ')']:
             failures.append('(pl-paren-comment-seg) a "(# " comment must not open a quote in the raw '
@@ -10335,21 +12108,25 @@ def _main_isolated(monitor):
         # denies too: the plain vectors assert those actual outcomes (the backstop's reason first now) and
         # that the de-quoted reading does not pair the feature push. The -iso vectors stand that one
         # commit-proof check down so the push layers alone decide: there the protected push was a silent
-        # allow at the pin and now denies via the backstop, and the feature-branch control allows.
+        # allow at the pin and now denies via the backstop, and the feature-branch control allows. Where the
+        # $-quote spells the subcommand word itself (dollar-push, dollar-push-dq), that word came through an
+        # ANSI-C or locale quote between the git word and its subcommand, so the git alias reading (HOW A WORD IS
+        # SPELLED) denies the feature-branch control first, the quote check stood down or not: those -ctl and
+        # -ctl-iso vectors allowed or denied for the quoting before and now deny naming the git alias.
         _orig_quote_bytes_known = aiqt_hooks._commit_quote_bytes_known
-        for _r9n, _r9m, _r9f in (
+        for _r9n, _r9m, _r9f, _r9alias in (
                 ('dollar-push', "git status; env git pu$''sh --force origin main",
-                 "git status; env git pu$''sh --force origin feature"),
+                 "git status; env git pu$''sh --force origin feature", True),
                 ('dollar-push-dq', 'git status; env git pu$""sh --force origin main',
-                 'git status; env git pu$""sh --force origin feature'),
+                 'git status; env git pu$""sh --force origin feature', True),
                 ('dollar-force', "git status; env git push --$''force origin main",
-                 "git status; env git push --$''force origin feature"),
+                 "git status; env git push --$''force origin feature", False),
                 ('dollar-force-short', "git status; env git push -$''f origin main",
-                 "git status; env git push -$''f origin feature"),
+                 "git status; env git push -$''f origin feature", False),
                 ('dollar-name', "git status; env git push --force origin ma$''in",
-                 "git status; env git push --force origin fea$''ture"),
+                 "git status; env git push --force origin fea$''ture", False),
                 ('dollar-name-dq', 'git status; env git push --force origin ma$""in',
-                 'git status; env git push --force origin fea$""ture'),
+                 'git status; env git push --force origin fea$""ture', False),
         ):
             for _r9s, _r9c in (('', _r9m), ('-ctl', _r9f)):
                 if aiqt_hooks._lex_uncertain_causes(_r9c) != ():
@@ -10360,14 +12137,25 @@ def _main_isolated(monitor):
                                 'force-push with a protected name'.format(_r9n))
             pexpect('(pl-dequote-word-{}) end to end the backstop denies the $-quote-fragmented protected push first'
                     .format(_r9n), _r9m, 'deny', cwd=plr, detail='raw command text pairs a git push')
-            pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the commit-proof quote '
-                    'check, not the backstop'.format(_r9n), _r9f, 'deny', cwd=plr, detail='ANSI-C or locale quoting')
+            if _r9alias:
+                pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the git alias '
+                        'reading of its $-quoted subcommand word, a word built at run time, not the backstop'
+                        .format(_r9n), _r9f, 'deny', cwd=plr, detail='builds at run time')
+            else:
+                pexpect('(pl-dequote-word-{}-ctl) end to end the feature-branch control is refused by the commit-proof '
+                        'quote check, not the backstop'.format(_r9n), _r9f, 'deny', cwd=plr,
+                        detail='ANSI-C or locale quoting')
             aiqt_hooks._commit_quote_bytes_known = lambda raw: True
             try:
                 pexpect('(pl-dequote-word-{}-iso) with the commit-proof quote check stood down the backstop denies'
                         .format(_r9n), _r9m, 'deny', cwd=plr, detail='raw command text pairs a git push')
-                pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the feature-branch '
-                        'control allows'.format(_r9n), _r9f, 'allow', cwd=plr)
+                if _r9alias:
+                    pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the git alias '
+                            'reading still denies the feature-branch control'.format(_r9n), _r9f, 'deny', cwd=plr,
+                            detail='builds at run time')
+                else:
+                    pexpect('(pl-dequote-word-{}-ctl-iso) with the commit-proof quote check stood down the '
+                            'feature-branch control allows'.format(_r9n), _r9f, 'allow', cwd=plr)
             finally:
                 aiqt_hooks._commit_quote_bytes_known = _orig_quote_bytes_known
 
@@ -10560,6 +12348,1170 @@ def _main_isolated(monitor):
                 "git push -f --push-opt marker origin", "deny", cwd=plr)
         pexpect("(f117r9-e) a genuine separated --push-option value is still skipped (plain push allows)",
                 "git push --push-option marker origin main", "allow", cwd=plr)
+        # A separated --shallow-file global option consumes the next word as its value (git 2.53.0 and 2.56.0
+        # both run 'git --shallow-file /dev/null version'), so that word is never the subcommand. Each vector
+        # below read the value as the subcommand before --shallow-file joined _GIT_ARG_OPTS: the refspec-less
+        # and HEAD forms (no protected name for the raw backstop to pair) allowed, as did the parsed layer.
+        pexpect("(gsf-a) --shallow-file does not mask a refspec-less force-push from a protected HEAD",
+                "git --shallow-file status push --force origin", "deny", cwd=plr)
+        pexpect("(gsf-b) --shallow-file does not mask a forced HEAD refspec from a protected HEAD",
+                "git --shallow-file x push origin +HEAD", "deny", cwd=plr)
+        pexpect_layer("(gsf-c) with the backstop stood down the parsed classifier denies behind --shallow-file",
+                      "git --shallow-file status push --force origin main", "deny", cwd=plr,
+                      detail="force-pushes the protected branch 'main'")
+        # The other guards that read the git subcommand judge the command behind --shallow-file as they judge
+        # the bare form (each allowed, or lost its note, while the value was read as the subcommand).
+        for _gsf_label, _gsf_handler, _gsf_cmd, _gsf_want in (
+                ("gsf-d", aiqt_hooks.commit_identity,
+                 'git --shallow-file x commit --author="Claude <noreply@anthropic.com>" -m y', "deny"),
+                ("gsf-e", aiqt_hooks.gate_weakening, "git --shallow-file x commit --no-verify -m y", "deny"),
+                ("gsf-f", aiqt_hooks.gate_weakening, "git --shallow-file x push --no-verify origin feat", "deny"),
+                ("gsf-g", aiqt_hooks.diff_source_pretool, "git --shallow-file x diff", "deny"),
+                ("gsf-h", aiqt_hooks.git_explicit_binding, "cd /abs/repo && git --shallow-file x commit -m y",
+                 "allow-note"),
+                ("gsf-i", aiqt_hooks.git_stash_ref, "git --shallow-file x stash pop", "allow-note")):
+            _gsf_got = _decision(_gsf_handler, _gsf_cmd)
+            if _gsf_got != _gsf_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _gsf_label, _gsf_handler.__name__, _gsf_cmd, _gsf_want, _gsf_got))
+        # The parse at the option's edges, through both subcommand readers: the exact separated spelling skips
+        # its value (gsf-j, red on revert); the '=' form carries the value in its own word (gsf-k); an
+        # abbreviation is not the option (gsf-l: git rejects '--shallow-fil' as unknown and runs nothing); a
+        # trailing option with no value leaves no subcommand (gsf-m).
+        for _gsf_label, _gsf_tokens, _gsf_want in (
+                ("gsf-j", ["git", "--shallow-file", "status", "push", "--force"], ("push", ["--force"])),
+                ("gsf-k", ["git", "--shallow-file=status", "push", "--force"], ("push", ["--force"])),
+                ("gsf-l", ["git", "--shallow-fil", "status", "push"], ("status", ["push"])),
+                ("gsf-m", ["git", "--shallow-file"], (None, []))):
+            for _gsf_fn in (aiqt_hooks._git_subcommand_rest, aiqt_hooks._git_sub_and_args):
+                _gsf_got = _gsf_fn(_gsf_tokens)
+                if _gsf_got != _gsf_want:
+                    failures.append("({}) {}({!r}): expected {!r}, got {!r}".format(
+                        _gsf_label, _gsf_fn.__name__, _gsf_tokens, _gsf_want, _gsf_got))
+        # The commit-identity finder reads the subcommand word itself: behind --shallow-file it is 'commit'.
+        _gsf_toks = ["git", "--shallow-file", "x", "commit", "-m", "y"]
+        _gsf_idx = list(aiqt_hooks._cmtidn_git_commands(_gsf_toks))
+        if _gsf_idx != [3]:
+            failures.append("(gsf-n) _cmtidn_git_commands({!r}): expected [3] (the commit word), got {!r}"
+                            .format(_gsf_toks, _gsf_idx))
+        # A git alias the command defines (_git_local_alias: a -c or --config-env alias, include or includeIf
+        # key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one) runs a subcommand the
+        # readers cannot see, so each treats it as unknown and possibly mutating. The handler vectors gla-a to
+        # gla-o each read the alias name as the subcommand and allowed before that reading (gla-g read the
+        # command as outside the commit grammar): the refspec-less force-push from a protected HEAD names no
+        # push and no protected branch, so neither the raw backstop nor the push classifier saw it. gla-p (a
+        # non-alias -c control) and gla-q (a -c alias the raw lossy-verb scan already denied) are regression
+        # locks, and gla-r to gla-za pin the definition forms the shared reading accepts and refuses.
+        pexpect("(gla-a) a -c alias hiding a refspec-less force-push from a protected HEAD denies",
+                "git -c alias.p=push p --force origin", "deny", cwd=plr, detail="defines a git alias for itself")
+        pexpect("(gla-b) an attached --config-env alias, whose value this guard cannot read, denies",
+                "git --config-env=alias.p=PUSHCMD p --force origin", "deny", cwd=plr)
+        pexpect("(gla-c) an alias passed by GIT_CONFIG_KEY_<n> assignments denies",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p --force origin",
+                "deny", cwd=plr)
+        pexpect("(gla-d) an include whose file can define the alias denies",
+                "git -c include.path=/abs/aliases.cfg p --force origin", "deny", cwd=plr)
+        pexpect("(gla-e) the alias denies on a feature HEAD too (its push or commit target is unknown)",
+                "git -c alias.p=push p --force origin", "deny", cwd=plf)
+        pexpect("(gla-f) GIT_CONFIG_PARAMETERS naming an alias denies",
+                "GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\" git p --force origin", "deny", cwd=plr)
+        # The commit recognizer reads the same segment as an apparent commit, so every reading of the command
+        # (main's reading of a floor included) is unverifiable rather than outside the commit grammar.
+        _gla_syntax = aiqt_hooks._commit_command_syntax("git --config-env=alias.c=COMMITCMD c -m y").status
+        if _gla_syntax != "unverifiable":
+            failures.append("(gla-g) _commit_command_syntax must read a --config-env alias as an apparent commit "
+                            "(unverifiable), got {!r}".format(_gla_syntax))
+        _gla_discard = _init_repo(tmp / "gla-discard")
+        (_gla_discard / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _gla_branch = _init_repo(tmp / "gla-branch")
+        for _gla_label, _gla_handler, _gla_cmd, _gla_cwd, _gla_want in (
+                ("gla-h", aiqt_hooks.gate_weakening, "git -c alias.c=commit c --no-verify -m y", None, "deny"),
+                ("gla-i", aiqt_hooks.gate_weakening, "git --config-env alias.c=COMMITCMD c -m y", None, "deny"),
+                ("gla-j", aiqt_hooks.git_discard, "git --config-env alias.r=RESETCMD r --hard", str(_gla_discard),
+                 "deny"),
+                ("gla-k", aiqt_hooks.git_discard, "git -c include.path=/abs/aliases.cfg r --hard",
+                 str(_gla_discard), "deny"),
+                ("gla-l", aiqt_hooks.branch_root, "git -c alias.co=checkout co -b gla-new", str(_gla_branch),
+                 "deny"),
+                ("gla-m", aiqt_hooks.commit_identity,
+                 'git -c alias.c=commit c --author="Claude <noreply@anthropic.com>" -m y', None, "deny"),
+                ("gla-n", aiqt_hooks.commit_identity,
+                 'env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.c GIT_CONFIG_VALUE_0=commit git c '
+                 '--author="Claude <noreply@anthropic.com>" -m y', None, "deny"),
+                ("gla-o", aiqt_hooks.commit_msg_subst, 'git -c alias.c=commit c -m "$(date)"', None, "deny"),
+                ("gla-p", aiqt_hooks.gate_weakening, "git -c core.editor=true commit -m y", None, "allow"),
+                ("gla-q", aiqt_hooks.git_discard, "git -c alias.r=reset r --hard", str(_gla_discard), "deny")):
+            _gla_got = _decision(_gla_handler, _gla_cmd, cwd=_gla_cwd)
+            if _gla_got != _gla_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _gla_label, _gla_handler.__name__, _gla_cmd, _gla_want, _gla_got))
+        # The definition forms at their edges (gla-p above is the non-alias -c control: it keeps the bare
+        # reading). The attached -c<key> form is no definition: git 2.53.0 rejects '-calias.x=y' as an unknown
+        # option and runs nothing. A value-taking global option consumes the word after it, and the walk stops
+        # at the subcommand, as _git_sub_and_args reads them.
+        for _gla_label, _gla_tokens, _gla_want in (
+                ("gla-r", ["git", "-c", "Alias.X=log", "x"], True),
+                ("gla-s", ["git", "--config-env", "alias.x=ENVVAR", "x"], True),
+                ("gla-t", ["git", "-c", "includeIf.gitdir:/abs/.path=/abs/x.cfg", "x"], True),
+                ("gla-u", ["GIT_CONFIG_KEY_3=ALIAS.x", "git", "x"], True),
+                ("gla-v", ["git", "-C", "/abs", "-c", "alias.x=log", "x"], True),
+                ("gla-w", ["git", "-c", "aliases.x=log", "x"], False),
+                ("gla-x", ["git", "-calias.x=log", "x"], False),
+                ("gla-y", ["GIT_CONFIG_KEY_0=remote.origin.mirror", "git", "push"], False),
+                ("gla-z", ["git", "log", "-c", "alias.x=y"], False),
+                ("gla-za", ["git", "--shallow-file", "-c", "alias.x=y"], False)):
+            _gla_got = aiqt_hooks._git_local_alias(_gla_tokens)
+            if _gla_got is not _gla_want:
+                failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
+                    _gla_label, _gla_tokens, _gla_want, _gla_got))
+        # A git alias defined outside the git command's own segment: when the command's text names
+        # GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere, whatever form sets it, every git
+        # command of it runs under an alias the command may define (_git_alias_named); so does every git segment
+        # when a variable in the hook's own environment names one (_git_alias_inherited). Before the export reading
+        # every glx-<guard>-<form> vector allowed: the alias name was read as the subcommand and the defining
+        # segment as no git command; before the text rule the set-a, allexport, nameref and reserved-word forms
+        # still allowed (each defined the alias on git 2.53.0). The git_discard alias values are built at run time
+        # ($GLX_CMD), so its raw lossy-verb scan names no work-losing verb either.
+        _glx_forms = (
+            ("count", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.{n} GIT_CONFIG_VALUE_0={v}; {cmd}"),
+            ("count-and", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.{n} GIT_CONFIG_VALUE_0={v} && {cmd}"),
+            ("params", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("params-and", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\" && {cmd}"),
+            ("declare", "declare -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("typeset", "typeset -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("readonly", "readonly -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}"),
+            ("export-name", "GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; export GIT_CONFIG_PARAMETERS; {cmd}"),
+            ("local", "f() {{ local -x GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; {cmd}; }}; f"),
+            ("include", "export GIT_CONFIG_PARAMETERS=\"'include.path'='/abs/aliases.cfg'\"; {cmd}"),
+            ("run-time", "export GIT_CONFIG_PARAMETERS=\"$GLX_PARAMS\"; {cmd}"),
+            ("set-a-read", "set -a; read -r GIT_CONFIG_PARAMETERS <<< \"'alias.{n}'='{v}'\"; {cmd}"),
+            ("allexport-printf", "set -o allexport; printf -v GIT_CONFIG_PARAMETERS %s \"'alias.{n}'='{v}'\"; {cmd}"),
+            ("set-a-for", "set -a; for GIT_CONFIG_PARAMETERS in \"'alias.{n}'='{v}'\"; do {cmd}; done"),
+            ("set-a-default", "set -a; : \"${{GIT_CONFIG_PARAMETERS:='alias.{n}'='{v}'}}\"; {cmd}"),
+            ("nameref", "declare -n r=GIT_CONFIG_PARAMETERS; r=\"'alias.{n}'='{v}'\"; export r; {cmd}"),
+            ("set-a-key-read", "set -a; GIT_CONFIG_COUNT=1; read -r GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 <<< "
+                               "'alias.{n} {v}'; {cmd}"),
+            ("if-export", "if export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; then {cmd}; fi"),
+            ("then-body", "export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; if true; then {cmd}; fi"),
+            ("while-export", "while export GIT_CONFIG_PARAMETERS=\"'alias.{n}'='{v}'\"; do {cmd}; break; done"))
+        _glx_dirty = _init_repo(tmp / "glx-discard")
+        (_glx_dirty / "file.txt").write_text("uncommitted\n", encoding="utf-8")
+        _glx_branch = _init_repo(tmp / "glx-branch")
+        _glx_author = 'git c --author="Claude <noreply@anthropic.com>" -m y'
+        for _glx_handler, _glx_n, _glx_v, _glx_cmd, _glx_cwd in (
+                (aiqt_hooks.protected_line, "p", "push", "git p --force origin", plr),
+                (aiqt_hooks.gate_weakening, "c", "commit", "git c --no-verify -m y", None),
+                (aiqt_hooks.branch_root, "co", "checkout", "git co -b glx-new", str(_glx_branch)),
+                (aiqt_hooks.git_discard, "r", "$GLX_CMD", "git r --hard", str(_glx_dirty)),
+                (aiqt_hooks.commit_identity, "c", "commit", _glx_author, None),
+                (aiqt_hooks.commit_msg_subst, "c", "commit", 'git c -m "$(date)"', None)):
+            for _glx_form, _glx_template in _glx_forms:
+                _glx_full = _glx_template.format(n=_glx_n, v=_glx_v, cmd=_glx_cmd)
+                _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+                if _glx_got != "deny":
+                    failures.append("(glx-{}-{}) {} on {!r}: expected deny, got {}".format(
+                        _glx_handler.__name__, _glx_form, _glx_handler.__name__, _glx_full, _glx_got))
+        # glx-feat: the exported alias denies on a feature HEAD too. glx-o1 to glx-o3: the disclosed over-refusal, a
+        # mention that defines no alias (an unrelated value, an echo, a comment) denies, since neither the form
+        # nor the value is read. glx-c1 to glx-c9: a command naming no such variable keeps the verdict each guard
+        # gave before. glx-u1 to glx-u4 and glx-u7: on an unparseable command a git command that runs under an
+        # alias denies (_git_alias_recovered), as the residues state; glx-u5 and glx-u6 keep a plain unparseable
+        # git command's allow. glx-u7 is commit_msg_subst's fallback, which read no alias before the text rule.
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-feat", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\"; git p --force origin", plf, "deny"),
+                ("glx-o1", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat; git status", plr,
+                 "deny"),
+                ("glx-o2", aiqt_hooks.protected_line, "echo GIT_CONFIG_COUNT; git status", plr, "deny"),
+                ("glx-o3", aiqt_hooks.gate_weakening, "git status # GIT_CONFIG_PARAMETERS", None, "deny"),
+                ("glx-c1", aiqt_hooks.protected_line, "export X=1; git push --force origin", plr, "deny"),
+                ("glx-c2", aiqt_hooks.protected_line, "export X=1; git p --force origin", plr, "allow"),
+                ("glx-c3", aiqt_hooks.gate_weakening, "export X=1; git c --no-verify -m y", None, "allow"),
+                ("glx-c4", aiqt_hooks.branch_root, "export X=1; git co -b glx-new", str(_glx_branch), "allow"),
+                ("glx-c5", aiqt_hooks.git_discard, "export X=1; git r --hard", str(_glx_dirty), "allow"),
+                ("glx-c6", aiqt_hooks.commit_identity, "export X=1; " + _glx_author, None, "allow"),
+                ("glx-c7", aiqt_hooks.commit_msg_subst, 'export X=1; git c -m "$(date)"', None, "allow"),
+                ("glx-c8", aiqt_hooks.protected_line, 'set -a; read -r X <<< "v"; git p --force origin', plr, "allow"),
+                ("glx-c9", aiqt_hooks.gate_weakening, "if export X=1; then git c --no-verify -m y; fi", None, "allow"),
+                ("glx-u1", aiqt_hooks.git_discard, 'git --config-env alias.r=RCMD r --hard "', str(_glx_dirty),
+                 "deny"),
+                ("glx-u2", aiqt_hooks.git_discard, 'export GIT_CONFIG_PARAMETERS="$GLX_PARAMS"; git r --hard "',
+                 str(_glx_dirty), "deny"),
+                ("glx-u3", aiqt_hooks.gate_weakening, 'git --config-env alias.c=CCMD c -m y "', None, "deny"),
+                ("glx-u4", aiqt_hooks.gate_weakening, 'export GIT_CONFIG_PARAMETERS="$GLX_PARAMS"; git c -m y "', None,
+                 "deny"),
+                ("glx-u5", aiqt_hooks.git_discard, 'git status "', str(_glx_dirty), "allow"),
+                ("glx-u6", aiqt_hooks.gate_weakening, 'git status "', None, "allow"),
+                ("glx-u7", aiqt_hooks.commit_msg_subst, 'git --config-env alias.c=CCMD c -m "$(date)"\necho "', None,
+                 "deny")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
+        # The hook's own environment, which the Bash tool's shell inherits: a GIT_CONFIG_PARAMETERS or
+        # GIT_CONFIG_KEY_<n> there naming an alias makes every git command run under it (glx-e1 to glx-e6, each
+        # allowed before), and one carrying only unrelated configuration is not refused (glx-e7). Each case sets
+        # only its own variables, and every one is restored after.
+        _glx_names = ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+        _glx_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glx_label, _glx_env, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                    ("glx-e1", {"GIT_CONFIG_PARAMETERS": "'alias.p'='push'"}, aiqt_hooks.protected_line,
+                     "git p --force origin", plr, "deny"),
+                    ("glx-e2", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "alias.c", "GIT_CONFIG_VALUE_0": "commit"},
+                     aiqt_hooks.gate_weakening, "git c --no-verify -m y", None, "deny"),
+                    ("glx-e3", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, aiqt_hooks.branch_root,
+                     "git co -b glx-new", str(_glx_branch), "deny"),
+                    ("glx-e4", {"GIT_CONFIG_PARAMETERS": "'alias.r'='reset'"}, aiqt_hooks.git_discard, "git r --hard",
+                     str(_glx_dirty), "deny"),
+                    ("glx-e5", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.commit_identity,
+                     _glx_author, None, "deny"),
+                    ("glx-e6", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.commit_msg_subst,
+                     'git c -m "$(date)"', None, "deny"),
+                    ("glx-e7", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"},
+                     aiqt_hooks.protected_line, "git p --force origin", plr, "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glx_env)
+                _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+                if _glx_got != _glx_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glx_label, _glx_handler.__name__, _glx_full, _glx_env, _glx_want, _glx_got))
+        finally:
+            for _glx_name, _glx_value in _glx_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # git behind a reserved word, a '{' group, time, '!' or a wrapper word runs a git alias as a git command word
+        # does (on git 2.53.0 with bash 5.3 a 'log' alias ran behind each). An alias the hook's environment carries
+        # counts as a text naming a git configuration variable, so every git word of the command runs under it
+        # (glx-we-<guard>-<form>), and a definition among the git global options after any git word of a segment
+        # defines one for that git command (glx-wl-<guard>-<form>). Before this reading each allowed, except the
+        # commit_msg_subst time, '!' and env forms, which its own modifier reading already denied (kept as locks).
+        # The local protected_line and git_discard forms use --config-env, so no push or work-losing verb is named.
+        _glw_forms = (("if", "if true; then {c}; fi"), ("brace", "{{ {c}; }}"), ("time", "time {c}"),
+                      ("bang", "! {c}"), ("while", "while {c}; do break; done"), ("env", "env {c}"))
+        _glw_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glx_name in _glx_names:
+                os.environ.pop(_glx_name, None)
+            for _glw_kind, _glw_env, _glw_handler, _glw_cmd, _glw_cwd in (
+                    ("we", "'alias.p'='push'", aiqt_hooks.protected_line, "git p --force origin", plr),
+                    ("we", "'alias.c'='commit'", aiqt_hooks.gate_weakening, "git c --no-verify -m y", None),
+                    ("we", "'alias.co'='checkout'", aiqt_hooks.branch_root, "git co -b glx-new", str(_glx_branch)),
+                    ("we", "'alias.r'='reset'", aiqt_hooks.git_discard, "git r --hard", str(_glx_dirty)),
+                    ("we", "'alias.c'='commit'", aiqt_hooks.commit_msg_subst, 'git c -m "$(date)"', None),
+                    ("wl", None, aiqt_hooks.protected_line, "git --config-env alias.p=PCMD p --force origin", plr),
+                    ("wl", None, aiqt_hooks.gate_weakening, "git -c alias.c=commit c --no-verify -m y", None),
+                    ("wl", None, aiqt_hooks.branch_root, "git -c alias.co=checkout co -b glx-new", str(_glx_branch)),
+                    ("wl", None, aiqt_hooks.git_discard, "git --config-env alias.r=RCMD r --hard", str(_glx_dirty)),
+                    ("wl", None, aiqt_hooks.commit_msg_subst, 'git -c alias.c=commit c -m "$(date)"', None)):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                for _glw_form, _glw_template in _glw_forms:
+                    _glw_full = _glw_template.format(c=_glw_cmd)
+                    _glw_got = _decision(_glw_handler, _glw_full, cwd=_glw_cwd)
+                    if _glw_got != "deny":
+                        failures.append("(glx-{}-{}-{}) {} on {!r} with {!r} in the environment: expected deny, got {}"
+                                        .format(_glw_kind, _glw_handler.__name__, _glw_form, _glw_handler.__name__,
+                                                _glw_full, _glw_env, _glw_got))
+            # glx-wx-1 to glx-wx-4: git_explicit_binding reads an aliased git command behind a reserved word, a group
+            # or time as a breadth stage and a publish (each allowed before). glx-wx-5 to glx-wx-7: the commit
+            # recognizer reads a git word behind 'then' under an environment alias, with a --config-env alias, or in a
+            # command whose text names a git configuration variable as an apparent commit, so the command is
+            # unverifiable rather than outside the commit grammar (glx-wx-5 was outside before; glx-wx-6 and glx-wx-7
+            # pin the segment reading the guards' own text-rule denies stand in front of). glx-wc-1 to glx-wc-3 keep
+            # a verdict: the same wrapped forms with no alias, or with
+            # only unrelated configuration in the environment, and a -c after the subcommand, which defines nothing.
+            # glx-wc-4 is the disclosed over-refusal (a git word with an alias definition after it in an echo) and
+            # glx-wc-5 the disclosed residual (a definition inside an sh -c body, one word here).
+            for _glw_label, _glw_env, _glw_full in (
+                    ("glx-wx-1", "'alias.p'='push'", "if true; then git add -A; git p; fi"),
+                    ("glx-wx-2", "'alias.p'='push'", "{ git add -A; }; time git p"),
+                    ("glx-wx-3", None, "if true; then git -c alias.a=add a -A; git -c alias.p=push p; fi"),
+                    ("glx-wx-4", None, "{ git -c alias.a=add a -A; }; time git -c alias.p=push p")):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                _glw_got = _decision(aiqt_hooks.git_explicit_binding, _glw_full, cwd=plr)
+                if _glw_got != "deny":
+                    failures.append("({}) git_explicit_binding on {!r} with {!r} in the environment: expected deny, "
+                                    "got {}".format(_glw_label, _glw_full, _glw_env, _glw_got))
+            for _glw_label, _glw_env, _glw_full in (
+                    ("glx-wx-5", "'alias.c'='commit'", "if true; then git c -m y; fi"),
+                    ("glx-wx-6", None, "if true; then git --config-env alias.c=CCMD c -m y; fi"),
+                    ("glx-wx-7", None, "export GIT_CONFIG_PARAMETERS=x; if true; then git c -m y; fi")):
+                if _glw_env is None:
+                    os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                else:
+                    os.environ["GIT_CONFIG_PARAMETERS"] = _glw_env
+                _glw_status = aiqt_hooks._commit_command_syntax(_glw_full).status
+                if _glw_status != "unverifiable":
+                    failures.append("({}) _commit_command_syntax({!r}) with {!r} in the environment: expected "
+                                    "unverifiable, got {!r}".format(_glw_label, _glw_full, _glw_env, _glw_status))
+            for _glw_label, _glw_env, _glw_handler, _glw_full, _glw_cwd, _glw_want in (
+                    ("glx-wc-1", {}, aiqt_hooks.protected_line, "if true; then git p --force origin; fi", plr, "allow"),
+                    ("glx-wc-2", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"},
+                     aiqt_hooks.gate_weakening, "{ git c --no-verify -m y; }", None, "allow"),
+                    ("glx-wc-3", {}, aiqt_hooks.gate_weakening, "time git log -c alias.x=y", None, "allow"),
+                    ("glx-wc-4", {}, aiqt_hooks.gate_weakening, "echo git -c alias.x=y", None, "deny"),
+                    ("glx-wc-5", {}, aiqt_hooks.gate_weakening, "sh -c 'git -c alias.c=commit c --no-verify -m y'", None,
+                     "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glw_env)
+                _glw_got = _decision(_glw_handler, _glw_full, cwd=_glw_cwd)
+                if _glw_got != _glw_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glw_label, _glw_handler.__name__, _glw_full, _glw_env, _glw_want, _glw_got))
+        finally:
+            for _glx_name, _glx_value in _glw_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # How a git alias key is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): a -c or --config-env key
+        # part spelled through a parameter or command expansion, an ANSI-C or locale quote, or a brace expansion,
+        # and a brace word with a comma between a git word and its subcommand, define a git alias whatever they
+        # decode to. Every alias here maps to log. gks-<form>-<guard>: each guard denies the parsed form (each
+        # allowed before; protected_line already denied the ANSI-C and locale forms for their quoting, so its rows
+        # also require the alias reason). gku-<form>-<guard>: the same definition behind a here-string, where only
+        # the de-quoted reading of an unparseable command sees it (_git_alias_spelled; each allowed before, and the
+        # locale form, which the de-quoted text already decoded, and protected_line's ANSI-C form, which its
+        # commit recognizer already denied, are left out). gkc-<form>-<guard> and gkcu-<form>-<guard>: a value spelled
+        # so behind a literal key, parsed and unparseable. On a parsed command a value whose expansion stands inside
+        # double quotes (param, subst) and a brace value keep the allow each guard gave before, except in
+        # gate_weakening, whose closed literal grammar denies all three (_gks_gw_grammar); a value through an
+        # ANSI-C or locale quote now denies naming the git alias under the region rule (HOW A WORD IS SPELLED; each
+        # allowed before, except in protected_line, which denied both for their quoting). On an unparseable command
+        # the de-quoted words cannot tell a quoted '$' from an unquoted one, so the param, subst, ansi and locale
+        # values now deny (each allowed before, except protected_line's ansi and locale), the disclosed
+        # over-refusal, and so does the brace value, since the leading here-string stops the lexer before the
+        # region, which is then unread (A GIT REGION THE LEXER DID NOT READ, above _git_region_open; it allowed before).
+        _gks_forms = (
+            ("param", 'git -c "${A:-alias}.l"=log l'),
+            ("subst", 'git -c "$(echo alias.l)"=log l'),
+            ("ansi", "git -c $'\\x61lias.l'=log l"),
+            ("locale", 'git -c $"alias".l=log l'),
+            ("brace-key", "git -c {alias,x}.l=log l"),
+            ("brace-word", "git {-c,alias.l=log} l"))
+        _gks_controls = (
+            ("param", 'git -c core.pager="${P:-cat}" log', "allow", "deny"),
+            ("subst", 'git -c core.pager="$(echo cat)" log', "allow", "deny"),
+            ("ansi", "git -c core.pager=$'cat' log", "deny", "deny"),
+            ("locale", 'git -c core.pager=$"cat" log', "deny", "deny"),
+            ("brace", "git -c core.pager={less,cat} log", "allow", "deny"))
+        _gks_guards = ((aiqt_hooks.protected_line, plr), (aiqt_hooks.gate_weakening, None),
+                       (aiqt_hooks.git_discard, str(_glx_dirty)), (aiqt_hooks.branch_root, str(_glx_branch)))
+        # The control rows (<label>-<form>) that gate_weakening denies under its closed literal grammar, which reads
+        # the raw text and refuses a git command whose global options or subcommand word hold an expansion, a brace
+        # or a backslash, quoted or not, and a git word in quoted text whose walk finds no subcommand: each such row
+        # denies there with the grammar's reason, while the other three guards keep the allow.
+        _gks_gw_grammar = frozenset((
+            "gkc-param", "gkc-subst", "gkc-brace",
+            "gkq-opt-word", "gkq-opt-value", "gkq-sub-word", "gkq-ansi-word",
+            "gklc-star", "gklc-arr-star", "gklc-length", "gklc-element", "gklc-names-star", "gklc-ind-star",
+            "gklc-keys-star", "gklc-ind-sub-star", "gklc-ind-count", "gklc-pattern",
+            "gku2c-nongit-echo", "gku2c-nongit-grep", "gku2c-nongit-gh"))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gks_form, _gks_cmd in _gks_forms:
+                for _gks_label, _gks_full in (("gks", _gks_cmd), ("gku", _gks_cmd.replace("git ", "git <<<x ", 1))):
+                    if _gks_label == "gku" and (_gks_form == "locale" or (
+                            _gks_name == "protected_line" and _gks_form == "ansi")):
+                        continue
+                    _gks_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gks_full}, "cwd": _gks_cwd}
+                    _gks_code, _gks_out, _gks_err = _gks_handler(_gks_data)
+                    _gks_got = _reduce_result(_gks_code, _gks_out)
+                    _gks_reason = ((_gks_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gks_got != "deny" or (_gks_label == "gks" and "git alias" not in _gks_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected a deny naming the git alias, got {} {!r}"
+                                        .format(_gks_label, _gks_form, _gks_name, _gks_name, _gks_full, _gks_got,
+                                                _gks_reason))
+            for _gks_form, _gks_cmd, _gks_want_parsed, _gks_want_unparsed in _gks_controls:
+                for _gks_label, _gks_full, _gks_want in (
+                        ("gkc", _gks_cmd, _gks_want_parsed),
+                        ("gkcu", _gks_cmd.replace("git ", "git <<<x ", 1), _gks_want_unparsed)):
+                    _gks_grammar = (_gks_name == "gate_weakening"
+                                    and "{}-{}".format(_gks_label, _gks_form) in _gks_gw_grammar)
+                    if _gks_grammar:
+                        _gks_want = "deny"
+                    _gks_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gks_full}, "cwd": _gks_cwd}
+                    _gks_code, _gks_out, _gks_err = _gks_handler(_gks_data)
+                    _gks_got = _reduce_result(_gks_code, _gks_out)
+                    _gks_reason = ((_gks_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    # A parsed deny names the git alias, which protected_line's earlier quoting deny did not; a deny
+                    # under gate_weakening's closed literal grammar names that grammar instead.
+                    if _gks_got != _gks_want or (_gks_grammar and "closed literal grammar" not in _gks_reason) or (
+                            not _gks_grammar and _gks_label == "gkc" and _gks_want == "deny"
+                            and "git alias" not in _gks_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {} {!r}".format(
+                            _gks_label, _gks_form, _gks_name, _gks_name, _gks_full, _gks_want, _gks_got,
+                            _gks_reason))
+        # The shared readers at their edges, on words lexed inside _WordSpellings (gkr-*): an attached or separated
+        # --config-env key spelled through an expansion or an ANSI-C quote, a '${X,,}' key, a key literal in effect
+        # but spelled through an ANSI-C quote (the disclosed over-refusal), a brace word as a -C value or read as
+        # the subcommand define one; a value whose expansion stands inside double quotes behind a literal key, a
+        # brace in a -c value, a brace word or a spelled definition after the subcommand do not; words lexed
+        # outside _WordSpellings carry no record, so the decoded key alone is read there, as before. gkr-j (an
+        # unquoted '${D:-/abs}' as the -C value) and gkr-n and gkr-o (an ANSI-C quote in a -c value) pinned no
+        # alias before and now define one under the region rule (HOW A WORD IS SPELLED). gkr-m, gkr-m2 and gkr-o2
+        # hold the key part's end on a lex (a part not spelled as plain literal text starting on the key's last
+        # character, inside, or just after its first '=', outside; the double-quoted '$' of gkr-m2 and gkr-o2 is no
+        # unquoted expansion, so the key part alone decides), and gkr-key-* hold it at the reader itself, where the
+        # part starts one before, at and one after the first '='.
+        for _gks_label, _gks_cmd, _gks_want, _gks_on in (
+                ("gkr-a", 'git --config-env="${A:-alias}.l"=LCMD l', True, True),
+                ("gkr-b", "git --config-env $'\\x61lias.l'=LCMD l", True, True),
+                ("gkr-c", "git -c ${K,,}=log l", True, True),
+                ("gkr-d", "git -c $'core.pager'=cat log", True, True),
+                ("gkr-e", "git -C {/abs,-c,alias.l=log} l", True, True),
+                ("gkr-f", "git -C /abs {-c,alias.l=log} l", True, True),
+                ("gkr-g", 'git --config-env=core.pager="${P:-PAGER}" log', False, True),
+                ("gkr-h", "git -c core.pager={less,cat} log", False, True),
+                ("gkr-i", "git log {a,b} -c $'\\x61lias.l'=x", False, True),
+                ("gkr-j", "git -C ${D:-/abs} log", True, True),
+                ("gkr-k", 'git -c "${A:-alias}.l"=log l', False, False),
+                ("gkr-l", "git {-c,alias.l=log} l", False, False),
+                # The key part's end: a part not spelled as plain literal text that starts on the key's last
+                # character (inside) or just after its first '=' (outside); an ANSI-C quote anywhere in the word now
+                # defines one (gkr-n, gkr-o), so the double-quoted rows hold the key part's end on a lex.
+                ("gkr-m", "git -c core.page$'r'=cat log", True, True),
+                ("gkr-n", "git -c core.pager$'='cat log", True, True),
+                ("gkr-o", "git -c core.pager=$'c'at log", True, True),
+                ("gkr-m2", 'git -c core.pager"$"=cat log', True, True),
+                ("gkr-o2", 'git -c core.pager="$"cat log', False, True)):
+            if _gks_on:
+                with aiqt_hooks._WordSpellings():
+                    _gks_segs = aiqt_hooks._lex_command(_gks_cmd)
+            else:
+                _gks_segs = aiqt_hooks._lex_command(_gks_cmd)
+            _gks_got = any(aiqt_hooks._git_local_alias(_gks_seg.argv) for _gks_seg in _gks_segs)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_local_alias on the lex of {!r} (spelling recorded: {}): expected {}, got {}"
+                                .format(_gks_label, _gks_cmd, _gks_on, _gks_want, _gks_got))
+        for _gks_label, _gks_literal, _gks_want in (("gkr-key-inside", 9, True), ("gkr-key-at", 10, False),
+                                                    ("gkr-key-outside", 11, False)):
+            _gks_got = aiqt_hooks._git_key_spelled("core.pager=cat", _gks_literal, 0)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_key_spelled('core.pager=cat', {}, 0): expected {}, got {}".format(
+                    _gks_label, _gks_literal, _gks_want, _gks_got))
+        # The unparseable reading at its edges (gkr-u*): the same reader over the de-quoted commands, past a
+        # here-string and an IO-number redirect inside the region; a spelled definition after the subcommand and a
+        # brace word in another command define nothing. gkr-u6, a value whose expansion stands inside double quotes
+        # behind a literal key, pinned no alias before; the de-quoted words cannot tell that '$' from an unquoted
+        # one, so it now defines one (the disclosed over-refusal of the region rule there).
+        for _gks_label, _gks_cmd, _gks_want in (
+                ("gkr-u1", 'git <<<x -c "${A:-alias}.l"=log l', True),
+                ("gkr-u2", "git <<<x 2>/dev/null {-c,alias.l=log} l", True),
+                ("gkr-u3", "git <<<x --config-env=`echo alias.l`=LCMD l", True),
+                ("gkr-u4", 'git <<<x log -c "$K"=v', False),
+                ("gkr-u5", "echo {a,b} <<<x; git log", False),
+                ("gkr-u6", 'git <<<x -c core.pager="$P" log', True)):
+            _gks_got = aiqt_hooks._git_alias_spelled(_gks_cmd)
+            if _gks_got is not _gks_want:
+                failures.append("({}) _git_alias_spelled({!r}): expected {}, got {}".format(
+                    _gks_label, _gks_cmd, _gks_want, _gks_got))
+        # The record leaves the decoded words unchanged (gkw-*): every lex of each command, full and partial, returns
+        # the same segments inside _WordSpellings as outside it, argv compared as plain lists; inside it each argv is
+        # a _SpelledWords with one record per word, outside it a plain list; the word reader returns the same tuple
+        # with a record asked for; and the switch is off again after each use, an exception included. Each lex and
+        # each word read runs with the locale reading off and on, since a locale quote sets the unquoted flag on a
+        # branch of its own, and the last corpus command holds every part that sets it.
+        _gks_corpus = (
+            'git -c "${A:-alias}.l"=log l; echo $"x" a{b,c} ${X,,} ~/p \\$q',
+            "git -c $'\\x61lias.l'=log l | grep -c x",
+            "x=$(true)#y; git {-c,alias.l=log} l",
+            "(true)#x\ngit -c \"$K\"=v log",
+            "a=`echo {a,b}` b=$(echo 'c') git -C {/r,s} log",
+            "x=\"$(cat <<'EOF'\n# Don't stop\nEOF\n)\"; git status",
+            'git status "unterminated',
+            "git <<<x -c a.b=c l",
+            "cat {fd}>out",
+            "((((;;;; git log",
+            "git$IFS-c -C $D `echo x` $'-\\x63' ${X:-a b} $\"l\" \"$Y\" x$ $(true)y l")
+        for _gks_index, _gks_cmd in enumerate(_gks_corpus):
+            for _gks_partial, _gks_locale in ((False, False), (True, False), (False, True), (True, True)):
+                _gks_runs = []
+                for _gks_on in (False, True):
+                    try:
+                        if _gks_on:
+                            with aiqt_hooks._WordSpellings():
+                                _gks_result = aiqt_hooks._lex_command(_gks_cmd, partial=_gks_partial,
+                                                                      locale=_gks_locale)
+                        else:
+                            _gks_result = aiqt_hooks._lex_command(_gks_cmd, partial=_gks_partial, locale=_gks_locale)
+                    except ValueError as _gks_exc:
+                        _gks_runs.append(("raised", type(_gks_exc).__name__, str(_gks_exc)))
+                        continue
+                    _gks_segs = _gks_result[0] if _gks_partial else _gks_result
+                    _gks_flags = tuple(_gks_result[1:]) if _gks_partial else ()
+                    for _gks_seg in _gks_segs:
+                        _gks_spelling = getattr(_gks_seg.argv, "spelling", None)
+                        if _gks_on and _gks_seg.argv and (not isinstance(_gks_seg.argv, aiqt_hooks._SpelledWords)
+                                                          or len(_gks_spelling) != len(_gks_seg.argv)):
+                            failures.append("(gkw-{}) a lex of {!r} inside _WordSpellings returned an argv with no "
+                                            "record per word: {!r}".format(_gks_index, _gks_cmd, _gks_seg.argv))
+                        if not _gks_on and type(_gks_seg.argv) is not list:
+                            failures.append("(gkw-{}) a lex of {!r} outside _WordSpellings returned a {} argv".format(
+                                _gks_index, _gks_cmd, type(_gks_seg.argv).__name__))
+                    _gks_runs.append(([(list(_gks_seg.argv),) + tuple(_gks_seg[1:]) for _gks_seg in _gks_segs],
+                                      _gks_flags))
+                if _gks_runs[0] != _gks_runs[1]:
+                    failures.append("(gkw-{}) the lex of {!r} (partial {}, locale {}) differs inside _WordSpellings: "
+                                    "{!r} against {!r}".format(_gks_index, _gks_cmd, _gks_partial, _gks_locale,
+                                                               _gks_runs[1], _gks_runs[0]))
+                if aiqt_hooks._WordSpellings.on:
+                    failures.append("(gkw-{}) _WordSpellings stayed on after a lex of {!r}".format(_gks_index, _gks_cmd))
+            for _gks_at in range(len(_gks_cmd)):
+                if _gks_cmd[_gks_at] in " \t\n;&|<>()#":
+                    continue
+                for _gks_locale in (False, True):
+                    _gks_holder = [None]
+                    try:
+                        _gks_plain = aiqt_hooks._read_word(_gks_cmd, _gks_at, len(_gks_cmd), [], locale=_gks_locale)
+                        _gks_rec = aiqt_hooks._read_word(_gks_cmd, _gks_at, len(_gks_cmd), [], locale=_gks_locale,
+                                                         spelling=_gks_holder)
+                    except ValueError:
+                        continue
+                    if _gks_plain != _gks_rec or not isinstance(_gks_holder[0], aiqt_hooks._WordSpelling) or not (
+                            0 <= _gks_holder[0].literal <= len(_gks_plain[0])) or not isinstance(
+                                getattr(_gks_holder[0], "unquoted", None), bool):
+                        failures.append("(gkw-read-{}-{}) _read_word on {!r} at {} (locale {}): {!r} with a record "
+                                        "asked for, {!r} without, record {!r}".format(
+                                            _gks_index, _gks_at, _gks_cmd, _gks_at, _gks_locale, _gks_rec, _gks_plain,
+                                            _gks_holder[0]))
+        try:
+            with aiqt_hooks._WordSpellings():
+                aiqt_hooks._lex_command('git status "unterminated')
+        except ValueError:
+            pass
+        if aiqt_hooks._WordSpellings.on:
+            failures.append("(gkw-raise) _WordSpellings stayed on after a lex inside it raised")
+        # The rule closed over the whole region after a git word through its subcommand word (HOW A WORD IS SPELLED,
+        # above _GIT_ALIAS_KEY_RE): a word there that carries an unquoted parameter or command expansion, which bash
+        # may split into several words, or came through an ANSI-C or locale quote, defines a git alias whatever its
+        # position. Every alias here maps to log. gke-<form>-<guard>: each guard denies, naming the git alias, an
+        # unquoted expansion in an option word (opt-word), as an option's value (opt-value) and as the subcommand
+        # word (sub-word), and an option word spelled through an ANSI-C quote that decodes to -c (ansi-word); each
+        # allowed before, except protected_line's ansi-word, which it denied for its quoting without naming an alias.
+        # gkeu-<form>-<guard>: the same behind a leading here-string, where only the de-quoted reading of the
+        # unparseable command sees it (_git_alias_spelled), naming the git alias except in protected_line, whose
+        # commit recognizer denies it as an unverifiable commit; each allowed before, and protected_line's ansi-word,
+        # which that recognizer denied for its quoting, is left out here and held by gkep. gkep-<form>-<guard>: the
+        # same with a trailing here-string, past the region, where the partial lex records each word's spelling, each
+        # deny naming the git alias (each allowed before or, in protected_line's ansi-word, denied without naming
+        # one). gkq-<form>-<guard>: the same expansion fully double-quoted, which bash does not split, keeps the
+        # allow each guard gave before, as does the option word double-quoted in place of the ANSI-C quote; the
+        # opt-word row also witnesses the disclosed residual of that decision, a double-quoted word naming -c at run
+        # time before a literal definition. gate_weakening denies each gkq row under its closed literal grammar
+        # (_gks_gw_grammar).
+        # gkqu-<form>-<guard>: on the unparseable path the de-quoted words cannot tell a double-quoted '$' from an
+        # unquoted one, so the double-quoted expansions deny there (the disclosed over-refusal; each allowed before),
+        # and so does the double-quoted option word, which holds no '$', since the leading here-string leaves the
+        # region unread (A GIT REGION THE LEXER DID NOT READ, above _git_region_open; it allowed before).
+        _gke_forms = (
+            ("opt-word", "git -$C alias.l=log l", 'git -"$C" alias.l=log l'),
+            ("opt-value", "git -C $D l", 'git -C "$D" l'),
+            ("sub-word", "git $A l", 'git "$A" l'),
+            ("ansi-word", "git $'-\\x63' alias.l=log l", 'git "-\\x63" alias.l=log l'))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gke_form, _gke_cmd, _gke_quoted in _gke_forms:
+                for _gke_label, _gke_full, _gke_want, _gke_named in (
+                        ("gke", _gke_cmd, "deny", True),
+                        ("gkeu", _gke_cmd.replace("git ", "git <<<x ", 1), "deny", _gks_name != "protected_line"),
+                        ("gkep", _gke_cmd + " <<<x", "deny", True),
+                        ("gkq", _gke_quoted, "allow", False),
+                        ("gkqu", _gke_quoted.replace("git ", "git <<<x ", 1), "deny", False)):
+                    if _gke_label == "gkeu" and _gks_name == "protected_line" and _gke_form == "ansi-word":
+                        continue
+                    _gke_grammar = (_gks_name == "gate_weakening"
+                                    and "{}-{}".format(_gke_label, _gke_form) in _gks_gw_grammar)
+                    if _gke_grammar:
+                        _gke_want = "deny"
+                    _gke_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": _gke_full}, "cwd": _gks_cwd}
+                    _gke_code, _gke_out, _gke_err = _gks_handler(_gke_data)
+                    _gke_got = _reduce_result(_gke_code, _gke_out)
+                    _gke_reason = ((_gke_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gke_got != _gke_want or (_gke_named and "git alias" not in _gke_reason) or (
+                            _gke_grammar and "closed literal grammar" not in _gke_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}{}, got {} {!r}".format(
+                            _gke_label, _gke_form, _gks_name, _gks_name, _gke_full, _gke_want,
+                            " naming the git alias" if _gke_named else
+                            " naming the closed literal grammar" if _gke_grammar else "", _gke_got, _gke_reason))
+        # The region at its edges, on words lexed inside _WordSpellings (gkv-*): a backquote, a '$(...)' and an open
+        # '${...}' in the region, an unquoted expansion in a -c value behind a literal key, a locale quote as the
+        # subcommand and a '$' bash reads literally each define one, as do the disclosed over-refusals: an unquoted
+        # variable after another word the readers take for a git word (gkv-i) and a git command inside a backquote
+        # substitution whose closing backquote the lexer reads into its subcommand word (gkv-s). The same expansion
+        # double-quoted, escaped or single-quoted, an unquoted expansion past the subcommand word or in an assignment
+        # before the command word, a leading tilde, and words lexed outside _WordSpellings define none. The git word
+        # itself is read by its decoded text alone: an opening backquote or an ANSI-C quoted sh -c body read into it
+        # defines nothing (gkv-t, gkv-u), and so, the disclosed residual, does an unquoted expansion or a brace word
+        # that bash splits into the git word and a definition (gkv-a, gkv-v; bash 5.3 printed git -c alias.l=log l
+        # for each) and one that names git at run time (gkv-h). The other disclosed residuals, witnessed: a word in
+        # the region bash builds by filename expansion or by a brace sequence expression (gkv-w, gkv-x; bash 5.3
+        # printed -c for '-[c]' where a file named -c existed, and for '-{c..c}').
+        for _gkv_label, _gkv_cmd, _gkv_want, _gkv_on in (
+                ("gkv-a", "git$IFS-c$IFS'alias.l=log' l", False, True),
+                ("gkv-b", "git `echo -c alias.l=log` l", True, True),
+                ("gkv-c", "git $(echo -c alias.l=log) l", True, True),
+                ("gkv-d", "git ${X:-a b} l", True, True),
+                ("gkv-e", "git -c core.pager=$P log", True, True),
+                ("gkv-f", 'git $"log"', True, True),
+                ("gkv-g", "git -C x$ log", True, True),
+                ("gkv-h", "$HOME/bin/git log", False, True),
+                ("gkv-i", "grep -r git $D", True, True),
+                ("gkv-s", "echo `git status`", True, True),
+                ("gkv-t", "cd `git rev-parse --show-toplevel`", False, True),
+                ("gkv-u", "bash -c $'git status'", False, True),
+                ("gkv-v", "{git,-c,alias.l=log} l", False, True),
+                ("gkv-w", "git -[c] alias.l=log l", False, True),
+                ("gkv-x", "git -{c..c} alias.l=log l", False, True),
+                ("gkv-j", '"$HOME"/bin/git log', False, True),
+                ("gkv-k", 'git "$(echo log)"', False, True),
+                ("gkv-l", 'git -c core.pager="$P" log', False, True),
+                ("gkv-m", "git -C \\$D log", False, True),
+                ("gkv-n", "git -C '$D' log", False, True),
+                ("gkv-o", "git log $X", False, True),
+                ("gkv-p", "X=$Y git log", False, True),
+                ("gkv-q", "git -C ~/repo log", False, True),
+                ("gkv-r", "git -C $D l", False, False)):
+            if _gkv_on:
+                with aiqt_hooks._WordSpellings():
+                    _gkv_segs = aiqt_hooks._lex_command(_gkv_cmd)
+            else:
+                _gkv_segs = aiqt_hooks._lex_command(_gkv_cmd)
+            _gkv_got = any(aiqt_hooks._git_local_alias(_gkv_seg.argv) for _gkv_seg in _gkv_segs)
+            if _gkv_got is not _gkv_want:
+                failures.append("({}) _git_local_alias on the lex of {!r} (spelling recorded: {}): expected {}, got {}"
+                                .format(_gkv_label, _gkv_cmd, _gkv_on, _gkv_want, _gkv_got))
+        # The same edges on the unparseable reading (gkv-u*): the de-quoted words of each command, where any '$' or
+        # backquote in the region counts, a single-quoted one too (the disclosed over-refusal), but one past the
+        # subcommand word does not.
+        for _gkv_label, _gkv_cmd, _gkv_want in (
+                ("gkv-u1", "git <<<x `echo $O` l", True),
+                ("gkv-u2", "git <<<x $(echo $O) l", True),
+                ("gkv-u3", "git <<<x -C '$D' log", True),
+                ("gkv-u4", 'git <<<x log "$X"', False)):
+            _gkv_got = aiqt_hooks._git_alias_spelled(_gkv_cmd)
+            if _gkv_got is not _gkv_want:
+                failures.append("({}) _git_alias_spelled({!r}): expected {}, got {}".format(
+                    _gkv_label, _gkv_cmd, _gkv_want, _gkv_got))
+        # The partial lex of _git_alias_recovered records each word's spelling (_WordSpellings): the only reading
+        # there that sees a definition where a quoted blank moves the de-quoted reading's subcommand word ('git -C
+        # "a b" $X' reads there as git -C a with the subcommand b, so $X stands past it). gkt-r1 and gkt-r2 hold the
+        # opt-in at the reader, the de-quoted reading alone finding no alias in either, and gkt-g*, gkt-d* and gkt-m1
+        # hold it through gate_weakening, git_discard and commit_msg_subst's unparseable fallback; each is red where
+        # that lex runs outside _WordSpellings. gkt-r2, gkt-g2 and gkt-d2 hold the key-part rule through the opt-in,
+        # the others the region rule.
+        for _gkt_label, _gkt_cmd in (("gkt-r1", 'git -C "a b" $X <<<x'), ("gkt-r2", 'git -C "a b" -c "$K"=v l <<<x')):
+            _gkt_spelled = aiqt_hooks._git_alias_spelled(_gkt_cmd)
+            _gkt_recovered = aiqt_hooks._git_alias_recovered(_gkt_cmd)
+            if _gkt_spelled or not _gkt_recovered:
+                failures.append("({}) on {!r}: expected the de-quoted reading to find no alias and the partial lex "
+                                "one, got _git_alias_spelled {} and _git_alias_recovered {}".format(
+                                    _gkt_label, _gkt_cmd, _gkt_spelled, _gkt_recovered))
+        for _gkt_label, _gkt_handler, _gkt_cmd, _gkt_cwd in (
+                ("gkt-g1", aiqt_hooks.gate_weakening, 'git -C "a b" $X <<<x', None),
+                ("gkt-g2", aiqt_hooks.gate_weakening, 'git -C "a b" -c "$K"=v l <<<x', None),
+                ("gkt-d1", aiqt_hooks.git_discard, 'git -C "a b" $X <<<x', str(_glx_dirty)),
+                ("gkt-d2", aiqt_hooks.git_discard, 'git -C "a b" -c "$K"=v l <<<x', str(_glx_dirty)),
+                ("gkt-m1", aiqt_hooks.commit_msg_subst, 'git -C "a b" $X -m "$(date)" <<<x', None)):
+            _gkt_got = _decision(_gkt_handler, _gkt_cmd, cwd=_gkt_cwd)
+            if _gkt_got != "deny":
+                failures.append("({}) {} on {!r}: expected deny, got {}".format(
+                    _gkt_label, _gkt_handler.__name__, _gkt_cmd, _gkt_got))
+        # A word reads as one word to bash only when no part of it can expand to several (_DQ_LIST_EXPANSION_RE): a
+        # double-quoted expansion of the positional list or of an array subscripted with @, in any parameter-expansion
+        # form, expands to one word per element, and so does an indirect expansion whose reference (a variable, an
+        # array element read through a subscript of its own, a positional parameter or $*) holds a list reference
+        # (bash 5.3 printed <-c><alias.qx=version> for each form here), so the reader marks it as a word bash may
+        # split. gkl-<form>-<guard>: each guard denies it in the region, naming a word built at run time (each allowed
+        # before). gklc-<form>-<guard>: a double-quoted expansion that expands to one word (a '*' list, a length, one
+        # element, the '*' key list, a prefix-names star, an indirect one through the argument count, a pattern
+        # holding '@') keeps the allow, except in gate_weakening, whose closed literal grammar denies each
+        # (_gks_gw_grammar). gkl-read-*: the record at the reader, each red where the double-quoted '$@' or
+        # '${...[@]}' branch stops setting the flag.
+        _gkl_forms = (
+            ("at", 'git "$@" l'), ("at-brace", 'git "${@:1}" l'), ("arr", 'git "${A[@]}" l'),
+            ("arr-op", 'git "${A[@]:0}" l'), ("keys", 'git "${!A[@]}" l'), ("names", 'git "${!pre@}" l'),
+            ("ind", 'git "${!R}" l'), ("ind-op", 'git "${!R:-x}" l'), ("ind-value", 'git -C "${!R}" l'),
+            ("ind-sub", 'git "${!A[0]}" l'), ("ind-sub-op", 'git "${!A[0]:-x}" l'),
+            ("ind-sub-var", 'git "${!A[$i]}" l'), ("ind-sub-value", 'git -C "${!A[0]}" l'),
+            ("ind-star-op", 'git "${!A[*]:-x}" l'), ("ind-pos", 'git "${!1}" l'), ("ind-args", 'git "${!*}" l'),
+            ("nested", 'git "${x:-$@}" l'), ("value", 'git -C "${A[@]}" l'))
+        _gkl_controls = (
+            ("star", 'git "$*" log'), ("arr-star", 'git "${A[*]}" log'), ("length", 'git -C "${#A[@]}" log'),
+            ("element", 'git -C "${A[0]}" log'), ("names-star", 'git "${!pre*}" log'),
+            ("ind-star", 'git "${!R*}" log'), ("keys-star", 'git -C "${!A[*]}" log'),
+            ("ind-sub-star", 'git -C "${!A[0]*}" log'), ("ind-count", 'git -C "${!#}" log'),
+            ("pattern", 'git -c user.email="${EMAIL%@*}" log'))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gkl_label, _gkl_rows, _gkl_want in (("gkl", _gkl_forms, "deny"), ("gklc", _gkl_controls, "allow")):
+                for _gkl_form, _gkl_cmd in _gkl_rows:
+                    _gkl_grammar = (_gks_name == "gate_weakening"
+                                    and "{}-{}".format(_gkl_label, _gkl_form) in _gks_gw_grammar)
+                    _gkl_row_want = "deny" if _gkl_grammar else _gkl_want
+                    _gkl_code, _gkl_out, _gkl_err = _gks_handler({
+                        "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": _gkl_cmd},
+                        "cwd": _gks_cwd})
+                    _gkl_got = _reduce_result(_gkl_code, _gkl_out)
+                    _gkl_reason = ((_gkl_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gkl_got != _gkl_row_want or (
+                            "closed literal grammar" not in _gkl_reason if _gkl_grammar
+                            else _gkl_want == "deny" and "builds at run time" not in _gkl_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {} {!r}".format(
+                            _gkl_label, _gkl_form, _gks_name, _gks_name, _gkl_cmd, _gkl_row_want, _gkl_got,
+                            _gkl_reason))
+        for _gkl_label, _gkl_word, _gkl_want, _gkl_locale in (
+                ("gkl-read-at", '"$@"', True, False), ("gkl-read-arr", '"${A[@]}"', True, False),
+                ("gkl-read-names", '"${!p@}"', True, False), ("gkl-read-star", '"$*"', False, False),
+                # An indirect expansion expands to a list when its reference holds a list reference, a subscript of
+                # its own or a positional parameter included (bash 5.3: with R, A[0], H[k], $0 or $1 set to B[@],
+                # "${!R}", "${!R:-x}", "${!A[0]}", "${!A[$i]}", "${!H[k]}", "${!A[*]:-x}", "${!1}", "${!0}" and
+                # "${!*}" expanded the list), so its word is marked as one bash may split; the prefix-names-star
+                # "${!R*}" and "${!A[0]*}", the '*' key list "${!A[*]}" and "${!#}", through the argument count, each
+                # stay one word.
+                ("gkl-read-ind", '"${!R}"', True, False), ("gkl-read-ind-op", '"${!R:-x}"', True, False),
+                ("gkl-read-ind-star", '"${!R*}"', False, False), ("gkl-read-ind-sub", '"${!A[0]}"', True, False),
+                ("gkl-read-ind-sub-op", '"${!A[0]:-x}"', True, False),
+                ("gkl-read-ind-sub-var", '"${!A[$i]}"', True, False), ("gkl-read-ind-assoc", '"${!H[k]}"', True, False),
+                ("gkl-read-ind-star-op", '"${!A[*]:-x}"', True, False), ("gkl-read-ind-pos", '"${!1}"', True, False),
+                ("gkl-read-ind-zero", '"${!0}"', True, False), ("gkl-read-ind-args", '"${!*}"', True, False),
+                ("gkl-read-ind-nested", '"${x:-${!A[0]}}"', True, False),
+                ("gkl-read-keys-star", '"${!A[*]}"', False, False),
+                ("gkl-read-ind-sub-star", '"${!A[0]*}"', False, False), ("gkl-read-ind-count", '"${!#}"', False, False),
+                ("gkl-read-element", '"${A[0]}"', False, False), ("gkl-read-length-elem", '"${#A[0]}"', False, False),
+                ("gkl-read-arr-star", '"${A[*]}"', False, False), ("gkl-read-length", '"${#A[@]}"', False, False),
+                ("gkl-read-scalar", '"$x"', False, False), ("gkl-read-transform", '"${x@Q}"', False, False),
+                # The locale-quote branch records its word as built at run time: with the locale reading on, $"x"
+                # reads as the double-quoted x, and only that branch sets the flag (red where it stops).
+                ("gkl-read-locale", '$"x"', True, True)):
+            _gkl_holder = [None]
+            aiqt_hooks._read_word(_gkl_word, 0, len(_gkl_word), [], locale=_gkl_locale, spelling=_gkl_holder)
+            if _gkl_holder[0].unquoted is not _gkl_want:
+                failures.append("({}) _read_word on {!r} (locale {}): expected unquoted {}, got {!r}".format(
+                    _gkl_label, _gkl_word, _gkl_locale, _gkl_want, _gkl_holder[0]))
+        with aiqt_hooks._WordSpellings():
+            _gkl_segs = aiqt_hooks._lex_command('git -C $"x" l', locale=True)
+        if not any(aiqt_hooks._git_local_alias(_gkl_seg.argv) for _gkl_seg in _gkl_segs):
+            failures.append("(gkl-locale-lex) _git_local_alias on the locale lex of 'git -C $\"x\" l': expected a "
+                            "word built at run time in the region, got none")
+        # A git region the lexer did not read (A GIT REGION THE LEXER DID NOT READ, above _git_region_open): on an
+        # unparseable command, a git command whose option region the partial lexer stopped before (a leading
+        # here-string) or never reached (past the stop) denies fail closed, where the de-quoted reading, which a
+        # quoted blank or separator shifts, allowed each before. gku2-<form>-<guard>: each guard denies, gate_weakening,
+        # git_discard and branch_root naming a word built at run time (protected_line's commit recognizer denies it as
+        # an unverifiable commit). open-log is the disclosed over-refusal of an open region with a literal subcommand.
+        # The reading past the stop is the union of the measured re-lex and the every-git-word reading (A GIT
+        # REGION THE LEXER DID NOT READ): past-echo reaches the real git command past a quoted git word that the
+        # old reading mis-read as the command; heredoc and fd deny through the unmeasured-construct union (red
+        # where that fallback returns False); split-* deny where a here-string splits a resolved wrapper's words
+        # (the resume is not at a separator); procsub-esc denies with the escaped parenthesis honoured in the
+        # measure; wrapper-flock and wrapper-ionice deny through the plain git word a command off the wrapper
+        # list carries; hash-resume denies where a '#' right after the measured construct hides the rest from
+        # the re-lex; procsub-body denies through the git region inside the measured construct's own text.
+        # redirect-* deny where the git command stands in a redirect target, which no recovered word holds (red
+        # where the git-word accounting of the re-lexed text is off); dq-* and assign-subst deny where it stands
+        # in a substitution inside a double-quoted word (red where a git word beside a '$' or backquote no longer
+        # keeps the raw reading); herestring-subst denies where it stands in the here-string's own word (red
+        # where a git word inside the measured construct no longer keeps it); split-bashc-* deny where a
+        # here-string splits a wrapper's words ahead of an sh -c body, which no recovered command runs as git
+        # (red where the resume test alone is reverted: a git command the wrapper runs directly past the split
+        # is a plain word the union view walks, so split-nice and split-env stay green there); procsub-esc-bashc
+        # denies past a process substitution whose body met a backslash escape (red where the escape term is off).
+        # gku2c-<form>-<guard>: a literal region the lexer read in full, or that the reading past the stop reads
+        # in full, keeps its allow; the nongit-* controls carry git only as quoted text or a pre-stop operand
+        # (grep), so the scoping and the proven-quoted narrowing keep them allowed, except in gate_weakening, whose
+        # closed literal grammar denies each (_gks_gw_grammar); esc-literal and
+        # heredoc-literal keep a literal closed region allowed past an escaped parenthesis or a heredoc.
+        _gku2_forms = (
+            ("qblank", 'git <<<x -C "a b" $X l'), ("squote", "git <<<x -C 'a b' $X l"),
+            ("qsep", 'git <<<x -C "a;b" $X l'), ("key", 'git <<<x -C "a b" -c "$K"=v l'),
+            ("lead", '<<<x git -C "a b" $X l'), ("past", 'cat <<<x; git -C "a b" $X l'),
+            ("past-echo", 'cat <<<x; echo "git log"; git -C "a b" $X l'),
+            ("open-log", "git <<<x log"),
+            ("heredoc", 'cat <<EOF\nx\nEOF\ngit -C "a b" $X l'),
+            ("fd", 'exec {fd}>/dev/null; git -C "a b" $X l'),
+            ("fd-lead", 'exec {fd}>/dev/null; git <<<y -C "a b" $X l'),
+            ("split-nice", 'nice <<<x -n 5 git -C "a b" $X l'),
+            ("split-env", 'env <<<x -u V git -C "a b" $X l'),
+            ("procsub-esc", 'cat <(echo \\(); git -C "a b" $X l; case a in a) true;; esac'),
+            ("wrapper-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l'),
+            ("wrapper-ionice", 'cat <<<x; ionice -c3 git -C "a b" $X l'),
+            ("hash-resume", 'cat <(a)#; git -C "a b" $X l'),
+            ("procsub-body", 'cat <(git -C "a b" $X l); true'),
+            ("redirect-subst", "cat <<<x; echo hi >\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("redirect-backquote", "cat <<<x; echo hi 2>`git -C 'a b' $X c --no-verify -m y`"),
+            ("dq-subst", "cat <<<x; echo \"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("dq-backquote", "cat <<<x; echo \"`git -C 'a b' $X c --no-verify -m y`\""),
+            ("assign-subst", "cat <<<x; y=\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("herestring-subst", "cat <<<\"$(git -C 'a b' $X c --no-verify -m y)\""),
+            ("split-bashc-nice", "nice <<<x -n 5 bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-env", "env <<<x -u V bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-timeout", "timeout <<<x 5 bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("split-bashc-sudo", "sudo <<<x -u u bash -c 'git <<<y -C a c --no-verify -m y'"),
+            ("procsub-esc-bashc", "cat <(echo \\(); bash -c 'git <<<y -C a c --no-verify -m y'"))
+        _gku2_controls = (
+            ("trail", "git log --oneline <<<x"), ("past-literal", "cat <<<x; git status"),
+            ("past-quoted", 'cat <<<x; git log "$a"'), ("procsub", "diff <(git show HEAD:f) f"),
+            ("nongit-echo", 'cat <<<x; echo "run git"'), ("nongit-grep", 'grep -c git <<<"$s"'),
+            ("nongit-gh", 'cat <<<x; gh pr create --body "mentions git here"'),
+            ("esc-literal", 'cat <(echo \\(); git status'),
+            ("heredoc-literal", "cat <<EOF\nx\nEOF\ngit status"))
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            for _gku2_label, _gku2_rows, _gku2_want in (("gku2", _gku2_forms, "deny"),
+                                                        ("gku2c", _gku2_controls, "allow")):
+                for _gku2_form, _gku2_cmd in _gku2_rows:
+                    _gku2_grammar = (_gks_name == "gate_weakening"
+                                     and "{}-{}".format(_gku2_label, _gku2_form) in _gks_gw_grammar)
+                    _gku2_row_want = "deny" if _gku2_grammar else _gku2_want
+                    _gku2_code, _gku2_out, _gku2_err = _gks_handler({
+                        "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": _gku2_cmd},
+                        "cwd": _gks_cwd})
+                    _gku2_got = _reduce_result(_gku2_code, _gku2_out)
+                    _gku2_reason = ((_gku2_out or {}).get("hookSpecificOutput") or {}).get(
+                        "permissionDecisionReason", "")
+                    if _gku2_got != _gku2_row_want or (
+                            "closed literal grammar" not in _gku2_reason if _gku2_grammar
+                            else _gku2_want == "deny" and _gks_name != "protected_line"
+                            and "builds at run time" not in _gku2_reason):
+                        failures.append("({}-{}-{}) {} on {!r}: expected {}, got {} {!r}".format(
+                            _gku2_label, _gku2_form, _gks_name, _gks_name, _gku2_cmd, _gku2_row_want, _gku2_got,
+                            _gku2_reason))
+        # The readers at their edges. gku2-open-*: a region whose walk ends exactly at the last word read is open,
+        # one that reads one word more is not, and a value-taking option as the last word is open. gku2-read-*: the
+        # region read from a git word stops at its subcommand word, a separator or a comment, reads past a redirect
+        # and its target, and is unread (None) at a here-string, a process substitution, a '{fd}' redirect or an
+        # unterminated quote before the subcommand word.
+        for _gku2_label, _gku2_tokens, _gku2_want in (
+                ("gku2-open-git", ["git"], True), ("gku2-open-value", ["git", "-C"], True),
+                ("gku2-open-at", ["git", "-C", "x"], True), ("gku2-open-past", ["git", "-C", "x", "l"], False),
+                ("gku2-open-other", ["grep", "-c", "git"], True), ("gku2-open-none", ["cat", "x"], False)):
+            _gku2_got = aiqt_hooks._git_region_open(_gku2_tokens)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_region_open({!r}): expected {}, got {}".format(
+                    _gku2_label, _gku2_tokens, _gku2_want, _gku2_got))
+        for _gku2_label, _gku2_cmd, _gku2_want in (
+                ("gku2-read-sub", 'git -C "a b" $X l', ["git", "-C", "a b", "$X"]),
+                ("gku2-read-sep", "git -C a; $X l", ["git", "-C", "a"]),
+                ("gku2-read-comment", "git -C a #x\n$X", ["git", "-C", "a"]),
+                ("gku2-read-redirect", "git 2>/dev/null -C a l", ["git", "-C", "a", "l"]),
+                ("gku2-read-herestring", "git <<<x l", None), ("gku2-read-procsub", "git -C <(x) l", None),
+                ("gku2-read-fd", "git {fd}>x l", None), ("gku2-read-quote", 'git -C "a l', None)):
+            _gku2_region = aiqt_hooks._git_region_read(_gku2_cmd, 0)
+            _gku2_got = None if _gku2_region is None else list(_gku2_region[0])
+            if _gku2_got != _gku2_want:
+                failures.append("({}) _git_region_read({!r}, 0): expected {!r}, got {!r}".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_got))
+        # The construct measure at its edges (gku2-measure-*): an escaped parenthesis opens and closes nothing,
+        # so the measure ends at the real ')' and records the escape it met; an unescaped extra '(' leaves the
+        # body unterminated (None); a here-string's measure ends just past its target word; a heredoc and a
+        # '{fd}' redirect stay unmeasured (None).
+        for _gku2_label, _gku2_cmd, _gku2_want, _gku2_esc_want in (
+                ("gku2-measure-esc", 'cat <(echo \\(); true', 14, True),
+                ("gku2-measure-esc-close", 'cat <(echo \\)); true', 14, True),
+                ("gku2-measure-plain", "cat <(true); true", 11, False),
+                ("gku2-measure-unbalanced", "cat <(echo (; true", None, False),
+                ("gku2-measure-herestring", "cat <<<x; true", 8, False),
+                ("gku2-measure-heredoc", "cat <<EOF\nx\nEOF\ntrue", None, False),
+                ("gku2-measure-fd", "exec {fd}>/dev/null; true", None, False)):
+            _gku2_esc = [False]
+            _gku2_got = aiqt_hooks._construct_end(_gku2_cmd, 4, _gku2_esc)
+            if _gku2_got != _gku2_want or _gku2_esc[0] is not _gku2_esc_want:
+                failures.append("({}) _construct_end({!r}, 4): expected ({!r}, escape {}), got ({!r}, {})".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_esc_want, _gku2_got, _gku2_esc[0]))
+        # The resume test at its boundary: a separator right after the construct (or nothing but blanks) is a
+        # command position; the first word character, redirect or '#' is not, however many blanks precede it.
+        for _gku2_label, _gku2_rest, _gku2_want in (
+                ("gku2-resume-empty", "", True), ("gku2-resume-blanks", "  \t", True),
+                ("gku2-resume-semi", " ; git", True), ("gku2-resume-newline", "\ngit", True),
+                ("gku2-resume-amp", " && git", True), ("gku2-resume-pipe", " | git", True),
+                ("gku2-resume-word", " -n 5 git", False), ("gku2-resume-hash", " #x\ngit", False),
+                ("gku2-resume-redirect", " >f; git", False)):
+            _gku2_got = aiqt_hooks._resumes_at_separator(_gku2_rest)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _resumes_at_separator({!r}): expected {}, got {}".format(
+                    _gku2_label, _gku2_rest, _gku2_want, _gku2_got))
+        # The union view of a recovered segment: a plain git word any command carries keeps the walk (flock),
+        # a git word proven quoted text is neutralized (echo "run git" has no walkable git word), and one beside
+        # a '$' or backquote defers to the raw reading (expansion True).
+        with aiqt_hooks._WordSpellings():
+            _gku2_flock = aiqt_hooks._lex_command('flock /tmp/l git -C "a b" $X l')[0][0]
+            _gku2_quoted = aiqt_hooks._lex_command('echo "run git"')[0][0]
+            _gku2_subst = aiqt_hooks._lex_command('echo "$(git log)"')[0][0]
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_flock)
+        if (_gku2_union is None or _gku2_exp
+                or not (aiqt_hooks._git_region_open(_gku2_union) or aiqt_hooks._git_local_alias(_gku2_union))):
+            failures.append("(gku2-union-flock) _segment_union_words kept no walkable git word for the flock "
+                            "carrier, or its walk read no run-time word: got ({!r}, {})".format(
+                                _gku2_union, _gku2_exp))
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_quoted)
+        if _gku2_union is not None or _gku2_exp:
+            failures.append("(gku2-union-quoted) _segment_union_words on a quoted git word: expected "
+                            "(None, False), got ({!r}, {})".format(_gku2_union, _gku2_exp))
+        _gku2_union, _gku2_exp = aiqt_hooks._segment_union_words(_gku2_subst)
+        if _gku2_exp is not True:
+            failures.append("(gku2-union-subst) _segment_union_words on a substitution carrying git: expected "
+                            "expansion True, got ({!r}, {})".format(_gku2_union, _gku2_exp))
+        # The every-git-word reading on raw text: a region holding a run-time word or stopped by a construct
+        # denies, a closed literal region does not, and reading starts at pos (a git word before it is skipped).
+        for _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want in (
+                ("gku2-raw-runtime", '<<EOF\ngit -C "a b" $X l', 0, True),
+                ("gku2-raw-construct", "<<<x; foo git <<<y -C a l", 0, True),
+                ("gku2-raw-literal", "<<<x; git status", 0, False),
+                ("gku2-raw-before-pos", 'git -C "a b" $X l; true', 18, False)):
+            _gku2_got = aiqt_hooks._git_alias_unread_everyword(_gku2_cmd, _gku2_pos)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_alias_unread_everyword({!r}, {}): expected {}, got {}".format(
+                    _gku2_label, _gku2_cmd, _gku2_pos, _gku2_want, _gku2_got))
+        # The reading past the stop on its own. esc-quoted: past a process substitution whose body met a
+        # backslash escape, the raw reading is kept, so a quoted git word there denies (a disclosed over-refusal,
+        # red where the escape term is off); plain-quoted is the same text with no escape, which allows.
+        for _gku2_label, _gku2_cmd, _gku2_want in (
+                ("gku2-unread-lead", 'git <<<x -C "a b" $X l', True),
+                ("gku2-unread-past", 'cat <<<x; git -C "a b" $X l', True),
+                ("gku2-unread-trail", 'git -C "a b" log <<<x', False),
+                ("gku2-unread-literal", "cat <<<x; git status", False),
+                ("gku2-unread-heredoc", 'cat <<EOF\nx\nEOF\ngit -C "a b" $X l', True),
+                ("gku2-unread-fd", 'exec {fd}>/dev/null; git -C "a b" $X l', True),
+                ("gku2-unread-split", 'nice <<<x -n 5 git -C "a b" $X l', True),
+                ("gku2-unread-escparen", 'cat <(echo \\(); git -C "a b" $X l; case a in a) true;; esac', True),
+                ("gku2-unread-flock", 'cat <<<x; flock /tmp/l git -C "a b" $X l', True),
+                ("gku2-unread-body", 'cat <(git -C "a b" $X l); true', True),
+                ("gku2-unread-esc-literal", 'cat <(echo \\(); git status', False),
+                ("gku2-unread-esc-quoted", "cat <(echo \\(); echo 'git <<<y c --no-verify -m y'", True),
+                ("gku2-unread-plain-quoted", "cat <(echo a); echo 'git <<<y c --no-verify -m y'", False),
+                ("gku2-unread-heredoc-literal", "cat <<EOF\nx\nEOF\ngit status", False)):
+            with aiqt_hooks._LexStops() as _gku2_stops:
+                aiqt_hooks._lex_command(_gku2_cmd, partial=True)
+            _gku2_got = aiqt_hooks._git_alias_unread(_gku2_cmd, _gku2_stops.seen)
+            if _gku2_got is not _gku2_want:
+                failures.append("({}) _git_alias_unread({!r}): expected {}, got {} (stops {!r})".format(
+                    _gku2_label, _gku2_cmd, _gku2_want, _gku2_got, _gku2_stops.seen))
+        if aiqt_hooks._LexStops.at is not None:
+            failures.append("(gku2-stops-off) _LexStops kept recording after its context closed")
+        # The deny reason (gkm-<kind>-<guard>): a word the shell builds at run time in a git command's options is
+        # named as such, with the quoting fix, and not as an alias the command defines; an actual alias definition
+        # keeps the alias wording. Each built row named only an alias before.
+        for _gks_handler, _gks_cwd in _gks_guards:
+            _gks_name = _gks_handler.__name__
+            _gkm_alias_texts = ("defines a git alias for itself", "a git alias the command defines or runs under")
+            for _gkm_label, _gkm_cmd, _gkm_has, _gkm_lacks in (
+                    ("gkm-built", "git -C $D l", ("builds at run time", "Quote the expansion"), _gkm_alias_texts),
+                    ("gkm-list", 'git "$@" l', ("builds at run time", "Quote the expansion"), _gkm_alias_texts),
+                    ("gkm-alias", "git -c alias.l=log l", ("git alias",), ("builds at run time",))):
+                _gkm_code, _gkm_out, _gkm_err = _gks_handler({
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": _gkm_cmd},
+                    "cwd": _gks_cwd})
+                _gkm_reason = ((_gkm_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                if (_reduce_result(_gkm_code, _gkm_out) != "deny" or any(_h not in _gkm_reason for _h in _gkm_has)
+                        or any(_l in _gkm_reason for _l in _gkm_lacks)):
+                    failures.append("({}-{}) {} on {!r}: expected a deny holding {!r} and not {!r}, got {!r}".format(
+                        _gkm_label, _gks_name, _gks_name, _gkm_cmd, _gkm_has, _gkm_lacks, _gkm_reason))
+        # git_discard denies a hook input whose command is missing or not a string, as the other git guards do for
+        # unreadable input (gkd-*; each allowed before).
+        for _gkd_label, _gkd_input in (("gkd-no-command", {}), ("gkd-int", {"command": 5}),
+                                       ("gkd-none", {"command": None}), ("gkd-no-input", None),
+                                       ("gkd-list-input", ["git reset --hard"])):
+            _gkd_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(_glx_dirty)}
+            if _gkd_input is not None:
+                _gkd_data["tool_input"] = _gkd_input
+            _gkd_code, _gkd_out, _gkd_err = aiqt_hooks.git_discard(_gkd_data)
+            if _reduce_result(_gkd_code, _gkd_out) != "deny":
+                failures.append("({}) git_discard on tool_input {!r}: expected deny, got {}".format(
+                    _gkd_label, _gkd_input, _reduce_result(_gkd_code, _gkd_out)))
+        # The shared local-alias reading at its edges (_git_local_alias): a definition after a git word behind a
+        # reserved word, a group, time or a wrapper carrying an assignment counts (glw-a to glw-d), as does an
+        # assignment before the command word when a later word of the segment is git (glw-g) and a definition after
+        # a git word that is another git word's option value (glw-i); a -c after the subcommand (glw-e), an
+        # assignment with no git word in its segment (glw-f), a definition inside another word's text (glw-h, the
+        # disclosed residual) and a -c that is the value of -C (glw-j: git 2.53.0 takes it as the directory) do
+        # not. Each of glw-a to glw-d was False before, when only the command word was read, and glw-f was True, read
+        # by callers only behind a git command word.
+        for _glw_label, _glw_tokens, _glw_want in (
+                ("glw-a", ["then", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-b", ["{", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-c", ["time", "git", "--config-env", "alias.x=E", "x"], True),
+                ("glw-d", ["env", "FOO=1", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-e", ["then", "git", "log", "-c", "alias.x=y"], False),
+                ("glw-f", ["GIT_CONFIG_KEY_0=alias.x"], False),
+                ("glw-g", ["GIT_CONFIG_KEY_0=alias.x", "env", "git", "x"], True),
+                ("glw-h", ["sh", "-c", "git -c alias.x=log x"], False),
+                ("glw-i", ["git", "-C", "git", "-c", "alias.x=log", "x"], True),
+                ("glw-j", ["then", "git", "-C", "-c", "alias.x=log", "x"], False)):
+            _glw_got = aiqt_hooks._git_local_alias(_glw_tokens)
+            if _glw_got is not _glw_want:
+                failures.append("({}) _git_local_alias({!r}): expected {}, got {}".format(
+                    _glw_label, _glw_tokens, _glw_want, _glw_got))
+        # branch_root's last fallback, reached when even the partial lex fails (forced here by a lexer that always
+        # raises): a git command under a git alias the command's text or the hook's environment may define denies
+        # (glx-lf-1, glx-lf-2), and one under none keeps the open-grammar allow (glx-lf-3).
+        def _glx_lex_fail(*_args, **_kwargs):
+            raise ValueError("forced lex failure")
+
+        _glx_lex = aiqt_hooks._lex_command
+        _glw_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        aiqt_hooks._lex_command = _glx_lex_fail
+        try:
+            for _glw_label, _glw_env, _glw_full, _glw_want in (
+                    ("glx-lf-1", {}, "export GIT_CONFIG_PARAMETERS=x; git co -b glx-new", "deny"),
+                    ("glx-lf-2", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, "git co -b glx-new", "deny"),
+                    ("glx-lf-3", {}, "git co -b glx-new", "allow")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glw_env)
+                _glw_got = _decision(aiqt_hooks.branch_root, _glw_full, cwd=str(_glx_branch))
+                if _glw_got != _glw_want:
+                    failures.append("({}) branch_root on {!r} with {!r} in the environment and a failing lexer: "
+                                    "expected {}, got {}".format(_glw_label, _glw_full, _glw_env, _glw_want, _glw_got))
+        finally:
+            aiqt_hooks._lex_command = _glx_lex
+            for _glx_name, _glx_value in _glw_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # An info flag (-h, --help) exempts a git command from gate_weakening's and branch_root's reading of its
+        # subcommand only when it runs under no git alias: git runs an alias with the flag passed on to it (on git
+        # 2.53.0 a shell alias ran under 'c -h', 'c x -h' and 'c x --help', one of them committing past a refusing
+        # pre-commit hook). glx-h1 to glx-h8 each allowed before: an alias the git command defines for itself with -c,
+        # --config-env or include.path, the flag after the alias name or after an operand. glx-h9 to glx-h12 keep their
+        # deny: the same command behind 'then' or time, and an alias the hook's environment carries. glx-h13 to
+        # glx-h19 keep the allow of a help invocation under no alias, with a -c that defines none or an environment
+        # carrying only unrelated configuration too. glx-h20, a --no-verify after the flag (git 2.53.0 printed the
+        # usage and committed nothing), denies: the closed literal grammar's raw bypass scan reads that --no-verify.
+        _glh_gate = "git -c 'alias.c=!git commit --no-verify -m y #' c"
+        _glh_branch = "git -c 'alias.co=!git checkout -b glx-new #' co"
+        _glh_unrelated = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0"}
+        _glh_saved = {_glx_name: os.environ.get(_glx_name) for _glx_name in _glx_names}
+        try:
+            for _glh_label, _glh_env, _glh_handler, _glh_full, _glh_want in (
+                    ("glx-h1", {}, aiqt_hooks.gate_weakening, _glh_gate + " -h", "deny"),
+                    ("glx-h2", {}, aiqt_hooks.gate_weakening, _glh_gate + " x --help", "deny"),
+                    ("glx-h3", {}, aiqt_hooks.gate_weakening, _glh_gate + " x -h", "deny"),
+                    ("glx-h4", {}, aiqt_hooks.gate_weakening, "git --config-env alias.c=CCMD c -h", "deny"),
+                    ("glx-h5", {}, aiqt_hooks.gate_weakening, "git -c include.path=/abs/aliases.cfg c -h", "deny"),
+                    ("glx-h6", {}, aiqt_hooks.branch_root, _glh_branch + " -h", "deny"),
+                    ("glx-h7", {}, aiqt_hooks.branch_root, "git --config-env alias.co=CCMD co -h", "deny"),
+                    ("glx-h8", {}, aiqt_hooks.branch_root, "git --config-env=alias.co=CCMD co x --help", "deny"),
+                    ("glx-h9", {}, aiqt_hooks.gate_weakening, "if true; then " + _glh_gate + " -h; fi", "deny"),
+                    ("glx-h10", {}, aiqt_hooks.branch_root, "time " + _glh_branch + " -h", "deny"),
+                    ("glx-h11", {"GIT_CONFIG_PARAMETERS": "'alias.c'='commit'"}, aiqt_hooks.gate_weakening, "git c -h",
+                     "deny"),
+                    ("glx-h12", {"GIT_CONFIG_PARAMETERS": "'alias.co'='checkout'"}, aiqt_hooks.branch_root, "git co -h",
+                     "deny"),
+                    ("glx-h13", {}, aiqt_hooks.gate_weakening, "git commit -h", "allow"),
+                    ("glx-h14", {}, aiqt_hooks.gate_weakening, "git commit --help", "allow"),
+                    ("glx-h15", {}, aiqt_hooks.gate_weakening, "git -c user.name=x commit -h", "allow"),
+                    ("glx-h16", _glh_unrelated, aiqt_hooks.gate_weakening, "git commit -h", "allow"),
+                    ("glx-h17", {}, aiqt_hooks.branch_root, "git checkout -b glx-new -h", "allow"),
+                    ("glx-h18", {}, aiqt_hooks.branch_root, "git switch --help", "allow"),
+                    ("glx-h19", {}, aiqt_hooks.branch_root, "git -c user.name=x checkout -h", "allow"),
+                    ("glx-h20", {}, aiqt_hooks.gate_weakening, "git commit -h --no-verify -m y", "deny")):
+                for _glx_name in _glx_names:
+                    os.environ.pop(_glx_name, None)
+                os.environ.update(_glh_env)
+                _glh_cwd = str(_glx_branch) if _glh_handler is aiqt_hooks.branch_root else None
+                _glh_got = _decision(_glh_handler, _glh_full, cwd=_glh_cwd)
+                if _glh_got != _glh_want:
+                    failures.append("({}) {} on {!r} with {!r} in the environment: expected {}, got {}".format(
+                        _glh_label, _glh_handler.__name__, _glh_full, _glh_env, _glh_want, _glh_got))
+        finally:
+            for _glx_name, _glx_value in _glh_saved.items():
+                if _glx_value is None:
+                    os.environ.pop(_glx_name, None)
+                else:
+                    os.environ[_glx_name] = _glx_value
+        # A git alias definition after a construct the lexer stops at (a here-string, an unquoted heredoc, a '{fd}'
+        # redirect) is in no segment the partial lex recovers, so the parse-error reading reads the text for one
+        # (_git_alias_spelled): glx-p-<guard>-<shape> denies under each of the four guards, and glx-p-msg under
+        # commit_msg_subst's fallback; each allowed before (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an
+        # alias FILE defined). glx-pc1 to glx-pc4 keep the deny of a definition the lexer reads (no construct, or the
+        # construct after it). glx-pc5 to glx-pc8 keep the allow of an unparseable git command that defines no alias
+        # and whose region the lexer read. glx-pc9, a -c with a key outside the alias, include and includeIf sections
+        # behind a leading here-string, now denies: the lexer stops before that region, so it is unread (A GIT REGION
+        # THE LEXER DID NOT READ, above _git_region_open; it allowed before). glx-po1 is the disclosed over-refusal: a
+        # definition spelling in any word of an unparseable command that names git counts.
+        for _glp_shape, _glp_full in (
+                ("herestring", "git <<<x -c include.path=/abs/aliases.cfg c"),
+                ("config-env", "git <<<x --config-env alias.c=CCMD c"),
+                ("heredoc", "git <<EOF -c include.path=/abs/aliases.cfg c\nbody\nEOF"),
+                ("fdvar", "git {fd}>/dev/null -c include.path=/abs/aliases.cfg c")):
+            for _glp_handler, _glp_cwd in ((aiqt_hooks.gate_weakening, None), (aiqt_hooks.protected_line, plr),
+                                           (aiqt_hooks.git_discard, str(_glx_dirty)),
+                                           (aiqt_hooks.branch_root, str(_glx_branch))):
+                _glp_got = _decision(_glp_handler, _glp_full, cwd=_glp_cwd)
+                if _glp_got != "deny":
+                    failures.append("(glx-p-{}-{}) {} on {!r}: expected deny, got {}".format(
+                        _glp_handler.__name__, _glp_shape, _glp_handler.__name__, _glp_full, _glp_got))
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-p-msg", aiqt_hooks.commit_msg_subst, 'git <<<x --config-env alias.c=CCMD c -m "$(date)"', None,
+                 "deny"),
+                ("glx-pc1", aiqt_hooks.protected_line, "git -c include.path=/abs/aliases.cfg c", plr, "deny"),
+                ("glx-pc2", aiqt_hooks.gate_weakening, "git --config-env alias.c=CCMD c", None, "deny"),
+                ("glx-pc3", aiqt_hooks.git_discard, "git -c include.path=/abs/aliases.cfg c <<<x", str(_glx_dirty),
+                 "deny"),
+                ("glx-pc4", aiqt_hooks.branch_root, "git -c include.path=/abs/aliases.cfg c <<<x", str(_glx_branch),
+                 "deny"),
+                ("glx-pc5", aiqt_hooks.gate_weakening, "git status <<<x", None, "allow"),
+                ("glx-pc6", aiqt_hooks.protected_line, "git log <<EOF\nbody\nEOF", plr, "allow"),
+                ("glx-pc7", aiqt_hooks.git_discard, "git status {fd}>/dev/null", str(_glx_dirty), "allow"),
+                ("glx-pc8", aiqt_hooks.branch_root, "git status <<<x", str(_glx_branch), "allow"),
+                ("glx-pc9", aiqt_hooks.gate_weakening, "git <<<x -c core.pager=cat log", None, "deny"),
+                ("glx-po1", aiqt_hooks.gate_weakening, "echo -c alias.x=y; git status <<<x", None, "deny")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
+        # The text rule at its edges (_git_config_env_named): the name in a word (glx-t1), in quotes (glx-t2), in a
+        # here-string (glx-t3), split across lines by a continuation (glx-t4) or on a line before the git command
+        # (glx-t5), escaped (glx-t6), in an unparseable command (glx-t7), and a git command inside an eval word
+        # (glx-t8) each deny; each allowed before the text rule, and each defined the alias on git 2.53.0. A name
+        # built at run time (glx-r1) or by a brace expansion (glx-r2), and one set in a sourced file (glx-r3), stay
+        # the disclosed residual and allow.
+        for _glx_label, _glx_handler, _glx_full, _glx_cwd, _glx_want in (
+                ("glx-t1", aiqt_hooks.protected_line,
+                 'set -a; printf -v GIT_CONFIG_PARAMETERS %s "$V"; git p --force origin', plr, "deny"),
+                ("glx-t2", aiqt_hooks.gate_weakening,
+                 'declare -n r="GIT_CONFIG_PARAMETERS"; r="$V"; export r; git c -m y', None, "deny"),
+                ("glx-t3", aiqt_hooks.git_discard,
+                 'read -r N <<< "GIT_CONFIG_PARAMETERS"; export "$N=$V"; git r --hard', str(_glx_dirty), "deny"),
+                ("glx-t4", aiqt_hooks.branch_root,
+                 'set -a; printf -v GIT_CONFIG_\\\nPARAMETERS %s "$V"; git co -b glx-new', str(_glx_branch), "deny"),
+                ("glx-t5", aiqt_hooks.protected_line,
+                 'set -a\nread -r GIT_CONFIG_PARAMETERS <<< "$V"\ngit p --force origin', plr, "deny"),
+                ("glx-t6", aiqt_hooks.protected_line,
+                 'set -a; printf -v G\\IT_CONFIG_PARAMETERS %s "$V"; git p --force origin', plr, "deny"),
+                ("glx-t7", aiqt_hooks.commit_msg_subst,
+                 'if export GIT_CONFIG_PARAMETERS="$V"; then git c -m "$(date)"; fi\necho "', None, "deny"),
+                ("glx-t8", aiqt_hooks.protected_line,
+                 "export GIT_CONFIG_PARAMETERS=\"$V\"; eval 'git p --force origin'", plr, "deny"),
+                ("glx-r1", aiqt_hooks.protected_line,
+                 'set -a; printf -v "GIT_CONFIG_$X" %s "$V"; git p --force origin', plr, "allow"),
+                ("glx-r2", aiqt_hooks.protected_line,
+                 'export GIT_CONFIG_{PARAMETERS,X}="$V"; git p --force origin', plr, "allow"),
+                ("glx-r3", aiqt_hooks.protected_line, "source ./cfg.sh; git p --force origin", plr, "allow")):
+            _glx_got = _decision(_glx_handler, _glx_full, cwd=_glx_cwd)
+            if _glx_got != _glx_want:
+                failures.append("({}) {} on {!r}: expected {}, got {}".format(
+                    _glx_label, _glx_handler.__name__, _glx_full, _glx_want, _glx_got))
         # Re-expected from allow to deny: the wrapper-hidden fallback now also reads the
         # DE-QUOTED text, where -'f' is the -f bash passes, so this force-push to main is caught (a
         # closed residual, not an over-refusal). The raw-text backstop reads each segment
@@ -11026,6 +13978,1000 @@ def _main_isolated(monitor):
                 ([["git", "diff"]], []))
         texpect("(tok-17b) mid-word '#' stays literal",
                 _argv("git commit -m ticket#123"), [["git", "commit", "-m", "ticket#123"]])
+        # A '#' opens a comment ONLY in a certain context (the comment rule above aiqt_hooks._nest_track): at
+        # the start, or after an unquoted blank, newline or one of ; & | < >, with no parenthesis, ${...} or
+        # backquote substitution open. Bash 5.3 reads a '#' right after a ')' as word text in
+        # 'x=$(true)#; echo SECOND' (it prints SECOND) but as a comment in '(true)#; echo SECOND', so any
+        # other unquoted '#' (right after a '(' or ')' or a backquote, or at a word start while something is
+        # open) is uncertain. Outside a backquote substitution the lexer judges it under both readings, a
+        # comment to the end of its line and word text (_lex_readings, each a normal lex), and _lex_command
+        # returns the segments of every reading in turn; beyond four such '#', at one in or right after a
+        # backquote substitution (a comment there ends at the closing backquote, which neither reading
+        # models), or where a reading does not lex, it raises _UncertainHashError, a ValueError, and each
+        # caller takes its fallback.
+        _hash_uncertain = "ValueError: cannot evaluate a '#' whose comment reading depends on context"
+        _hash_backquote = "ValueError: cannot evaluate a '#' inside a backquote substitution"
+
+        def _argv_or_error(command):
+            try:
+                return _argv(command)
+            except ValueError as exc:
+                return "ValueError: {}".format(exc)
+
+        def _readings_or_error(command):
+            try:
+                return [[seg.argv for seg in reading] for reading in aiqt_hooks._lex_readings(command)]
+            except ValueError as exc:
+                return "ValueError: {}".format(exc)
+
+        texpect("(tok-17c) '#' after a command substitution's ')' is lexed under both readings",
+                _readings_or_error("x=$(true)#; git commit --no-verify -m x"),
+                [[["x=$"], ["true"], []],
+                 [["x=$"], ["true"], ["#"], ["git", "commit", "--no-verify", "-m", "x"]]])
+        texpect("(tok-17d) '#' after an arithmetic expansion's '))' is lexed under both readings",
+                _readings_or_error("x=$((1))#; git x"),
+                [[["x=$"], [], ["1"], [], []], [["x=$"], [], ["1"], [], ["#"], ["git", "x"]]])
+        texpect("(tok-17e) '#' after an array assignment's ')' is lexed under both readings",
+                _readings_or_error("a=(1 2)#; git x"),
+                [[["a="], ["1", "2"], []], [["a="], ["1", "2"], ["#"], ["git", "x"]]])
+        texpect("(tok-17f) a continuation between the ')' and the '#' changes nothing (both readings)",
+                _readings_or_error("x=$(true)\\\n#; git x"),
+                [[["x=$"], ["true"], []], [["x=$"], ["true"], ["#"], ["git", "x"]]])
+        texpect("(tok-17g) '#' after a blank inside an unquoted ${...} is lexed under both readings",
+                _readings_or_error("echo ${x:- #}; git x"),
+                [[["echo", "${x:-"]], [["echo", "${x:-", "#}"], ["git", "x"]]])
+        texpect("(tok-17h) '#' after a blank inside a backquote substitution is cannot-evaluate",
+                _argv_or_error("x=`true #`; git x"), _hash_backquote)
+        texpect("(tok-17i) '#' after a ')' is lexed under both readings whatever the case words before it",
+                _readings_or_error("(x=$(case a in a) true;; esac)#; git x)"),
+                [[[], ["x=$"], ["case", "a", "in", "a"], ["true"], [], ["esac"], []],
+                 [[], ["x=$"], ["case", "a", "in", "a"], ["true"], [], ["esac"], ["#"], ["git", "x"], []]])
+        texpect("(tok-17j) a redirect target '#' inside an open ${...}: its comment reading has no target, so "
+                "it is cannot-evaluate",
+                _argv_or_error("echo ${x:- >#}; git x"),
+                "ValueError: a reading of an uncertain '#' does not lex: malformed redirect: no target")
+        texpect("(tok-17k) a '#' glued after a substitution's ')' is lexed under both readings",
+                _readings_or_error("x=$(true)#"), [[["x=$"], ["true"], []], [["x=$"], ["true"], ["#"]]])
+        texpect("(tok-17k2) _lex_command returns the segments of both readings in turn",
+                _argv_or_error("x=$(true)#"), [["x=$"], ["true"], [], ["x=$"], ["true"], ["#"]])
+        texpect("(tok-17l) a '~' in a word read right after a ')' is not a leading tilde",
+                [s.argv_leading_tilde for s in aiqt_hooks._lex_command("x=$(true)~/a")],
+                [[False], [False], [False]])
+        # Controls: a '#' in a certain context stays a comment.
+        texpect("(tok-17m) control: a blank before the '#' keeps it a comment",
+                _argv("x=$(true) #; git x"), [["x=$"], ["true"], []])
+        texpect("(tok-17n) '#' after a subshell's ')' is lexed under both readings (bash reads a comment)",
+                _readings_or_error("(true)#; git x"),
+                [[[], ["true"], []], [[], ["true"], ["#"], ["git", "x"]]])
+        texpect("(tok-17o) '#' after an arithmetic command's '))' is lexed under both readings (bash reads a "
+                "comment)",
+                _readings_or_error("((1))#; git x"),
+                [[[], [], ["1"], [], []], [[], [], ["1"], [], ["#"], ["git", "x"]]])
+        texpect("(tok-17p) control: '#' after ';' is a comment",
+                _argv("true;# git x"), [["true"], []])
+        texpect("(tok-17q) control: a continuation then a blank before the '#' keeps it a comment",
+                _argv("x=$(true)\\\n #; git x"), [["x=$"], ["true"], []])
+        texpect("(tok-17r) '#' after a blank inside a backquote substitution is cannot-evaluate",
+                _argv_or_error("x=`true #c\necho in`; git x"), _hash_backquote)
+        # The bound: four uncertain '#' (five readings here, since a comment reading of the first ends the
+        # line) are judged; a fifth on one reading is cannot-evaluate, and the partial lexer then returns the
+        # segments recovered before the first uncertain '#'.
+        texpect("(tok-17r2) four uncertain '#' on one reading are judged",
+                len(_readings_or_error("x=$(true)#a; (y)#; (z)#; (w)#")), 5)
+        texpect("(tok-17r3) a fifth uncertain '#' on one reading is cannot-evaluate",
+                _argv_or_error("x=$(true)#a; (y)#; (z)#; (w)#; (v)#"), _hash_uncertain)
+        texpect("(tok-17r4) beyond the bound the partial lexer stops at the first uncertain '#'",
+                [[s.argv for s in aiqt_hooks._lex_command("x=$(true)#a; (y)#; (z)#; (w)#; (v)#", partial=True)[0]],
+                 aiqt_hooks._lex_command("x=$(true)#a; (y)#; (z)#; (w)#; (v)#", partial=True)[1]],
+                [[["x=$"], ["true"]], False])
+        # The fallback text removes a backslash-newline before any quote or backslash, as bash does, so a
+        # continued spelling reads as the word bash runs.
+        texpect("(tok-17r5) the fallback text removes backslash-newlines first",
+                aiqt_hooks._hash_doubt_text("gi\\\nt g'it' \\\"x"), "git git x")
+        texpect("(tok-17r6) the fallback scan holds the raw text, a newline, then the decoded text",
+                aiqt_hooks._hash_doubt_scan("g'it' diff"), "g'it' diff\ngit diff")
+        # That removal is no decoder: it reads g$'i't as g$it, and bash 5.3.9 runs git for g$'i't, g$''it,
+        # gi$'t', g$'\x69't and g$"i"t. So each fallback reads a command as cannot-evaluate, and takes its
+        # fail-closed decision, where its text holds an ANSI-C or locale quote anywhere, or a quote character
+        # or backslash with a letter right before or after it (_hash_doubt_opaque). The boundary: a letter
+        # beside the quote is inside, a digit or underscore beside it is outside, and a continuation between
+        # blanks is outside (the removal reads it as bash does).
+        for _ocmd, _owant in (("g$'i't", True), ('g$"i"t', True), ("x $'\\n'", True), ('x $"1"', True),
+                              ("g'it'", True), ("'git'", True), ('g"i"t', True), ("gi\\t", True),
+                              ("gi\\\nt", True), ("a'", True), ("'a", True), ("é'", True),
+                              ("1'", False), ("'1", False), ("_'", False), ("'_", False),
+                              ("git \\\nreset --hard", False), ("x=`true #`; echo hi", False),
+                              ("'-'-no-verify", False), ("$x '' $y", False)):
+            texpect("(tok-17r7) _hash_doubt_opaque({!r})".format(_ocmd), aiqt_hooks._hash_doubt_opaque(_ocmd),
+                    _owant)
+        # A RUN of one repeated ';', '(' or ')' builds its empty records in one batch (_lex_pass), which must
+        # leave every record and every piece of state exactly as the per-character path leaves them: one empty
+        # record per further character of the run carrying the run's separator, the nesting stack moved as
+        # _nest_track moves it for that character, and, for ')', the glued-word index just past the run.
+        texpect("(tok-seprun-semi) each ';' of a run ends one empty record carrying ';' as its separator",
+                [(s.argv, s.sep_after, s.raw) for s in aiqt_hooks._lex_command("a;;;b")],
+                [(["a"], ";", "a"), ([], ";", ""), ([], ";", ""), (["b"], "", "b")])
+        texpect("(tok-seprun-paren) each '(' of a run ends one empty record carrying '(' as its separator",
+                [(s.argv, s.sep_after, s.raw) for s in aiqt_hooks._lex_command("a((((b")],
+                [(["a"], "(", "a"), ([], "(", ""), ([], "(", ""), ([], "(", ""), (["b"], "", "b")])
+        texpect("(tok-seprun-pop) a ')' run pops only open parentheses, so the backquote under them still "
+                "closes and the '#' after it is a comment",
+                _argv_or_error("`(a)))` #c"), [["`"], ["a"], [], [], ["`"]])
+        texpect("(tok-seprun-glued) a word right after a ')' run is read as glued to the run's last ')'",
+                [s.argv_opaque for s in aiqt_hooks._lex_command("(a))x")],
+                [[], [False], [], [True]])
+        # The lexer vectors: bash 5.3.9 runs the RAN or RUN command in each (bash -c printed RUN for a and b,
+        # RAN for c to i), and before the comment rule the lexer read each one without an error while the
+        # command sat inside a misread quote or comment. Each '#' here is right after a ')' (a case pattern,
+        # a subshell, a function name's '()', a regex group) or at a word start inside an open ${...} (the
+        # ordinary form, a command substitution inside it, and the ${ cmd; } and ${| cmd; } forms), and one
+        # of its two readings is the one bash takes: each vector has a reading that reaches the command bash
+        # ran. Each vector's two readings are checked in full, the comment reading first and then the word-text
+        # reading (a, b: the comment reading reaches the printf RUN bash ran; c to h: the comment reading
+        # reaches the echo RAN bash ran, and the word-text reading swallows it into a quoted word; i: the
+        # word-text reading, the regex group bash reads, reaches the echo RAN).
+        _hash_vectors = (
+            ("a", 'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
+             [[["case", "x", "in", "x"], [], [":"], [], ["esac"], ["printf", "RUN"], [], ["wait"]],
+              [["case", "x", "in", "x"], ["#", "\n :;; esac; printf RUN & # "], ["wait"]]]),
+            ("b", 'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
+             [[["echo", "${x:-$"], ["true"], [], ["}"], ["printf", "RUN"], ["wait"]],
+              [["echo", "${x:-$"], ["true", "#", "\n)} & printf RUN # "], ["wait"]]]),
+            ("c", "case a in a)# it's\n echo RAN;; esac # '",
+             [[["case", "a", "in", "a"], [], ["echo", "RAN"], [], ["esac"]],
+              [["case", "a", "in", "a"], ["#", "its\n echo RAN;; esac # "]]]),
+            ("d", "echo case; (true)# it's\n echo RAN # '",
+             [[["echo", "case"], [], ["true"], [], ["echo", "RAN"]],
+              [["echo", "case"], [], ["true"], ["#", "its\n echo RAN # "]]]),
+            ("e", "echo ${x:-$(echo a # it's\n)}; echo RAN # '",
+             [[["echo", "${x:-$"], ["echo", "a"], [], ["}"], ["echo", "RAN"]],
+              [["echo", "${x:-$"], ["echo", "a", "#", "its\n)}; echo RAN # "]]]),
+            ("f", "${ true; # it's\n}; echo RAN # '",
+             [[["${", "true"], [], ["}"], ["echo", "RAN"]],
+              [["${", "true"], ["#", "its\n}; echo RAN # "]]]),
+            ("g", "${| true; # it's\n}; echo RAN # '",
+             [[["${"], ["true"], [], ["}"], ["echo", "RAN"]],
+              [["${"], ["true"], ["#", "its\n}; echo RAN # "]]]),
+            ("h", "f()# it's\n{ echo RAN; }\nf # '",
+             [[["f"], [], [], ["{", "echo", "RAN"], ["}"], ["f"]],
+              [["f"], [], ["#", "its\n{ echo RAN; }\nf # "]]]),
+            ("i", "[[ x =~ (a)#b ]] || echo RAN",
+             [[["[[", "x", "=~"], ["a"], []],
+              [["[[", "x", "=~"], ["a"], ["#b", "]]"], ["echo", "RAN"]]]),
+        )
+        for _vname, _vcmd, _vwant in _hash_vectors:
+            texpect("(tok-17s-{}) lexer vector {!r}: its comment reading, then its word-text reading".format(
+                        _vname, _vcmd),
+                    _readings_or_error(_vcmd), _vwant)
+        # The word reader leaves a '#' that begins a word to its caller and records the '${' it reads on the
+        # caller's nesting stack, so the lexer sees vectors f and g inside an open ${...}.
+        for _vname, _vcmd, _vwant in _hash_vectors[5:7]:
+            _wnest = []
+            _wread = aiqt_hooks._read_word(_vcmd, 0, len(_vcmd), _wnest)
+            texpect("(tok-17t-{}) the word reader records the open '${{' of vector {}".format(_vname, _vname),
+                    (_wread[0], _wread[2], _wnest), ("${", True, ["${"]))
+        _wcmd = _hash_vectors[0][1]
+        _wat = _wcmd.index("#")
+        texpect("(tok-17u) the word reader reads nothing at a '#' that begins a word (its caller decides)",
+                aiqt_hooks._read_word(_wcmd, _wat, len(_wcmd), []), ("", False, False, True, False, _wat))
+        # Certain-context controls: each still lexes, with the comment (and the quote inside it) dropped.
+        for _ccmd, _cwant in (("echo a # it's", [["echo", "a"]]),
+                              ("echo a;# it's", [["echo", "a"], []]),
+                              ("echo a &# it's", [["echo", "a"], []]),
+                              ("echo a |# it's", [["echo", "a"], []]),
+                              ('echo a # say "hi', [["echo", "a"]]),
+                              ('echo a;# say "hi', [["echo", "a"], []]),
+                              ('echo a &# say "hi', [["echo", "a"], []]),
+                              ('echo a |# say "hi', [["echo", "a"], []])):
+            texpect("(tok-17v) control {!r} lexes with the comment dropped".format(_ccmd),
+                    _argv_or_error(_ccmd), _cwant)
+        # The here-string controls raise before their '#' is reached: the lexer does not model a here-string
+        # ('<<<') at all, at this commit as at the base commit, so they stay cannot-evaluate for that reason.
+        for _ccmd in ("echo a <<<b # it's", 'echo a <<<b # say "hi'):
+            texpect("(tok-17w) here-string control {!r} raises for the here-string, not the '#'".format(_ccmd),
+                    _argv_or_error(_ccmd), "ValueError: unsupported shell construct: <<")
+        # The two other uncertain shapes and the in-word control. Bash 5.3.9 prints RAN for the first two: a
+        # '#' that opens a backquote substitution's text is a comment there (the apostrophe is inside it), and
+        # a '#' after a blank inside a regex group is regex text (the parenthesis is no subshell).
+        texpect("(tok-17x) '#' right after a backquote is cannot-evaluate",
+                _argv_or_error("echo `#'`; echo RAN # '"),
+                "ValueError: cannot evaluate a '#' right after a backquote")
+        # An ESCAPED backquote opens nothing outside a backquote substitution: bash 5.3.9 prints `# for
+        # echo \`# and runs the next line, so the lexer reads the '#' after it as word text. Inside a backquote
+        # substitution an escaped backquote opens a nested one, so a '#' right after it stays cannot-evaluate
+        # (a control: the lexer raised there before this change too).
+        texpect("(tok-17x2) a '#' right after an escaped backquote is word text",
+                _argv_or_error("echo \\`#\ngit x"), [["echo", "`#"], ["git", "x"]])
+        texpect("(tok-17x3) a '#' right after an escaped backquote and before a blank is word text",
+                _argv_or_error("echo \\`# a; git x"), [["echo", "`#", "a"], ["git", "x"]])
+        texpect("(tok-17x4) control: a '#' right after an escaped backquote inside a backquote substitution is "
+                "cannot-evaluate",
+                _argv_or_error("x=`echo \\`#\\``"), "ValueError: cannot evaluate a '#' right after a backquote")
+        texpect("(tok-17y) '#' after a blank inside any open parenthesis is lexed under both readings",
+                _readings_or_error("[[ x =~ (a #b) ]] || echo RAN"),
+                [[["[[", "x", "=~"], ["a"]], [["[[", "x", "=~"], ["a", "#b"], ["]]"], ["echo", "RAN"]]])
+        texpect("(tok-17z) control: a '#' inside a word of ${...} is word text",
+                _argv_or_error("echo ${#x} ${x#a}"), [["echo", "${#x}", "${x#a}"]])
+        # INSIDE A DOUBLE-QUOTED STRING the word reader skips a '$(...)', '${...}' or backquote substitution
+        # whole (_skip_quoting, whose own quotes nest), and the skip applies the comment rule to a '#' inside
+        # it, since a comment there runs past the quote or ')' on its line and moves where the skip ends.
+        # Bash 5.3.9 printed a and then RAN for each lexer vector below (bash -c): the comment reading, listed
+        # first, reaches the echo RAN bash ran; the word-text reading, the one the skip took with no comment
+        # rule, pairs the apostrophe with the last quote and swallows echo RAN into the double-quoted word.
+        # The locale vector is read under both locale readings (the '$' kept, then dropped).
+        _dq_rest = "\"; echo RAN # ')"
+        _dq_vectors = (
+            ("subst", "echo \"$(echo a # it's\n)\"; echo RAN # ')\"", "$(echo a # it's\n)", ""),
+            ("brace", "echo \"${x:-$(echo a # it's\n)}\"; echo RAN # ')}\"", "${x:-$(echo a # it's\n)}", "}"),
+            ("paren", "echo \"$( (echo a)# it's\n)\"; echo RAN # ')\"", "$( (echo a)# it's\n)", ""),
+        )
+        for _dqn, _dqc, _dqw, _dqtail in _dq_vectors:
+            texpect("(tok-dq-{}) a '#' inside a double-quoted substitution is lexed under both readings".format(
+                        _dqn),
+                    _readings_or_error(_dqc),
+                    [[["echo", _dqw], ["echo", "RAN"]], [["echo", _dqw + _dq_rest + _dqtail]]])
+        _dql = "echo $\"$(echo a # it's\n)\"; echo RAN # ')\""
+        for _dql_locale, _dql_word in ((False, "$$(echo a # it's\n)"), (True, "$(echo a # it's\n)")):
+            try:
+                _dql_got = [[s.argv for s in r] for r in aiqt_hooks._lex_readings(_dql, locale=_dql_locale)]
+            except ValueError as exc:
+                _dql_got = "ValueError: {}".format(exc)
+            texpect("(tok-dq-locale-{}) a '#' inside a locale-quoted substitution is lexed under both readings "
+                    "with locale={}".format(_dql_locale, _dql_locale),
+                    _dql_got, [[["echo", _dql_word], ["echo", "RAN"]], [["echo", _dql_word + _dq_rest]]])
+        # Right after a backquote inside the substitution the '#' is cannot-evaluate, as outside it; inside a
+        # backquote substitution no '#' is read (bash ends one at its first unescaped backquote whatever a
+        # comment inside it reads, so both readings skip the same text); a '#' right after a word character is
+        # word text; and an uncertain '#' whose rest of line holds nothing the skip reads (no quote, backslash,
+        # backquote, '$', parenthesis or brace) ends the skip at the same index under both readings, so it is
+        # not enumerated (the '# Notes' line of a here-document inside "$(...)", a common commit message form).
+        texpect("(tok-dq-backquote) a '#' right after a backquote inside a double-quoted substitution is "
+                "cannot-evaluate",
+                _argv_or_error("echo \"$(echo `echo a`# it's\n)\"; echo RAN # ')\""),
+                "ValueError: cannot evaluate a '#' right after a backquote")
+        for _dqn, _dqc, _dqwant in (
+                ("in-backquote", "echo \"`echo a # it's`\"; echo RAN", [["echo", "`echo a # it's`"], ["echo", "RAN"]]),
+                ("word", "echo \"$(echo a#b)\"; echo RAN", [["echo", "$(echo a#b)"], ["echo", "RAN"]]),
+                ("no-read-chars", "echo \"$(printf '%s\\n' a # note\n)\"; echo RAN",
+                 [["echo", "$(printf '%s\\n' a # note\n)"], ["echo", "RAN"]]),
+                ("heredoc-heading", "echo \"$(cat <<'EOF'\nTitle\n\n# Notes\nEOF\n)\"; echo RAN",
+                 [["echo", "$(cat <<'EOF'\nTitle\n\n# Notes\nEOF\n)"], ["echo", "RAN"]])):
+            texpect("(tok-dq-{}) a single reading".format(_dqn), _readings_or_error(_dqc), [_dqwant])
+        # Each guard row (below) behind the double-quoted prefixes decides at least as strictly as its bare
+        # shape: the comment reading lexes the shape as its own segment, as bash runs it. The skip read every
+        # such '#' as word text before it applied the comment rule, which swallowed the shape into the
+        # double-quoted word, and seven of these rows then allowed on the plain spelling.
+        _dq_prefixes = ("echo \"$(echo a # it's\n)\"; {} # ')\"", "echo $\"$(echo a # it's\n)\"; {} # ')\"",
+                        "echo \"${{x:-$(echo a # it's\n)}}\"; {} # ')}}\"")
+        # The raw push splitter skips a substitution with the same rule and no reading to judge an uncertain
+        # '#' by, so it meets one as an unreadable construct and the rest of the command joins the current
+        # segment (a whole-text read): the over-denial direction, witnessed here (bash runs only the echo, the
+        # push sits in the comment), with a word-text '#' as the control that still splits.
+        texpect("(tok-dq-split) an uncertain '#' in a double-quoted substitution stops the raw push split",
+                aiqt_hooks._raw_push_segments("echo \"$(echo a # )\" ; git push --force origin x; echo main\n)\""),
+                ["echo \"$(echo a # )\" ; git push --force origin x; echo main\n)\""])
+        texpect("(tok-dq-split-ctl) control: a word-text '#' in a double-quoted substitution still splits",
+                aiqt_hooks._raw_push_segments("echo \"$(echo a#b)\" ; git push --force origin x; echo main"),
+                ["echo \"$(echo a#b)\" ", " git push --force origin x", " echo main"])
+        # A here-document inside a double-quoted "$(...)" with a quoted delimiter: bash reads its body as text,
+        # so no comment rule, quote or parenthesis applies there and the skip jumps past it (bash 5.3.9 prints
+        # the body, '# Don't merge yet' line included, for the first shape, a common commit message form, and
+        # for the five '# H<n> (x)' lines of the second, which would otherwise exceed the four '#' the lexer
+        # judges). A ')"' line in such a body is body text too (bash runs no echo HIDDEN there).
+        _hd_m1 = "git commit -m \"$(cat <<'EOF'\nSubject line\n\n# Don't merge yet\nbody\nEOF\n)\""
+        _hd_h5 = "git commit -m \"$(cat <<'EOF'\n# H1 (x)\n# H2 (x)\n# H3 (x)\n# H4 (x)\n# H5 (x)\nEOF\n)\""
+        for _hdn, _hdc in (("apostrophe", _hd_m1), ("five-headings", _hd_h5)):
+            texpect("(tok-dq-heredoc-{}) a quoted here-document's body in a double-quoted substitution is "
+                    "body text".format(_hdn), _readings_or_error(_hdc), [[["git", "commit", "-m", _hdc[15:-1]]]])
+        texpect("(tok-dq-heredoc-close-line) a ')\"' line in a quoted here-document's body is body text",
+                _readings_or_error("echo \"$(cat <<'EOF'\n)\"; echo HIDDEN\nEOF\n)\"; echo RAN"),
+                [[["echo", "$(cat <<'EOF'\n)\"; echo HIDDEN\nEOF\n)"], ["echo", "RAN"]]])
+        # Where the skip does not read a body it reads the text as before: an unquoted delimiter (bash expands
+        # that body, which this skip does not model), a body that does not end before the command does, and a
+        # body line that begins with the delimiter but is not exactly it. Bash 5.3 ends a body inside a command
+        # substitution at such a line when a ')' follows on it and reads the rest of that line as commands, so
+        # its ')' closes the substitution here as there (bash 5.3.9 prints hello, RAN and the last string for
+        # the third, whose later 'EOF' line a body read to an exact delimiter line would reach instead). These
+        # three are REGRESSION GUARDS: they pass on code that reads no body at all, and fail only where a
+        # change to the body reading reads one of these bodies.
+        texpect("(tok-dq-heredoc-unquoted) an unquoted here-document's body is read as text, as before",
+                _readings_or_error("echo \"$(cat <<EOF\n# it's\nEOF\n)\"; echo RAN"),
+                "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
+        texpect("(tok-dq-heredoc-unterminated) a body with no delimiter line is read as text, as before",
+                _readings_or_error("echo \"$(cat <<'EOF'\n# it's\n)\"; echo RAN"),
+                "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
+        texpect("(tok-dq-heredoc-delim-prefix) a body line beginning with the delimiter ends the read as bash does",
+                _readings_or_error("echo \"$(cat <<'EOF'\nhello\nEOF)\"; echo RAN; echo \"\nEOF\n)\""),
+                [[["echo", "$(cat <<'EOF'\nhello\nEOF)"], ["echo", "RAN"], ["echo", "\nEOF\n)"]]])
+        # Each guard that reads the lexer decides both shapes as main does (eight allow, where each denied or
+        # noted through the fallback before the skip read the body; commit_msg_subst denies the substitution
+        # in a commit argument and protected_line the unproven commit), and still judges a later line: each
+        # shape followed by a line its row's guard denies (or notes) decides that way. The hd-guard rows of
+        # commit_msg_subst and protected_line and all sixteen hd-later rows are REGRESSION GUARDS: they pass on
+        # code that reads no body at all (where each such command takes the fallback), and fail only where a
+        # change to the body reading flips those two guards or hides a later line; the other sixteen hd-guard
+        # rows fail on that code.
+        # gate_weakening allows both shapes, as on main: on a parsed command the closed literal grammar accepts
+        # the git commit message form as -m's value (_gate_heredoc_message), so these two rows fail on code
+        # whose grammar refuses every "$(...)" on a git commit segment.
+        for _hdn, _hdc in (("apostrophe", _hd_m1), ("five-headings", _hd_h5)):
+            for _hdg, _hdwant in ((aiqt_hooks.gate_weakening, "allow"), (aiqt_hooks.diff_source_pretool, "allow"),
+                                  (aiqt_hooks.git_explicit_binding, "allow"), (aiqt_hooks.commit_identity, "allow"),
+                                  (aiqt_hooks.bash_absolute_paths, "allow"), (aiqt_hooks.branch_root, "allow"),
+                                  (aiqt_hooks.git_discard, "allow"), (aiqt_hooks.git_stash_ref, "allow"),
+                                  (aiqt_hooks.commit_msg_subst, "deny"), (aiqt_hooks.protected_line, "deny")):
+                texpect("(hd-guard-{}) {} on the here-document shape".format(_hdn, _hdg.__name__),
+                        _decision(_hdg, _hdc), _hdwant)
+            for _hdg, _hdlater, _hdwant in (
+                    (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "deny"),
+                    (aiqt_hooks.bash_absolute_paths, "echo hi > out.txt", "deny"),
+                    (aiqt_hooks.commit_identity, 'git commit -m x --author="Claude <noreply@anthropic.com>"', "deny"),
+                    (aiqt_hooks.branch_root, "git checkout --orphan x", "deny"),
+                    (aiqt_hooks.diff_source_pretool, "git diff", "deny"),
+                    (aiqt_hooks.git_explicit_binding, "git add -A && git push", "deny"),
+                    (aiqt_hooks.git_discard, "git reset --hard", "deny"),
+                    (aiqt_hooks.git_stash_ref, "git stash pop", "allow-note")):
+                texpect("(hd-later-{}) {} on a line after the here-document shape".format(_hdn, _hdg.__name__),
+                        _decision(_hdg, _hdc + "\n" + _hdlater), _hdwant)
+        # The skip reads a body only in that commit message form: the first substitution the lex skips whole,
+        # holding cat and the here-document and nothing else. A command before or after the here-document inside
+        # its substitution, or another double-quoted '$(' or a backquote substitution anywhere in the command,
+        # makes the lex read the text as before (the HERE-DOCUMENTS paragraph of _skip_quoting): the guards read
+        # no command inside a double-quoted or backquote substitution, so a body read there would turn the
+        # failed lex, whose fallback reads the whole text, into a lex beside a command no guard reads (an
+        # unquoted '$(...)' is lexed as its own segments, which the guards read). Bash 5.3.9 runs the
+        # commit in every shape below (with git replaced by a function that prints a marker); before this rule
+        # each lexed with the body read, and gate_weakening and commit_msg_subst allowed it where main denies.
+        _hd_nv = "git commit --no-verify -m x"
+        _hd_unq = "cat <<B\n$(" + _hd_nv + ")\nB\n"
+        _hd_then = (
+            ("later-line", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n" + _hd_nv + "\n)\""),
+            ("later-unquoted-body", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n" + _hd_unq + ")\""),
+            ("two-substs-later-line", "echo \"$(cat <<'EOF'\n# Don't\nEOF\necho $(true) $(" + _hd_unq + ")\n)\""),
+            ("two-substs-one-word", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)$(" + _hd_unq + ")\""),
+            ("two-substs-two-words", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\" \"$(" + _hd_unq + ")\""),
+            ("later-subst", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\" \"$(" + _hd_nv + ")\""),
+            ("later-segment-subst", "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"; echo \"$(" + _hd_nv + ")\""),
+            ("later-backquote", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\" `" + _hd_nv + "`"),
+            ("earlier-subst", "echo \"$(" + _hd_nv + ")\" \"$(cat <<'EOF'\n# Don't\nEOF\n)\""),
+            ("earlier-command", "echo \"$(" + _hd_nv + "; cat <<'EOF'\n# Don't\nEOF\n)\""),
+            ("command-reads-body", "echo \"$(git commit --no-verify -F - <<'EOF'\n# Don't\nEOF\n)\""),
+        )
+        for _hdn, _hdc in _hd_then:
+            texpect("(tok-dq-heredoc-then-{}) a body beside another command is read as before".format(_hdn),
+                    _readings_or_error(_hdc),
+                    "ValueError: a reading of an uncertain '#' does not lex: unterminated single quote")
+            texpect("(hd-then-{}) gate_weakening and commit_msg_subst deny as main does".format(_hdn),
+                    (_decision(aiqt_hooks.gate_weakening, _hdc), _decision(aiqt_hooks.commit_msg_subst, _hdc)),
+                    ("deny", "deny"))
+        # No guard decides a reviewed shape less strictly than main (e47da1de) does: the shapes above, the two
+        # commit message shapes, a body that a nested substitution's line holds (bash 5.3.9 reads its 'git
+        # commit' line as body text), two here-documents on one operator line, and a top-level assignment
+        # whose here-document bash ends at 'EOF)' (main and this code allow it alike). Main's decisions were
+        # recorded by running main's module on each command, per guard in _hd_floor_guards order, and each guard
+        # must decide exactly as main does, except the seven guards _hd_retry_over names on the eleven rows of
+        # _hd_then and on two-on-operator-line, which must decide at least as strictly: there the lex starts
+        # again reading no body, one reading of the body's '#' does not lex, and those guards take their
+        # cannot-evaluate path, an over-deny kept from the commit that added the retry. The eleven rows of
+        # _hd_then fail on the code before that retry; the last five rows pass there too and are REGRESSION
+        # GUARDS.
+        _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
+                            aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
+                            aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
+                            aiqt_hooks.protected_line)
+        _hd_rank = {"allow": 0, "allow-note": 1, "deny": 2}  # deny > note > allow; anything else fails
+        _hd_letter = {"A": "allow", "N": "allow-note", "D": "deny"}
+
+        def _hd_want(handler, command, recorded):
+            """The decision a recorded row expects of handler on command: gate_weakening denies wherever the
+            closed literal grammar refuses the raw text as it reads a parsed command (_gate_closed_grammar_scan
+            with heredoc_message: an expansion, substitution, here-document, comment or redirection on a
+            roster-verb git segment, or a roster git named inside quoted data, its disclosed over-deny, but not
+            the git commit message form it accepts there), which outranks the allow main recorded before that
+            grammar; every other guard and command keeps the recorded decision."""
+            if handler is aiqt_hooks.gate_weakening and aiqt_hooks._gate_closed_grammar_scan(
+                    command, heredoc_message=True) is not None:
+                return "deny"
+            return recorded
+
+        def _hd_main_check(tag, command, main_decisions, over=(), exact=False):
+            """Each guard in _hd_floor_guards decides command exactly as main does (main_decisions: main's
+            recorded decisions in that order, as a tuple or as a string of A, N and D), and each guard named in
+            over at least as strictly; gate_weakening denies where the closed literal grammar refuses the
+            command (_hd_want), except on a row marked exact, which keeps main's recorded decisions with no
+            grammar reading (so a grammar that refuses the row's command fails it)."""
+            if len(main_decisions) != len(_hd_floor_guards):
+                failures.append("({}) records {} decisions for {} guards".format(
+                    tag, len(main_decisions), len(_hd_floor_guards)))
+            for _hdg, _hdm in zip(_hd_floor_guards, main_decisions):
+                _hdm = _hd_letter.get(_hdm, _hdm)
+                if not exact:
+                    _hdm = _hd_want(_hdg, command, _hdm)
+                _hdgot = _decision(_hdg, command)
+                if _hdg.__name__ in over:
+                    if _hd_rank.get(_hdgot, -1) < _hd_rank[_hdm]:
+                        failures.append("({}) {}: main decides {}, got {}, less strictly".format(
+                            tag, _hdg.__name__, _hdm, _hdgot))
+                elif _hdgot != _hdm:
+                    failures.append("({}) {}: main decides {}, got {}".format(tag, _hdg.__name__, _hdm, _hdgot))
+
+        _hd_main_then = ("deny",) + ("allow",) * 7 + ("deny", "deny")
+        _hd_retry_over = ("diff_source_pretool", "git_explicit_binding", "commit_identity", "bash_absolute_paths",
+                          "branch_root", "git_discard", "git_stash_ref")
+        _hd_floor = [(_hdn, _hdc, _hd_main_then, _hd_retry_over) for _hdn, _hdc in _hd_then] + [
+            ("apostrophe", _hd_m1, ("allow",) * 8 + ("deny", "deny"), ()),
+            ("five-headings", _hd_h5, ("allow",) * 8 + ("deny", "deny"), ()),
+            ("nested-line-body", "echo \"$(echo $(cat <<'EOF') $(true\n" + _hd_nv + "\nEOF\n))\"",
+             ("allow",) * 9 + ("deny",), ()),
+            ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
+             _hd_main_then, _hd_retry_over),
+            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10, ()),
+        ]
+        # The two commit message shapes keep main's decisions exactly: the closed literal grammar accepts the
+        # form on a parsed command, so gate_weakening allows them as main does, and both rows fail on code whose
+        # grammar refuses every "$(...)" on a git commit segment.
+        for _hdn, _hdc, _hdmain, _hdover in _hd_floor:
+            _hd_main_check("hd-main-floor-" + _hdn, _hdc, _hdmain, _hdover,
+                           exact=_hdn in ("apostrophe", "five-headings"))
+        # MAIN'S DECISION AS A FLOOR (the comment above _MainHashReading). Main's lex fails on the commit
+        # message form whose body holds an apostrophe, and its guards then take their failed-lex path, whose raw
+        # scans read the whole text, a command inside a string included; reading that body made the lex clean,
+        # and the clean lex reads no command inside a -c, eval, trap or python3 -c string, or one piped or fed
+        # into a shell. Each guard now also takes the decision of main's failed-lex path where main's reading of
+        # such a body fails, and keeps the stricter. In every row below the form comes before the command bash
+        # runs from the string, after it, or on the line above it, and the string runs git commit --no-verify -m
+        # y. Main (fe381129) denies all 54 in gate_weakening, and each row must decide as main does in every
+        # guard; the code before the floor allowed all 54 in gate_weakening (both measured by running each
+        # module on each command), so every hd-floor row fails there.
+        _hdf_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\""
+        _hdf_body = "git commit --no-verify -m y"
+        _hdf_families = (
+            ("sh-c", "sh -c '{}'"), ("dash-c", "dash -c '{}'"), ("zsh-c", "zsh -c '{}'"),
+            ("bash-c", "bash -c '{}'"), ("bash-lc", "bash -lc '{}'"), ("bash-c-dq", "bash -c \"{}\""),
+            ("bash-c-ansi", "bash -c $'{}'"), ("eval", "eval '{}'"), ("env-sh-c", "env sh -c '{}'"),
+            ("sudo-sh-c", "sudo sh -c '{}'"), ("timeout-sh-c", "timeout 5 sh -c '{}'"),
+            ("xargs-sh-c", "echo x | xargs sh -c '{}'"), ("find-exec-sh-c", "find . -maxdepth 0 -exec sh -c '{}' \\;"),
+            ("pipe-bash", "echo '{}' | bash"), ("pipe-sh", "printf '%s' '{}' | sh"), ("trap", "trap '{}' EXIT"),
+            ("python3-c", "python3 -c 'import os; os.system(\"{}\")'"))
+        _hdf_cases = []
+        for _hdfn, _hdfp in _hdf_families:
+            _hdfcmd = _hdfp.format(_hdf_body)
+            _hdf_cases += [(_hdfn + "-after", _hdf_form + "; " + _hdfcmd), (_hdfn + "-before", _hdfcmd + "; " + _hdf_form),
+                           (_hdfn + "-next-line", _hdf_form + "\n" + _hdfcmd)]
+        _hdf_cases += [("bash-heredoc-after", _hdf_form + "; bash <<'X'\n" + _hdf_body + "\nX"),
+                       ("bash-heredoc-before", "bash <<'X'; " + _hdf_form + "\n" + _hdf_body + "\nX"),
+                       ("bash-heredoc-next-line", _hdf_form + "\nbash <<'X'\n" + _hdf_body + "\nX")]
+        for _hdfn, _hdfc in _hdf_cases:
+            _hd_main_check("hd-floor-" + _hdfn, _hdfc, _hd_main_then)
+        # The other guards' failed-lex floors, each on a command where main's decision, recorded per guard in
+        # _hd_floor_guards order by running main's module, is stricter than the code before this floor in one
+        # guard (git_explicit_binding, commit_identity, commit_msg_subst twice and gate_weakening, in row order),
+        # so each row fails there; each guard must decide as main does. The last row is a commit message that
+        # names --no-verify and holds an apostrophe: main denies it through its fallback, so it denies here too
+        # (the over-deny main had).
+        _hdf_guard_rows = (
+            ("publish", _hdf_form + "; sh -c 'git add -A && git push'", ("allow", "allow", "deny") + ("allow",) * 5
+             + ("deny", "deny")),
+            ("identity", _hdf_form + "; sh -c 'git commit --author=\"Claude <noreply@anthropic.com>\" -m y'",
+             ("allow",) * 3 + ("deny",) + ("allow",) * 4 + ("deny", "deny")),
+            ("subst", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"; sh -c 'git commit -m \"$(date)\"'",
+             ("allow",) * 8 + ("deny", "deny")),
+            ("commit-after", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"; git commit -m x", ("allow",) * 8 + ("deny", "deny")),
+            ("message", "git commit -m \"$(cat <<'EOF'\nDon't use --no-verify\nEOF\n)\"",
+             ("deny",) + ("allow",) * 7 + ("deny", "deny")),
+        )
+        for _hdn, _hdc, _hdmain in _hdf_guard_rows:
+            _hd_main_check("hd-floor-guard-" + _hdn, _hdc, _hdmain)
+        # Where main's skip ends the substitution at the same ')' (no unpaired quote or ')' in the body), main
+        # lexed the form as the clean lex does, and no floor applies: a message without an apostrophe that names
+        # --no-verify allows in gate_weakening, as on main (the closed literal grammar accepts the git commit
+        # message form on a parsed command, and the body is -m's value). It fails on code whose grammar refuses
+        # every "$(...)" on a git commit segment, and on code that applies a floor to every body read.
+        texpect("(hd-floor-same-reading) a body main reads to the same ')' takes no floor",
+                _decision(aiqt_hooks.gate_weakening, "git commit -m \"$(cat <<'EOF'\nDocument the --no-verify bypass\n"
+                                                    "EOF\n)\""), "allow")
+        # The floor's own raw-probe deny (_gate_weakening_fallback_kind in _GATE_FALLBACK_DENIES) on a command
+        # the closed literal grammar accepts: the body main fails to read sits in an echo, the only git is an
+        # off-roster git log, and the raw short -n probe reads its '-n' beside a later 'commit' word, so the
+        # floor denies as main's failed-lex path does (an over-deny main had).
+        texpect("(hd-floor-raw-probe) the floor's raw-probe deny stands where the closed grammar accepts the text",
+                _decision(aiqt_hooks.gate_weakening, "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"; git log -n 3; echo commit"),
+                "deny")
+        # Main's own reading of a body this lexer reads (MAIN'S DECISION AS A FLOOR): main's skip reads the body
+        # as text, so a ')' in it can close the substitution early and a quote in it can pair with one past
+        # it. Where main's reading then lexes, its segments are one more reading here; where it fails, main's
+        # failed-lex path is the floor, with its partial lex reading on past the body. Main's decisions were
+        # recorded by running main's module on each command, per guard in _hd_floor_guards order (A allow, N
+        # note, D deny), and each guard must decide exactly as main does; bash -n accepts every command.
+        # early-close-switch: main closes the substitution at the body's ')"' line and lexes, so branch_root
+        # reads the git switch -c segment bash would run if that line were code (bash 5.3.9 reads it as body
+        # text). The case rows put a 'case x in x) sh -c "...";; esac' line after a body holding an unpaired
+        # '"' (form E, an echo, and form F, a commit): main pairs that quote past the ')', closes its
+        # substitution at the case pattern's ')' and fails at the end, and its partial lex then reads on past
+        # the body into the -c string, so bash_absolute_paths and branch_root deny or note there (bash 5.3.9
+        # runs the -c string: it wrote out.txt for case-E-trunc in an empty scratch directory). The paren rows
+        # are harmless messages with a ')' in the body, which main reads to an earlier ')' and lexes: every
+        # guard allows there as on main (the code before this change denied them in gate_weakening,
+        # gate_weakening and git_explicit_binding, in row order). The close rows put a command on the body's
+        # ')"' line, which main reads as its own segment, one row each for diff_source_pretool,
+        # bash_absolute_paths, git_stash_ref, git_discard, gate_weakening, git_explicit_binding, commit_identity,
+        # commit_msg_subst and protected_line, in row order (protected_line denies the last one without main's
+        # reading too, through the commit text in the echo's word). heredoc-diff and heredoc-commit hold a
+        # top-level here-document naming git diff or git commit after the form with an apostrophe, where main's
+        # lex fails and its raw scans read that body: diff_source_pretool notes and commit_msg_subst and
+        # protected_line deny there, through their failed-lex floors. paren-heredoc-commit is the same with a
+        # body main reads to an earlier ')' and lexes, which excludes that here-document's body: protected_line
+        # and commit_msg_subst allow there as on main (both denied on the code before this change). The
+        # close-line rows hold the ')"' line in a quoted body, where main's lex fails and gate_weakening and
+        # commit_msg_subst deny through their fallback as main does (bash 5.3.9 reads that line as body text
+        # and runs nothing on it, an over-deny main had). On the code before this change 27 rows fail (measured
+        # by running this suite on its module): early-close-switch, the case rows, the paren rows, close-diff,
+        # close-trunc, close-stash, close-no-verify, close-identity, close-commit and paren-heredoc-commit. The
+        # other seven pass there and fail where the floor they test is removed (measured by running this suite
+        # on modules with main's reading, or its clean-lex or failed-lex half, removed for every guard or for one,
+        # and with each guard's own failed-lex code removed): close-publish and close-subst without main's
+        # segments, and heredoc-diff, heredoc-commit and the close-line rows without the failed-lex floor.
+        # close-reset records git_discard's decision, which no removal changes (git_discard needs no floor, its
+        # docstring says why): a REGRESSION GUARD.
+        _hdx_e = "echo \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\""
+        _hdx_f = "git commit -m \"$(cat <<'EOF'\nsay \"hi\nEOF\n)\""
+        _hdx_close = "echo \"$(cat <<'EOF'\n)\"; {}; echo \"\nEOF\n)\""
+        _hdx_inners = (("trunc", "echo hi > out.txt; true"), ("cd-trunc", "\ncd foo; echo hi > out.txt; true"),
+                       ("checkout-b", "\ngit checkout -b feat; true"), ("switch-c", "\ngit switch -c feat; true"),
+                       ("worktree-b", "\ngit worktree add ../w -b feat; true"),
+                       ("cd-checkout-b", "\ncd foo; git checkout -b feat; true"),
+                       ("cd-commit", "\ncd foo; git commit -m y; true"),
+                       ("cd-add-push", "\ncd foo; git add -A; git push; true"))
+        # AMENDED RECORDS (two letters): on the cd-add-push rows the recorded module gave
+        # git_explicit_binding the relocate note through its failed-lex fallback, where the visible
+        # breadth+push pairing must deny; the fallback now tests the publish deny before the
+        # directory-change note (the parsed pre-scan's precedence), so those two rows record D at the
+        # git_explicit_binding position in place of the recorded N. Every other letter is the record.
+        _hdx_main = {"E": ("AAAADAAAAA", "AAAADAAAAA", "AAAAADDAAA", "AAAAADDAAA", "AAAAADAAAA", "AANANDDAAA",
+                           "AANANAAADD", "AADANAAAAA"),
+                     "F": ("AAAADAAADD", "AANADAAADD", "AAAAADDADD", "AAAAADDADD", "AAAAADAADD", "AANANDDADD",
+                           "AANANAAADD", "AADANAAADD")}
+        _hd_main_rows = [("early-close-switch", "git commit -m \"$(cat <<'EOF'\n)\"; git switch -c test origin/other; "
+                          "echo \"\nEOF\n)\"", "AAAAADDADD")]
+        for _hdxf, _hdxform in (("E", _hdx_e), ("F", _hdx_f)):
+            for (_hdxn, _hdxi), _hdxm in zip(_hdx_inners, _hdx_main[_hdxf]):
+                _hd_main_rows.append(("case-{}-{}".format(_hdxf, _hdxn),
+                                      _hdxform + "\ncase x in x) sh -c \"" + _hdxi + "\";; esac", _hdxm))
+        for _hdxn, _hdxb in (("paren-no-verify", "fix a) document --no-verify"),
+                             ("paren-short-n", "fix a) git commit -n is a route around"),
+                             ("paren-publish", "1) git add -A then git push")):
+            _hd_main_rows.append((_hdxn, "git commit -m \"$(cat <<'EOF'\n" + _hdxb + "\nEOF\n)\"", "AAAAAAAADD"))
+        for _hdxn, _hdxi, _hdxm in (("close-diff", "git diff", "ADAAAAAAAA"),
+                                    ("close-trunc", "echo hi > out.txt", "AAAADAAAAA"),
+                                    ("close-stash", "git stash pop", "AAAAAADNAA"),
+                                    ("close-reset", "git reset --hard", "AAAAAADAAA"),
+                                    ("close-no-verify", "git commit --no-verify -m y", "DAAAAAAAAD"),
+                                    ("close-publish", "git add -A && git push", "AADAAAAAAA"),
+                                    ("close-identity", "git commit --author=\"Claude <noreply@anthropic.com>\" -m y",
+                                     "AAADAAAAAD"),
+                                    ("close-subst", "git commit -m \"$(date)\"", "AAAAAAAADD"),
+                                    ("close-commit", "git commit -m y", "AAAAAAAAAD")):
+            _hd_main_rows.append((_hdxn, _hdx_close.format(_hdxi), _hdxm))
+        _hd_main_rows += [
+            ("heredoc-diff", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\ncat <<'X'\ngit diff\nX", "ANAAAAAAAA"),
+            ("heredoc-commit", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAADD"),
+            ("paren-heredoc-commit", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAAAA"),
+            ("close-line", "echo \"$(cat <<'EOF'\n)\"; " + _hd_nv + "\nEOF\n)\"", "DAAAAAAADD"),
+            ("close-line-apostrophe", "echo \"$(cat <<'EOF'\n# Don't\n)\"; " + _hd_nv + "\nEOF\n)\"", "DAAAAAAADD"),
+        ]
+        for _hdn, _hdc, _hdmain in _hd_main_rows:
+            _hd_main_check("hd-main-reading-" + _hdn, _hdc, _hdmain)
+        # COST. The lexer's cost per lex is linear in the command's length (the comment above _nest_track), so
+        # each guard below decides these inputs in well under its hook timeout: a 256 KiB line of blank-led '#'
+        # inside a double-quoted substitution, where the substitution skip searched to the end of the line from
+        # every '#', and a 128 KiB run of open parentheses and backquote substitutions, where the nesting stack
+        # was searched or copied for every word, skip and backquote. Each must take under 1 s of CPU. Measured
+        # on one host as the max of five runs per guard, this code took at most 0.051 s on the first input
+        # (protected_line) and 0.049 s on the second (gate_weakening), a margin of about nineteen times, and
+        # the code before the linear skip and the counted
+        # nesting stack took 14.4 s, 30.4 s and 15.2 s on the first and 9.3 s and 18.4 s on the second in
+        # gate_weakening, bash_absolute_paths and protected_line. protected_line took 0.09 s on the second
+        # input there too, so that row is a REGRESSION GUARD that does not tell the two apart; the other five
+        # rows fail on that code. With the counted stack put back to a plain list on this code, the second
+        # input takes 8.4 s in gate_weakening and 8.6 s in bash_absolute_paths (one run each), so those rows
+        # still fail such a stack. The orch self-test checks the cost of the poll-loop classifier, the raw word
+        # scan and the foreground detach scan on the same inputs. The retry rows put the commit message form
+        # before each input, so each lex reads the body, meets a later substitution and starts again reading
+        # none (two passes); the floor row puts it before 128 Ki plain words, so the body read stands, main's
+        # reading (one more pass) fails, and each guard also takes its failed-lex path (MAIN'S DECISION AS A
+        # FLOOR); the main-reading row puts a body main reads to an earlier ')' before them, so main's reading
+        # lexes and each guard judges both readings' segments. Measured on one host as the max of five runs
+        # per guard, this code took at most 0.033 s on retry-long-comment-line, 0.099 s on retry-deep-nesting,
+        # 0.162 s on floor-long-words (gate_weakening) and 0.122 s on main-reading-long-words
+        # (bash_absolute_paths), a margin of
+        # about six times against the 1 s bound: a long run of one separator character builds its records in
+        # one batch (_lex_pass), the sink check gate_weakening runs on a lex that fails resumes where that lex
+        # stopped (_gate_recovered_sink), and bash_absolute_paths reads its full lex's segments where a
+        # second, partial lex could recover nothing more. These rows are REGRESSION GUARDS for the
+        # two-pass bound and the floor's cost: before those three changes this code took at most 0.062 s,
+        # 0.541 s, 0.183 s and 0.238 s on them, the code before main's reading took 0.063 s, 0.557 s, 0.182 s
+        # and 0.200 s, so they pass there too, and with the counted nesting stack put back to a plain list
+        # retry-deep-nesting takes 8.7 s in gate_weakening (one run), so that row still fails such a plain-list
+        # stack. The batch leaves the deep-nesting rows' contiguous parenthesis runs off the per-character
+        # path, so code superlinear only in the per-character work of a '(' or ')' (an O(depth) copy on every
+        # '(' in _nest_track) fits every row above: the spaced-deep-nesting row separates each '(' with a
+        # blank, which breaks every run, so each '(' takes the per-character path. With such a copy added to
+        # _nest_track that row took 12.5 s in gate_weakening and 12.2 s in bash_absolute_paths (one run each)
+        # while every row above fit that code, and unchanged it takes a fraction of a second (on one host at
+        # most 0.18 s as the max of five runs in gate_weakening), a margin of about five times against the same
+        # 1 s bound; the figure and the margin are host-specific, and the 1 s bound is what each row
+        # enforces. The doubt-comment-pipes row is the linearity guard for the fail-closed sink test behind
+        # a '#' the lexer cannot judge under both readings (_gate_doubt_sink): a 256 KiB run of '# |' comment
+        # lines between a checker's pipe and an off-list terminal word, so the test scans the whole text and
+        # finds no listed sink word. Its clock is time.process_time (per-process CPU, as every row here). A
+        # probe that re-read the remaining comment lines from every '|' grew about fourfold per doubling
+        # there and took about 20 s of CPU in gate_weakening on a quarter of this input, far over the bound;
+        # the single-pass test took at most 0.21 s on the full input as the max of five runs on one host
+        # across the three guards, a margin of about five times against the same enforced 1 s bound.
+        _cost_form = "git commit -m \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\n"
+        _cost_inputs = (("long-comment-line", 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
+                        ("deep-nesting", "(" * 56000 + " `a`" * (56000 // 3)),
+                        ("spaced-deep-nesting", "( " * (128 * 1024)),
+                        ("retry-long-comment-line", _cost_form + 'echo "$(echo ' + "# " * (128 * 1024) + '\n)"\ngit status'),
+                        ("retry-deep-nesting", _cost_form + "(" * 56000 + " `a`" * (56000 // 3)),
+                        ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
+                        ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)),
+                        ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
+        _cost_doubt_got = None
+        for _cost_name, _cost_cmd in _cost_inputs:
+            for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
+                _cost_t0 = time.process_time()
+                _cost_got = _decision(_cost_guard, _cost_cmd)
+                _cost_cpu = time.process_time() - _cost_t0
+                if _cost_cpu >= 1.0:
+                    failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command; the bound "
+                                    "is 1 s".format(_cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd)))
+                if _cost_name == "doubt-comment-pipes" and _cost_guard is aiqt_hooks.gate_weakening:
+                    _cost_doubt_got = _cost_got
+        # The doubt-comment-pipes row bounds the fail-closed sink test only while its input still reaches
+        # that test: the lex must keep raising the uncertain-'#' doubt on it and gate_weakening must keep
+        # giving it the checker-and-pipe note (its terminal word is off the deny list), or the row would
+        # time an unrelated path and a superlinear sink test could ship behind a green bound.
+        _cost_doubt_cmd = dict(_cost_inputs)["doubt-comment-pipes"]
+        try:
+            aiqt_hooks._lex_readings(_cost_doubt_cmd)
+            failures.append("(lex-cost-doubt-path) the doubt-comment-pipes input now lexes, so its row no "
+                            "longer times the fail-closed sink test behind an unjudged '#'")
+        except aiqt_hooks._UncertainHashError:
+            pass
+        except ValueError as _cost_exc:
+            failures.append("(lex-cost-doubt-error) the doubt-comment-pipes input fails the lex with {!r} "
+                            "instead of the uncertain-'#' doubt, so its row no longer times the fail-closed "
+                            "sink test".format(_cost_exc))
+        if _cost_doubt_got != "allow-note":
+            failures.append("(lex-cost-doubt-note) gate_weakening decided {} on the doubt-comment-pipes input "
+                            "instead of the checker-and-pipe note, so the row no longer runs the sink test to "
+                            "the end of its scan".format(_cost_doubt_got))
+        # The note above proves the outcome, not the reach: a sink scan cut short of the text's end still
+        # gives the off-list 'wc' shape the same note within the CPU bound. Only a deny on the same long
+        # input with its terminal word swapped onto the deny list holds the scan to the input's end, so
+        # this positive is the reach check the 'wc' row is the negative control for (a scan truncated in
+        # memory to its first 1 KiB passes every check above and only this one catches it).
+        _cost_reach_cmd = "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "head"
+        _cost_reach_got = _decision(aiqt_hooks.gate_weakening, _cost_reach_cmd)
+        if _cost_reach_got != "deny":
+            failures.append("(lex-cost-doubt-reach) gate_weakening decided {} on the long doubt input whose "
+                            "terminal word is on the sink deny list, instead of the fail-closed deny, so the "
+                            "sink test no longer reaches the end of its scan".format(_cost_reach_got))
+        # READING COST. gate_weakening's parsed path also reads each segment's de-quoted text (_gate_behind_bypass:
+        # the blank-split reading and three bash-model readings, each a pass per character or per word, then the
+        # any-word walk, whose search for a first git word reads every word), and over every segment of a command
+        # that costs about twice one lex of it. On floor-long-words and main-reading-long-words, whose long echo
+        # segment names no git, it took gate_weakening to 1.8 and 2.6 times main's time: on one host, as the max
+        # of five runs, 0.237 s and 0.300 s against main's 0.129 s and 0.114 s, and over the 1 s bound above on a
+        # slower CI runner. Text no reading can make name git now gives None before any reading is built
+        # (_gate_text_may_name_git), and the same runs took 0.138 s and 0.102 s. This row holds the reading to a
+        # fixed linear budget that the host's speed cancels from: on each input, the CPU time of
+        # _gate_behind_bypass over every segment of every reading must stay under a quarter of the CPU time of one
+        # lex of the same command (_lex_readings, _gate_read_cost_problems). Over five runs on one host the
+        # reading took at most 0.010 of the lex with that pass-over and at least 1.94 of it with the readings
+        # built for every text, so the row fails the latter and passes the former about twenty-five times inside
+        # its budget; the clock is time.process_time, as in every row above.
+        failures.extend(_gate_read_cost_edge_failures())
+        for _rd_name in ("floor-long-words", "main-reading-long-words"):
+            _rd_cmd = dict(_cost_inputs)[_rd_name]
+            _rd_t0 = time.process_time()
+            _rd_segs = [seg for reading in aiqt_hooks._lex_readings(_rd_cmd) for seg in reading]
+            _rd_lex = time.process_time() - _rd_t0
+            _rd_t0 = time.process_time()
+            _rd_got = [aiqt_hooks._gate_behind_bypass(seg) for seg in _rd_segs]
+            _rd_read = time.process_time() - _rd_t0
+            _rd_longest = max((len(seg.argv) for seg in _rd_segs), default=0)
+            for _rd_problem in _gate_read_cost_problems(_rd_lex, _rd_read, _rd_longest, _rd_got):
+                failures.append("(gw-read-cost-{}) on a {}-character command, {}".format(
+                    _rd_name, len(_rd_cmd), _rd_problem))
+        # The other scanners main's lexer helpers carry read a comment their own way, beside the lexer:
+        # the continuation join keeps a backslash-newline after a '#' at a word start ('(' included) and removes
+        # one after a '#' glued to a substitution's ')'; the uncertainty causes report any '#' outside quotes
+        # and any '$(' inside them; and the argv list of every reading feeds the continuation cause.
+        texpect("(tok-dq-join-comment) the join keeps the continuation after a word-start '#'",
+                aiqt_hooks._join_continuations("(# a\\\nb)")[0], "(# a\\\nb)")
+        texpect("(tok-dq-join-glued) the join removes the continuation after a '#' glued to a ')'",
+                aiqt_hooks._join_continuations("x=$(y)#a\\\nb")[0], "x=$(y)#ab")
+        texpect("(tok-dq-causes) a '#' in a double-quoted substitution is uncertain through its '$('",
+                aiqt_hooks._lex_uncertain_causes("echo \"$(echo a # b)\""), ("substitution",))
+        texpect("(tok-dq-causes-brace) a '#' in a double-quoted ${...} the lexer cannot read is a lexer cause",
+                aiqt_hooks._lex_uncertain_causes("echo \"${x:- #}\""), ("lexer",))
+        texpect("(tok-dq-argvs) the argv list holds every reading's segments in turn",
+                aiqt_hooks._lex_argvs("x=$(true)#"), [["x=$"], ["true"], [], ["x=$"], ["true"], ["#"]])
+        # Every guard that reads the lexer output: each shape denies bare (git_stash_ref notes) and must
+        # decide at least as strictly behind each of six prefixes that hid it at the base commit, four with a
+        # '#' right after a ')' and two with a '#' after a blank inside an open ${...} or backquote
+        # substitution, in the plain spelling and in the quoted and continued spellings g'it' and
+        # gi<backslash-newline>t (the word-text reading reaches the shape for the first five; the backquote
+        # prefix takes the guard's fallback, which reads the text with its backslash-newlines and then its
+        # quote characters and backslashes removed), while the same prefix with a blank before the '#' and
+        # nothing open comments the shape out, as bash does (the hash-control rows are controls). protected_line
+        # is not a row here: behind a 'git status; ' lead every one of its rows denied before this check
+        # existed too, and with no lead its blank-led control denies as well, so neither form tells a change
+        # apart; the base tables below cover it with no lead.
+        _hash_rows = [
+            (aiqt_hooks.gate_weakening, "", "git commit --no-verify -m x", "deny", "allow"),
+            (aiqt_hooks.diff_source_pretool, "", "git diff", "deny", "allow-note"),
+            (aiqt_hooks.commit_msg_subst, "", 'git commit -m "a$(id)"', "deny", "allow"),
+            (aiqt_hooks.commit_identity, "", 'git commit -m x --author="Claude <noreply@anthropic.com>"',
+             "deny", "allow"),
+            (aiqt_hooks.git_explicit_binding, "", "git add -A && git push", "deny", "allow"),
+            (aiqt_hooks.git_stash_ref, "", "git stash pop", "allow-note", "allow"),
+            (aiqt_hooks.branch_root, "", "git checkout --orphan x", "deny", "allow"),
+            (aiqt_hooks.bash_absolute_paths, "", "echo hi > out.txt", "deny", "allow"),
+            # The discard guard has no comment-out control (None): its scope scan reads the de-quoted text
+            # unstripped, a comment included, so a commented-out g'it' re'set' --hard still puts the command in
+            # scope and the closed allowlist grammar denies it, exactly as it denies the same command with the
+            # shape not commented out (that scan's disclosed over-refusal, not the lexer's). No such control
+            # tells the comment rule apart for this guard, so none is checked; its rows behind every prefix are.
+            (aiqt_hooks.git_discard, "", "g'it' re'set' --hard", "deny", None),
+        ]
+        _hash_prefixes = ("x=$(true)#; ", "x=$((1))#; ", "a=(1 2)#; ", "x=$(true)\\\n#; ",
+                          "echo ${x:- #}; ", "x=`true #`; ")
+        _hash_rank = {"allow": 0, "allow-note": 1, "deny": 2}  # deny > note > allow; anything else fails
+
+        def _hash_spellings(word):
+            """The plain, quoted and continued spellings of a command word (git, g'it', gi<bs-newline>t)."""
+            return (word, word[0] + "'" + word[1:] + "'", word[:-1] + "\\\n" + word[-1])
+
+        def _hash_spell(shape, word, spelled):
+            return " ".join(spelled if tok == word else tok for tok in shape.split(" "))
+
+        for _hg, _hlead, _hshape, _hwant, _hcontrol in _hash_rows:
+            for _hspelled in _hash_spellings("git"):
+                _hbody = _hash_spell(_hshape, "git", _hspelled)
+                for _hp in ("",) + _hash_prefixes:
+                    _hcmd = _hlead + _hp + _hbody
+                    _hgot = _decision(_hg, _hcmd)
+                    if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
+                        failures.append("(hash-glued) {} on {!r}: expected {} or stricter, got {}".format(
+                            _hg.__name__, _hcmd, _hwant, _hgot))
+            if _hcontrol is not None:
+                _hcmd = _hlead + "x=$(true) #; " + _hshape
+                _hgot = _decision(_hg, _hcmd)
+                # the closed literal grammar reads every raw git word, one inside a comment too (_hd_want)
+                _hcontrol = _hd_want(_hg, _hcmd, _hcontrol)
+                if _hgot != _hcontrol:
+                    failures.append("(hash-control) {} on {!r}: the blank-led '#' must comment the shape out, "
+                                    "expected {}, got {}".format(_hg.__name__, _hcmd, _hcontrol, _hgot))
+            # Behind each double-quoted substitution prefix (tok-dq above), in each spelling.
+            for _hspelled in _hash_spellings("git"):
+                _hbody = _hash_spell(_hshape, "git", _hspelled)
+                for _hp in _dq_prefixes:
+                    _hcmd = _hlead + _hp.format(_hbody)
+                    _hgot = _decision(_hg, _hcmd)
+                    if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
+                        failures.append("(hash-dq) {} on {!r}: expected {} or stricter, got {}".format(
+                            _hg.__name__, _hcmd, _hwant, _hgot))
+        # THE BASE TABLE: each guard row, each prefix below (the six above without their '; ', and the
+        # multi-line command substitution with a comment line, msg=$(<newline># c<newline>...)), each
+        # spelling of the row's command word (plain, then quoted as in g'it', then continued as in
+        # gi<backslash-newline>t), and each placement (the shape on the line AFTER the prefix, then the shape
+        # BEFORE the prefix as '<shape>; <prefix>'), must decide at least as strictly as the base commit
+        # fc11d9bc did for the same command. HOW THE TABLE WAS PRODUCED: fc11d9bc's
+        # .aiqt/core/hooks/scripts/aiqt_hooks.py (git show fc11d9bc:<that path>) was loaded as a module and each
+        # row's guard was called on each command with the payload _decision builds (no cwd), each result
+        # reduced as _reduce_result does: D deny, N allow-note, A allow. Each string holds one prefix's six
+        # results in the order plain-after, plain-before, quoted-after, quoted-before, continued-after,
+        # continued-before. At dfac8602, before the lexer judged both readings, the same check failed on 203 of
+        # these 504 commands (protected_line, gate_weakening, commit_msg_subst and git_explicit_binding on 28 each,
+        # bash_absolute_paths on 42, diff_source_pretool, git_stash_ref and git_discard on 14 each,
+        # branch_root on 7), where a guard's fallback allowed a shape the base commit denied or noted.
+        _hash_base_prefixes = ("x=$(true)#", "x=$((1))#", "a=(1 2)#", "x=$(true)\\\n#", "echo ${x:- #}",
+                               "x=`true #`", "msg=$(\n  # c\n  echo hi\n)")
+        _hash_base_table = (
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.commit_identity, 'git commit -m x --author="Claude <noreply@anthropic.com>"', "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git",
+             "NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.bash_absolute_paths, "echo hi > out.txt", "echo",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.bash_absolute_paths, "cd foo", "cd",
+             "NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN"),
+            (aiqt_hooks.bash_absolute_paths, "cat < in.txt", "cat",
+             "NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN NNNNNN"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git",
+             "DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD DDDDDD"),
+        )
+        _hash_base_codes = {"D": "deny", "N": "allow-note", "A": "allow"}
+        _hash_base_count = 0
+        for _hg, _hshape, _hword, _hcodes in _hash_base_table:
+            for _hp, _hrow in zip(_hash_base_prefixes, _hcodes.split(" "), strict=True):
+                _hcmds = []
+                for _hspelled in _hash_spellings(_hword):
+                    _hbody = _hash_spell(_hshape, _hword, _hspelled)
+                    _hcmds += [_hp + "\n" + _hbody, _hbody + "; " + _hp]
+                for _hcmd, _hcode in zip(_hcmds, _hrow, strict=True):
+                    _hash_base_count += 1
+                    _hwant = _hash_base_codes[_hcode]
+                    _hgot = _decision(_hg, _hcmd)
+                    if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
+                        failures.append("(hash-base) {} on {!r}: the base commit decided {}, got {}".format(
+                            _hg.__name__, _hcmd, _hwant, _hgot))
+        texpect("(hash-base-count) the base table holds every row, prefix, spelling and placement",
+                _hash_base_count, 12 * 7 * 3 * 2)
+        # THE QUOTE TABLE: ANSI-C and locale spellings, which the fallback's text removal does not decode
+        # (g$'i't reads as g$it there; bash 5.3.9 runs git for g$'i't, g$''it, gi$'t', g$'\x69't and g$"i"t).
+        # Each entry names a guard row of the base table, a word of its shape and a spelling of that word, and
+        # holds two strings, the decisions of fc11d9bc and then of main at 3295772c (whose hook module is
+        # byte-identical to fc11d9bc's), produced as the base table was. Each string holds one pair per prefix
+        # below, the shape after the prefix's line and then '<shape>; <prefix>'. The prefixes: a '#' right
+        # after the backquote that opens a substitution, a '#' after a blank inside one, an escaped backquote
+        # before a '#' (plain text to bash, so the lexer reads the command and the row decides as main's lexer
+        # does), and five uncertain '#', one beyond the bound. Each command must decide at least as strictly
+        # as the stricter of the two. An A in main's string marks a spelling main allows: its lexer reads
+        # g$'\x69't as gx69t and g$"i"t as g$it, not git (main's git_discard allows g$'\x69't reset --hard with
+        # no '#' at all), and the escaped-backquote pair of those rows, which the lexer now reads, decides here
+        # as main's does. At e2fe8d72, before the fallback read such quoting as cannot-evaluate and before the
+        # lexer read an escaped backquote as text, 220 of these 440 commands, in 30 of the 55 entries, decided
+        # less strictly than fc11d9bc or main (diff_source_pretool on 40, gate_weakening, commit_msg_subst,
+        # git_explicit_binding, git_stash_ref and git_discard on 32 each, branch_root on 16, bash_absolute_paths
+        # on 4); of the other 25 entries, 15 are spellings fc11d9bc and main allow and 10 already denied there.
+        _hash_quote_prefixes = ("echo `#`", "x=`true #`", "echo \\`#", "x=$(true)#a; (y)#; (z)#; (w)#; (v)#")
+        _qid = 'git commit -m x --author="Claude <noreply@anthropic.com>"'
+        _hash_quote_table = (
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", "g$'\\x69't", "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.gate_weakening, "git commit --no-verify -m x", "commit", "com$'m'it", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "git", 'g$"i"t', "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.diff_source_pretool, "git diff", "diff", "di$'f'f", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", "g$'\\x69't", "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.commit_msg_subst, 'git commit -m "a$(id)"', "commit", "com$'m'it", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.commit_identity, _qid, "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.commit_identity, _qid, "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.commit_identity, _qid, "commit", "com$'m'it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", "g$'\\x69't", "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "git", 'g$"i"t', "AA AA AA AA",
+             "AA AA AA AA"),
+            (aiqt_hooks.git_explicit_binding, "git add -A && git push", "push", "pu$'s'h", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "g$'i't", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "g$''it", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "gi$'t'", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_stash_ref, "git stash pop", "stash", "st$'a'sh", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.branch_root, "git checkout --orphan x", "checkout", "che$'c'kout", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.bash_absolute_paths, "cd foo", "cd", "c$'d'", "NN NN NN NN", "NN NN NN NN"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "g$'i't", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "g$''it", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "gi$'t'", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", "g$'\\x69't", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "git", 'g$"i"t', "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.protected_line, "git push --force origin main", "push", "pu$'s'h", "DD DD DD DD",
+             "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "g$'i't", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "g$''it", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "gi$'t'", "DD DD DD DD", "DD DD DD DD"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", "g$'\\x69't", "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_discard, "git reset --hard", "git", 'g$"i"t', "AA AA AA AA", "AA AA AA AA"),
+            (aiqt_hooks.git_discard, "git reset --hard", "reset", "re$'s'et", "DD DD DD DD", "DD DD DD DD"),
+        )
+        _hash_quote_count = 0
+        for _hg, _hshape, _hword, _hspelled, _hbase, _hmain in _hash_quote_table:
+            _hbody = _hash_spell(_hshape, _hword, _hspelled)
+            _hcmds = [_hcmd for _hp in _hash_quote_prefixes for _hcmd in (_hp + "\n" + _hbody, _hbody + "; " + _hp)]
+            for _hcmd, _hcb, _hcm in zip(_hcmds, _hbase.replace(" ", ""), _hmain.replace(" ", ""), strict=True):
+                _hash_quote_count += 1
+                _hwant = max(_hash_base_codes[_hcb], _hash_base_codes[_hcm], key=_hash_rank.get)
+                _hgot = _decision(_hg, _hcmd)
+                if _hash_rank.get(_hgot, -1) < _hash_rank[_hwant]:
+                    failures.append("(hash-quote) {} on {!r}: fc11d9bc decided {}, main {}, got {}".format(
+                        _hg.__name__, _hcmd, _hash_base_codes[_hcb], _hash_base_codes[_hcm], _hgot))
+        texpect("(hash-quote-count) the quote table holds every row, prefix and placement",
+                _hash_quote_count, 55 * 4 * 2)
+        # The fallback path (a '#' the lexer cannot judge under both readings, here one inside a backquote
+        # substitution): a guard subject its text names keeps the strict decision, and a command naming none
+        # takes the guard's ordinary unparseable-command path (the three '-none' checks are controls: they pass
+        # at fc11d9bc and at dfac8602 as well).
+        texpect("(hash-fallback-diff-none) control: a fallback command naming no diff producer allows",
+                _decision(aiqt_hooks.diff_source_pretool, "x=`true #`; echo hi"), "allow")
+        texpect("(hash-fallback-gate-sink) a fallback command piping into a listed sink denies",
+                _decision(aiqt_hooks.gate_weakening, "x=`true #`\npytest | head"), "deny")
+        texpect("(hash-fallback-gate-sink-wrapped) the sink is found after a wrapper in its stage",
+                _decision(aiqt_hooks.gate_weakening, "x=`true #`\npytest | nice head"), "deny")
+        texpect("(hash-fallback-gate-none) control: a fallback command with no sink or bypass allows",
+                _decision(aiqt_hooks.gate_weakening, "x=`true #`; echo hi"), "allow")
+        texpect("(hash-fallback-push) a fallback command naming a plain git push denies",
+                _decision(aiqt_hooks.protected_line, "x=`true #`\ng'it' push origin feature"), "deny")
+        texpect("(hash-fallback-abspth-none) control: a fallback command with no cd, '<' or '>' allows",
+                _decision(aiqt_hooks.bash_absolute_paths, "x=`true #`; echo hi"), "allow")
+        texpect("(hash-fallback-abspth-pushd) a fallback command naming a continued pushd notes",
+                _decision(aiqt_hooks.bash_absolute_paths, "x=`true #`\npush\\\nd foo"), "allow-note")
+        # An AI identity spelled in ANSI-C quoting: fc11d9bc decoded it and denied; the fallback's text
+        # removal reads Cl$aude, so the guard reads the command as cannot-evaluate and denies.
+        texpect("(hash-fallback-identity-ansi-c) an AI identity in ANSI-C quoting behind the fallback denies",
+                _decision(aiqt_hooks.commit_identity, "echo `#`\ngit commit -m x --author=Cl$'a'ude"), "deny")
+        # The cost of failing closed: behind the fallback, ANY quote character next to a letter is read as
+        # cannot-evaluate, so a command that only echoes a quoted word is denied by every guard whose fallback
+        # denies its subject, and noted by the two that only note; fc11d9bc allowed every one. The same
+        # command with no quote is the control (allowed by each, as at fc11d9bc).
+        _hash_cost = "x=`true #`; echo 'hi'"
+        texpect("(hash-fallback-opaque-cost) a fallback command with a quoted word takes each guard's fail-closed "
+                "decision",
+                [_decision(_hg, _hash_cost) for _hg in (
+                    aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.commit_identity, aiqt_hooks.git_explicit_binding, aiqt_hooks.git_stash_ref,
+                    aiqt_hooks.branch_root, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line,
+                    aiqt_hooks.git_discard)],
+                ["deny", "deny", "deny", "deny", "deny", "allow-note", "deny", "allow-note", "deny", "deny"])
+        texpect("(hash-fallback-opaque-cost-control) control: the same command with no quote allows",
+                [_decision(_hg, "x=`true #`; echo hi") for _hg in (
+                    aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.commit_msg_subst,
+                    aiqt_hooks.commit_identity, aiqt_hooks.git_explicit_binding, aiqt_hooks.git_stash_ref,
+                    aiqt_hooks.branch_root, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line,
+                    aiqt_hooks.git_discard)],
+                ["allow"] * 10)
+        # The common multi-line substitution with a comment line takes the both-readings path, and a guard
+        # reads the command after it as the base commit did.
+        texpect("(hash-readings-msg) the multi-line substitution with a comment line has two readings",
+                len(aiqt_hooks._lex_readings("msg=$(\n  # c\n  echo hi\n)\ngit commit -m \"$msg\"")), 2)
         # A '..'-normalized device target and a decoy-real target under '..' do not classify file-real.
         texpect("(tok-18a) '/tmp/../dev/stdout' normalizes to a /dev device target",
                 _redir("git diff > /tmp/../dev/stdout"),
@@ -11347,24 +15293,25 @@ def _main_isolated(monitor):
         # no snapshot at the pin and at the previous reading (nothing made the lex uncertain, the wrapper hid
         # the verb from the parsed scan, and the raw and joined text held no contiguous verb). In scope, the
         # closed allowlist grammar DENIES each (a wrapper word, a double quote, a concatenated quote, a
-        # backslash or a '$' is outside it), and the denied command takes no recovery snapshot.
-        for _g8n, _g8c in (
-                ("dq-reset", 'git status; env git re""set --hard'),
-                ("sq-reset", "env git re'set' --hard"),
-                ("cmdword", 'command g""it reset --hard'),
-                ("dq-checkout", 'git status; env git check""out -- file.txt'),
-                ("esc-reset", "git status; env git re" + chr(92) + "set --hard"),
-                ("dollar-reset", "git status; env git re$''set --hard"),
+        # backslash or a '$' is outside it), and the denied command takes no recovery snapshot. dollar-reset spells
+        # the subcommand word through an ANSI-C quote, so the git alias reading (HOW A WORD IS SPELLED) denies it
+        # first, naming the git alias (the closed allowlist grammar denied it before), with no snapshot either.
+        for _g8n, _g8c, _g8why in (
+                ("dq-reset", 'git status; env git re""set --hard', "closed allowlist grammar"),
+                ("sq-reset", "env git re'set' --hard", "closed allowlist grammar"),
+                ("cmdword", 'command g""it reset --hard', "closed allowlist grammar"),
+                ("dq-checkout", 'git status; env git check""out -- file.txt', "closed allowlist grammar"),
+                ("esc-reset", "git status; env git re" + chr(92) + "set --hard", "closed allowlist grammar"),
+                ("dollar-reset", "git status; env git re$''set --hard", "builds at run time"),
         ):
             if aiqt_hooks._lex_uncertain_causes(_g8c) != ():
                 failures.append("(gd-dequoted-{}-certain) the vector must read as a certain lex; got {!r}"
                                 .format(_g8n, aiqt_hooks._lex_uncertain_causes(_g8c)))
             _g8 = _gd6_outcome(_g8c)
             _g8reason = ((_g8[0][1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-            if _g8[1] != "deny" or "closed allowlist grammar" not in _g8reason or _g8[3]:
+            if _g8[1] != "deny" or _g8why not in _g8reason or _g8[3]:
                 failures.append("(gd-dequoted-{}) a fragmented wrapped work-losing verb on a certain lex must be in "
-                                "scope and denied by the closed allowlist grammar with no new recovery ref; got "
-                                "{!r}".format(_g8n, _g8))
+                                "scope and denied ({}) with no new recovery ref; got {!r}".format(_g8n, _g8why, _g8))
         # The same scope reading feeds the unrecognized-subcommand deny: a quote-fragmented
         # 'checkout-index' (outside the recognized verb set, its sub not snapshottable) was a silent allow
         # at the pin and at the previous reading; pristine or -C redirected, it now denies like
@@ -11386,18 +15333,28 @@ def _main_isolated(monitor):
         if _g8w[1] != "deny" or "closed allowlist grammar" not in _g8wreason or _g8w[3]:
             failures.append("(gd-dequoted-wrapped-redirect) a fragmented wrapped discard with a fragmented -C redirect to "
                             "another repository must be denied by the closed allowlist grammar; got {!r}".format(_g8w))
-        # The DISCLOSED residual, witnessed: a verb no raw, joined or de-quoted reading assembles (an escape
-        # decoded inside $'...', a word a parameter expansion builds at run time) still reads as no
-        # recognized lossy verb and allows silently.
-        for _g8n, _g8c in (
-                ("residual-ansi", "env git $'" + chr(92) + "x72'eset --hard"),
-                ("residual-param", "r=re; env git ${r}set --hard"),
+        # A verb no raw, joined or de-quoted reading assembles. Built in the subcommand word by an escape decoded
+        # inside $'...' or by an unquoted parameter expansion, it now reads as a git alias (HOW A WORD IS SPELLED)
+        # and denies naming a word built at run time (residual-ansi and residual-param were silent allows, the
+        # disclosed residual, before). The DISCLOSED residual that remains, witnessed: a verb a double-quoted expansion builds reads as
+        # no recognized lossy verb and allows silently (residual-dq).
+        for _g8n, _g8c, _g8want in (
+                ("residual-ansi", "env git $'" + chr(92) + "x72'eset --hard", "deny"),
+                ("residual-param", "r=re; env git ${r}set --hard", "deny"),
+                ("residual-dq", 'r=re; env git "${r}set" --hard', "allow"),
         ):
             _g8 = aiqt_hooks.git_discard({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                           "tool_input": {"command": _g8c}, "cwd": gd6r})
-            if _g8 != (0, None, None):
-                failures.append("(gd-dequoted-{}) the disclosed residual changed (update the git_discard docstring and "
-                                "the manifest residue with it); got {!r}".format(_g8n, _g8))
+            _g8reason = ((_g8[1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _g8want == "allow":
+                _g8bad = _g8 != (0, None, None)
+            else:
+                _g8bad = _reduce_result(_g8[0], _g8[1]) != "deny" or "builds at run time" not in _g8reason
+            if _g8bad:
+                failures.append("(gd-dequoted-{}) expected {}{} (update the git_discard docstring and the manifest "
+                                "residue with any change); got {!r}".format(
+                                    _g8n, _g8want, " naming a word built at run time" if _g8want == "deny" else "",
+                                    _g8))
         # The DISCLOSED over-refusal of that de-quoted read, pinned. It reads quoted prose too,
         # so a command that only prints fragmented work-losing prose is in scope although bash runs only
         # echo or printf, and the closed allowlist grammar DENIES it (echo, printf, a double quote and a
@@ -12045,12 +16002,17 @@ def _main_isolated(monitor):
         _git(pl_mcfg, "config", "remote.origin.mirror", "true")  # persisted file config: NOT read
         pexpect("(gd146-m33) a PERSISTED file-config mirror mode is a disclosed residual, allows",
                 "git push origin", "allow", cwd=str(pl_mcfg))
-        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol (and the explicit-refspec ambient gap) is a "
-                "disclosed residual, allows",
+        # Re-expected from allow to deny: the command's text names GIT_CONFIG_COUNT, so every git command of it runs
+        # under an alias the command may define (_git_alias_named) and denies before the push reading; the
+        # GIT_CONFIG_* env protocol from the session environment stays the disclosed residual.
+        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol named in the command denies as a possible alias",
                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true "
-                "git push origin main", "allow", cwd=plf)
-        pexpect("(gd146-m35) an alias hiding the push (subcommand is 'p', not 'push') is a disclosed "
-                "residual, allows", "git -c alias.p='push --mirror' p origin", "allow", cwd=plf)
+                "git push origin main", "deny", cwd=plf, detail="defines a git alias for itself")
+        # Re-expected from allow to deny: a git alias the command defines makes the subcommand unknown, so
+        # protected_line denies it on any branch (the gla vectors); an alias from a configuration file stays the
+        # disclosed residual.
+        pexpect("(gd146-m35) an alias the command defines hides the push (subcommand is 'p', not 'push'), "
+                "so it denies", "git -c alias.p='push --mirror' p origin", "deny", cwd=plf)
         pexpect("(gd146-m36) a command-local remote.<name>.push refspec is a disclosed follow-on "
                 "residual, allows", "git -c remote.origin.push=:main push origin", "allow", cwd=plf)
         # (gd146-m37, round-2 QA BLOCKER) the raw fallback requires a CONTIGUOUS '.mirror', so a shell
@@ -12135,6 +16097,17 @@ def _main_isolated(monitor):
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
 
+        def gdeny_names(label, command, needle):
+            # Assert the command DENIES and that its deny reason names the offending word (needle), so a
+            # regression that drops the word from the message is caught, not only the decision category.
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            _code, obj, _err = gwg(data)
+            hso = (obj or {}).get("hookSpecificOutput") or {}
+            if hso.get("permissionDecision") != "deny":
+                failures.append("{}: expected deny, got {}".format(label, _decision(gwg, command)))
+            elif needle not in hso.get("permissionDecisionReason", ""):
+                failures.append("{}: deny reason does not name {!r}".format(label, needle))
+
         # The DENY core: --no-verify on every verb that accepts it (verified against the git 2.53.0 man
         # pages), exact, abbreviated (conservative prefix), and the short -n ONLY where -n IS --no-verify.
         gexpect("(gw-a) commit --no-verify denies", "git commit --no-verify -m 'x'", "deny")
@@ -12158,7 +16131,11 @@ def _main_isolated(monitor):
         gexpect("(gw-h) push -n is a dry run, allows", "git push -n origin main", "allow")
         gexpect("(gw-i) merge -n is --no-stat, allows", "git merge -n topic", "allow")
         gexpect("(gw-j) plain commit allows", "git commit -m 'fix: adjust'", "allow")
-        gexpect("(gw-k) attached -m value containing -n allows", "git commit -m'-n note'", "allow")
+        gexpect("(gw-k) an attached -m'-n note' value glues a quote to a word, denies (a disclosed "
+                "over-deny of the closed literal grammar; the separated form is the control)",
+                "git commit -m'-n note'", "deny")
+        gexpect("(gw-k2) a separated single-quoted -m value containing -n is that option's value, allows",
+                "git commit -m '-n note'", "allow")
         gexpect("(gw-l) separated --message value -n is consumed, allows",
                 "git commit --message -n", "allow")
         gexpect("(gw-m) post-'--' pathspec -n is an operand, allows",
@@ -12168,6 +16145,54 @@ def _main_isolated(monitor):
         gexpect("(gw-n3) --no-verify-signatures is not the bypass",
                 "git merge --no-verify-signatures topic", "allow")
         gexpect("(gw-n4) positive --verify allows", "git commit --verify -m 'x'", "allow")
+
+        # A commit whose quoted message only quotes a hook-skip spelling is a disclosed over-deny; every deny
+        # it can draw keeps its decision and names the way on (_GATE_FILE_ROUTE): commit the message from a
+        # file, which the guard never opens. One row per deny site (parsed, de-quoted, parse-error, raw
+        # fallback, opaque '#' doubt and doubt bypass), each failing on code that drops the route from it.
+        for _fr_label, _fr_cmd in (
+                ("gw-fr-behind", "git commit -m 'docs: git commit -n is banned'"),
+                ("gw-fr-grammar", "git commit -m 'look at git --namespace'"),
+                ("gw-fr-seg", "git commit -m 'docs' '-n'"),
+                ("gw-fr-pseg", "git commit -m 'docs' '-n' <<<x"),
+                ("gw-fr-pbehind", "git commit -m 'docs: git commit -n is banned'; cat <<<x"),
+                ("gw-fr-unread", 'git commit -m "docs: git commit -n is banned'),
+                ("gw-fr-fb-noverify", "git commit -m \"$(cat <<'EOF'\nDon't use --no-verify\nEOF\n)\""),
+                ("gw-fr-fb-shortn", "git commit -m \"$(cat <<'EOF'\nDon't use -n\nEOF\n)\""),
+                ("gw-fr-fb-grammar", 'git commit -m "x" $y "unbalanced'),
+                ("gw-fr-opaque", "x=`true #`\ngit commit -m 'docs: git commit -n is banned'"),
+                ("gw-fr-doubt", "x=`true #`\ngit commit -m \" git commit -n \"")):
+            gdeny_names("({}) a quoted-message commit denies and its reason names -F".format(_fr_label), _fr_cmd,
+                        "git commit -F FILE")
+        # The 'bypass' branch of the grammar messages, parsed and unparsed: the walks before it catch every
+        # bypass spelling these rows can write, so the message is read directly.
+        for _fr_unparsed in (False, True):
+            if "git commit -F FILE" not in aiqt_hooks._gate_grammar_messages(
+                    "bypass", "commit", "the short -n", _fr_unparsed)[0]:
+                failures.append("(gw-fr-grammar-bypass-{}) the bypass grammar reason does not name -F"
+                                .format(_fr_unparsed))
+        # The route named allows: the commands are read out of the reason text itself (FILE an absolute
+        # path), so a route the guard does not allow, or a reason that names none, fails here.
+        _fr_route = aiqt_hooks._GATE_FILE_ROUTE
+        for _fr_form in ("git commit -F FILE", "cat FILE | git commit -F -"):
+            if _fr_form not in _fr_route:
+                failures.append("(gw-fr-route) the route does not name {!r}".format(_fr_form))
+            gexpect("(gw-fr-route-allows) the named route {!r} allows".format(_fr_form),
+                    _fr_form.replace("FILE", "/tmp/msg.txt"), "allow")
+        gexpect("(gw-fr-allow-file) a commit from a message file allows", "git commit -F /tmp/msg.txt", "allow")
+        gexpect("(gw-fr-allow-long) the --file spelling allows too", "git commit --file /tmp/msg.txt", "allow")
+        gexpect("(gw-fr-allow-pipe) the message piped from a file to -F - allows",
+                "cat /tmp/msg.txt | git commit -F -", "allow")
+        # Controls: the route is a file the guard does not read; a '<' redirection or a here-document on the
+        # git segment stays outside the closed grammar, and a stage whose own text names the spelling is read.
+        gexpect("(gw-fr-ctl-redir) control: -F - fed by a '<' redirection still denies",
+                "git commit -F - < /tmp/msg.txt", "deny")
+        gexpect("(gw-fr-ctl-heredoc) control: -F - fed by a here-document still denies",
+                "git commit -F - <<'EOF'\ndocs: git commit -n is banned\nEOF", "deny")
+        gexpect("(gw-fr-ctl-printf) control: a printf naming the spelling before -F - still denies",
+                "printf 'docs: git commit -n is banned' | git commit -F -", "deny")
+        gexpect("(gw-fr-ctl-flag) control: a real -n beside -F still denies", "git commit -F /tmp/msg.txt -n",
+                "deny")
 
         # ROUND-2 FINDING 14: the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
         # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. These previously
@@ -12209,6 +16234,69 @@ def _main_isolated(monitor):
         gexpect("(gw-ae) unparseable checker + swallow allows-with-note (finding 14; fallback relaxed)",
                 'pytest || true "unbalanced', "allow-note")
         gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
+        # A bypass the raw text hides behind quoting, behind an ordinary parse failure (a here-string): the
+        # fallback also reads the de-quoted text (quote characters, backslashes and a '$' before a quote
+        # removed, line continuations joined, each ANSI-C quote's escapes decoded), so the fragmented
+        # spelling keeps the deny its plain spelling earns. Each reads as no bypass in the raw text alone.
+        gexpect("(gw-pf1) here-string + quote-fragmented commit verb with --no-verify denies (the "
+                "fallback reads the de-quoted text)",
+                "git co'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf2) here-string + ANSI-C-fragmented commit verb with --no-verify denies (the '$' "
+                "before the quote is removed too)",
+                "git co$'mmit' --no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf6) here-string + quote-fragmented --no-verify denies", 'git commit "-"-no-verify -m x <<<x',
+                "deny")
+        gexpect("(gw-pf7) here-string + continuation-split --no-verify denies",
+                "git commit -\\\n-no-verify -m x <<<x", "deny")
+        gexpect("(gw-pf8) here-string + quote-fragmented short -n on commit denies", 'git commit -m x -"n" <<<x',
+                "deny")
+        gexpect("(gw-pf9) here-string + ANSI-C hex escape spelling --no-verify denies (escapes decoded)",
+                "git commit --no-$'\\x76'erify -m x <<<x", "deny")
+        gexpect("(gw-pf10) here-string + ANSI-C octal escape spelling --no-verify denies",
+                "git commit $'--no-\\166erify' -m x <<<x", "deny")
+        gexpect("(gw-pf11) here-string + ANSI-C Unicode escape spelling the commit verb denies",
+                "git $'\\u0063'ommit --no-verify -m x <<<x", "deny")
+        # Quoting alone is no ground to deny: an ordinary command whose quotes touch letters, behind a
+        # here-string or a process substitution, and that spells no bypass in any reading keeps the raw
+        # probes' allow (the same decision the main branch gives it).
+        # Except on a roster-verb git segment: the closed literal grammar refuses a here-string or a process
+        # substitution there, so a git commit carrying one denies, quoted message or not (the stricter
+        # fail-closed choice where the two readings disagree).
+        gexpect("(gw-pf3) here-string commit with a quoted message denies by the closed grammar",
+                'git commit -m "fix bug" <<<x', "deny")
+        gexpect("(gw-pf12) here-string with a quoted word allows", 'wc -l <<<"hello"', "allow")
+        gexpect("(gw-pf13) quoted pattern and here-string allows", 'grep "foo" <<<"bar"', "allow")
+        # A process substitution on a roster-verb git commit segment denies by the closed grammar (the
+        # stricter fail-closed choice), as gw-fb-procsub pins.
+        gexpect("(gw-pf14) commit message from a process substitution with a quoted word denies by the closed "
+                "grammar", 'git commit -F <(echo "msg")', "deny")
+        gexpect("(gw-pf15) two process substitutions with quoted paths allow",
+                'diff <(sort "a.txt") <(sort "b.txt")', "allow")
+        gexpect("(gw-pf16) an ANSI-C here-string whose escapes decode to no bypass allows",
+                "cat <<<$'line1\\nline2'", "allow")
+        # A here-string on a roster-verb git commit segment denies by the closed grammar even with no bypass
+        # flag (the stricter fail-closed choice).
+        gexpect("(gw-pf4) here-string commit with no bypass flag denies by the closed grammar",
+                "git commit -m x <<<x", "deny")
+        gexpect("(gw-pf5) here-string non-git command still allows", "wc -l <<<x", "allow")
+        # The ANSI-C decoder behind gw-pf9 to gw-pf11, at each escape's bounds (just inside, at, just past):
+        # \x reads one or two hex digits, an octal escape one to three digits (its value keeps its low
+        # eight bits, 0o377 the last value kept whole), \u one to four and \U one to eight hex digits (a
+        # code point past U+10FFFF reads as nothing), \cX a control character, an unknown letter stays
+        # escaped, an escaped quote does not end the body, and an unclosed $' is left as written.
+        for _ac_raw, _ac_want in (
+                ("$'\\x7'", "\x07"), ("$'\\x76'", "v"), ("$'\\x766'", "v6"),
+                ("$'\\7'", "\x07"), ("$'\\166'", "v"), ("$'\\1666'", "v6"),
+                ("$'\\377'", "\xff"), ("$'\\400'", "\x00"), ("$'\\555'", "m"),
+                ("$'\\u63'", "c"), ("$'\\u0063'", "c"), ("$'\\u00633'", "c3"),
+                ("$'\\U00000063'", "c"), ("$'\\U000000631'", "c1"),
+                ("$'\\U0010FFFE'", "\U0010fffe"), ("$'\\U0010FFFF'", "\U0010ffff"), ("$'\\U00110000'", ""),
+                ("$'\\cA\\c?'", "\x01\x7f"), ("$'\\z'", "\\z"), ("$'it\\'s'", "it's"),
+                ("a$'b'c", "abc"), ("\"$'\"", "\"$'\"")):
+            _ac_got = aiqt_hooks._ansi_c_decoded(_ac_raw)
+            if _ac_got != _ac_want:
+                failures.append("(gw-ansi-c) _ansi_c_decoded({!r}) must be {!r}, got {!r}".format(
+                    _ac_raw, _ac_want, _ac_got))
         # DENY outranks the parse error only over complete segments: the segment the lexer was still inside
         # is dropped, and a segment the scan had already closed (by ';', '&&' or a newline) before the
         # unparseable construct begins is judged, so the closed verification-into-sink pipeline denies as it
@@ -12234,7 +16322,11 @@ def _main_isolated(monitor):
                 "option, not a real bypass", "git commit --no-ver -m 'x'", "deny")
         gexpect("(gw-ai) clustered -sn carries -n", "git commit -sn -m 'x'", "deny")
         gexpect("(gw-aj) pull -n is --no-stat, allows", "git pull -n", "allow")
-        gexpect("(gw-ak) an -m value naming the no-verify word allows",
+        gexpect("(gw-ak) an -m value naming the no-verify word allows when single-quoted",
+                "git commit -m 'fix the no-verify flag'", "allow")
+        gexpect("(gw-ak2) the double-quoted form allows too (the closed literal grammar accepts a "
+                "standalone double-quoted literal with no $, backquote, backslash or '!' inside, and the "
+                "decoded word is an -m value, not an option)",
                 'git commit -m "fix the no-verify flag"', "allow")
         gexpect("(gw-al) --no-verify-signatures on commit is not the bypass",
                 "git commit --no-verify-signatures -m 'x'", "allow")
@@ -12286,6 +16378,1028 @@ def _main_isolated(monitor):
         gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
                 "(disclosed clustered-help over-block)", "git commit -hn -m x", "deny")
 
+        # === gatdis: uncertain git segments are held to a closed literal grammar =========================
+        # Bash rewrites an argument word carrying a live expansion BEFORE git parses options: '${x}-n',
+        # '$x-n', '`true`-n' and '{-n,}' each become a bare '-n' when the expansion is empty, so the
+        # commit hook is skipped while the option scan sees no '-'-initial word. Modelling those rewrites
+        # one spelling at a time kept leaking (a process substitution split the segment in two, an
+        # expansion in the subcommand or global-option position left the segment unscanned, a glob was
+        # read as inert, and a raw backslash-newline replacement rewrote an escaped backslash and a
+        # backslash-ended comment, hiding the command on the next line), so the gate now holds EVERY raw
+        # git naming to a closed literal allowlist grammar (_gate_closed_grammar_scan): on a segment whose
+        # subcommand is on the no-verify roster, only bare literal words, one standalone single-quoted
+        # literal per word, one standalone double-quoted literal per word whose interior stays on one
+        # line and holds no '$', backquote or backslash, literal global-option values and the
+        # >/dev/null, 2>/dev/null and 2>&1 redirections are accepted; anything else denies by
+        # construction, and a git whose subcommand cannot be resolved denies too. The accepted literal
+        # words are then checked for the bypass spellings themselves. The allow controls pin the
+        # grammar's edges (plain words, the standalone quoted literals, the accepted redirects, a real
+        # '--' terminator, an off-roster verb, and quoted data consumed by an accepted scan).
+        gexpect("(gw-eo-a) ${x}-n on commit denies (an empty expansion leaves a bare -n)",
+                "git commit ${x}-n -m y", "deny")
+        gexpect("(gw-eo-b) $x-n on commit denies", "git commit $x-n -m y", "deny")
+        gexpect("(gw-eo-c) a backquoted command glued to -n denies", "git commit `true`-n -m y", "deny")
+        gexpect("(gw-eo-d) the brace expansion {-n,} denies", "git commit {-n,} -m y", "deny")
+        gexpect("(gw-eo-e) ${x}-n inside a double-quoted word still substitutes, denies",
+                'git commit "${x}-n" -m y', "deny")
+        gexpect("(gw-eo-f) a glued unquoted $(true)-n denies (split-substitution case)",
+                "git commit $(true)-n -m y", "deny")
+        gexpect("(gw-eo-g) an unquoted $(true) followed by -n denies (the split hides the -n)",
+                "git commit $(true) -n -m y", "deny")
+        gexpect("(gw-eo-h) ${x}-n on am denies (-n IS --no-verify there too)",
+                "git am ${x}-n patch.mbox", "deny")
+        gexpect("(gw-eo-i) ${x}-n on push denies (word splitting can build --no-verify)",
+                "git push ${x}-n origin main", "deny")
+        # The unparseable fallback applies the same grammar from the raw text.
+        gexpect("(gw-eo-j) unparseable ${x}-n on commit denies (raw fallback)",
+                'git commit ${x}-n -m "unbalanced', "deny")
+        gexpect("(gw-eo-k) ${x}-n beside a here-string denies (raw fallback)",
+                "git am ${x}-n <<<x", "deny")
+        # The grammar's deliberate over-denials, each disclosed in the gate docstring and the enforcement
+        # ledger: ANY live expansion on a roster-verb git segment denies, even as a safe value or operand
+        # and inside double quotes too, outside the one accepted here-document message form (a separated -m
+        # value "$(cat <<'EOF' ... EOF)" on a command the lexer parses); a plain double-quoted literal with
+        # no $, backquote, backslash or '!' inside is accepted like a bare word, so the re-issue is a literal
+        # or standalone quoted word.
+        gexpect("(gw-eo-l) -m \"$msg\" is a double-quoted expansion on a roster verb, denies (disclosed "
+                "over-deny; the single-quoted control gw-eo-o allows)",
+                'git commit -m "$msg"', "deny")
+        gexpect("(gw-eo-m) an unquoted dash-free ${msg} value denies (disclosed over-deny)",
+                "git commit -m ${msg}", "deny")
+        gexpect("(gw-eo-n) git log is off the no-verify roster, ${x}-n allows",
+                "git log ${x}-n", "allow")
+        gexpect("(gw-eo-o) a standalone single-quoted literal is accepted and stays data, allows",
+                "git commit -m 'a ${x}-n b'", "allow")
+        gexpect("(gw-eo-p) an escaped \\$x-n carries a backslash, denies (disclosed over-deny)",
+                "git commit -m \\$x-n", "deny")
+        gexpect("(gw-eo-q) a post-'--' ${y}-n denies (the grammar covers the whole segment; disclosed "
+                "over-deny)", "git commit -m x -- ${y}-n", "deny")
+        gexpect("(gw-eo-r) an unparseable dash-free double-quoted word denies (raw fallback, same grammar)",
+                'git commit -m "$msg x', "deny")
+        gexpect("(gw-eo-s) --author=\"$a\" is a double-quoted expansion, denies (disclosed over-deny)",
+                'git commit --author="$a" -m x', "deny")
+        gexpect("(gw-eo-t) -m $(date) denies (an unquoted $( command substitution)",
+                "git commit -m $(date)", "deny")
+        gexpect("(gw-eo-u) the separated --author \"$a\" form denies too (disclosed over-deny; the "
+                "re-issue is a literal or single-quoted value)",
+                'git commit --author "$a" -m x', "deny")
+        gexpect("(gw-eo-u2) a separated single-quoted --author value allows (the documented re-issue)",
+                "git commit --author 'A U Thor' -m x", "allow")
+        gexpect("(gw-eo-s-mut1) --author\"$a\" glues a double quote to a word, denies",
+                'git commit --author"$a" -m x', "deny")
+        gexpect("(gw-eo-s-mut2) --no-verify=\"$x\" is the bypass spelling, denies",
+                'git commit --no-verify="$x" -m y', "deny")
+
+        # A value-taking option can consume the '--' itself, so a following -n is still an option,
+        # not an operand (the value-aware terminator applies to the resolved literal words).
+        gexpect("(gw-eo-v) --message consumes the '--' as its value, the following -n is the bypass, denies",
+                "git commit --message -- -n", "deny")
+        gexpect("(gw-eo-w) -m consumes the '--' as its value, the following -n is the bypass, denies",
+                "git commit -m -- -n", "deny")
+        # Control: when -m already has a value, '--' IS the terminator and the trailing -n is an operand.
+        gexpect("(gw-eo-x) -m x -- -n: the '--' is a real terminator, -n is an operand, allows",
+                "git commit -m x -- -n", "allow")
+
+        # An ANSI-C $'...' word opens with '$': the grammar refuses every one of them, so the spellings
+        # that decode to the bypass stay denied and the dash-free ones are the disclosed over-deny.
+        gexpect("(gw-eo-y) $'\\x2dn' (ANSI-C for -n) on commit denies",
+                "git commit $'\\x2dn' -m y", "deny")
+        gexpect("(gw-eo-z) $'\\055n' (octal ANSI-C for -n) on am denies",
+                "git am $'\\055n' patch.mbox", "deny")
+        gexpect("(gw-eo-ac) a dash-free ANSI-C word denies too (disclosed over-deny)",
+                "git commit $'commit' -m y", "deny")
+        gexpect("(gw-eo-ad) an ANSI-C -m value denies (disclosed over-deny; single-quote it instead)",
+                "git commit -m $'a\\nb'", "deny")
+
+        # A word the shared lexer splits at an inner space/';'/'#' inside '${...}' or a backquote is ONE
+        # word to bash; each carries an expansion, so each denies under the grammar.
+        gexpect("(gw-eo-ae) ${x# }-n (inner space in the parameter expansion) denies",
+                "git commit ${x# }-n -m y", "deny")
+        gexpect("(gw-eo-af) ${x+ }-n (inner space in the alternate) denies",
+                "git commit ${x+ }-n -m y", "deny")
+        gexpect("(gw-eo-ag) ${x:+a b}-n (inner space in the alternate) denies",
+                "git commit ${x:+a b}-n -m y", "deny")
+        gexpect("(gw-eo-ah) `true;`-n (a ';' inside the backquote) denies",
+                "git commit `true;`-n -m y", "deny")
+        gexpect("(gw-eo-ai) `true #`-n (a '#' inside the backquote) denies",
+                "git commit `true #`-n -m y", "deny")
+        gexpect("(gw-eo-aj) ${x# }--no-verify on push denies (word splitting can build the long flag)",
+                "git push ${x# }--no-verify origin main", "deny")
+        gexpect("(gw-eo-ak) ${x# }-n beside a here-string denies (raw fallback)",
+                "git commit ${x# }-n <<<y", "deny")
+
+        # On the raw fallback a command substitution assembling the flag must still deny.
+        gexpect("(gw-eo-al) $(printf ...) assembling --no-verify denies beside a here-string (raw fallback)",
+                'git push $(printf "\\55\\55no\\55verify") origin topic <<<x', "deny")
+
+        # A quoted expansion behind a literal prefix is no longer narrowed to allow: the closed grammar
+        # refuses every live expansion on a roster verb (disclosed over-deny; the literal re-issue allows).
+        gexpect("(gw-eo-am) \"release-$v\" on merge denies (disclosed over-deny; spell the ref literally)",
+                'git merge "release-$v"', "deny")
+        gexpect("(gw-eo-am2) the literal ref spelling allows (the documented re-issue)",
+                "git merge release-1.2", "allow")
+        gexpect("(gw-eo-am-mut1) \"-release$v\" leads with a literal '-', denies",
+                'git merge "-release$v"', "deny")
+        gexpect("(gw-eo-am-mut2) \"$v-release\" leads with the expansion, denies",
+                'git merge "$v-release"', "deny")
+
+        # === gatdis: a standalone double-quoted LITERAL is accepted like a bare word =====================
+        # Bash reads a complete standalone double-quoted word with no '$', backquote or backslash inside
+        # as exactly the literal between the quotes, so refusing it was pure over-refusal (it pushed
+        # routine commits into working around the gate). Each allow here DENIED before the grammar
+        # accepted the form; each deny pins the boundary that keeps the acceptance narrow (the interior
+        # scan, the glue checks, the one-line rule and the bypass check on the decoded word), so a
+        # mutant that accepts any terminated double-quoted word turns a deny red while a revert of the
+        # acceptance turns an allow red.
+        gexpect("(gw-dq-a1) a plain double-quoted -m value allows",
+                'git commit -m "Fix the parser"', "allow")
+        gexpect("(gw-dq-a2) a double-quoted ref whose closing quote ends the command allows",
+                'git push origin "main"', "allow")
+        gexpect("(gw-dq-a3) shell metacharacters inside double quotes are literal, allows",
+                'git commit -m "a; b | c"', "allow")
+        gexpect("(gw-dq-a4) an empty double-quoted word allows (like the empty single-quoted word)",
+                'git commit -m ""', "allow")
+        gexpect("(gw-dq-a5) a single quote inside double quotes is literal, allows",
+                "git commit -m \"it's a fix\"", "allow")
+        # The decoded interior is judged like a bare word, so a quoted bypass spelling still denies.
+        gexpect("(gw-dq-d1) a double-quoted \"-n\" is still the short bypass, denies",
+                'git commit "-n" -m x', "deny")
+        gexpect("(gw-dq-d2) a double-quoted \"--no-verify\" is still the long bypass, denies",
+                'git commit "--no-verify" -m x', "deny")
+        gexpect("(gw-dq-d3) the quoted bypass denies on the raw fallback too",
+                'git commit "-n" -m "unbalanced', "deny")
+        # The interior scan: '$', a backquote or a backslash anywhere inside denies ('$' just inside
+        # the opening quote is gw-eo-l; just before the closing quote is gw-dq-d6).
+        gexpect("(gw-dq-d4) a backslash inside double quotes denies",
+                'git commit -m "a\\"b"', "deny")
+        gexpect("(gw-dq-d5) a backquote inside double quotes denies",
+                'git commit -m "`x`"', "deny")
+        gexpect("(gw-dq-d6) a '$' just before the closing quote denies (bash reads a trailing '$' "
+                "literally; the grammar refuses every interior '$', a disclosed safe-direction over-deny)",
+                'git commit -m "msg$"', "deny")
+        # The one-line rule: a double-quoted word spanning a newline denies (the segment model ends at
+        # a newline, so a quoted one cannot be carried into an accepted word).
+        gexpect("(gw-dq-d7) a double-quoted word spanning a newline denies",
+                'git commit -m "a\nb"', "deny")
+        # The glue checks on both sides, and the unterminated form.
+        gexpect("(gw-dq-d8) an opening quote glued to a word denies (the separated gw-dq-a1 form is "
+                "the control)", 'git commit -m"x y"', "deny")
+        gexpect("(gw-dq-d9) a closing quote glued to trailing text denies",
+                'git commit -m "x y"z', "deny")
+        gexpect("(gw-dq-d10) an unterminated double quote denies (raw fallback, same grammar)",
+                'git commit -m "unterminated', "deny")
+
+        # === gatdis: an ambiguous quote interior does not swallow a hidden 'git' bypass ==================
+        # The scan starts at each raw 'git' word, so when a '"' or "'" it meets is really bash's CLOSING
+        # quote it would otherwise pair with the NEXT opening quote and read the live command between them
+        # (operators and a real 'git commit -nv') as one consumed data word, skipping the bypass. A
+        # single-quoted interior byte that is not a bare-word character or a space or tab, or a shell
+        # operator, newline or single quote inside a double-quoted interior, now marks the pairing
+        # ambiguous: the span is not treated as consumed data, so the hidden 'git' is judged as its own
+        # segment and the bypass denies. Each of gw-dq-h1..h5 ALLOWED at an earlier revision of this
+        # guard and DENIES here; the control gw-dq-h7/h8 shows a benign operator message still allows
+        # (only a 'git' inside such a span is re-judged, not every operator), so a mutant that swallows
+        # the span again turns gw-dq-h1..h5 (and gw-dq-m1a..m1e, gw-dq-q1, gw-dq-n2) red while one that
+        # denies every operator interior turns gw-dq-h7/h8 red.
+        gexpect("(gw-dq-h1) a hidden 'git commit -nv' between a double-quoted close and the next open denies",
+                'echo "git log " ; git commit -nv ; echo " x"\necho "', "deny")
+        gexpect("(gw-dq-h2) the same hidden bypass with a clustered -nq denies",
+                'echo "git log " ; git commit -nq -m y ; echo " x"\necho "', "deny")
+        gexpect("(gw-dq-h3) a hidden bypass behind a different off-roster outer verb denies",
+                'echo "git status " ; git commit -nv -m wip ; echo " x"\necho "', "deny")
+        gexpect("(gw-dq-h4) the single-quote-outer form (a '\"' inside single quotes) denies",
+                "echo 'git log \"' ; git commit -nv ; echo '\" x'\necho \"", "deny")
+        gexpect("(gw-dq-h5) the single-quote-mirror form (a \"'\" inside double quotes) denies",
+                'echo "git log \'" ; git commit -nv ; echo "\' x"\necho "', "deny")
+        # (The former gw-dq-h6 vector, "git commit \"a;\" -nv", was removed: the enclosing roster word is
+        # still read past the ambiguous quote so its own trailing -nv is caught, but that flag is ALSO
+        # caught by the raw git-verb backstop, so the vector denied under every mutant tried, including one
+        # that stops the roster lex at the ambiguous quote, and discriminated nothing.)
+        # A benign message carries no roster 'git' inside, so it still allows (the pin's gw-dq-a3 win is
+        # kept, for single and double quotes alike): the fix re-judges only a hidden roster git, it does
+        # not refuse every operator-bearing quoted literal.
+        gexpect("(gw-dq-h7) a double-quoted message with ';' and '|' but no inner git still allows",
+                'git commit -m "fix: a; b | c"', "allow")
+        gexpect("(gw-dq-h8) the single-quoted operator message likewise still allows",
+                "git commit -m 'fix: a; b | c'", "allow")
+        # A quoted -m value NAMING a roster git command is re-judged whatever its interior bytes: bash's
+        # own quote close and the next open could bracket that live 'git <roster verb>', so the hidden
+        # bypass is judged as its own segment and denies, whether or not an operator sits in the interior
+        # (the accepted safe-direction over-deny; re-issue without a git roster-verb spelling, or keep it
+        # out of quoted data). A mutant that swallows an all-bare-word span again (reverting
+        # _gate_span_hides_roster_git) turns gw-dq-h9 and gw-cg-g1 red, while one that re-judges ANY inner
+        # git, roster or not, turns the off-roster controls gw-dq-h8b/gw-cg-g1b red.
+        gexpect("(gw-dq-h9) a plain single-quoted -m value naming a roster git bypass (no operator) is "
+                "re-judged and denies (the accepted over-deny)", "git commit -m 'git commit -nv'", "deny")
+        gexpect("(gw-dq-h10) the same value with an operator before the named bypass denies (re-judged)",
+                "git commit -m 'fix; git commit -nv'", "deny")
+        gexpect("(gw-dq-h8b) a single-quoted message naming an OFF-roster git (log) stays allowed (control)",
+                "git commit -m 'see git log for history'", "allow")
+        # Boundary: the backslash interior check is load-bearing. Bash reads this as -m 'a" '
+        # then a live -nv; dropping the interior backslash check would mis-pair the quotes and allow it.
+        gexpect("(gw-dq-h11) a backslash inside double quotes guards a hidden -nv on the fallback, denies",
+                'git commit -m "a\\" " -nv "; echo "\necho "', "deny")
+        # An interior '!' can be rewritten by bash history expansion, so it denies (re-issue the
+        # text single-quoted, gw-dq-h13, which never history-expands and is accepted like a bare word).
+        gexpect("(gw-dq-h12) a '!' inside double quotes denies (history expansion could rewrite it)",
+                'git commit -m "ship it!"', "deny")
+        gexpect("(gw-dq-h13) the same message single-quoted is literal and allows (the documented re-issue)",
+                "git commit -m 'ship it!'", "allow")
+
+        # === gatdis: command-running wrappers do not hide a roster git behind a quoted assignment ========
+        # env (with its VAR=value assignments and options), exec -a, nice, nohup, command, time and timeout
+        # run the git command after their own words, so the parsed path peels them (_gate_novrf_peel) and
+        # judges that git. A quoted assignment value whose bytes merely resemble a git command
+        # (env 'A=git log ' ...) no longer lets the real 'git commit -nv' slip through as a mis-paired
+        # span's consumed data. gw-wr-env1/env2/env3/exec1/nice1 each deny here; they do NOT discriminate
+        # the peel, because the raw \bgit\b scan ALSO catches their literal 'git commit' naming (dropping
+        # the peel leaves them red). The peel and the fail-closed dequoted judgement are pinned instead by
+        # the quote-concatenated vectors below (gw-wr-concat*, where the raw scan cannot see 'g'i't') and by
+        # the direct _gate_novrf_peel unit cases (gw-peel-*). The controls stay green (gw-wr-cmdv is a name
+        # lookup that runs nothing, gw-wr-off is an off-roster verb).
+        gexpect("(gw-wr-env1) env with a quoted assignment hiding git commit -nv denies",
+                "env 'A=git log ' git commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-env2) the same with a double-quoted assignment and message denies",
+                'env "A=git log " git commit -nv -m " fix"', "deny")
+        gexpect("(gw-wr-env3) an env assignment hiding a push --no-verify denies",
+                "env 'A=git log ' git push --no-verify ' origin'", "deny")
+        gexpect("(gw-wr-exec1) exec -a NAME renaming argv[0] before git commit -nv denies",
+                "exec -a 'git log ' git commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-nice1) nice env (stacked wrappers) hiding git commit -n denies",
+                "nice env 'A=git status ' git commit -n -m ' wip'", "deny")
+        gexpect("(gw-wr-cmdv) command -v only looks git up and runs nothing, allows (no false deny)",
+                "command -v git", "allow")
+        gexpect("(gw-wr-off) env running an off-roster git verb still allows (no over-deny)",
+                "env FOO=bar git log --oneline", "allow")
+        # The unparseable form (an unterminated trailing quote) falls to the raw-text scan, where the same
+        # 'git <roster verb>' inside the mis-paired span is re-judged rather than swallowed as data. This
+        # ALLOWED before the raw-scan hides-roster-git rule (the all-bare-word span was consumed data).
+        gexpect("(gw-wr-unparse) an unparseable wrapper line hiding git commit -nv denies on the fallback",
+                "env 'A=git log ' git commit -nv -m ' fix'\necho '", "deny")
+        # The env form of the double-quote single-quote ambiguity: bash runs git commit -nv (the
+        # quoted assignment 'A=git log "' sets A), now caught on the parsed path by the wrapper peel.
+        gexpect("(gw-wr-envdqsq) env hiding git commit -nv behind mixed quotes denies",
+                "env 'A=git log \"' git commit -nv -m '\" fix'", "deny")
+        # PEEL-DISCRIMINATING VECTORS: a quote-concatenated 'g'i't' decodes to the token 'git' bash would
+        # run, but the RAW \bgit\b scan cannot see it (the source bytes are g,',i,',t). These deny through
+        # the parsed path's wrapper peel/dequoted judgement with its own message ("this git commit carries");
+        # under the matching mutant each still denies, through the de-quoted reading behind any word, with
+        # that reading's message instead, so the needle pins the path.
+        # gw-wr-concat1 pins the resolved peel: dropping the peel judges the raw word 'env' and the g'i't
+        # is never re-assembled by it.
+        gdeny_names("(gw-wr-concat1) env with a quote-concatenated git commit -nv denies (resolved peel)",
+                    "env g'i't commit -nv", "this git commit carries")
+        # gw-wr-concat2/concat3 pin the FAIL-CLOSED path for a wrapper option the grammar cannot resolve
+        # (an attached short-option value): the peel returns _GATE_PEEL_UNRESOLVED and the dequoted words
+        # are judged; reverting that to return None (the prior behaviour) loses that message.
+        gdeny_names("(gw-wr-concat2) env -uX (attached short value) + quote-concatenated git commit -nv denies",
+                    "env -uX g'i't commit -nv", "this git commit carries")
+        gdeny_names("(gw-wr-concat3) nice -n5 (attached short value) + quote-concatenated git commit -nv denies",
+                    "nice -n5 g'i't commit -nv", "this git commit carries")
+        # gw-wr-concat4 pins the UNLISTED-wrapper dequoted judgement (sudo/xargs/setsid/stdbuf): the raw
+        # scan cannot see g'i't and the peel returns the sudo-led argv, so only the dequoted scan gives it.
+        gdeny_names("(gw-wr-concat4) sudo with a quote-concatenated git commit -nv denies (unlisted wrapper)",
+                    "sudo g'i't commit -nv", "this git commit carries")
+        # The span/global-option vectors: a quoted global-option value between the real 'git' and its verb
+        # (git --namespace ' x' commit -nv) behind a wrapper the peel does not resolve or does not list.
+        # These allowed before the hides-roster-git run-out rule (the span's option walk ran off its
+        # interior and the span was consumed as data). They do NOT pin that rule: each still denies under a
+        # mutant that removes the run-out (the walk that exhausts the interior no longer fails closed),
+        # because the dequoted wrapper judgement catches span1 to span3 (nice -n10 is unresolved, stdbuf and
+        # sudo are unlisted) and the fallback's raw-text scan catches span4. The run-out rule is pinned by
+        # gw-wr-runout1/runout2 and the gw-span-* unit cases below.
+        gexpect("(gw-wr-span1) nice -n10 env + git --namespace ' x' commit -nv denies (span run-out)",
+                "nice -n10 env 'A=git log ' git --namespace ' x' commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-span2) stdbuf (unlisted) + git --namespace ' x' commit -nv denies (span run-out)",
+                "stdbuf -oL env 'A=git log ' git --namespace ' x' commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-span3) sudo + git --namespace ' x' push --no-verify denies (span run-out)",
+                "sudo env 'A=git log ' git --namespace ' x' push --no-verify ' origin'", "deny")
+        gexpect("(gw-wr-span4) the unparseable span form denies on the fallback (raw-text scan)",
+                "nice -n10 env 'A=git log ' git --namespace ' x' commit -nv -m ' fix'\necho '", "deny")
+        # RUN-OUT-DISCRIMINATING VECTORS: no wrapper the dequoted judgement reads, so only the run-out rule
+        # re-judges the git whose verb falls off the end of a quoted span. Each denies here and allows under
+        # the run-out mutant above. runout2 is the helper docstring's own example, a disclosed over-deny.
+        gexpect("(gw-wr-runout1) echo + a span ending at git --namespace before commit -nv denies (run-out)",
+                "echo 'A=git log ' git --namespace ' x' commit -nv -m ' fix'", "deny")
+        gexpect("(gw-wr-runout2) a message ending at git --namespace denies (run-out, disclosed over-deny)",
+                "git commit -m 'look at git --namespace'", "deny")
+        # FALLBACK-DISCRIMINATING VECTORS: the trailing unterminated quote sends each line to the unparseable
+        # fallback, and the raw-text scan cannot see the quote-concatenated g'i't, so the fallback's wrapper
+        # judgement over each recovered segment denies with the parsed path's message. Under a mutant that
+        # drops that judgement each still denies, through the de-quoted reading of each complete segment,
+        # with that reading's message instead, so the needle pins the judgement.
+        gdeny_names("(gw-wr-fallback1) env -uX + g'i't commit -nv on an unparseable line denies "
+                    "(fallback, unresolved)", "env -uX g'i't commit -nv\necho '", "this git commit carries")
+        gdeny_names("(gw-wr-fallback2) sudo + g'i't commit -nv on an unparseable line denies "
+                    "(fallback, unlisted)", "sudo g'i't commit -nv\necho '", "this git commit carries")
+        # IN-PROGRESS-SEGMENT VECTORS: a here-string or process substitution stops the full lex INSIDE the git
+        # segment, and the raw-text scans cannot see the quote-concatenated g'i't. The segment the lexer was
+        # still inside is judged exactly as a complete one over the words read before the construct, so each
+        # denies with the parsed path's own bypass message ("this git <verb> carries"). Each allowed while
+        # that segment was dropped; each keeps denying, with the de-quoted reading's message instead, under a
+        # mutant that drops only the in-progress judgement, so the needle pins that judgement.
+        gdeny_names("(gw-pe-sudo) sudo + g'i't commit -nv before a here-string denies (in-progress segment)",
+                    "sudo g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-envux) env -uX + g'i't commit -nv before a here-string denies",
+                    "env -uX g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-nice) nice -n5 + g'i't commit -nv before a here-string denies",
+                    "nice -n5 g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-env) env + g'i't commit -nv before a here-string denies (resolved peel)",
+                    "env g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-bare) a bare g'i't commit -nv before a here-string denies",
+                    "g'i't commit -nv <<<x", "this git commit carries")
+        gdeny_names("(gw-pe-push) g'i't push --no-verify before a here-string denies",
+                    "g'i't push --no-verify <<<x", "this git push carries")
+        gdeny_names("(gw-pe-procsub) sudo + g'i't commit -nv before a process substitution denies",
+                    "sudo g'i't commit -nv <(true)", "this git commit carries")
+        # PAST-THE-FAILURE VECTORS: the lex stops BEFORE the git word (or the bypass word), so no recovered
+        # segment holds it. The text from the start of the in-progress segment onward (the whole command when
+        # no segment was in progress: gw-pe-noopen, gw-pe-fdvar) is split at its unquoted separators and read
+        # de-quoted by the same fail-closed dequoted-word scan (_gate_unread_bypass). Each allowed before that
+        # reading and allows again under a mutant that drops it.
+        gdeny_names("(gw-pe-after-semi) sudo + g'i't commit -nv after a here-string segment denies",
+                    "cat <<<x; sudo g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-after-and) g'i't commit -nv after '&&' past a here-string denies",
+                    "cat <<<x && g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-after-nl) env -uX + g'i't commit -nv on the line after a process substitution "
+                    "denies", "diff <(true) <(true)\nenv -uX g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-after-push) g'i't push --no-verify after a here-string segment denies",
+                    "cat <<<x; g'i't push --no-verify", "names a git push carrying")
+        gdeny_names("(gw-pe-tail) a -n past the here-string inside the git segment itself denies",
+                    "sudo g'i't commit -m x <<<y -n", "names a git commit carrying")
+        gdeny_names("(gw-pe-noopen) a here-string opening the segment before g'i't commit -nv denies "
+                    "(no segment in progress)", "true; <<<x g'i't commit -nv", "names a git commit carrying")
+        gdeny_names("(gw-pe-fdvar) an {fd} redirect opening the segment before g'i't commit -nv denies",
+                    "true; {fd}>/dev/null g'i't commit -nv", "names a git commit carrying")
+        # The disclosed over-deny of that reading: a quoted word holding a blank is split into words, so a
+        # message naming '-n' on such a line denies; pinned so a change to it is a deliberate one.
+        gexpect("(gw-pe-overdeny) a quoted message holding ' -n' on that line denies (disclosed over-deny)",
+                "g'i't commit -m 'fix -n' <<<x", "deny")
+        # Controls: the new judgements read no wider than the dequoted-word scan, so an off-roster verb, push's
+        # -n (--dry-run), a plain message, a git named off-roster in quoted text and an unrelated -n word stay
+        # allowed on the same unparseable lines.
+        gexpect("(gw-pe-ctl-log) g'i't log -n3 before a here-string allows", "g'i't log -n3 <<<x", "allow")
+        gexpect("(gw-pe-ctl-pushn) g'i't push -n (dry run) before a here-string allows",
+                "g'i't push -n <<<x", "allow")
+        gexpect("(gw-pe-ctl-msg) g'i't commit -m x before a here-string allows", "g'i't commit -m x <<<y",
+                "allow")
+        gexpect("(gw-pe-ctl-after-log) g'i't log -n3 after a here-string segment allows",
+                "cat <<<x; g'i't log -n3", "allow")
+        gexpect("(gw-pe-ctl-after-echo) an echoed off-roster git after a here-string segment allows",
+                "cat <<<x; echo 'see git log -n 3'", "allow")
+        gexpect("(gw-pe-ctl-find) find -name before a here-string and a later ls -n allow",
+                "find . -name z <<<y; ls -n", "allow")
+        # BEHIND-ANY-WORD VECTORS: a git behind a command word on no wrapper list, or inside an option's value,
+        # spelled so the raw \bgit\b scan cannot see it. The parsed path reads each segment's de-quoted text
+        # (_gate_behind_bypass) whatever runs that git, so each denies with that reading's message; each allowed
+        # before it and allows again under a mutant that drops it.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-bh-ionice", "ionice g'i't commit -nv"),
+                ("gw-bh-ionice-c3", "ionice -c3 g'i't commit -nv"),
+                ("gw-bh-taskset", "taskset 1 g'i't commit -nv"),
+                ("gw-bh-chrt", "chrt -o 0 g'i't commit -nv"),
+                ("gw-bh-doas", "doas g'i't commit -nv"),
+                ("gw-bh-flock", "flock /tmp/l g'i't commit -nv"),
+                ("gw-bh-unbuffer", "unbuffer g'i't commit -nv"),
+                ("gw-bh-chroot", "chroot / g'i't commit -nv"),
+                ("gw-bh-builtin-exec", "builtin exec g'i't commit -nv"),
+                ("gw-bh-env-ionice", "env ionice g'i't commit -nv"),
+                ("gw-bh-timeout-ionice", "timeout 5 ionice g'i't push --no-verify"),
+                ("gw-bh-env-s", "env -S 'g\"i\"t commit -nv'"),
+                ("gw-bh-env-s-dq", "env -S \"g'i't commit -nv\""),
+                ("gw-bh-env-s-attached", "env -S'g\"i\"t commit -nv'"),
+                ("gw-bh-env-split-string", "env --split-string='g\"i\"t commit -nv'"),
+                ("gw-bh-env-ux-ansic", "env -uX $'g\\x69t' commit -nv"),
+                ("gw-bh-ansic-bare", "$'g\\x69t' commit -nv"),
+                ("gw-bh-ansic-flag", "ionice g'i't commit $'\\x2dn'"),
+                ("gw-bh-sh-c", "sh -c 'g\"i\"t commit -nv'"),
+                ("gw-bh-pe-before", "ionice g'i't commit -nv; cat <<<x")):
+            gdeny_names("({}) a git bypass behind another word, read from the de-quoted text, denies".format(
+                _gw_lbl), _gw_cmd, "after another word of the same command")
+        # The disclosed over-deny of that reading, pinned so a change to it is a deliberate one: text that only
+        # names such a command behind any word, and a quoted value holding a blank and a -n behind a command
+        # word the wrapper peel does not resolve to git.
+        gexpect("(gw-bh-overdeny-echo) an echoed quote-concatenated git commit -nv denies (disclosed over-deny)",
+                "echo g'i't commit -nv", "deny")
+        gexpect("(gw-bh-overdeny-sudo-msg) sudo + a quoted message holding ' -n' denies (disclosed over-deny)",
+                "sudo git commit -m 'fix -n'", "deny")
+        # Controls: an off-roster verb, push's -n (--dry-run) and a plain message behind an unlisted wrapper
+        # allow, and the segment's own git, the one the wrapper peel resolves, keeps its value-aware reading,
+        # so a quoted value holding ' -n' after it allows; an attached option value naming a path that only
+        # ends in .git is not a git word.
+        gexpect("(gw-bh-ctl-log) ionice + g'i't log -n3 allows", "ionice g'i't log -n3", "allow")
+        gexpect("(gw-bh-ctl-pushn) ionice + g'i't push -n (dry run) allows",
+                "ionice g'i't push -n origin main", "allow")
+        gexpect("(gw-bh-ctl-msg) ionice + g'i't commit -m x allows", "ionice g'i't commit -m x", "allow")
+        gexpect("(gw-bh-ctl-env-s-log) env -S with a quoted git log -n3 allows", "env -S 'g\"i\"t log -n3'",
+                "allow")
+        gexpect("(gw-bh-ctl-own-env) env A=1 + git commit -m 'fix -n' allows (own git, value-aware)",
+                "env A=1 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-bh-ctl-own-timeout) timeout 60 + git commit -m 'fix -n' allows (own git, value-aware)",
+                "timeout 60 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-bh-ctl-own-assign) a quoted assignment holding a blank before git commit -m 'fix -n' "
+                "allows", "GIT_AUTHOR_NAME='A B' git commit -m 'fix -n'", "allow")
+        gexpect("(gw-bh-ctl-gitdir) --git-dir=/srv/r.git is no git word, git commit -m 'fix -n' allows",
+                "git --git-dir=/srv/r.git commit -m 'fix -n'", "allow")
+        # BASH-MODEL READING VECTORS: each allowed before the bash-model readings (_gate_bash_readings) and the
+        # any-word walk (_gate_any_word_bypass), and bash runs a hook-skipping git commit or push for each. An
+        # ANSI-C quote is cut at its first NUL escape as bash cuts it ($'gi\0zz't is git), and decoded with
+        # bash's own escapes (\x{..}, an octal code past 377 keeping its low byte, \c with the first byte of a
+        # multibyte character).
+        for _gw_lbl, _gw_cmd in (
+                ("gw-rd-nul-env", "env $'g\\x69t\\0' commit -nv"),
+                ("gw-rd-nul-ionice", "ionice $'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-bare", "$'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-c-at", "ionice $'gi\\c@zz't commit -nv"),
+                ("gw-rd-nul-nice", "nice $'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-sudo", "sudo $'gi\\0zz't commit -nv"),
+                ("gw-rd-nul-env-word", "env $'gi\\0zz't commit -nv"),
+                ("gw-rd-xbrace", "ionice $'g\\x{69}t' commit -nv"),
+                ("gw-rd-octal-byte", "ionice $'gi\\400zz't commit -nv"),
+                ("gw-rd-xbrace-empty", "ionice $'gi\\x{}zz't commit -nv"),
+                ("gw-rd-c-space", "ionice $'gi\\c zz't commit -nv"),
+                ("gw-rd-c-backquote", "ionice $'gi\\c`zz't commit -nv"),
+                ("gw-rd-c-multibyte", "ionice $'gi\\cࠁzz't commit -nv"),
+                # A quoted span that splits into a '--', a value-taking option or a global option's value no
+                # longer swallows the real -n after it, and a vertical tab is no blank to bash.
+                ("gw-rd-split-dashdash", "ionice g'i't commit 'x --' -n"),
+                ("gw-rd-split-m", "ionice g'i't commit 'x -m' -n"),
+                ("gw-rd-split-c-dq", "ionice g'i't commit \"x -C\" -n"),
+                ("gw-rd-split-herestr", "ionice g'i't commit 'x --' -n <<<x"),
+                ("gw-rd-split-after-herestr", "cat <<<x; ionice g'i't commit 'x -m' -n"),
+                ("gw-rd-vt-ansic", "ionice g'i't commit x$'\\v'-m -n"),
+                ("gw-rd-vt-raw", "ionice g'i't commit x\x0b-m -n"),
+                ("gw-rd-global-c", "ionice g'i't -c 'x.y=1 -C' commit -n"),
+                # env -S reads a quoted \_ as a separator.
+                ("gw-rd-env-s-us", "env -S 'g\"i\"t\\_commit\\_-nv'"),
+                ("gw-rd-env-s-us-att", "env -S'g\"i\"t\\_commit\\_-nv'"),
+                ("gw-rd-env-split-us", "env --split-string='g\"i\"t\\_commit\\_-nv'"),
+                # A git glued to a shell operator character, a process substitution's opener, a command
+                # substitution's opener or a backquote.
+                ("gw-rd-procsub-in", "cat <(g'i't commit -nv)"),
+                ("gw-rd-procsub-redir", "cat < <(g'i't commit -nv)"),
+                ("gw-rd-procsub-tee", "tee >(g'i't commit -nv)"),
+                ("gw-rd-procsub-out", "cat >(g'i't commit -nv)"),
+                ("gw-rd-sh-semi", "sh -c 'true;g\"i\"t commit -nv'"),
+                ("gw-rd-sh-and", "sh -c 'true&&g\"i\"t commit -nv'"),
+                ("gw-rd-sh-or", "sh -c 'true||g\"i\"t commit -nv'"),
+                ("gw-rd-sh-pipe", "sh -c 'true|g\"i\"t commit -nv'"),
+                ("gw-rd-sh-paren", "sh -c '(g\"i\"t commit -nv)'"),
+                ("gw-rd-sh-cd", "sh -c 'cd /x&&g\"i\"t commit -nv'"),
+                ("gw-rd-bash-dq", "bash -c \"true;g'i't commit -nv\""),
+                ("gw-rd-ionice-sh", "ionice sh -c 'true;g\"i\"t commit -nv'"),
+                ("gw-rd-eval", "eval 'true;g\"i\"t commit -nv'"),
+                ("gw-rd-subst-semi", "echo \"$(true;g'i't commit -nv)\""),
+                ("gw-rd-subst", "echo \"$(g'i't commit -nv)\""),
+                ("gw-rd-backquote", "echo `g'i't commit -nv`"),
+                ("gw-rd-pe-paren", "cat <<<x; (g'i't commit -nv)"),
+                ("gw-rd-pe-paren-glued", "cat <<<x;(g'i't commit -nv)"),
+                ("gw-rd-pe-paren-push", "cat <<<x; (g'i't push --no-verify)"),
+                ("gw-rd-pe-case", "cat <<<x; case a in a)g'i't commit -nv;; esac"),
+                ("gw-rd-pe-heredoc", "cat <<EOF\nhi\nEOF\n(g'i't commit -nv)"),
+                # The text's own quoting level read as bash reads it (a '$' that ends a single-quoted span opens
+                # no ANSI-C quote), the next level in (a script handed to bash -c), and every ANSI-C quote the
+                # raw match finds, at any depth.
+                ("gw-rd-mispair-ansic", "flock 'x$' $'g\\x69t' commit -nv"),
+                ("gw-rd-nested-nul", "bash -c \"\\$'gi\\\\0zz't commit -nv\""),
+                ("gw-rd-nested-mispair", "bash -c \"env 'A=x\\$' \\$'g\\\\x69t' commit -nv\""),
+                ("gw-rd-raw-fragment", "echo \"$(echo \"it's\"; $'gi\\0zz't commit -nv)\"")):
+            gexpect("({}) a git bypass the bash-model readings see denies".format(_gw_lbl), _gw_cmd, "deny")
+        # The disclosed safe-direction over-denies of those readings, pinned so a change to them is a deliberate
+        # one: a single-dash word holding an n counts after the verb even as an attached value, any later roster
+        # verb word counts as the verb, a git, a roster verb and an n word named in a message on a git line
+        # count, and a \_ is read as a separator wherever it stands.
+        gexpect("(gw-rd-overdeny-uno) ionice + git commit -uno denies (disclosed over-deny)",
+                "ionice git commit -uno -m x", "deny")
+        gexpect("(gw-rd-overdeny-later-verb) a later roster verb word counts (disclosed over-deny)",
+                "ionice git log --grep commit -n 3", "deny")
+        gexpect("(gw-rd-overdeny-msg) a message naming git, a roster verb and -n denies (disclosed over-deny)",
+                "git commit -m 'see git log; then commit -n'", "deny")
+        gexpect("(gw-rd-overdeny-us) an unquoted \\_ is read as a separator too (disclosed over-deny)",
+                "env -S g\"i\"t\\_commit\\_-nv", "deny")
+        # Controls: an option value holding no n, push's -n (--dry-run) behind a wrapper, a quoted message with
+        # operators on the segment's own git, and a wrapper option holding an n before the git word allow.
+        gexpect("(gw-rd-ctl-ionice-n7) ionice -n7 before git commit -m x allows", "ionice -c2 -n7 git commit -m x",
+                "allow")
+        gexpect("(gw-rd-ctl-sudo-msg) sudo + git commit -m 'new feature' allows",
+                "sudo git commit -m 'new feature'", "allow")
+        gexpect("(gw-rd-ctl-ops-msg) a quoted message holding operators on the own git allows",
+                "git commit -m \"a; b | c\"", "allow")
+        gexpect("(gw-rd-ctl-procsub-log) a git log -n3 in a process substitution allows", "cat <(g'i't log -n3)",
+                "allow")
+        gexpect("(gw-rd-ctl-sh-pushn) a git push -n (dry run) inside sh -c allows",
+                "sh -c 'true;g\"i\"t push -n origin main'", "allow")
+        # OWN-GIT AND NO-COMMAND-WORD VECTORS: a git hidden before the segment's own git (in an assignment value, a
+        # redirection word or a peeled wrapper's option value), and one in a redirection word of a segment with no
+        # command word, which bash still expands. Each allowed while every reading's first git word was dropped as
+        # the own git, or while a segment with no command word was passed over, and bash runs the substitution's
+        # hook-skipping git for each; the last four take the parse-error path.
+        for _gw_lbl, _gw_cmd in (
+                ("gw-own-assign", "A=\"$(g'i't commit -nv)\" git status"),
+                ("gw-own-assign-commit", "A=\"$(g'i't commit -nv)\" git commit -m x"),
+                ("gw-own-assign-backquote", "A=\"`g'i't commit -nv`\" git status"),
+                ("gw-own-env-assign", "env A=\"$(g'i't commit -nv)\" git status"),
+                ("gw-own-exec-a", "exec -a \"$(g'i't commit -nv)\" git status"),
+                ("gw-own-nice-n", "nice -n \"$(g'i't commit -nv)\" git status"),
+                ("gw-own-timeout", "timeout \"$(g'i't commit -nv)\" git status"),
+                ("gw-own-redir-out", ">\"$(g'i't commit -nv)\" git status"),
+                ("gw-own-redir-in-push", "<\"$(g'i't push --no-verify)\" git status"),
+                ("gw-own-assign-ionice", "A=\"$(ionice g'i't commit -nv)\" git status"),
+                ("gw-own-assign-split", "A=\"$(g'i't commit 'x --' -n)\" git status"),
+                ("gw-nocmd-redir", ">\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-space", "> \"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-fd", "2>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-append", ">>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-redir-in", "<\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-backquote", ">\"`g'i't commit -nv`\""),
+                ("gw-nocmd-after-true", "true; >\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-subshell", "(>\"$(g'i't commit -nv)\")"),
+                ("gw-nocmd-push", ">\"$(g'i't push --no-verify)\""),
+                ("gw-nocmd-ionice", ">\"$(ionice g'i't commit -nv)\""),
+                ("gw-nocmd-backslash", ">\"$(g\\it commit -nv)\""),
+                ("gw-nocmd-ansic", ">\"$($'g\\x69t' commit -nv)\""),
+                ("gw-nocmd-dup-first", "echo hi; 2>&1 >\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-both", "&>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-both-append", "&>>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-clobber", ">|\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-readwrite", "<>\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-dup-out", ">&\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-op-dup-in", "<&\"$(g'i't commit -nv)\""),
+                ("gw-nocmd-pe", ">\"$(g'i't commit -nv)\"; cat <<<x"),
+                ("gw-own-pe", "A=\"$(g'i't commit -nv)\" git status; cat <<<x"),
+                ("gw-own-pe-exec-a", "exec -a \"$(g'i't commit -nv)\" git status; cat <(true)"),
+                ("gw-own-pe-redir", ">\"$(g'i't commit -nv)\" git status; cat <<<x")):
+            gdeny_names("({}) a git bypass before the own git or in a redirection, read from the de-quoted text, "
+                        "denies".format(_gw_lbl), _gw_cmd, "after another word of the same command")
+        # The disclosed safe-direction over-denies of that reading, pinned so a change to them is a deliberate one:
+        # text that only names a hook-skipping git before the own git, in a redirection of a segment with no command
+        # word or in a comment after one, and a quoted message holding a blank and a -n on a git in a substitution
+        # before the own git, which the reading splits.
+        gexpect("(gw-own-overdeny-exec-a) an exec -a name naming g'i't commit -n denies (disclosed over-deny)",
+                "exec -a \"g'i't commit -n\" git status", "deny")
+        gexpect("(gw-nocmd-overdeny-target) a redirection target naming one denies (disclosed over-deny)",
+                ">'g'i't commit -nv'", "deny")
+        gexpect("(gw-nocmd-overdeny-comment) a comment after a redirection naming one denies (disclosed over-deny)",
+                ">x # g'i't commit -nv", "deny")
+        gexpect("(gw-own-overdeny-msg) a split quoted message in a substitution before the own git denies "
+                "(disclosed over-deny)", "A=\"$(g'i't commit -m 'fix -n')\" git status", "deny")
+        # The whole text read with its first git word dropped, as before, is kept beside the split, so a deny it
+        # gave stays: each of these denied before the split and allows when that reading is removed.
+        gexpect("(gw-own-kept-exec-a) a git word as the exec -a name keeps its earlier deny (disclosed over-deny)",
+                "exec -a git git commit -m 'fix -n'", "deny")
+        gexpect("(gw-own-kept-redir) a redirection target ending in /git keeps its earlier deny (disclosed "
+                "over-deny)", "> /tmp/git git commit -m 'fix -n'", "deny")
+        # Controls: a git log -n3 before the own git or in a redirection, a plain wrapper option value, redirections
+        # and a stack of peeled wrappers before the own git, a plain redirection, and a comment alone allow.
+        gexpect("(gw-own-ctl-log) a git log -n3 in an assignment before the own git allows",
+                "A=\"$(g'i't log -n3)\" git status", "allow")
+        gexpect("(gw-own-ctl-log-pe) the same on the parse-error path allows",
+                "A=\"$(g'i't log -n3)\" git status; cat <<<x", "allow")
+        gexpect("(gw-own-ctl-exec-a) exec -a x + git commit -m 'fix -n' allows (own git, value-aware)",
+                "exec -a x git commit -m 'fix -n'", "allow")
+        gexpect("(gw-own-ctl-redir) redirections before git commit -m 'fix -n' allow (own git, value-aware)",
+                ">/dev/null 2>&1 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-own-ctl-stack) assignments and peeled wrappers before git commit -m 'fix -n' allow",
+                "A=1 B='c d' env C=2 nice -n 3 timeout 9 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-nocmd-ctl-log) a git log -n3 in a redirection with no command word allows",
+                ">\"$(g'i't log -n3)\"", "allow")
+        gexpect("(gw-nocmd-ctl-log-pe) the same on the parse-error path allows", ">\"$(g'i't log -n3)\"; cat <<<x",
+                "allow")
+        gexpect("(gw-nocmd-ctl-file) a plain redirection with no command word allows", "> out.txt", "allow")
+        gexpect("(gw-nocmd-ctl-comment) a comment alone, with no word and no redirection, is passed over",
+                "# g'i't commit -nv", "allow")
+        # Direct unit cases for _gate_word_start: the first word, a word after a redirection, the last word, an
+        # index just past the last word and one below the first, a word that differs from argv, a '#' at a word
+        # boundary, and a digits-only word glued to a redirection operator, read as its source descriptor.
+        _gw_ws = getattr(aiqt_hooks, "_gate_word_start", None)
+
+        def wsexpect(label, raw, argv, idx, want):
+            got = _gw_ws(raw, argv, idx) if _gw_ws is not None else "no _gate_word_start"
+            if got != want:
+                failures.append("{}: _gate_word_start({!r}, {!r}, {}) = {!r}, expected {!r}".format(
+                    label, raw, argv, idx, got, want))
+
+        _gw_raw = "A=\"$(x)\" 2>/dev/null git status"
+        _gw_argv = ["A=$(x)", "git", "status"]
+        wsexpect("(gw-ws-first) the first word starts the text", _gw_raw, _gw_argv, 0, 0)
+        wsexpect("(gw-ws-own) a redirection before the word is skipped", _gw_raw, _gw_argv, 1, 21)
+        wsexpect("(gw-ws-last) the last word is placed", _gw_raw, _gw_argv, 2, 25)
+        wsexpect("(gw-ws-past) an index just past the last word is not placed", _gw_raw, _gw_argv, 3, None)
+        wsexpect("(gw-ws-below) an index just below the first word is not placed", _gw_raw, _gw_argv, -1, None)
+        wsexpect("(gw-ws-differs) a word that differs from argv is not placed", _gw_raw, ["A=$(y)", "git", "status"],
+                 1, None)
+        wsexpect("(gw-ws-comment) a '#' at a word boundary is not placed", "x # git", ["x", "git"], 1, None)
+        wsexpect("(gw-ws-fd) a digits-only word glued to '>' is a descriptor, not a word", "2>x 2 git", ["2", "git"],
+                 1, 6)
+        # Direct unit cases for the bash-model pieces: the ANSI-C body decoder (the NUL cut, the octal and \x{}
+        # low byte just inside, at and just past 0xFF, \c's pair and DEL, an unknown escape kept, a multibyte
+        # \c), the word split, and the any-word walk.
+        _gw_act = getattr(aiqt_hooks, "_gate_ansi_c_text", None)
+        _gw_rwd = getattr(aiqt_hooks, "_gate_reading_words", None)
+        _gw_awb = getattr(aiqt_hooks, "_gate_any_word_bypass", None)
+
+        def rdexpect(label, func, arg, want):
+            got = func(arg) if func is not None else "missing helper"
+            if got != want:
+                failures.append("{}: {!r} -> {!r}, expected {!r}".format(label, arg, got, want))
+
+        rdexpect("(gw-rd-act-nul) \\0 cuts the body", _gw_act, "gi\\0zz", "gi")
+        rdexpect("(gw-rd-act-u0) \\u0000 cuts the body", _gw_act, "a\\u0000b", "a")
+        rdexpect("(gw-rd-act-c-at) \\c@ cuts the body", _gw_act, "a\\c@b", "a")
+        rdexpect("(gw-rd-act-oct377) \\377 keeps 0xff", _gw_act, "a\\377b", "a\xffb")
+        rdexpect("(gw-rd-act-oct400) \\400 keeps its low byte, a NUL", _gw_act, "a\\400b", "a")
+        rdexpect("(gw-rd-act-oct401) \\401 keeps its low byte", _gw_act, "a\\401b", "a\x01b")
+        rdexpect("(gw-rd-act-xb-ff) \\x{ff} keeps 0xff", _gw_act, "a\\x{ff}b", "a\xffb")
+        rdexpect("(gw-rd-act-xb-100) \\x{100} keeps its low byte, a NUL", _gw_act, "a\\x{100}b", "a")
+        rdexpect("(gw-rd-act-xb-169) \\x{169} keeps its low byte", _gw_act, "a\\x{169}b", "aib")
+        rdexpect("(gw-rd-act-c-pair) \\c\\\\ takes both backslashes", _gw_act, "a\\c\\\\x69b", "a\x1cx69b")
+        rdexpect("(gw-rd-act-c-del) \\c? is DEL", _gw_act, "a\\c?b", "a\x7fb")
+        rdexpect("(gw-rd-act-unknown) an unknown escape keeps its backslash", _gw_act, "a\\_b", "a\\_b")
+        rdexpect("(gw-rd-act-c-mb-nul) \\c before U+0801 reads its first byte, a NUL", _gw_act, "a\\cࠁb", "a")
+        rdexpect("(gw-rd-act-u10ffff) \\U0010FFFF decodes", _gw_act, "a\\U0010FFFFb", "a\U0010ffffb")
+        rdexpect("(gw-rd-act-u110000) \\U00110000 is past Unicode and reads as nothing", _gw_act,
+                 "a\\U00110000b", "ab")
+        rdexpect("(gw-rd-words-vt) a vertical tab does not split", _gw_rwd, "a\x0bb c", ["a\x0bb", "c"])
+        rdexpect("(gw-rd-words-ops) operator characters and a backquote split", _gw_rwd, "a;b(c`d<e",
+                 ["a", "b", "c", "d", "e"])
+        rdexpect("(gw-rd-words-us) a \\_ splits", _gw_rwd, "x\\_y", ["x", "y"])
+        rdexpect("(gw-rd-walk-dashdash) a '--' does not end the reading", _gw_awb, ["git", "commit", "--", "-n"],
+                 ("commit", "the short -n (--no-verify) in '-n'"))
+        rdexpect("(gw-rd-walk-value) a value option does not take the -n", _gw_awb, ["git", "commit", "-m", "-n"],
+                 ("commit", "the short -n (--no-verify) in '-n'"))
+        rdexpect("(gw-rd-walk-pushn) push's -n is no bypass", _gw_awb, ["git", "push", "-n"], None)
+        rdexpect("(gw-rd-walk-before-git) a verb before git does not count", _gw_awb, ["commit", "-n", "git"], None)
+        # Direct unit cases for _gate_dequoted_words: the ANSI-C decoding (each escape form, and the \U code
+        # just inside, at and just past the last Unicode code point) and the attached-value git word (a
+        # single-dash word of four characters, the boundary, and five and six).
+        _gw_dqw = getattr(aiqt_hooks, "_gate_dequoted_words", None)
+
+        def dqwexpect(label, text, want):
+            got = _gw_dqw(text) if _gw_dqw is not None else "no _gate_dequoted_words"
+            if got != want:
+                failures.append("{}: _gate_dequoted_words({!r}) = {!r}, expected {!r}".format(label, text, got, want))
+
+        dqwexpect("(gw-dqw-hex) a \\x code decodes", "$'g\\x69t' x", ["git", "x"])
+        dqwexpect("(gw-dqw-octal) an octal code decodes", "$'g\\151t'", ["git"])
+        dqwexpect("(gw-dqw-u4) a \\u code decodes", "$'g\\u0069t'", ["git"])
+        dqwexpect("(gw-dqw-flag) an escape-coded dash decodes", "$'\\x2dn'", ["-n"])
+        dqwexpect("(gw-dqw-ctrl) a \\c control character is a blank-free byte", "$'a\\cAb'", ["a\x01b"])
+        dqwexpect("(gw-dqw-letter) \\t splits like a tab", "$'a\\tb'", ["a", "b"])
+        dqwexpect("(gw-dqw-u8-in) \\U0010FFFE decodes", "$'a\\U0010FFFEb'", ["a\U0010fffeb"])
+        dqwexpect("(gw-dqw-u8-at) \\U0010FFFF decodes", "$'a\\U0010FFFFb'", ["a\U0010ffffb"])
+        dqwexpect("(gw-dqw-u8-past) \\U00110000 is past Unicode and reads as nothing", "$'a\\U00110000b'",
+                  ["ab"])
+        dqwexpect("(gw-dqw-dash4) a four-character single-dash word adds no git (boundary)", "-git x",
+                  ["-git", "x"])
+        dqwexpect("(gw-dqw-dash5) -Sgit adds a git word", "-Sgit x", ["-Sgit", "git", "x"])
+        dqwexpect("(gw-dqw-dash6) -iSgit adds a git word", "-iSgit x", ["-iSgit", "git", "x"])
+        dqwexpect("(gw-dqw-long) --split-string=git adds a git word", "--split-string=git x",
+                  ["--split-string=git", "git", "x"])
+        dqwexpect("(gw-dqw-long-path) a long option's value whose basename is git adds a git word",
+                  "--x=/usr/bin/git", ["--x=/usr/bin/git", "git"])
+        dqwexpect("(gw-dqw-long-dotgit) a value ending in .git adds none", "--git-dir=r.git", ["--git-dir=r.git"])
+        # The de-quoted reading passes over text no reading can make name git and keeps every decision there.
+        failures.extend(_gate_read_fast_failures())
+        # The run-out over-deny reaches a quoted URL or path ending in '.git' on ANY git line, roster verb or
+        # not (the 'git' after the dot is a word-boundary match whose walk runs off the span end); the
+        # gate-weakening residue discloses it. Pinned so a change to it updates that disclosure; the
+        # unquoted control allows.
+        gexpect("(gw-wr-runout-url) a quoted URL ending in .git on git clone denies (disclosed over-deny)",
+                "git clone 'https://example.com/a/b.git' d", "deny")
+        gexpect("(gw-wr-runout-url-dq) the same URL double-quoted denies (disclosed over-deny)",
+                'git clone "https://example.com/a/b.git" d', "deny")
+        gexpect("(gw-wr-runout-url-bare) the same URL unquoted allows (control)",
+                "git clone https://example.com/a/b.git d", "allow")
+        # (gw-res) The gate-weakening residue must disclose that over-deny, the over-deny of the de-quoted
+        # reading behind any word and what that reading still cannot see. Read from the manifest the
+        # generator renders into ENFORCEMENT.md, so reverting any of these disclosures fails here.
+        try:
+            _gw_hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+            _gw_residue = [h for h in _gw_hooks if h.get("id") == "gate-weakening-guard"][0]["residue"]
+        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            _gw_residue = ""
+            failures.append("(gw-res-read) could not read the gate-weakening-guard residue: {}".format(exc))
+        for _gw_rlbl, _gw_needle in (
+                ("gw-res-runout-url", "so a quoted URL or path ending in .git on any git line denies too"),
+                ("gw-res-behind-overdeny", "so sudo git commit -m \"fix -n\" denies"),
+                ("gw-res-behind-residual", "it cannot see a git word built at run time"),
+                ("gw-res-anyword-overdeny", "any later roster-verb word counts as the verb"),
+                ("gw-res-value-overdeny", "an option value holding an n counts after the verb"),
+                ("gw-res-us-overdeny", "a \\_ is read as a separator wherever it stands"),
+                ("gw-res-ansic-residual", "an ANSI-C dollar-quoted span that the two level readings do not decode")):
+            if _gw_needle not in _gw_residue:
+                failures.append("({}) the gate-weakening-guard residue must carry {!r}"
+                                .format(_gw_rlbl, _gw_needle))
+        # Direct unit cases for the run-out rule in _gate_span_hides_roster_git: the walk that ends at the
+        # interior end (a bare trailing git, or a valueless option after it) and the walk whose separated
+        # option value is missing both fail closed; an off-roster verb does not.
+
+        def spanexpect(label, interior, want):
+            got = aiqt_hooks._gate_span_hides_roster_git(interior)
+            if got is not want:
+                failures.append("{}: _gate_span_hides_roster_git({!r}) = {!r}, expected {!r}"
+                                .format(label, interior, got, want))
+
+        spanexpect("(gw-span-end) a trailing git runs out of the interior, fails closed", "use git", True)
+        spanexpect("(gw-span-opt-end) a valueless option after git runs out, fails closed",
+                   "see git --bare", True)
+        spanexpect("(gw-span-value-missing) an option whose value is missing runs out, fails closed",
+                   "look at git --namespace", True)
+        spanexpect("(gw-span-roster) git followed by a roster verb hides it", "then git commit", True)
+        spanexpect("(gw-span-off) git followed by an off-roster verb does not (control)",
+                   "see git log here", False)
+        # The controls stay allowed: no roster bypass is hidden, so no over-deny beyond the disclosed scope.
+        gexpect("(gw-wr-concat-off) env -uX with a quote-concatenated OFF-roster git log allows (control)",
+                "env -uX g'i't log --oneline", "allow")
+        gexpect("(gw-wr-concat-plain) sudo running a plain non-git command allows (control)",
+                "sudo ls -la", "allow")
+        # Direct unit cases for _gate_novrf_peel: the resolved peel, the fail-closed sentinel for an option
+        # outside the grammar, and None where no command runs. These pin the peel independently of the
+        # whole-handler decision, so a regression in the sentinel protocol is caught at its source.
+        _PEEL_UNRES = aiqt_hooks._GATE_PEEL_UNRESOLVED
+
+        def peelexpect(label, argv, want):
+            got = aiqt_hooks._gate_novrf_peel(argv)
+            if got != want:
+                failures.append("{}: _gate_novrf_peel({!r}) = {!r}, expected {!r}"
+                                .format(label, argv, got, want))
+
+        peelexpect("(gw-peel-env-assign) env skips a VAR=value, resolves the git behind it",
+                   ["env", "A=1", "git", "commit"], ["git", "commit"])
+        peelexpect("(gw-peel-nice-sep) nice -n 10 (separated value) resolves the git behind it",
+                   ["nice", "-n", "10", "git", "commit"], ["git", "commit"])
+        peelexpect("(gw-peel-timeout) timeout consumes its duration operand, resolves git",
+                   ["timeout", "5", "git", "log"], ["git", "log"])
+        peelexpect("(gw-peel-nice-bare) nice with no option resolves the git behind it",
+                   ["nice", "git"], ["git"])
+        peelexpect("(gw-peel-nice-attached) nice -n5 (attached short value) is unresolved, fails closed",
+                   ["nice", "-n5", "git", "commit"], _PEEL_UNRES)
+        peelexpect("(gw-peel-env-attached) env -uX (attached short value) is unresolved, fails closed",
+                   ["env", "-uX", "git", "commit"], _PEEL_UNRES)
+        peelexpect("(gw-peel-env-combined) env -iX (a combined flag + unknown) is unresolved, fails closed",
+                   ["env", "-iX", "git", "commit"], _PEEL_UNRES)
+        peelexpect("(gw-peel-cmdv) command -v is a name lookup that runs nothing, None",
+                   ["command", "-v", "git"], None)
+        peelexpect("(gw-peel-unlisted) an unlisted wrapper (sudo) is returned as the command word",
+                   ["sudo", "git", "commit"], ["sudo", "git", "commit"])
+        # The glue reason text is read (not only the decision), so a regression that points the offender at
+        # the glued byte instead of the quote (reverting the j+1 -> i offender) turns these red: the
+        # double-quote reason contains the needle 'double-quoted word' (which the single-quote reason does
+        # NOT), so the needle is specific to the double-quote branch; a single-quoted one names the single-
+        # quote reason. The separated controls (gw-dq-a1, gw-k2) allow.
+        gdeny_names("(gw-wr-glue-dq) a glued double-quoted word's deny names the double-quote reason",
+                    'git commit -m "a"b', "double-quoted word")
+        gdeny_names("(gw-wr-glue-sq) a glued single-quoted word's deny names the single-quote glue reason",
+                    "git commit -m 'a'b", "unterminated or glued to adjacent text")
+
+        # A backquote between a mis-paired single-quote CLOSE and the next OPEN is live command text bash
+        # runs, not quoted data (a '$' expansion is the same shape, but every command-running '$' form
+        # also carries a '(' or '{', already a break byte, so these vectors isolate the backquote): the
+        # single-quote ambiguity test marks the span on ANY interior byte outside the bare-word set plus
+        # space and tab, so the hidden 'git ... -nv' inside it is re-judged and denies. Each ALLOWED at
+        # an earlier revision of this guard, before the backquote was a single-quote break byte; a mutant
+        # that tests only the shell operators, the newline and the double quote (the pre-change set) turns
+        # gw-dq-m1a..m1e red.
+        gexpect("(gw-dq-m1a) a backquote hidden between a single-quoted close and open denies",
+                "echo 'git log ' `git commit -nv` ' x'", "deny")
+        gexpect("(gw-dq-m1b) the same with the backquote glued to the quotes denies",
+                "echo 'git log '`git commit -nv`' x'", "deny")
+        gexpect("(gw-dq-m1c) a hidden clustered -n behind an off-roster outer verb denies",
+                "echo 'git status ' `git commit -n -m wip` ' done'", "deny")
+        gexpect("(gw-dq-m1d) a hidden push --no-verify in a backquote span denies",
+                "echo 'git log ' `git push --no-verify` ' x'", "deny")
+        gexpect("(gw-dq-m1e) a backquote span bound to an assignment word denies",
+                "echo 'git log ' x=`git commit -nv` ' x'", "deny")
+        # The other-quote and newline triggers the single-quote ambiguity test still needs are subsumed by
+        # the bounded rule (a double quote and a newline are both outside the bare-word set plus space and
+        # tab), and these two vectors pin them with the double quote (q1) or the newline (n2) as the ONLY
+        # non-word interior byte, so each isolates one trigger. Each ALLOWED at an earlier revision of this
+        # guard, before the ambiguity feature; a mutant that excludes the double quote from the test
+        # turns gw-dq-q1 red, one that excludes the newline turns gw-dq-n2 red. In q1 bash actually runs
+        # only 'git log' (the double-quoted a" is one operand), so the deny is a safe-direction over-deny;
+        # the vector pins the trigger MECHANISM, not a live bypass in that exact string.
+        gexpect("(gw-dq-q1) a double quote is the only ambiguous byte in a single-quoted span, so the "
+                "hidden git commit -nv is re-judged and denies (safe-direction over-deny; bash runs only "
+                "git log)", "git log 'a\"' git commit -nv", "deny")
+        gexpect("(gw-dq-n2) a hidden bypass where a newline marks the single-quote span ambiguous denies",
+                "echo 'git log '\ngit commit -nv\necho ' x'\necho '", "deny")
+        # The double-quote branch's single-quote trigger is the mirror: a '"' the scan meets may be bash's
+        # CLOSING double quote, and a single quote in its interior is where bash's own close and the next
+        # open bracket live command text. Here too bash runs only 'git log' (the double-quoted a' is one
+        # operand), a safe-direction over-deny, but dropping the interior single-quote test, and it alone,
+        # swallows the hidden 'git commit -nv' and allows, so this isolates that trigger;
+        # the parsed path sees an off-roster 'git log', so the deny comes purely from the raw scan.
+        gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
+                "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
+                "trigger)", "git log \"a'\" git commit -nv", "deny")
+        # Timing: the whole-command scan, the hides-roster-git helper and the dequoted-word scan are linear in
+        # their input length on these shapes, so doubling the input should roughly double the time (ratio
+        # ~2); a quadratic re-walk quadruples it
+        # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
+        # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
+        # Each scan is timed with time.process_time (this process's CPU time, as in the lex-cost rows), so
+        # time the process spends waiting for a CPU on a busy runner is not counted. Because a short t_n gives
+        # a noisy ratio, n is DOUBLED (bounded: from 4000 repetitions, at most 9 sizes) until t_n clears a
+        # 0.1 s floor; if it never does, the check FAILS 'linearity not evaluated' rather than passing
+        # silently (the former early-pass path). The floor sets how much stray cost one comparison absorbs:
+        # extra work counted in t_2n moves a linear row's ratio of about 2 past 3 only when it costs more
+        # than t_n itself. With a 0.02 s floor and a wall clock, one CI row failed at 3.24x (0.030 s then
+        # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
+        # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
+        # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
+        # What else a timed call is charged for was measured on Python 3.14.4 with the whole suite running:
+        # no cyclic collection ran inside any timed call (the dequoted-word scan makes no lasting
+        # collector-tracked allocation, so none starts there even with the collector's count at its
+        # threshold), and every row's ratio stayed between 1.93 and 2.09 with the collector left on and with
+        # it disabled around each call. The one cost that grew faster than the input was the kernel's work
+        # on the page faults that first touch the memory a scan allocates (about 2.5 times the faults per
+        # doubling), under a tenth of t_2n there. A ratio above 3 that a CI runner measured for gw-lin-dq-off
+        # was not reproduced that way, nor with other processes loading the same CPU, so its cause is not
+        # known. A failing row therefore reports what the process used across each of its two timed calls,
+        # read outside the timed region: user and system CPU time, minor page faults, involuntary context
+        # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
+        # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
+        # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
+        # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
+        # as the scan docstring states.
+        # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
+        # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
+        #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
+        #   cached offroster_resolved makes it linear. Quadratic before that cache.
+        # gw-lin-span-roster (`git commit -m '` + `git x `*n + `'`) and gw-lin-span-off (`git log '` +
+        #   `git log `*n + `'`): one quoted span naming many inner git words. The former
+        #   _gate_span_hides_roster_git re-split the suffix per 'git' match (quadratic); the one-pass token
+        #   walk makes both linear. Both quadratic before that walk.
+        # gw-lin-span-optgit (`git log '` + `-git `*n + `log'`) and gw-lin-span-chain (`git commit -m 'git` +
+        #   ` -C git`*n + ` x'`): every option word holds a 'git' match, or each '-C' consumes a git word as
+        #   its value, so an option walk per match crossed every later option word (quadratic). The helper
+        #   now reads each match's walk outcome from a table filled once from the end, so both are linear.
+        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) time
+        #   _gate_novrf_dequoted_bypass over the word list itself: it copied the words after each git word
+        #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
+        #   subcommand from tables filled once from the end, so both are linear.
+        # gw-lin-dq-roster (`echo` + `git push`*n + `-n`) and gw-lin-dq-roster-m (`echo` + `git commit -m`*n +
+        #   `-n`) pack ROSTER-verb git words before a '-n' that is a bypass for none of them (push's dry run,
+        #   or -m's value): each git word's walk read every later word, quadratic. A walk that found no bypass
+        #   now passes over every later git word of the same verb whose words it already read, so both are
+        #   linear. gw-lin-unread-roster times the de-quoted text reading over the quote-concatenated shape.
+        # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
+        # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
+        # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
+        _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
+        _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
+        _gw_unread_scan = aiqt_hooks._gate_unread_bypass
+        _gw_lin_cases = (
+            ("gw-dq-lin-sq", "git -C 'a;' log ", "", "", _gw_cmd_scan, None),
+            ("gw-dq-lin-dq", 'git log "a;" ', "", "", _gw_cmd_scan, None),
+            ("gw-lin-opts", "-C 'a;' ", "git ", "", _gw_cmd_scan, None),
+            ("gw-lin-span-roster", "git x ", "git commit -m '", "'", _gw_cmd_scan, None),
+            ("gw-lin-span-off", "git log ", "git log '", "'", _gw_cmd_scan, None),
+            ("gw-lin-span-optgit", "-git ", "git log '", "log'", _gw_cmd_scan, None),
+            ("gw-lin-span-chain", " -C git", "git commit -m 'git", " x'", _gw_cmd_scan, None),
+            ("gw-lin-dq-off", ["git", "log"], ["sudo"], [], _gw_dq_scan, None),
+            ("gw-lin-dq-chain", ["-C", "git"], ["sudo", "git"], ["log"], _gw_dq_scan, None),
+            ("gw-lin-dq-roster", ["git", "push"], ["echo"], ["-n"], _gw_dq_scan, None),
+            ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"], _gw_dq_scan, None),
+            ("gw-lin-unread-roster", " g'i't push", "echo", " -n", _gw_unread_scan, None),
+        )
+        failures.extend(_gw_lin_failures(_gw_lin_cases))
+        failures.extend(_gw_lin_usage_failures())
+
+        # A glob character can match a filename that becomes an option word (a file named -n makes
+        # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
+        gexpect("(gw-eo-an) '$x-n'* (a quoted word glued to a glob) denies",
+                "git commit -m '$x-n'*", "deny")
+        gexpect("(gw-eo-an-mut) ${x}-n* (a live expansion with a dash and a glob) denies",
+                "git commit ${x}-n* -m y", "deny")
+
+        # The deny reason names the offending word as typed (so dropping it from the message is caught).
+        gdeny_names("(gw-eo-ao) the deny reason names the ${x}-n word", "git commit ${x}-n -m y", "${x}-n")
+        gdeny_names("(gw-eo-ap) the deny reason names the ANSI-C word", "git commit $'\\x2dn' -m y",
+                    "x2dn")
+
+        # An unquoted expansion word-splits, so even behind a literal prefix or bound by '--long=' it can
+        # hand git a fresh '-n'; the quoted forms now deny under the same grammar rather than a narrowing.
+        gexpect("(gw-eo-aq) an unquoted expansion behind a literal prefix word-splits into -n, denies",
+                "git commit -m prefix-$x", "deny")
+        gexpect("(gw-eo-ar) prefix-\"$x\" as the -m value denies (disclosed over-deny; the single-quoted "
+                "control gw-eo-o allows)", 'git commit -m prefix-"$x"', "deny")
+        gexpect("(gw-eo-as) an unquoted expansion bound by --message= still word-splits into -n, denies",
+                "git commit --message=$x", "deny")
+        gexpect("(gw-eo-at) an empty '' then an unquoted ${x}-n leaves a bare -n, denies",
+                "git commit ''${x}-n -m y", "deny")
+        gexpect("(gw-eo-au) an empty '' then a quoted leading \"${x}\"-n leaves a bare -n, denies",
+                "git commit ''\"${x}\"-n -m y", "deny")
+        gexpect("(gw-eo-av) a literal '.' then unquoted ${IFS} word-splits off a bare -n, denies",
+                "git commit -m msg .${IFS}-n", "deny")
+        # Only the three harmless redirect spellings are accepted (bash removes them from the argument
+        # list and they write no file); every other redirection denies, so none can hide what follows.
+        gexpect("(gw-eo-aw) a redirection before ${x}-n does not hide it, denies",
+                "git commit -m y 2>&1 ${x}-n", "deny")
+        gexpect("(gw-eo-ax) a plain >/dev/null redirect is accepted, allows",
+                "git commit -m y >/dev/null", "allow")
+        gexpect("(gw-eo-ax2) 2>/dev/null then 2>&1 are both accepted, allows",
+                "git commit -m y 2>/dev/null 2>&1", "allow")
+        gexpect("(gw-eo-ax3) a redirect to a real file denies (off the accepted redirect list; "
+                "disclosed over-deny)", "git commit -m y >out.log", "deny")
+        # A git global option must carry a LITERAL value for the verb to be trusted; an expansion value
+        # leaves the verb unresolvable and denies (fail closed, never 'leave the segment unscanned').
+        gexpect("(gw-eo-az) a --git-dir= global option with an expansion value cannot be trusted, denies",
+                'git --git-dir="$d" commit ${x}-n -m y', "deny")
+        gexpect("(gw-eo-ba) the same global option with no bypass word still denies (disclosed over-deny)",
+                'git --git-dir="$d" commit -m y', "deny")
+        gexpect("(gw-eo-ba2) a literal --git-dir= value resolves the verb and allows (control)",
+                "git --git-dir=/tmp/r commit -m y", "allow")
+        # ANSI-C NUL-truncation spellings are inside the refused '$' class like every other ANSI-C word.
+        gexpect("(gw-eo-bb) $'\\0junk'-n carries an ANSI-C expansion, denies",
+                "git commit $'\\0junk'-n -m y", "deny")
+        gexpect("(gw-eo-bc) $'X\\0junk'-n denies too (every ANSI-C word does; disclosed over-deny)",
+                "git commit $'X\\0junk'-n -m y", "deny")
+        # An abbreviated value-taking long option consumes the '--' that follows it, so the trailing -n is
+        # still the bypass; a non-value abbreviation lets '--' terminate and the -n is an operand.
+        gexpect("(gw-eo-bd) --mess resolves to --message and consumes the '--', the -n denies",
+                "git commit --mess -- -n", "deny")
+        gexpect("(gw-eo-be) --ame resolves to --amend (no value), the '--' terminates and -n is an operand",
+                "git commit --ame -- -n", "allow")
+        # A glob with a '-' is a live hazard: with a file named -n in the working directory, bash hands
+        # git a bare -n for '*-n' (and for '-?'), so glob opacity DENIES on a roster verb.
+        gexpect("(gw-eo-bf) a glob with a '-' denies (a file named -n makes it the bypass)",
+                "git commit *-n -m y", "deny")
+        # The no-verify prefix rule applies to the resolved literal words on the fallback too.
+        gexpect("(gw-eo-bg) an unparseable --no-ve=\"$x\" is a no-verify prefix, denies",
+                'git commit --no-ve="$x" -m "unbalanced', "deny")
+
+        # === gatdis: the closed-grammar battery (spellings that previously slipped through) ==============
+        # Every deny here except three was an allow before the closed grammar, and each sits beside an
+        # allow control that differs only in the construct under test, so an over-broad grammar turns a
+        # control red while a revert of the grammar turns the deny red. The three exceptions already
+        # denied and are locks on paths the grammar now carries: the parsed-path continuation (b5), the
+        # substitution bypass (g4) and the unparseable quoted bypass (h1).
+        # A process substitution used to split the segment, hiding the option word after it.
+        gexpect("(gw-cg-a1) a <(:) process substitution before ${x}-n denies",
+                "git commit -m y <(:) ${x}-n", "deny")
+        gexpect("(gw-cg-a2) a <(:) process substitution before a quoted '-n' denies",
+                "git commit -m y <(:) '-n'", "deny")
+        gexpect("(gw-cg-a3) a >(cat) process substitution before ${x}-n denies",
+                "git commit -m y >(cat) ${x}-n", "deny")
+        # An escaped backslash at a line end is NOT a line continuation: the newline ends the command and
+        # the next line runs. A raw continuation replacement used to fuse the two lines, hiding the git.
+        gexpect("(gw-cg-b1) after an escaped backslash line end, ${x}-n on the next line denies",
+                "echo a\\\\\ngit commit ${x}-n -m y", "deny")
+        gexpect("(gw-cg-b2) the same shape with a literal commit stays allowed (control)",
+                "echo a\\\\\ngit commit -m y", "allow")
+        # A comment ends at its newline even when it ends in a backslash: the next line runs.
+        gexpect("(gw-cg-b3) after a backslash-ended comment, ${x}-n on the next line denies",
+                "# note \\\ngit commit ${x}-n -m y", "deny")
+        gexpect("(gw-cg-b4) the same shape with a literal commit stays allowed (control)",
+                "# note \\\ngit commit -m 'y'", "allow")
+        # A real backslash-newline continuation keeps denying: the shared lexer joins it on the parsed
+        # path, and the raw grammar refuses the backslash outright (no raw rewrite is involved).
+        gexpect("(gw-cg-b5) a backslash-newline continuation carrying -n denies",
+                "git commit -m y \\\n-n", "deny")
+        # An expansion where the subcommand or a global option's value is expected leaves the verb
+        # unresolvable: fail closed, never 'leave the segment alone'.
+        gexpect("(gw-cg-d1) git $g commit -n: the verb cannot be resolved, denies",
+                "git $g commit -n -m y", "deny")
+        gexpect("(gw-cg-d2) git -C $d -n: the global option value is not literal, denies",
+                "git -C $d -n -m y", "deny")
+        gexpect("(gw-cg-d3) a literal -C value resolves the verb and allows (control)",
+                "git -C /tmp commit -m y", "allow")
+        gexpect("(gw-cg-d4) git $g commit ${x}-n denies",
+                "git $g commit ${x}-n -m y", "deny")
+        # A glob where an option word stands picks up a file named like an option (-? matches -n).
+        gexpect("(gw-cg-e1) git commit -? denies (a glob in the option region)",
+                "git commit -? -m y", "deny")
+        # A comment inside the flagged segment denies (its reach over the line is not modelled); a
+        # mid-word '#' is literal in bash and stays accepted.
+        gexpect("(gw-cg-f1) a '#' comment after a roster-verb git denies (disclosed over-deny)",
+                "git commit -m 'x' # done", "deny")
+        gexpect("(gw-cg-f2) a mid-word '#' is literal and stays accepted (control)",
+                "git commit -m ticket#123", "allow")
+        # A -m value naming a roster-verb git command is re-judged, so it denies even when its interior
+        # is all bare-word bytes and spaces (the accepted over-deny; cf gw-dq-h9). An inner git with NO
+        # roster verb after it stays consumed data and allows (g1b), so the over-deny is scoped to the
+        # roster, not every git word inside quoted data.
+        gexpect("(gw-cg-g1) a -m value naming 'git commit -n' is re-judged and denies (accepted over-deny)",
+                "git commit -m 'say git commit -n somewhere'", "deny")
+        gexpect("(gw-cg-g1b) a -m value naming an off-roster git (log) stays consumed data, allows",
+                "git commit -m 'run git log then stop'", "allow")
+        gexpect("(gw-cg-g2) echoed quoted text naming git commit -n denies (disclosed over-deny)",
+                "echo 'git commit -n'", "deny")
+        gexpect("(gw-cg-g3) a roster-verb git inside $( ) is scanned on its own: a literal form allows",
+                "echo $(git commit -m 'x')", "allow")
+        gexpect("(gw-cg-g4) a roster-verb git inside $( ) carrying -n denies",
+                "echo $(git commit -n -m x)", "deny")
+        # The fallback applies the same grammar, including the bypass check on the resolved words (the
+        # short-n raw probe cannot see a quoted '-n'; the grammar's literal scan can).
+        gexpect("(gw-cg-h1) an unparseable command with a single-quoted '-n' on commit denies",
+                "git commit '-n' -m y \"unbalanced", "deny")
+        # A tilde leading a word is an expansion and denies; mid-word it is literal (HEAD~1).
+        gexpect("(gw-cg-i1) a leading ~ in the option region denies",
+                "git commit -m y ~/notes", "deny")
+        gexpect("(gw-cg-i2) a mid-word ~ is literal and stays accepted (control)",
+                "git rebase HEAD~3", "allow")
+
         # === L11: the F1/F2 redirect-pollution slips are CLOSED by the shared raw-aware tokenizer =========
         # A redirect anywhere no longer hides the --no-verify bypass or the checker command word.
         gexpect("(gw-l11a) redirect before the subcommand no longer hides --no-verify, denies",
@@ -12303,6 +17417,426 @@ def _main_isolated(monitor):
         # bypass subcommand from the gate-weakening scan -> DENY.
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
+
+        # A backslash-newline before a '#' inside a double-quoted command substitution is removed by bash
+        # before it reads the line, so the '#' keeps the classification from before the pair: a '#' at a word
+        # boundary there opens a comment to end of line. _skip_quoting formerly set the class to "word" for the
+        # pair, so the '#' was read as word text and the apostrophe after it opened a single quote that ran on
+        # and hid the later 'git commit --no-verify' (allow). Each vector below denies: the bypass or the
+        # verification run into a truncating sink is no longer concealed. The no-continuation twin denies too,
+        # so the pair changes nothing (the equivalence the pin broke).
+        gexpect("(gw-bsnl-finding) a backslash-newline before a '#' in a double-quoted substitution does not "
+                "hide the trailing --no-verify, denies",
+                'echo "$(echo a \\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-twin) the no-continuation twin denies too (the pair changes nothing)",
+                'echo "$(echo a # it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-sink) the same pair before a '#' does not hide a verification run into a truncating "
+                "sink, denies",
+                'echo "$(echo a \\\n# it\'s\n)"; pytest | head', "deny")
+        gexpect("(gw-bsnl-two) two consecutive backslash-newline pairs before the '#' deny",
+                'echo "$(echo a \\\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-three) three consecutive pairs before the '#' deny",
+                'echo "$(echo a \\\n\\\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-early) a pair before the '#' at the start of the substitution body denies",
+                'echo "$( \\\n# it\'s\necho a\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-late) a pair before a '#' deeper in the substitution body denies",
+                'echo "$(echo a; echo b \\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-wrapped) a pair before the '#' in a substitution inside surrounding double-quoted "
+                "text denies",
+                'echo "pre $(echo a \\\n# it\'s\n) post"; git commit --no-verify -m x # \')"', "deny")
+        gexpect("(gw-bsnl-blank) a blank line before the pair, the pair immediately before the '#', denies",
+                'echo "$(echo a\n\\\n# it\'s\n)"; git commit --no-verify -m x # \')"', "deny")
+
+        # A reading of an uncertain '#' that fails to lex abandons the readings, and the sink check then runs
+        # on the partial lex of the WHOLE command, which recovers every reading's segments: a verification run
+        # piped into a truncating sink past the first uncertain '#' is still proven and denied, with the sink
+        # stage on the pipe's own line or after the newline that continues the pipeline. In each vector the
+        # here-string or process substitution fails one reading of the '#' inside the parameter expansion
+        # while the other reading recovers the pipeline whole.
+        gexpect("(gw-rfail-sink-nl) a failed reading does not hide a verification run piped into a sink "
+                "stage after a pipeline-continuation newline, denies",
+                "pytest |\nhead 3</dev/null${x# #} 4<<<x", "deny")
+        gexpect("(gw-rfail-sink-line) control: the same-line sink stage denies too",
+                "pytest | head 3</dev/null${x# #} 4<<<x", "deny")
+        gexpect("(gw-rfail-sink-redir) the sink stage carrying the failing redirects itself still denies",
+                "pytest |\nhead 2>${x:- #} 3> >(cat)", "deny")
+        gexpect("(gw-rfail-benign) control: the same failed-reading shape with no verification run or "
+                "sink allows",
+                "ls ${x# #} <<<x", "allow")
+
+        # (gw-rfail-pin) The reading_failed branch of _gate_recovered_sink is pinned directly here. A sink
+        # that branch proves is a lexed pipeline whose listed sink word follows its '|' in the raw text, and
+        # the fail-closed sink test (_gate_doubt_sink) denies exactly that order, so at the decision level
+        # reverting the branch leaves such a command denied and no gexpect vector isolates it. (A probe that
+        # modelled the sink stage gave no such cover: a stage spelling it missed, one opening with a quoted
+        # newline, decided through this branch alone.) So this check exercises the branch itself: on a
+        # reading_failed command the full partial lex of the WHOLE command recovers the sink past the first
+        # uncertain '#', while resuming from the first reading's fork (the behaviour before the fix) drops
+        # the readings that lex whole and misses it.
+        for _rf_label, _rf_cmd in (("sink-nl", "pytest |\nhead 3</dev/null${x# #} 4<<<x"),
+                                   ("sink-redir", "pytest |\nhead 2>${x:- #} 3> >(cat)")):
+            try:
+                aiqt_hooks._lex_readings(_rf_cmd)
+                failures.append("(gw-rfail-pin-doubt) {}: _lex_readings judged the readings; expected a "
+                                "reading_failed doubt".format(_rf_label))
+            except aiqt_hooks._UncertainHashError as _rf_exc:
+                if not getattr(_rf_exc, "reading_failed", False):
+                    failures.append("(gw-rfail-pin-flag) {}: the doubt is not a reading_failed doubt"
+                                    .format(_rf_label))
+                if aiqt_hooks._gate_recovered_sink(_rf_cmd, _rf_exc) is None:
+                    failures.append("(gw-rfail-pin-recover) {}: the reading_failed branch did not recover the "
+                                    "sink from the full partial lex".format(_rf_label))
+                _rf_rec, _rf_done, _rf_open = aiqt_hooks._lex_resume_partial(_rf_cmd, _rf_exc)
+                if _rf_open:
+                    _rf_rec = _rf_rec[:-1]
+                if aiqt_hooks._verification_sink(_rf_rec) is not None:
+                    failures.append("(gw-rfail-pin-resume) {}: resuming from the fork already finds the sink, so "
+                                    "the branch would not discriminate".format(_rf_label))
+            except ValueError as _rf_exc:
+                failures.append("(gw-rfail-pin-error) {}: unexpected ValueError {!r}".format(_rf_label, _rf_exc))
+
+        # Behind a '#' the lexer cannot judge under both readings, the fail-closed sink test reads a listed
+        # sink word anywhere at or after the first '|' (_gate_doubt_sink), so the newlines and the blank or
+        # '#' comment lines that continue the pipeline (bash reads the stage after '|' or '|&' past them)
+        # never end the scan. Here the '#' sits inside an open '(' and its
+        # word-text reading fails on the quote it opens, while the comment reading leaves the pipeline after a
+        # subshell prefix the deny tier does not read past (_gate_benign_prefix), so the raw probe is the
+        # deciding layer.
+        gexpect("(gw-dbt-sink-nl) the doubt fallback reads the sink stage after a pipeline-continuation "
+                "newline, denies",
+                "(true #'\n)\npytest |\nhead", "deny")
+        gexpect("(gw-dbt-sink-line) control: the same-line sink stage denies too",
+                "(true #'\n)\npytest | head", "deny")
+        gexpect("(gw-dbt-sink-amp) a '|&' pipe before the continuation newline denies too",
+                "(true #'\n)\npytest |&\nhead", "deny")
+        gexpect("(gw-dbt-sink-stage) a pass-through stage between the pipe and the sink keeps the deny",
+                "(true #'\n)\npytest |\ncat |\nhead", "deny")
+        gexpect("(gw-dbt-sink-wc) control: a stage off the sink list after the continuation newline allows",
+                "(true #'\n)\nls |\nwc", "allow")
+        # A '#' comment line between the pipe and the sink continues the pipeline in bash just as a blank line
+        # does. The fail-closed sink test never reads the comment at all (no listed sink word stands between
+        # the pipe and the sink here), so the comment cannot stop the scan short of the sink.
+        gexpect("(gw-dbt-sink-cmt) a comment after the pipe on its own line, then the sink, denies",
+                "(true #'\n)\npytest | # run the checks\nhead", "deny")
+        gexpect("(gw-dbt-sink-cmtamp) a '|&' pipe then a comment then the sink denies too",
+                "(true #'\n)\npytest |& # run the checks\nhead", "deny")
+        gexpect("(gw-dbt-sink-cmtline) a comment on its own line between the pipe and the sink denies",
+                "(true #'\n)\npytest |\n# run the checks\nhead", "deny")
+        gexpect("(gw-dbt-sink-cmtwc) control: a comment line then a stage off the sink list allows",
+                "(true #'\n)\nls | # just a note\nwc", "allow")
+        gexpect("(gw-dbt-sink-cmtlinewc) control: a comment line then an off-list stage on its own line allows",
+                "(true #'\n)\nls |\n# just a note\nwc", "allow")
+
+        # The fail-closed sink test reads a listed sink word anywhere at or after the first pipe, whatever
+        # stands between them, so a stage spelling a stage-modelling probe would have to enumerate denies by
+        # construction: a quoted newline inside the sink stage, a redirect carrying '&' at the stage's start,
+        # and their combinations with the comment continuation lines above. The controls pin the other side:
+        # with the sink word off the deny list the same cannot-evaluate shapes keep the checker-and-pipe
+        # note, and a checker with no pipe, process substitution or here-string stays a silent allow.
+        gexpect("(gw-dbt-sink-qnl) a quoted newline inside the sink stage does not end the scan, denies",
+                "(true #'\n)\npytest | # note\nA=\"\n\" head", "deny")
+        gexpect("(gw-dbt-sink-spcnl) a space-valued assignment inside the sink stage denies too (the deny "
+                "this vector pins is stricter than the note its floor row records)",
+                "(true #'\n)\npytest | # note\nA=\" \" head", "deny")
+        gexpect("(gw-dbt-sink-ramp) a sink stage starting with a '2>&1' redirect denies",
+                "(true #'\n)\npytest | 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-rampcmt) a comment line then a '2>&1'-led sink stage denies",
+                "(true #'\n)\npytest | # note\n2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-rerr) a '|&' pipe into a '>&2'-led sink stage denies",
+                "(true #'\n)\npytest |& >&2 head", "deny")
+        gexpect("(gw-dbt-sink-qnlramp) a quoted newline and a '&'-carrying redirect together deny",
+                "(true #'\n)\npytest | A=\"\n\" 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-cmtqnlramp) a comment line, a quoted newline and the redirect together deny",
+                "(true #'\n)\npytest | # note\nA=\"\n\" 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-stageramp) a pass-through stage then a '&'-redirect-led sink stage denies",
+                "(true #'\n)\npytest |\ncat |\n2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-braceramp) five unjudged parameter-expansion '#' then the redirect-led sink "
+                "stage denies",
+                "cd /tmp ${x# #} ${y# #} ${z# #} ${w# #} ${v# #}\npytest | 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-bqramp) a backquote-substitution '#' then the redirect-led sink stage denies",
+                "echo `true #`\npytest | 2>&1 head", "deny")
+        gexpect("(gw-dbt-sink-dbrramp) a '#' inside a ${...} expansion then the redirect-led sink stage denies",
+                "echo ${x:- #'}\npytest | 2>&1 head", "deny")
+        gexpect("(gw-rfail-sink-qnl) a failed reading with a quoted newline inside the sink stage denies",
+                "pytest | A=\"\n\" head 3</dev/null${x# #} 4<<<x", "deny")
+        gexpect("(gw-dbt-note-qnlwc) control: the quoted-newline stage with an off-list word keeps the "
+                "checker-and-pipe note, not a deny",
+                "(true #'\n)\npytest | # note\nA=\"\n\" wc", "allow-note")
+        gexpect("(gw-dbt-note-rampwc) control: a '2>&1'-led stage with an off-list word keeps the note",
+                "(true #'\n)\npytest | 2>&1 wc", "allow-note")
+        gexpect("(gw-dbt-note-noflow) control: a checker with no pipe or flow past the unjudged '#' allows "
+                "silently",
+                "(true #'\n)\npytest", "allow")
+
+        # Behind the same unjudged '#', the hook-bypass test is bounded and fail-closed by construction
+        # (_gate_doubt_bypass): text naming git with a subcommand that accepts --no-verify plus ANY
+        # dash-prefixed option token denies, whatever the option's spelling or ending, so no bypass
+        # spelling (a long abbreviation down to '--n' or '--no-', a cluster over any character set, a
+        # token ended by a shell operator) decides more quietly behind a '#' the guard cannot judge than
+        # it does readable. The stated cost is an over-denial, pinned by gw-dbt-nv-overdeny: a harmless
+        # option on those subcommands denies there too. The controls pin the bound the other way: a
+        # listed verb with no dash-prefixed token, and a git subcommand outside the --no-verify set,
+        # still allow. The first five vectors are REGRESSION GUARDS: the earlier spelling probes and the
+        # readable parsed path already denied each of them, so they keep the deny rather than tell this
+        # test apart from those; the vectors after them each allowed before this test.
+        gexpect("(gw-dbt-nv-nm) regression guard: behind the unjudged '#', a clustered -nm hook bypass denies",
+                "(true #'\n)\ngit commit -nm x", "deny")
+        gexpect("(gw-dbt-nv-anm) regression guard: a -anm cluster (the n after other flag letters) denies too",
+                "(true #'\n)\ngit commit -anm x", "deny")
+        gexpect("(gw-dbt-nv-n3) regression guard: a -n3 on git am (a digit after the n) denies",
+                "(true #'\n)\ngit am -n3 p", "deny")
+        gexpect("(gw-dbt-nv-nove) regression guard: a --no-ve abbreviation (a conservative long prefix) denies",
+                "(true #'\n)\ngit commit --no-ve", "deny")
+        gexpect("(gw-dbt-nv-non) regression guard: the shortest --n abbreviation denies",
+                "(true #'\n)\ngit commit --n", "deny")
+        gexpect("(gw-dbt-nv-nodash) a bare --no- abbreviation denies",
+                "(true #'\n)\ngit commit --no-", "deny")
+        gexpect("(gw-dbt-nv-semi) an abbreviation the next ';' ends denies",
+                "(true #'\n)\ngit commit --n;true", "deny")
+        gexpect("(gw-dbt-nv-redir) an abbreviation a redirect ends denies",
+                "(true #'\n)\ngit commit --no-ve>/dev/null", "deny")
+        gexpect("(gw-dbt-nv-pipe) an abbreviation a pipe ends denies",
+                "(true #'\n)\ngit commit --no-v|cat", "deny")
+        gexpect("(gw-dbt-nv-lt) an abbreviation a '<' ends, on git am, denies",
+                "(true #'\n)\ngit am --no-v<p", "deny")
+        gexpect("(gw-dbt-nv-paren) an abbreviation a ')' ends, in a subshell, denies",
+                "(true #'\n)\n(git am --no-ve)", "deny")
+        gexpect("(gw-dbt-nv-amp) an abbreviation a '&' ends denies",
+                "(true #'\n)\ngit am --no-v&", "deny")
+        gexpect("(gw-dbt-nv-gt) an abbreviation a '>' ends denies",
+                "(true #'\n)\ngit am --no-v>o", "deny")
+        gexpect("(gw-dbt-nv-bang) a '-!n' cluster (a character off any letter-digit set) denies",
+                "(true #'\n)\ngit commit -!n", "deny")
+        gexpect("(gw-dbt-nv-dot) a '-.n' cluster denies",
+                "(true #'\n)\ngit commit -.n x", "deny")
+        gexpect("(gw-dbt-nv-uscr) a '-_n' cluster denies",
+                "(true #'\n)\ngit commit -_n x", "deny")
+        gexpect("(gw-dbt-nv-overdeny) the stated over-denial: a harmless option on a listed subcommand "
+                "denies behind the unjudged '#', since nothing there can prove any option harmless",
+                "(true #'\n)\ngit commit -m x", "deny")
+        gexpect("(gw-dbt-nv-noopt) control: a listed subcommand with no dash-prefixed token allows",
+                "(true #'\n)\ngit commit", "allow")
+        gexpect("(gw-dbt-nv-otherverb) control: a git subcommand outside the --no-verify set keeps its "
+                "option behind the '#'",
+                "(true #'\n)\ngit status -s", "allow")
+        # The option test needs a character after an unquoted '-' that does not end the token in bash, so
+        # a lone '-' (git am's stdin operand) allows when a shell operator ends it just as when a blank or
+        # the end of the command does. The end and newline controls allowed before this rule too, and the
+        # newline control fails if the newline is dropped from the ending set; the space and tab rows below
+        # now deny through the closed literal grammar (their '<p' redirection), so no row pins the space or
+        # the tab in that set (dropping either can only add a deny). A character bash does not split
+        # on, a carriage return included, stays in the token and counts; a process substitution glued to
+        # the '-' forms the dash-prefixed word '-/dev/fd/N' and counts too, in either direction (guards:
+        # both denied before this rule, and a rule that excluded '<' and '>' alone, or kept only '<(',
+        # would let one allow). No control ends a lone '-' with '(': bash refuses 'git am -(x)' as a
+        # syntax error, so no runnable command has that shape.
+        gexpect("(gw-dbt-nv-lone) control: a lone '-' stdin operand ended by the end of the command allows",
+                "(true #'\n)\ngit am -", "allow")
+        # The four controls whose git am segment carries a '<p' or '>o' file redirection deny: the closed
+        # literal grammar refuses any redirection but >/dev/null, 2>/dev/null and 2>&1 on a roster-verb git
+        # segment, behind this '#' as on a parsed command. The other lone '-' controls still allow.
+        gexpect("(gw-dbt-nv-lonespace) a lone '-' ended by a space, then a '<p' redirection, denies",
+                "(true #'\n)\ngit am - <p", "deny")
+        gexpect("(gw-dbt-nv-lonetab) a lone '-' ended by a tab, then a '<p' redirection, denies",
+                "(true #'\n)\ngit am -\t<p", "deny")
+        gexpect("(gw-dbt-nv-lonenl) control: a lone '-' ended by a newline allows",
+                "(true #'\n)\ngit am -\ntrue", "allow")
+        gexpect("(gw-dbt-nv-lonesemi) control: a lone '-' ended by ';' allows",
+                "(true #'\n)\ngit am -;true", "allow")
+        gexpect("(gw-dbt-nv-lonelt) a lone '-' ended by a '<p' redirection denies",
+                "(true #'\n)\ngit am -<p", "deny")
+        gexpect("(gw-dbt-nv-loneparen) control: a lone '-' ended by ')' in a subshell allows",
+                "(true #'\n)\n(git am -)", "allow")
+        gexpect("(gw-dbt-nv-loneamp) control: a lone '-' ended by '&' allows",
+                "(true #'\n)\ngit am -&", "allow")
+        gexpect("(gw-dbt-nv-lonepipe) control: a lone '-' ended by a pipe allows",
+                "(true #'\n)\ngit am -|cat", "allow")
+        gexpect("(gw-dbt-nv-lonegt) a lone '-' ended by a '>o' redirection denies",
+                "(true #'\n)\ngit am ->o", "deny")
+        gexpect("(gw-dbt-nv-cr) a carriage return after the '-' stays in the token and denies",
+                "(true #'\n)\ngit commit -\rn", "deny")
+        gexpect("(gw-dbt-nv-procsub) regression guard: a process substitution glued to the '-' denies",
+                "(true #'\n)\ngit am -<(true)", "deny")
+        gexpect("(gw-dbt-nv-procsubout) regression guard: an output process substitution glued to the '-' "
+                "denies",
+                "(true #'\n)\ngit am ->(true)", "deny")
+        # A quote character or backslash between the token start and the '-' can keep the next character
+        # from ending the word, and the de-quoted half of the scan no longer shows that it was protected:
+        # '"-;"' is the one word '-;' to bash, not a lone '-' before a ';'. Such a '-' counts whatever
+        # follows it, so each of these denies (each allowed when the operator test read the de-quoted
+        # text alone). A backslash-newline inside the quotes is removed first, as bash removes it, so it
+        # does not hide the '-'. The stated cost: a lone '-' spelled with a quote next to it denies too.
+        gexpect("(gw-dbt-nv-q-semi) a quoted '-;' word denies", "(true #'\n)\ngit am \"-;\"", "deny")
+        gexpect("(gw-dbt-nv-q-lt) a quoted '-<' word denies", "(true #'\n)\ngit am \"-<\"", "deny")
+        gexpect("(gw-dbt-nv-q-gt) a quoted '->' word denies", "(true #'\n)\ngit am \"->\"", "deny")
+        gexpect("(gw-dbt-nv-q-parens) a quoted '-()' word denies", "(true #'\n)\ngit am \"-()\"", "deny")
+        gexpect("(gw-dbt-nv-q-amp) a quoted '-&' word denies", "(true #'\n)\ngit am \"-&\"", "deny")
+        gexpect("(gw-dbt-nv-q-pipe) a quoted '-|' word denies", "(true #'\n)\ngit am \"-|\"", "deny")
+        gexpect("(gw-dbt-nv-q-escsemi) a quoted '-' then an escaped ';' (the word '-;') denies",
+                "(true #'\n)\ngit am \"-\"\\;", "deny")
+        gexpect("(gw-dbt-nv-q-semin) a quoted '-;n 1' word on git commit denies",
+                "(true #'\n)\ngit commit \"-;n 1\"", "deny")
+        gexpect("(gw-dbt-nv-q-lparenn) a quoted '-(n ' word denies",
+                "(true #'\n)\ngit commit \"-(n \"", "deny")
+        gexpect("(gw-dbt-nv-q-escsemin) a quoted '-' then an escaped ';n' (the word '-;n') denies",
+                "(true #'\n)\ngit commit \"-\"\\;n", "deny")
+        gexpect("(gw-dbt-nv-q-pipen) a quoted '-|n 1' word denies",
+                "(true #'\n)\ngit commit \"-|n 1\"", "deny")
+        gexpect("(gw-dbt-nv-sq-lt) a single-quoted '-<x ' word denies",
+                "(true #'\n)\ngit commit '-<x '", "deny")
+        gexpect("(gw-dbt-nv-q-split) a quoted '-' then a quoted ';' (the word '-;') denies",
+                "(true #'\n)\ngit commit \"-\"\";\"", "deny")
+        gexpect("(gw-dbt-nv-q-ampn) a quoted '-&n 1' word on git am denies",
+                "(true #'\n)\ngit am \"-&n 1\"", "deny")
+        gexpect("(gw-dbt-nv-q-rparenn) a quoted '-)n ' word denies",
+                "(true #'\n)\ngit commit \"-)n \"", "deny")
+        gexpect("(gw-dbt-nv-esc-dash) an escaped '-' then an escaped ';' (the word '-;') denies",
+                "(true #'\n)\ngit am \\-\\;", "deny")
+        gexpect("(gw-dbt-nv-q-bsnl) a backslash-newline inside the quotes before '-;' (the word '-;') denies",
+                "(true #'\n)\ngit am \"\\\n-;\"", "deny")
+        gexpect("(gw-dbt-nv-q-overdeny) the stated over-denial: a quoted lone '-' denies behind the '#'",
+                "(true #'\n)\ngit am \"-\"", "deny")
+        # The checker-shaped test behind the unjudged '#' calls the parsed recognizer's own name splitter
+        # and lexicon (_gate_doubt_checker), so its boundary semantics are the splitter's: a non-ASCII
+        # letter (the dotless 'ı' below) separates name parts exactly as _name_parts_hit separates
+        # them, where a case-insensitive [a-z0-9] boundary read that letter as part of the name and
+        # missed the part. The 'latest' control pins the other side: only whole parts compare, never
+        # substrings.
+        gexpect("(gw-dbt-note-uscore) an underscore-separated checker name piped to cut keeps the note",
+                "(true #'\n)\nrun_all_checks.sh | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-clippy) cargo clippy piped to cut keeps the note",
+                "(true #'\n)\ncargo clippy | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-vet) go vet piped to cut keeps the note",
+                "(true #'\n)\ngo vet ./... | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-uniprefix) a checker part right after a non-ASCII letter keeps the note, as "
+                "the parsed path notes the same command readable",
+                "(true #'\n)\npython3 tools/runıtest.py | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-unisuffix) a checker part right before a non-ASCII letter keeps the note too",
+                "(true #'\n)\ntools/testı.py | cut -c1", "allow-note")
+        gexpect("(gw-dbt-note-latest) control: 'latest' carries no checker part, allows",
+                "(true #'\n)\ntools/latest.py | cut -c1", "allow")
+        # The doubt tests run ONLY behind a '#' the lexer cannot judge under both readings; the plain
+        # parse-error fallback keeps the conservative raw probes (adding only a deny for a bypass that a
+        # de-quoted reading spells), and the failed-main-reading floor keeps the raw probes alone, so these
+        # commands keep the allow the probes have always given them (each was denied while widened spelling
+        # probes ran on every fallback path, though no path here can read a bypass in them).
+        gexpect("(gw-fb-herestring) outside the doubt path, a here-string parse error with a '-name' "
+                "operand in another segment still allows",
+                "git commit -m x && find . -name z <<<y", "allow")
+        # This one denies through the closed literal grammar, which refuses a process substitution on a git
+        # commit segment, not through a widened spelling probe.
+        gexpect("(gw-fb-procsub) a process-substitution parse error passing '-Dname' through denies by the "
+                "closed grammar",
+                "git commit -F <(echo \"pass -Dname through\")", "deny")
+        # The closed literal grammar accepts the git commit message form on a parsed command
+        # (_gate_heredoc_message), so these two allow, as on main; the floor's raw probes find no bypass.
+        gexpect("(gw-fb-heredocfloor) on the failed-main-reading floor, a heredoc commit message carrying "
+                "'-Dname' still allows",
+                "git commit -m \"$(cat <<'EOF'\nPass -Dname through; don't drop it\nEOF\n)\"", "allow")
+        gexpect("(gw-fb-heredocno) the same floor with '--no' inside the quoted message body still allows",
+                "git commit -m \"$(cat <<'EOF'\nKeep --no in; don't drop it\nEOF\n)\"", "allow")
+        # The grammar accepts that form ONLY as -m's value, with a single-quoted delimiter (so bash reads the
+        # body as literal text), a substitution holding nothing but that cat, and a body with no '$' or
+        # backquote. Every other shape keeps the grammar's deny. gw-hd-plain allows only with the acceptance;
+        # each deny row is a REGRESSION GUARD: it passes on the code before the acceptance (which denies
+        # every here-document) and fails where the acceptance is widened past its narrowing.
+        _gw_hd = "git commit -m \"$(cat <<'EOF'\nSubject\n\nBody text.\nEOF\n)\""
+        gexpect("(gw-hd-plain) the git commit message form with a single-quoted delimiter allows", _gw_hd, "allow")
+        for _gw_hdn, _gw_hdc in (
+                ("unquoted-delim", "git commit -m \"$(cat <<EOF\nSubject\nEOF\n)\""),
+                ("dq-delim", "git commit -m \"$(cat <<\"EOF\"\nSubject\nEOF\n)\""),
+                ("body-subst", "git commit -m \"$(cat <<'EOF'\nSubject $(date)\nEOF\n)\""),
+                ("body-backquote", "git commit -m \"$(cat <<'EOF'\nSubject `date`\nEOF\n)\""),
+                ("body-param", "git commit -m \"$(cat <<'EOF'\nCosts ${x}\nEOF\n)\""),
+                ("cmd-after", "git commit -m \"$(cat <<'EOF'\nSubject\nEOF\necho more\n)\""),
+                ("cmd-before", "git commit -m \"$(echo x; cat <<'EOF'\nSubject\nEOF\n)\""),
+                ("pipe-on-op-line", "git commit -m \"$(cat <<'EOF' | tr a b\nSubject\nEOF\n)\""),
+                ("not-cat", "git commit -m \"$(/bin/cat <<'EOF'\nSubject\nEOF\n)\""),
+                ("delim-prefix-line", "git commit -m \"$(cat <<'EOF'\nSubject\nEOFX\nEOF\n)\""),
+                ("no-delim-line", "git commit -m \"$(cat <<'EOF'\nSubject\n)\""),
+                ("glued-close", "git commit -m \"$(cat <<'EOF'\nSubject\nEOF\n)\"x"),
+                ("bypass-value-word", "git commit \"$(cat <<'EOF'\n-n\nEOF\n)\""),
+                ("pathspec-word", "git commit -m x \"$(cat <<'EOF'\nfile\nEOF\n)\""),
+                ("m-as-value", "git commit -m -m \"$(cat <<'EOF'\nfile\nEOF\n)\""),
+                ("m-after-terminator", "git commit -- -m \"$(cat <<'EOF'\nfile\nEOF\n)\""),
+                ("merge", "git merge -m \"$(cat <<'EOF'\nSubject\nEOF\n)\" topic"),
+                ("second-message", _gw_hd + " -m \"$(cat <<'EOF'\nMore\nEOF\n)\""),
+                ("bypass-after", _gw_hd + " -n"),
+                ("body-names-bypass", "git commit -m \"$(cat <<'EOF'\nthen git commit -n\nEOF\n)\""),
+                ("parse-error", _gw_hd + " && find . -name z <<<y")):
+            gexpect("(gw-hd-{}) the commit message form's {} shape keeps its deny".format(_gw_hdn, _gw_hdn),
+                    _gw_hdc, "deny")
+
+        # NO WEAKER THAN THE BASE COMMIT: every cannot-evaluate sink, bypass and checker-note shape above,
+        # the combinations, and the off-list controls, beside the decision the base commit ac813196 gave
+        # the same command. HOW THE
+        # COLUMN WAS PRODUCED: ac813196's .aiqt/core/hooks/scripts/aiqt_hooks.py (git show ac813196:<that
+        # path>) was loaded as a module and gate_weakening called on each command with the payload _decision
+        # builds, each result reduced as _reduce_result does: D deny, N allow-note, A allow. Each command
+        # must decide at least as strictly here: behind a '#' the lexer cannot judge under both readings the
+        # command is cannot-evaluate and takes a deny, the raw fallback's decision or the checker-and-pipe
+        # note, never an outcome quieter than the base commit's reading of the same text.
+        _gwb_rows = (
+            ("sink after a continuation newline", "(true #'\n)\npytest |\nhead", "N"),
+            ("sink on the pipe's line", "(true #'\n)\npytest | head", "N"),
+            ("sink after '|&' and a newline", "(true #'\n)\npytest |&\nhead", "N"),
+            ("pass-through stage then the sink", "(true #'\n)\npytest |\ncat |\nhead", "N"),
+            ("comment after the pipe", "(true #'\n)\npytest | # run the checks\nhead", "N"),
+            ("'|&' then a comment", "(true #'\n)\npytest |& # run the checks\nhead", "N"),
+            ("comment line between pipe and sink", "(true #'\n)\npytest |\n# run the checks\nhead", "N"),
+            ("quoted newline inside the sink stage", "(true #'\n)\npytest | # note\nA=\"\n\" head", "N"),
+            ("the same stage with a space in the value", "(true #'\n)\npytest | # note\nA=\" \" head", "N"),
+            ("'2>&1'-led sink stage", "(true #'\n)\npytest | 2>&1 head", "N"),
+            ("comment line then the '2>&1'-led stage", "(true #'\n)\npytest | # note\n2>&1 head", "N"),
+            ("'|&' into a '>&2'-led stage", "(true #'\n)\npytest |& >&2 head", "N"),
+            ("five expansion '#' then the redirect stage",
+             "cd /tmp ${x# #} ${y# #} ${z# #} ${w# #} ${v# #}\npytest | 2>&1 head", "N"),
+            ("backquote '#' then the redirect stage", "echo `true #`\npytest | 2>&1 head", "N"),
+            ("${...} '#' then the redirect stage", "echo ${x:- #'}\npytest | 2>&1 head", "N"),
+            ("quoted newline and the redirect together", "(true #'\n)\npytest | A=\"\n\" 2>&1 head", "N"),
+            ("comment line, quoted newline and redirect",
+             "(true #'\n)\npytest | # note\nA=\"\n\" 2>&1 head", "N"),
+            ("pass-through stage then the redirect stage", "(true #'\n)\npytest |\ncat |\n2>&1 head", "N"),
+            ("failed reading, quoted newline in the stage",
+             "pytest | A=\"\n\" head 3</dev/null${x# #} 4<<<x", "D"),
+            ("failed reading, sink after the newline", "pytest |\nhead 3</dev/null${x# #} 4<<<x", "D"),
+            ("failed reading, redirects on the sink", "pytest |\nhead 2>${x:- #} 3> >(cat)", "D"),
+            ("clustered -nm hook bypass", "(true #'\n)\ngit commit -nm x", "D"),
+            ("'--no-ve' long abbreviation", "(true #'\n)\ngit commit --no-ve", "D"),
+            ("'--no-' abbreviation at the text's end", "(true #'\n)\ngit commit --no-", "D"),
+            ("'--n' abbreviation ended by ';'", "(true #'\n)\ngit commit --n;true", "D"),
+            ("'--no-ve' abbreviation ended by a redirect", "(true #'\n)\ngit commit --no-ve>/dev/null", "D"),
+            ("'--no-v' abbreviation ended by a pipe", "(true #'\n)\ngit commit --no-v|cat", "D"),
+            ("'--no-v' abbreviation ended by '<'", "(true #'\n)\ngit am --no-v<p", "D"),
+            ("'--no-ve' abbreviation ended by ')'", "(true #'\n)\n(git am --no-ve)", "D"),
+            ("'--no-v' abbreviation ended by '&'", "(true #'\n)\ngit am --no-v&", "D"),
+            ("'--no-v' abbreviation ended by '>'", "(true #'\n)\ngit am --no-v>o", "D"),
+            ("'-!n' cluster", "(true #'\n)\ngit commit -!n", "D"),
+            ("'-.n' cluster", "(true #'\n)\ngit commit -.n x", "D"),
+            ("'-_n' cluster", "(true #'\n)\ngit commit -_n x", "D"),
+            ("underscore-named check into cut", "(true #'\n)\nrun_all_checks.sh | cut -c1", "N"),
+            ("cargo clippy into cut", "(true #'\n)\ncargo clippy | cut -c1", "N"),
+            ("go vet into cut", "(true #'\n)\ngo vet ./... | cut -c1", "N"),
+            ("checker part after a non-ASCII letter",
+             "(true #'\n)\npython3 tools/runıtest.py | cut -c1", "N"),
+            ("checker part before a non-ASCII letter", "(true #'\n)\ntools/testı.py | cut -c1", "N"),
+            ("over-denied harmless option", "(true #'\n)\ngit commit -m x", "A"),
+            ("control: listed verb, no dash-prefixed token", "(true #'\n)\ngit commit", "A"),
+            ("control: subcommand off the --no-verify set", "(true #'\n)\ngit status -s", "A"),
+            ("control: 'latest' into cut", "(true #'\n)\ntools/latest.py | cut -c1", "A"),
+            ("control: off-list word, quoted-newline stage", "(true #'\n)\npytest | # note\nA=\"\n\" wc", "A"),
+            ("control: off-list word, '2>&1'-led stage", "(true #'\n)\npytest | 2>&1 wc", "A"),
+            ("control: checker with no pipe or flow", "(true #'\n)\npytest", "A"),
+            ("control: no checker before the pipe", "(true #'\n)\nls |\nwc", "A"),
+            ("control: no checker, comment after the pipe", "(true #'\n)\nls | # just a note\nwc", "A"),
+            ("control: failed reading, no run and no sink", "ls ${x# #} <<<x", "A"),
+        )
+        for _gwb_name, _gwb_cmd, _gwb_code in _gwb_rows:
+            _gwb_want = _hash_base_codes[_gwb_code]
+            _gwb_got = _decision(gwg, _gwb_cmd)
+            if _hash_rank.get(_gwb_got, -1) < _hash_rank[_gwb_want]:
+                failures.append("(gw-dbt-base) {}: the base commit decided {}, got {}".format(
+                    _gwb_name, _gwb_want, _gwb_got))
 
         # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
         # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
@@ -16264,6 +21798,244 @@ def _main_isolated(monitor):
                     tool="Write", file_path=os.path.join(grrace, "GEN.md"), cwd=grrace)
         finally:
             os.lstat = _real_lstat
+        # (gs-res) The control residue must say what the cases above prove: a present-but-unreadable registry
+        # and the delete race DENY (gs-i*, gs-ag, gs-ah), so the residue lists them under the fail-closed
+        # DENY and never among the allow-with-a-note branches. Read from the manifest the generator renders
+        # into ENFORCEMENT.md, so reverting the residue correction fails here.
+        try:
+            _gs_hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+            _gs_residue = [h for h in _gs_hooks if h.get("id") == "gensrc-edit-guard"][0]["residue"]
+        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            _gs_residue = ""
+            failures.append("(gs-res-read) could not read the gensrc-edit-guard residue: {}".format(exc))
+        if "fails safe to DENY rather than reading as absent" not in _gs_residue:
+            failures.append("(gs-res-deny) the residue must say the delete race fails safe to DENY")
+        if "fails safe to ALLOW-WITH-A-NOTE" in _gs_residue:
+            failures.append("(gs-res-noallow) the residue must not say the delete race allows with a note")
+        _gs_deny_at = _gs_residue.find("A PRESENT registry that cannot be read DENIES fail-closed")
+        _gs_bad_at = _gs_residue.find("an unreadable, non-UTF-8, oversized")
+        _gs_note_at = _gs_residue.find("These cannot-evaluate branches ALLOW WITH AN INFORMATIONAL NOTE")
+        _gs_note_end = _gs_residue.find("Besides a confirmed registry match", _gs_note_at)
+        if not 0 <= _gs_deny_at < _gs_bad_at < _gs_note_at < _gs_note_end:
+            failures.append("(gs-res-order) the residue must list the unreadable-registry cases under the fail-closed "
+                            "DENY, before the allow-with-a-note branches")
+        else:
+            _gs_note_text = _gs_residue[_gs_note_at:_gs_note_end]
+            for _gs_word in ("registry that", "malformed registry", "registry version", "delete race"):
+                if _gs_word in _gs_note_text:
+                    failures.append("(gs-res-list) the allow-with-a-note list names a registry fault ({!r}) the "
+                                    "guard denies".format(_gs_word))
+        if "generated .claude/settings.json (tools/gen_hooks.py)" not in _gs_residue:
+            failures.append("(gs-res-wiring) the residue must name the generated project wiring")
+        # (gs-res-scope) The residue states the authoring scope as gs-auth-* below prove it: the absent marker
+        # skips silently, a present malformed marker denies fail-closed, and an older guard honours everywhere.
+        for _gs_phrase in ("An entry scoped authoring", "skips that entry silently",
+                           "DENIES fail-closed and names the marker repair",
+                           "a present-but-malformed authoring marker on an authoring-scoped match",
+                           "honours the entry in every tree"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-scope) the residue must state the authoring scope: {!r}".format(_gs_phrase))
+        # (gs-res-local) Beside the Bash residual, the residue discloses that a Write, Edit or MultiEdit to a sibling
+        # settings file is not judged (gs-auth-b-local below) yet can change hook behaviour for later sessions, that
+        # keeping that file personal is a convention, and that gen_hooks applies the same marker size bound as the
+        # guard (gs-auth-f below).
+        for _gs_phrase in ("A Write, Edit or MultiEdit to a sibling settings file such as .claude/settings.local.json "
+                           "is not judged by this guard", "can change hook behaviour for later sessions",
+                           "is a convention, not enforced", "the two apply the same size bound"):
+            if _gs_phrase not in _gs_residue:
+                failures.append("(gs-res-local) the residue must state: {!r}".format(_gs_phrase))
+
+        # === gs-auth: an authoring-scoped registry entry never blocks an adopter's own settings ==========
+        # The fixtures hold the REAL .aiqt/gensrc.json bytes this repository ships (tools/gen_gensrc.py scopes
+        # its .claude/settings.json entry "authoring"), so a generator that drops the scope, or a guard that
+        # ignores it, fails gs-auth-a. The authoring fixture holds the exact marker, spelled literally here because the
+        # shipped tree carries no .aiqt/authoring.toml (never read from the repo root); gs-auth-f pins it to gen_hooks.
+        def _gs_auth_reason(cwd, rel):
+            _code, _obj, _err = aiqt_hooks.gensrc_guard(
+                {"hook_event_name": "PreToolUse", "tool_name": "Write",
+                 "tool_input": {"file_path": os.path.join(cwd, rel)}, "cwd": cwd})
+            try:
+                return _obj["hookSpecificOutput"]["permissionDecisionReason"]
+            except (TypeError, KeyError):
+                return ""
+
+        _gs_exact_marker = b"format-version = 1\nrole = \"pack-authoring-repository\"\n"
+        try:
+            _gs_real_registry = (repo_root() / ".aiqt" / "gensrc.json").read_bytes()
+            gs_adopt = _gs_init("gsadopt")          # the shipped registry, no marker: an adopter tree
+            gs_author = _gs_init("gsauthor")        # the shipped registry and the real marker
+            gs_badm = _gs_init("gsbadmarker")       # the shipped registry and a mutable malformed marker
+            for _gs_root in (gs_adopt, gs_author, gs_badm):
+                os.makedirs(str(_gs_root / ".aiqt"), exist_ok=True)
+                (_gs_root / ".aiqt" / "gensrc.json").write_bytes(_gs_real_registry)
+            (gs_author / ".aiqt" / "authoring.toml").write_bytes(_gs_exact_marker)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the gensrc authoring-scope fixtures: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        gad, gau, gbm = str(gs_adopt), str(gs_author), str(gs_badm)
+        _gs_settings = os.path.join(".claude", "settings.json")
+        # (gs-auth-a) The adopter tree: a Write, Edit or MultiEdit of its OWN .claude/settings.json allows
+        # silently (the scoped entry is skipped), while an unscoped registered target there still denies: the
+        # skip is per entry, never the whole registry.
+        for _gs_tool in ("Write", "Edit", "MultiEdit"):
+            gexpect("(gs-auth-a-{}) an adopter tree (no marker) allows a {} of its own .claude/settings.json"
+                    .format(_gs_tool, _gs_tool), "allow", tool=_gs_tool,
+                    file_path=os.path.join(gad, _gs_settings), cwd=gad,
+                    edits=[{"old_string": "a", "new_string": "b"}] if _gs_tool == "MultiEdit" else None)
+        gexpect("(gs-auth-a-unscoped) an adopter tree still denies an unscoped registered target", "deny",
+                tool="Write", file_path=os.path.join(gad, ".claude", "RULES-INDEX.md"), cwd=gad)
+        # (gs-auth-b) The authoring tree still denies it, naming gen_hooks and its source.
+        gexpect("(gs-auth-b) the authoring tree denies a Write to .claude/settings.json", "deny",
+                tool="Write", file_path=os.path.join(gau, _gs_settings), cwd=gau)
+        # (gs-auth-b-local) The disclosed residual: no generator writes a sibling settings file, so no registry entry
+        # covers it and a Write, Edit or MultiEdit to it in the authoring tree is not judged (allowed silently).
+        for _gs_tool in ("Write", "Edit", "MultiEdit"):
+            gexpect("(gs-auth-b-local-{}) the authoring tree does not judge a {} to .claude/settings.local.json"
+                    .format(_gs_tool, _gs_tool), "allow", tool=_gs_tool,
+                    file_path=os.path.join(gau, ".claude", "settings.local.json"), cwd=gau,
+                    edits=[{"old_string": "a", "new_string": "b"}] if _gs_tool == "MultiEdit" else None)
+        _gs_why = _gs_auth_reason(gau, _gs_settings)
+        if ("python3 tools/gen_hooks.py" not in _gs_why or ".aiqt/core/hooks/manifest.toml" not in _gs_why
+                or "authoring marker" in _gs_why):
+            failures.append("(gs-auth-b-names) the authoring-tree deny must name gen_hooks and its source, "
+                            "not the marker, got {!r}".format(_gs_why))
+        # (gs-auth-c) A PRESENT marker that is not exact denies fail-closed (tools/gen_hooks.py exits 2 on each)
+        # and names the marker, never the regenerate command: other content, a bool format-version (true == 1
+        # in Python), unparseable, non-UTF-8, empty, a directory, a symlink to the real marker (lstat, never
+        # followed), a FIFO (lstat first, so no open and no hang), one byte over the size bound and a delete race (regular at the lstat,
+        # gone at the open). (gs-auth-d) With a malformed marker present, every other edit is unaffected.
+        _gs_marker = gs_badm / ".aiqt" / "authoring.toml"
+        _gs_real_lstat = os.lstat
+        _gs_regular_st = _gs_real_lstat(os.path.join(gau, ".aiqt", "authoring.toml"))
+
+        def _gs_race_lstat(p, *a, **k):
+            if str(p).endswith(os.path.join("gsbadmarker", ".aiqt", "authoring.toml")):
+                return _gs_regular_st
+            return _gs_real_lstat(p, *a, **k)
+
+        def _gs_padded_marker(size):
+            return _gs_exact_marker + b"#" + b"x" * (size - len(_gs_exact_marker) - 2) + b"\n"
+
+        def _gs_plant(kind):
+            if kind == "other content":
+                _gs_marker.write_text("format-version = 1\nrole = \"adopter\"\n", encoding="utf-8")
+            elif kind == "a bool format-version":
+                _gs_marker.write_text("format-version = true\nrole = \"pack-authoring-repository\"\n",
+                                      encoding="utf-8")
+            elif kind == "unparseable":
+                _gs_marker.write_text("not toml [\n", encoding="utf-8")
+            elif kind == "non-UTF-8":
+                _gs_marker.write_bytes(b"\xff\xfe format-version = 1\n")
+            elif kind == "empty":
+                _gs_marker.write_bytes(b"")
+            elif kind == "a directory":
+                os.makedirs(str(_gs_marker))
+            elif kind == "a symlink":
+                os.symlink(os.path.join(gau, ".aiqt", "authoring.toml"), str(_gs_marker))
+            elif kind == "a FIFO":
+                os.mkfifo(str(_gs_marker))
+            elif kind == "one byte over the bound":
+                _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES + 1))
+
+        def _gs_clear():
+            if os.path.isdir(str(_gs_marker)) and not os.path.islink(str(_gs_marker)):
+                shutil.rmtree(str(_gs_marker))
+            elif os.path.lexists(str(_gs_marker)):
+                os.remove(str(_gs_marker))
+
+        for _gs_kind in ("other content", "a bool format-version", "unparseable", "non-UTF-8", "empty",
+                         "a directory", "a symlink", "a FIFO", "one byte over the bound", "a delete race"):
+            try:
+                _gs_clear()
+                if _gs_kind == "a delete race":
+                    os.lstat = _gs_race_lstat
+                else:
+                    _gs_plant(_gs_kind)
+                gexpect("(gs-auth-c) a marker that is {} DENIES fail-closed".format(_gs_kind), "deny",
+                        tool="Write", file_path=os.path.join(gbm, _gs_settings), cwd=gbm)
+                _gs_why = _gs_auth_reason(gbm, _gs_settings)
+                if "authoring marker .aiqt/authoring.toml is PRESENT but malformed" not in _gs_why or (
+                        "gen_hooks.py" in _gs_why):
+                    failures.append("(gs-auth-c-names) a marker that is {} must deny naming the marker, not "
+                                    "the regenerate command, got {!r}".format(_gs_kind, _gs_why))
+                if _gs_kind == "other content":
+                    gexpect("(gs-auth-d-unregistered) a malformed marker leaves an unregistered edit allowed",
+                            "allow", tool="Write", file_path=os.path.join(gbm, "README.md"), cwd=gbm)
+                    _gs_why = _gs_auth_reason(gbm, os.path.join(".claude", "RULES-INDEX.md"))
+                    if "is a generated artefact" not in _gs_why or "authoring marker" in _gs_why:
+                        failures.append("(gs-auth-d-unscoped) a malformed marker must leave the unscoped deny "
+                                        "unchanged, got {!r}".format(_gs_why))
+            except (OSError, NotImplementedError) as exc:
+                failures.append("(gs-auth-c-setup) could not plant a marker that is {}: {}".format(_gs_kind, exc))
+            finally:
+                os.lstat = _gs_real_lstat
+        try:
+            _gs_clear()
+        except OSError as exc:
+            failures.append("(gs-auth-c-clear) could not clear the planted marker: {}".format(exc))
+        # (gs-auth-e) The scope in a synthetic registry: on a file and on a tree entry, an absent marker allows
+        # the target silently and the exact marker denies it; an unknown scope value, a JSON null included, is a
+        # malformed entry and DENIES fail-closed (it must never widen or narrow coverage).
+        gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+            {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r", "scope": "authoring"},
+            {"kind": "tree", "target": "gen/", "sources": ["s"], "regenerate": "r", "scope": "authoring"}]}),
+            encoding="utf-8")
+        for _gs_rel in ("GEN.md", os.path.join("gen", "part.md")):
+            gexpect("(gs-auth-e-absent) a scoped {} with no marker allows".format(_gs_rel), "allow",
+                    tool="Edit", file_path=os.path.join(gr3, _gs_rel), cwd=gr3)
+        _gs_marker3 = gs_repo3 / ".aiqt" / "authoring.toml"
+        try:
+            _gs_marker3.write_bytes(_gs_exact_marker)
+            for _gs_rel in ("GEN.md", os.path.join("gen", "part.md")):
+                gexpect("(gs-auth-e-exact) a scoped {} with the exact marker DENIES".format(_gs_rel), "deny",
+                        tool="Edit", file_path=os.path.join(gr3, _gs_rel), cwd=gr3)
+        finally:
+            os.remove(str(_gs_marker3))
+        for _gs_scope in ("adopter", "Authoring", None, 1, ["authoring"]):
+            gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+                {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r",
+                 "scope": _gs_scope}]}), encoding="utf-8")
+            gexpect("(gs-auth-e-unknown) a scope of {!r} is a malformed entry and DENIES fail-closed"
+                    .format(_gs_scope), "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # (gs-auth-f) The dispatcher spells the marker and the scope itself (it imports nothing from tools/), so
+        # pin them against the generators that own them.
+        import gen_gensrc
+        import gen_hooks
+        if aiqt_hooks._GENSRC_MARKER != gen_hooks.AUTHORING_MARKER or (
+                aiqt_hooks._GENSRC_MARKER_REL.replace(os.sep, "/") != gen_hooks.AUTHORING_MARKER_REL):
+            failures.append("(gs-auth-f-marker) the guard marker must equal gen_hooks.AUTHORING_MARKER(_REL)")
+        if aiqt_hooks._GENSRC_SCOPES != (gen_gensrc.SCOPE_AUTHORING,):
+            failures.append("(gs-auth-f-scope) the guard scopes must be exactly gen_gensrc.SCOPE_AUTHORING")
+        # The literal marker bytes above are the ones gen_hooks reads as the authoring tree, and the two readers share
+        # one size bound: a marker of exactly the bound is the authoring marker to both (the guard denies naming
+        # gen_hooks, not the marker), and one byte over it is refused by both (gs-auth-c above for the guard).
+        if aiqt_hooks._GENSRC_MAX_BYTES != gen_hooks.AUTHORING_MARKER_MAX_BYTES:
+            failures.append("(gs-auth-f-bound) the guard marker bound must equal gen_hooks.AUTHORING_MARKER_MAX_BYTES")
+
+        def _gs_gen_reads(root):
+            try:
+                return gen_hooks.authoring_tree(root)
+            except (ValueError, OSError) as exc:
+                return "refused ({})".format(exc)
+        if _gs_gen_reads(gs_author) is not True:
+            failures.append("(gs-auth-f-bytes) gen_hooks must read the literal marker as the authoring tree, got "
+                            "{!r}".format(_gs_gen_reads(gs_author)))
+        try:
+            _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES))
+            _gs_why = _gs_auth_reason(gbm, _gs_settings)
+            if "python3 tools/gen_hooks.py" not in _gs_why or "authoring marker" in _gs_why:
+                failures.append("(gs-auth-f-at-bound-guard) a marker of exactly the bound must be honoured by the guard, "
+                                "got {!r}".format(_gs_why))
+            if _gs_gen_reads(gs_badm) is not True:
+                failures.append("(gs-auth-f-at-bound-gen) gen_hooks must read a marker of exactly the bound as the "
+                                "authoring tree, got {!r}".format(_gs_gen_reads(gs_badm)))
+            _gs_marker.write_bytes(_gs_padded_marker(aiqt_hooks._GENSRC_MAX_BYTES + 1))
+            if _gs_gen_reads(gs_badm) is True:
+                failures.append("(gs-auth-f-over-bound) gen_hooks must refuse a marker one byte over the bound")
+            os.remove(str(_gs_marker))
+        except OSError as exc:
+            failures.append("(gs-auth-f-setup) could not plant a marker at the size bound: {}".format(exc))
 
         # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
         # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the
@@ -16691,6 +22463,30 @@ def _main_isolated(monitor):
                  "git add -A && git commit -m x", "allow")
         ebexpect("(eb-e10e) a push BEFORE the breadth stage does not fire (publishes pre-breadth state)",
                  "git push && git add -A", "allow")
+        # The fallback's deny precedence: behind a '#' the lexer cannot judge under both readings (the
+        # backquote prefix), a visible cd+mutate pairing must not note its way past the visible
+        # breadth+push pairing - the raw fallback tests the publish deny first, like the parsed pre-scan.
+        ebexpect("(eb-e10f) fallback: cd+mutate beside breadth+push still DENIES (the cd note cannot mask "
+                 "the publish deny)",
+                 "x=`true #`\ncd /abs/repo && git add --all && git commit -m x && git push", "deny")
+        # Order state is judged one reading of an uncertain '#' at a time: flattening the readings would
+        # read the first reading's trailing breadth into the second reading's push and invent a
+        # stage-then-publish sequence no single reading holds, so the prefixed spelling of eb-e10e must
+        # keep its control's allow.
+        ebexpect("(eb-e10g) per-reading order: push before breadth behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit push && git add -A", "allow")
+        ebexpect("(eb-e10h) control for eb-e10g: the unprefixed push-before-breadth command allows",
+                 "git push && git add -A", "allow")
+        # The directory-change scan is judged one reading at a time too: flattening the readings would read
+        # the first reading's trailing cd into the second reading's commit and invent a cd-then-mutation
+        # sequence no single reading holds, so a cd AFTER the commit keeps its control's allow, while a cd
+        # BEFORE the commit inside one reading still notes.
+        ebexpect("(eb-e10i) per-reading order: a cd after the commit behind an uncertain '#' prefix allows",
+                 "x=$(true)#\ngit commit -m y && cd /abs", "allow")
+        ebexpect("(eb-e10j) control for eb-e10i: the unprefixed commit-then-cd command allows",
+                 "git commit -m y && cd /abs", "allow")
+        ebexpect("(eb-e10k) per-reading order: a cd before the commit behind the same prefix still notes",
+                 "x=$(true)#\ncd /abs && git commit -m y", "allow-note")
         ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
         ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
         ebexpect("(eb-e13) bare discard remains the git_discard control's boundary",
@@ -16802,16 +22598,16 @@ def _main_isolated(monitor):
         # with a note. Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
         ebexpect("(eb-e57) relocated breadth stage with an explicit -C target and no publish allows with a note",
                  "cd /abs/repo && git -C /abs/repo add -A", "allow-note")
-        # GD-158 round-6 + tri-family synthesis: the branch/tag classifier is now FAIL-SAFE (defaults
-        # MUTATING; returns read only when every token resolves to a recognized read-neutral role and no
-        # create/rename/delete target is present). This table exercises _git_is_mutating directly against
-        # the git 2.53 ground truth: the plan's matrix classes, the six historical fail-open forms as
-        # regression teeth, and fail-safe probes asserting the default on unknown/ambiguous/malformed
-        # input. want=True is MUTATING (-> expbnd ASK); over-ASK is safe, a fail-open (want-True read as
-        # False) is the forbidden regression. This table is validated against git 2.53 by the in-suite eb
+        # The branch/tag classifier is FAIL-SAFE (defaults MUTATING; returns read only when every token
+        # resolves to a recognized read-neutral role and no create/rename/delete target is present). This
+        # table exercises _git_is_mutating directly against the git 2.53 ground truth: the matrix classes,
+        # the six historical fail-open forms as regression teeth, and fail-safe probes asserting the default
+        # on unknown/ambiguous/malformed input. want=True is MUTATING (-> under a directory change, an expbnd
+        # allow with a note, never an ask); an over-note is safe, a fail-open (want-True read as False) is
+        # the forbidden regression. This table is validated against git 2.53 by the in-suite eb
         # differential above and an out-of-suite real-git differential; a future git option-table change is
-        # a disclosed drift residual, and a dedicated option-table drift-tripwire gate is a tracked
-        # follow-up (GD-158-T7), not a gate that exists yet.
+        # a disclosed drift residual that the option-table drift-tripwire gate,
+        # tools/check_git_option_table.py, checks on the installed git.
         _M, _R = True, False
         for _rc_label, _rc_sub, _rc_args, _rc_want in (
             # -- branch: writes (short, long, attached-short, abbreviated-long) --
@@ -16926,6 +22722,204 @@ def _main_isolated(monitor):
             if _rc_got is not _rc_want:
                 failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
                                 .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
+        # history, refs and repack write refs, history or objects (observed with git 2.56.0 on scratch
+        # fixtures: history drop moved every descendant branch and the worktree, refs create, update, rename
+        # and delete wrote refs, repack --drop-filtered deleted a local object), so they class as mutating and
+        # only refs list, exists and verify read. Every M row for those three verbs read False before they
+        # joined _GIT_MUTATING_VERBS; the R rows fail if the refs read exemption is dropped. add --resolved
+        # (gv-18) and branch --delete-merged (gv-19) were already mutating (add is a mutating verb, and an
+        # unknown branch option keeps the fail-safe default), so those two are regression locks.
+        for _gv_label, _gv_sub, _gv_args, _gv_want in (
+                ("gv-1", "history", ["drop", "HEAD~1"], _M),
+                ("gv-2", "history", ["fixup", "HEAD~1"], _M),
+                ("gv-3", "history", ["reword", "HEAD~1"], _M),
+                ("gv-4", "history", ["split", "HEAD~1"], _M),
+                ("gv-5", "history", ["drop", "--dry-run", "HEAD~1"], _M),  # still writes objects: fail-safe
+                ("gv-6", "refs", ["create", "refs/heads/x", "HEAD"], _M),
+                ("gv-7", "refs", ["delete", "refs/heads/main"], _M),
+                ("gv-8", "refs", ["update", "refs/heads/main", "HEAD~1"], _M),
+                ("gv-9", "refs", ["rename", "refs/heads/main", "refs/heads/old"], _M),
+                ("gv-10", "refs", ["migrate", "--ref-format=reftable"], _M),
+                ("gv-11", "refs", ["optimize", "--all"], _M),
+                ("gv-12", "refs", [], _M),
+                ("gv-13", "repack", ["-a", "-d", "--filter=blob:limit=1", "--drop-filtered"], _M),
+                ("gv-14", "repack", ["-a", "-d"], _M),
+                ("gv-15", "refs", ["list"], _R),
+                ("gv-16", "refs", ["exists", "refs/heads/main"], _R),
+                ("gv-17", "refs", ["verify"], _R),
+                ("gv-18", "add", ["--resolved"], _M),
+                ("gv-19", "branch", ["--delete-merged", "origin/main"], _M)):
+            _gv_got = aiqt_hooks._git_is_mutating(_gv_sub, _gv_args)
+            if _gv_got is not _gv_want:
+                failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_gv_label, _gv_sub, _gv_args, _gv_want, _gv_got))
+        # End to end: a cd feeding one of them without an explicit target now carries the binding note, through
+        # the parsed reading (gv-20 to gv-22) and through the unparseable-command raw fallback (gv-25 to gv-27);
+        # each was a silent allow before. A read-only refs list (gv-23) and an explicit -C target (gv-24) stay
+        # silent.
+        ebexpect("(gv-20) a cd feeding an untargeted git history rewrite allows with a note",
+                 "cd /abs/repo && git history drop HEAD~1", "allow-note")
+        ebexpect("(gv-21) a cd feeding an untargeted git refs delete allows with a note",
+                 "cd /abs/repo && git refs delete refs/heads/x", "allow-note")
+        ebexpect("(gv-22) a cd feeding an untargeted git repack --drop-filtered allows with a note",
+                 "cd /abs/repo && git repack -a -d --filter=blob:limit=1 --drop-filtered", "allow-note")
+        ebexpect("(gv-23) a cd feeding a read-only git refs list stays a silent allow",
+                 "cd /abs/repo && git refs list", "allow")
+        ebexpect("(gv-24) an explicit -C target credits the binding for git history",
+                 "cd /abs/repo && git -C /abs/repo history drop HEAD~1", "allow")
+        ebexpect("(gv-25) the unparseable-command fallback notes a cd feeding git history",
+                 'cd /abs/repo && git history reword HEAD~1 "open', "allow-note")
+        ebexpect("(gv-26) the unparseable-command fallback notes a cd feeding git refs",
+                 'cd /abs/repo && git refs create x HEAD "open', "allow-note")
+        ebexpect("(gv-27) the unparseable-command fallback notes a cd feeding git repack",
+                 'cd /abs/repo && git repack -a -d "open', "allow-note")
+        # A git alias the command defines runs an unknown subcommand: after a cd it notes like a mutation, and
+        # beside a breadth stage or a push it counts as the other half of the breadth-then-publish deny. Each
+        # read the alias name as a read-only subcommand and allowed silently before that reading.
+        # A ref name (refs/heads/main) in an unparseable read is not the refs subcommand: the raw fallback stays
+        # silent (gv-28, a note before refs followed by '/' was excluded), while the refs subcommand itself
+        # still notes there (gv-26).
+        ebexpect("(gv-28) the unparseable-command fallback does not read a refs/ ref name as git refs",
+                 'cd /abs/repo && git log --oneline refs/heads/main "open', "allow")
+        ebexpect("(gla-eb-a) a cd feeding an untargeted command-local alias allows with a note",
+                 "cd /abs/repo && git -c alias.c=commit c -m y", "allow-note")
+        ebexpect("(gla-eb-b) a breadth stage followed by a command-local alias, which may push, denies",
+                 "git add -A && git -c alias.p=push p origin feat", "deny")
+        ebexpect("(gla-eb-c) a command-local alias, which may stage the whole tree, followed by a push denies",
+                 "git --config-env=alias.a=ADDCMD a && git push origin feat", "deny")
+        # A command whose text names a git configuration variable (_git_alias_named) counts the same way for every
+        # git command of it, behind a reserved word too (glx-eb-d) and on an unparseable command with two git
+        # words, as many as a breadth stage and a later publish need (glx-eb-e); each allowed silently before. One
+        # git word in such an unparseable command (glx-eb-f) and a command naming no such variable keep the silent
+        # allow.
+        ebexpect("(glx-eb-a) an exported alias, then a cd feeding an untargeted alias command, allows with a note",
+                 "export GIT_CONFIG_PARAMETERS=\"'alias.c'='commit'\"; cd /abs/repo && git c -m y", "allow-note")
+        ebexpect("(glx-eb-b) a breadth stage followed by a command an exported alias may make a push denies",
+                 "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push; git add -A && "
+                 "git p origin feat", "deny")
+        ebexpect("(glx-eb-c) an unrelated export keeps the silent allow",
+                 "export X=1; cd /abs/repo && git c -m y", "allow")
+        ebexpect("(glx-eb-d) a breadth stage and an aliased command in a then body deny",
+                 "if export GIT_CONFIG_PARAMETERS=\"'alias.p'='push'\"; then git add -A; git p; fi", "deny")
+        ebexpect("(glx-eb-e) an unparseable command naming the variable and git twice denies",
+                 'set -a; read -r GIT_CONFIG_PARAMETERS <<< "$V"; git add -A && git p origin feat', "deny")
+        ebexpect("(glx-eb-f) an unparseable command naming the variable and git once keeps the silent allow",
+                 'set -a; read -r GIT_CONFIG_PARAMETERS <<< "$V"; git p origin feat', "allow")
+        # A W entry and the unknown-option default give the same MUTATING verdict, so the git 2.56
+        # spellings are also pinned by role: each resolves to its own entry, and a prefix git 2.56
+        # rejects as ambiguous (--d, --del, --fo) resolves to None. --forked and --points-at take a value
+        # git requires even when last, so they are Q, not the optional-when-last F.
+        _rr_long = aiqt_hooks._GIT_REF_SPECS["branch"]["long"]
+        for _rr_name, _rr_want in (
+                ("--delete-merged", "W"), ("--delete-m", "W"),
+                ("--dry-run", "W"), ("--dr", "W"), ("--no-dry-run", "W"),
+                ("--forked", "Q"), ("--fork", "Q"), ("--points-at", "Q"), ("--contains", "F"),
+                ("--del", None), ("--d", None), ("--fo", None)):
+            _rr_got = aiqt_hooks._resolve_long_role(_rr_name, _rr_long)
+            if _rr_got != _rr_want:
+                failures.append("branch {} resolves to role {!r}, expected {!r}"
+                                .format(_rr_name, _rr_got, _rr_want))
+        for _rq_sub, _rq_args, _rq_want in (
+                # -- git 2.56 options. --delete-merged deletes; --dry-run and --no-dry-run decide whether
+                # it does and are W, so a dry run beside the deletion is judged like the deletion --
+                ("branch", ["--delete-merged", "main"], _M),
+                ("branch", ["--delete-merged=main"], _M),
+                ("branch", ["--delete-m", "main"], _M),           # git 2.56 resolves this prefix
+                ("branch", ["--dry-run", "--delete-merged", "main"], _M),
+                ("branch", ["--delete-merged", "main", "--dry-run"], _M),
+                ("branch", ["--dry-run"], _M),                    # git refuses it alone (a note, never an ask)
+                ("branch", ["--no-dry-run"], _M),                 # git lists (an over-note, never an ask)
+                ("branch", ["--no-dry-run", "NAME"], _M),         # git creates NAME
+                # -- git 2.56 --forked is a filter that implies --list (a name is a pattern) --
+                ("branch", ["--forked", "main"], _R),
+                ("branch", ["--forked=main"], _R),
+                ("branch", ["--fork", "main"], _R),               # git 2.56 resolves this prefix
+                ("branch", ["--forked", "main", "NAME"], _R),     # git creates nothing
+                ("branch", ["--forked", "main", "-d", "NAME"], _M),  # list mode never masks a write
+                # -- A required filter value that is missing (last, or before '--') or empty is a command
+                # git refuses; the classifier must not call it a read. An optional-when-last filter alone
+                # stays a read --
+                ("branch", ["--forked"], _M),
+                ("branch", ["--forked="], _M),
+                ("branch", ["--fork"], _M),
+                ("branch", ["--list", "--forked"], _M),
+                ("branch", ["--forked", "--", "NAME"], _M),
+                ("branch", ["--forked", "main", "--forked"], _M),
+                ("branch", ["--forked", "main", "--forked", "origin/*"], _R),
+                ("branch", ["--points-at"], _M),
+                ("branch", ["--points-at="], _M),
+                ("branch", ["--points-at", "HEAD", "-v"], _R),
+                ("branch", ["--points-at=HEAD"], _R),
+                ("branch", ["--contains="], _M),
+                ("branch", ["--merged"], _R),
+                ("tag", ["--points-at"], _R),
+                ("tag", ["--points-at="], _M),
+                # -- An empty value given as a separate argument is the same malformed form as an empty
+                # '=' value: git 2.53 refuses every one below and git 2.56 refuses --forked '' --
+                ("branch", ["--forked", ""], _M),
+                ("branch", ["--forked", "", "NAME"], _M),
+                ("branch", ["--points-at", ""], _M),
+                ("branch", ["--contains", ""], _M),
+                ("branch", ["--merged", ""], _M),
+                ("tag", ["--points-at", ""], _M),
+                ("tag", ["--contains", ""], _M),
+                ("branch", ["--sort", ""], _M),
+                ("branch", ["--sort="], _M),
+                ("tag", ["--sort="], _M),
+                ("branch", ["--color="], _M),
+                ("branch", ["--abbrev="], _M),
+                ("branch", ["--format="], _M),                    # git lists (an over-note, never an ask)
+                ("branch", ["--abbrev=7"], _R),
+                # -- A filter value that leads with a dash is not a read in either spelling (git 2.53
+                # refuses '-x' as a malformed object name); a display value attached with '=' may lead
+                # with a dash --
+                ("branch", ["--contains=-x"], _M),
+                ("branch", ["--forked=-x"], _M),
+                ("tag", ["--points-at=-x"], _M),
+                ("branch", ["--sort=-committerdate"], _R),
+                ("branch", ["--sort", "-committerdate"], _M),     # a separate dash-leading value
+        ):
+            _rq_got = aiqt_hooks._git_is_mutating(_rq_sub, _rq_args)
+            if _rq_got is not _rq_want:
+                failures.append("_git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_rq_sub, _rq_args, _rq_want, _rq_got))
+        # The value rule, swept over every non-W long option of both tables so that no option or spelling
+        # is left out: an empty '=' value never yields a read, nor does an empty separate value or a
+        # dash-leading separate value for a value-taking role (F, Q, D), nor a dash-leading '=' value for a
+        # filter (F, Q). The boundary cases, a one-character value ('@', HEAD) and a dash after the first
+        # character ('v-1'), stay reads. The sweep pins the classifier's syntax; whether git accepts a given
+        # nonempty value is outside it.
+        _vs_roles = set()
+        for _vs_sub in ("branch", "tag"):
+            for _vs_opt, _vs_role in sorted(aiqt_hooks._GIT_REF_SPECS[_vs_sub]["long"].items()):
+                if _vs_role == "W":
+                    continue
+                _vs_roles.add(_vs_role)
+                _vs_cases = [([_vs_opt + "="], _M)]
+                if _vs_role in ("F", "Q", "D"):
+                    _vs_cases += [([_vs_opt, ""], _M), ([_vs_opt, "-"], _M), ([_vs_opt, "-v1"], _M),
+                                  ([_vs_opt, "@"], _R), ([_vs_opt, "v-1"], _R),
+                                  ([_vs_opt + "=@"], _R), ([_vs_opt + "=v-1"], _R)]
+                if _vs_role in ("F", "Q"):
+                    _vs_cases += [([_vs_opt + "=-"], _M), ([_vs_opt + "=-v1"], _M)]
+                for _vs_args, _vs_want in _vs_cases:
+                    _vs_got = aiqt_hooks._git_is_mutating(_vs_sub, _vs_args)
+                    if _vs_got is not _vs_want:
+                        failures.append("value rule: _git_is_mutating({!r}, {!r}) ({} role): expected {}, "
+                                        "got {}".format(_vs_sub, _vs_args, _vs_role, _vs_want, _vs_got))
+        if not {"F", "Q", "D", "O"} <= _vs_roles:
+            failures.append("value rule: the sweep covered roles {}, not every value-taking role F, Q, D "
+                            "and O".format(sorted(_vs_roles)))
+        ebexpect("branch --delete-merged under cd allows with a note (a deletion)",
+                 "cd /x && git branch --delete-merged main", "allow-note")
+        ebexpect("branch --forked listing under cd is read-only",
+                 "cd /x && git branch --forked main", "allow")
+        ebexpect("branch --forked with no value under cd is not a read (a note, never an ask)",
+                 "cd /x && git branch --forked", "allow-note")
+        ebexpect("branch --forked with an empty separate value under cd is not a read (a note, never an ask)",
+                 'cd /x && git branch --forked ""', "allow-note")
+        ebexpect("a dry run beside --delete-merged is judged like the deletion under cd",
+                 "cd /x && git branch --dry-run --delete-merged main", "allow-note")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
@@ -17836,6 +23830,49 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-note) orch_truncation_guard must ALLOW WITH A NOTE a background "
                             "dispatch whose shell syntax it does not parse (a redirect, no truncating sink) "
                             "on a real repo; got {}".format(_f18_note))
+        # (noask-trunc-out-of-scope-note) with NO orchestration registry, a foreground bare-& detach reaches
+        # the out-of-scope allow-with-note. Falsifiable: the silent allow reads "allow", a deny "deny".
+        _f18_plain = _f18_tmp / "plain"
+        _f18_plain.mkdir()
+        with _no_registry_above(_f18_plain):
+            _f18_oos = _decision_any(aiqt_hooks.orch_truncation_guard, {
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "sleep 1 &", "run_in_background": False}, "cwd": str(_f18_plain)})
+        if _f18_oos != "allow-note":
+            failures.append("(noask-trunc-out-of-scope-note) orch_truncation_guard must ALLOW WITH A NOTE a "
+                            "foreground bare-& detach where no orchestration registry is found; got {}"
+                            .format(_f18_oos))
+        # (noask-trunc-oos-unreadable-input) with NO orchestration registry, input the guard cannot read
+        # draws the unreadable-input note naming the field, never the silent allow it was and never ask
+        # or deny: a tool_input that is not an object, a command that is not a string, and a
+        # run_in_background that is present but not a real boolean, one probe per note site.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_badinput = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": _f18_ti, "cwd": str(_f18_plain)})
+                for _f18_ti in ("long_job &",
+                                {"command": 7},
+                                {"command": "long_job &", "run_in_background": "true"})]
+        if _f18_oos_badinput != ["allow-note"] * 3:
+            failures.append("(noask-trunc-oos-unreadable-input) orch_truncation_guard must ALLOW WITH A "
+                            "NOTE an out-of-scope Bash call whose input it cannot read (a non-object "
+                            "tool_input, a non-string command, a non-boolean run_in_background); got {}"
+                            .format(_f18_oos_badinput))
+        # (noask-trunc-oos-reader-notes) with NO orchestration registry, a foreground command the in-scope
+        # detector cannot read to its end (an open quote) draws that detector's note, and a detacher word it
+        # does not read (setsid) draws the note scan's note: one probe per note site, each an allow WITH A
+        # NOTE, never ask, deny or the silent allow.
+        with _no_registry_above(_f18_plain):
+            _f18_oos_readers = [
+                _decision_any(aiqt_hooks.orch_truncation_guard, {
+                    "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": _f18_cmd, "run_in_background": False}, "cwd": str(_f18_plain)})
+                for _f18_cmd in ("echo 'oops & bg", "setsid long_job")]
+        if _f18_oos_readers != ["allow-note"] * 2:
+            failures.append("(noask-trunc-oos-reader-notes) orch_truncation_guard must ALLOW WITH A NOTE an "
+                            "out-of-scope foreground command it cannot read to its end and one running "
+                            "setsid; got {}".format(_f18_oos_readers))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
@@ -17883,6 +23920,12 @@ def _main_isolated(monitor):
           "-c key, leading assignment or subcommand; an unhonoured cd; or any raw-flagged unparseable "
           "command, which the fallback now denies outright with no snapshot); a provably-clean tree ALLOWS "
           "with no snapshot; an ambient GIT_*/redirect view-override snapshot-then-allows on a dirty cwd "
+          "(except that a whole-tree clobber behind a git global option or a leading assignment DENIES on a "
+          "dirty target, with its snapshot, exactly as the bare command does, and a destructive form "
+          "carrying a --git-dir, --work-tree or --bare redirect is resolved by git itself, DENYING when git "
+          "splits the git dir and worktree across repositories or cannot resolve them read-only, or when the "
+          "session directory a --git-dir beside -C was read from cannot be snapshotted while the repository "
+          "git resolved was neither probed clean nor snapshotted; otherwise the note names that failure) "
           "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
@@ -17899,7 +23942,32 @@ def _main_isolated(monitor):
           "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
           "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
           "non-creation commands ALLOW. "
-          "gatdis (gate_weakening) DENIES a --no-verify bypass and a known verification run whose output reaches "
+          "gatdis (gate_weakening) DENIES a --no-verify bypass (with a value-aware '--' boundary so a '--' "
+          "eaten as an option value does not hide a following -n), any raw git naming whose segment the "
+          "closed literal allowlist grammar refuses on a roster verb (an expansion, substitution, process "
+          "substitution, backslash, glob, brace, comment, a glued, unterminated or newline-spanning "
+          "double-quoted word, or a double-quoted word with an interior '!' - a standalone double-quoted "
+          "literal that stays on one line and holds no $, backquote, backslash or '!' inside is accepted "
+          "like a bare word, and a quoted interior that could bracket live command text (inside single "
+          "quotes any non-word non-space byte, inside double quotes a shell operator or the other quote, "
+          "or in EITHER quote an all-literal interior that NAMES a roster git command - a git word whose "
+          "next non-option word is a roster verb, or whose option walk runs off the interior end) "
+          "leaves its pairing ambiguous so a git hidden there is re-judged rather than swallowed - or a "
+          "redirection "
+          "beyond >/dev/null, 2>/dev/null and 2>&1) or whose subcommand cannot be resolved; it also PEELS "
+          "the command-running wrappers (env, exec -a, nice, nohup, command, time, timeout) to judge the "
+          "git behind one, and FAILS CLOSED through the dequoted-word scan on a wrapper option it cannot "
+          "resolve (env -uX, nice -n5) or an unlisted wrapper (sudo, xargs, setsid, stdbuf); behind ANY "
+          "other word of a segment, with no wrapper list, before the segment's own git (an assignment, a "
+          "wrapper option value or a redirection), and in a redirection of a segment with no command word, "
+          "it reads that segment's de-quoted text (the "
+          "blank-split reading, and bash-model readings that decode ANSI-C quotes as bash does, cutting at "
+          "a NUL, and split at blanks, operator characters, backquotes and env -S's \\_) and denies a git "
+          "followed by any roster verb and then any hook-skip word, with no '--' or option value read, and "
+          "on a parse error it reads every recovered segment, the in-progress one, and the unread text the "
+          "same way, so a quote-concatenated or escape-coded git spelling the raw scan cannot see still "
+          "denies (a disclosed over-deny of text that merely names such a command); and it denies a known "
+          "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "

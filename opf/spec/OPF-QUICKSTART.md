@@ -1,6 +1,6 @@
 # OPFiles at a glance
 
-Date: 2026-10-03 (UTC). The two-minute version of the OPFiles standard; the full specification
+Date: 2026-10-24 (UTC). The two-minute version of the OPFiles standard; the full specification
 lives in OPF-SPEC.md beside this file.
 
 ## What it is
@@ -60,17 +60,28 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 ## Getting started
 
-1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "opf"` in its `[opf]` table, plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
-   exempt ledger listed above, not an index); specification
-   sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+1. Create `.working/toml/` by hand with `manifest.toml` declaring `standard = "opf"`,
+   `spec_version = "2.0.0"` and `homes = 2` in its `[opf]` table, plus `counters.toml` (with the
+   imported counter row of each enabled type beside its clean row), `version.toml`,
+   `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
+   exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
+   `worklog.imported.toml`, all empty to start; specification sections 4, 8 and 9 give the full
+   file baseline. The reference tooling's `opf init` does not scaffold this store yet: its
+   scaffold still writes a 1.2.0 store, a format the specification's validation refuses
+   (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
-   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory): keep it, migrate it
-   for a later post-adoption import, move it, or retire it; nothing is absorbed or overwritten
-   silently. `opf init` also refuses when the git history of HEAD's first-parent line shows a
-   prior store (specification section 8.2: counters never restart, so record ids are never
-   reissued). That scan follows the first-parent line only: a store that never reached a tree on
+   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
+   `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
+   retire it; nothing is absorbed or overwritten silently. `opf init` writes the store under the
+   shared init operation lock (in the git directory's `opf-oplock/`, the lock adoption takes too),
+   holding the specification section 5.7 lease (`.working/toml/lease.toml`) while it writes, and
+   removes the lease and releases the lock before it reports success; while another OPF run holds
+   the lock, `opf init` refuses. A run that stopped partway can leave a partial `.working/` and
+   its lock record behind: once that `.working/` is moved aside, `opf init --recover` clears a
+   record whose holder is confirmed dead, and refuses a record whose holder may still be live.
+   `opf init` also refuses when the git
+   history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
+   never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
    is not detected. The scan also has a path limit: the scan checks the root's current path only
    (a store committed under another directory, for example before a rename, is not detected).
@@ -158,13 +169,13 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack; until
 then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
-so. An implementation declares a conformance class: an upgrade-capable one carries older stores
-forward within its disclosed limits, and a fresh-only one supports one current format and refuses by
-name an older store or one in which its admission check detects an item on its closed legacy-state
-list (OPF-SPEC section 16.1). That check searches only the files section 16.1 permits and the list
-catches only what it lists, so legacy state the list omits, or that sits where the check does not
-search, goes undetected. The reference tooling targets the upgrade-capable class, but its upgrade
-into base 1.3.0 is still a target it does not yet perform.
+so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
+section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
+defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
+grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
+VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
+and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
+refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling requires Python 3.14 or newer.
 
@@ -216,7 +227,7 @@ Superseded by the OPFiles identity fold (this revision):
 
 - The base discovery token is `opf`, carried in the `[opf]` base manifest table. This supersedes the
   earlier `aiqt-opf` token; the interim `devprocess` token and `[devprocess]` table are retired by the
-  OPFiles rebrand, and a legacy store still carrying them is migrated forward by `opf upgrade`.
+  OPFiles rebrand.
 - The base storage field `layout_profile` is renamed to `layout`, reserving the word "profile" for
   the base/profile mechanism (`[profiles.<name>]`).
 

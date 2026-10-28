@@ -80,9 +80,12 @@ command-injection hazard the shell runs before git sees the argument, so it DENI
 re-issue (single quotes, escape the marker, or git commit -F <file>); the unparseable-fallback and unreadable
 -command cases deny fail-safe on the same terms. Only a mis-wired event hard-blocks (no structured decision).
 
-git_explicit_binding (expbnd): an ambient git target or a whole-tree breadth+publish is a binding CONVENTION
-where the orchestrator normally binds its own target, not a hazard, so every former ask (including the
-unreadable-command case) ALLOWS with a note.
+git_explicit_binding (expbnd): an ambient git target or a relocated whole-tree breadth stage is a binding
+CONVENTION where the orchestrator normally binds its own target, not a hazard, so every former ask
+(including the unreadable-command case) ALLOWS with a note - EXCEPT the whole-tree stage-then-push pair: a
+breadth stage ('git add -A/./:/', 'git commit -a/--all') followed by a 'git push' later in the same command
+publishes whatever the tree holds, so it is DENIED, on the parsed path and on every fallback alike (the
+fallback tests that pair before its directory-change note, so the note cannot mask the denial).
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "recover then allow" guard (EN-6). NO-ASK
 TRANSLATION: this control was originally an "ask unless PRISTINE and provably clean" three-outcome
@@ -94,22 +97,25 @@ inline alias, an unrecognized flagged subcommand, an unresolvable worktree). The
 whole-tree clobber on a dirty tree is unchanged (it too carries a recovery snapshot when one could be made).
 So wherever the detailed prose below says a form "ASKS", read it as "snapshot-then-allows when recoverable,
 else denies-and-educates". UNLIKE the fail-closed controls above, it fails OPEN
-(ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
-cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
-discard it can reason about, and it never silently allows a recognized WORKING-TREE-CONTENT discard (a
+(ALLOW) at the TRUE BOUNDARY - a present non-Bash tool, a non-git command, or no recognized lossy
+verb - because none of those is a discard it can reason about (a payload with NO tool_name is malformed,
+not another tool, and denies under the shared missing-tool_name contract), and it never silently allows a
+recognized WORKING-TREE-CONTENT discard (a
 recognized verb in a genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - preserves the
 index and worktree content, though reset --soft still MOVES HEAD, a reflog-recoverable ref move, so it
 discards no working-tree content and may ALLOW even on a dirty tree, as detailed below). That no-silent-allow
 guarantee is bounded to WORKING-TREE CONTENT and is best-effort, not categorical: some ref-level moves (a
 merged-branch delete, reset --soft moving HEAD) are reflog-recoverable, and the obfuscation/config residuals
-disclosed below (a fragmented git command word or verb, a git alias, ambient config) can hide a discard the
-lexical scan never sees. An UNPARSEABLE command
+disclosed below (a fragmented git command word or verb, a git alias defined in a configuration file, ambient
+config) can hide a discard the lexical scan never sees. An UNPARSEABLE command
 (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and, when one is present,
 takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
 the tree is provably clean (or the form is genuinely non-destructive), in
-which case it ALLOWS. PRISTINE
+which case it ALLOWS. A Bash payload whose tool_input.command is MISSING or NOT A STRING is not that
+boundary but a cannot-evaluate input (a discard could hide in what was not read), so it DENIES under the
+shared fail-closed contract (check-fails-closed-on-unreadable), like the fail-closed controls above. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
 assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
 metacharacter anywhere EVEN INSIDE QUOTES (none of ; | & < > ( ) { } $ backtick backslash ! newline, which
@@ -127,15 +133,19 @@ metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
-entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
+entry (a '!!' line, never printed without --ignored, reads as malformed, never clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
 No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
 'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
 on a dirty tree), or on a provably-clean tree - worst case it ASKS, at the cost of more asks. No in-band
 override exists (the operator channel is hook configuration). This guarantee is bounded to
 working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
-recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git; deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
+recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias
+defined in a configuration file, or a shell function, renaming git (a git alias the command defines for itself,
+or runs under from the session environment, DENIES, and so does every git command of a command whose text names
+GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_: _git_local_alias, _git_alias_inherited,
+_git_alias_named);
+deliberate obfuscation of the COMMAND WORD 'git' ITSELF or of the verb that no raw,
 continuation-joined or de-quoted reading assembles (an escape decoded inside $'...', or a word built by a
 parameter expansion or a command substitution at run time, reads as 'no recognized lossy verb' and is
 silently ALLOWED - a best-effort residual; a quote- or backslash-fragmented spelling under a wrapper, such
@@ -200,14 +210,22 @@ or an interrupt) raised in a fail-open mode, which ends the hook as it would wit
 an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
 fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
 square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
-below 64 KB. Measured in-process on a 24-core host with Python 3.14.4 over runs on 2026-10-15 and
-2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
+below 64 KB. The push backstop's raw mirror-configuration scan is a _RawMirrorConfig probe of linear cost,
+and its segment split walks a '<(' or '>(' process substitution in place: the single regex grew with the
+square of a run of quoted '-c' options with no blank (about 6.2 to 6.5 s of CPU for one call of the push
+backstop alone at 180 KB, against about 0.37 s at 1 MB with the probe), and a copy of the rest of the
+command for each substitution with the square of a run of them (about 3.4 s of CPU for one call of the
+copying split alone at 1 MB, against about 0.11 s for the in-place walk), each in-process on a 24-core
+host with Python 3.14.4, 2026-10-18. Measured in-process on a 24-core host with Python 3.14.4 over runs on
+2026-10-15 and 2026-10-16, the slowest PreToolUse handler call on the worst shapes tools/selftest_aiqt_hooks.py times
 took at most 0.10 s of wall-clock time at 64 KB, 0.49 s at 256 KB and 2.07 s at 1 MB (nest_parens under
 git_stash_ref). With the raw-text push backstop and the joined and de-quoted readings of the command,
 runs on 2026-10-17 on a 24-core host with Python 3.14.4 that was running other work measured at most
 0.13 s at 64 KB (protected_line, whose backstop reads the whole command before its 65,536-character
-commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard). Interpreter
-start-up adds about 0.1 to 0.2 s to each call. Outside the deadline: interpreter start-up and
+commit size cap), 0.55 s at 256 KB and 2.17 s at 1 MB (nest_parens under git_discard); which clock those
+runs read, CPU or wall-clock time, was not recorded. Interpreter start-up adds about 0.1 to 0.2 s to each
+call, a figure first written on 2026-10-15 whose date of measurement, host and clock were not recorded.
+Outside the deadline: interpreter start-up and
 module import, which run before main(); a wait the interpreter cannot interrupt (a system call in
 uninterruptible sleep, such as a read from a hung network mount, or a long call into C code that does not
 check for signals), which holds the deadline back until it returns, as does review_dispatch_pin's wait for
@@ -307,6 +325,9 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # fail-open PRETOOL_BUDGET_SECONDS, counted from before the payload read, and fails closed with exit 2
 # when its check has not decided by then, so the refusal is written before the platform's own timeout.
 # gen_hooks also refuses a budget that is not at least one second below the timeout or not positive.
+# With the manifest's on-failure-render switch on, a hook may render its own authored timeout instead;
+# gen_hooks refuses (exit 2) one at or below PRETOOL_BUDGET_SECONDS plus the margin the line below
+# reserves, so an authored timeout always exceeds this deadline by more than that margin.
 HOOK_TIMEOUT_SECONDS = 10
 PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 
@@ -341,12 +362,13 @@ NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
-    "_orch_stop_family")
+    "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_git_discard_fallback",
-    "_protected_line_fallback", "_raw_push_guard", "_wrtscp_deny")
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
+    "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny", "_protected_line_fallback",
+    "_raw_push_guard", "_redirect_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -457,16 +479,611 @@ _Redirect = collections.namedtuple(
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde"))
+# How the word reader (_read_word) found one word spelled: literal, the number of leading characters of the
+# decoded word spelled as plain literal text (unquoted text, single- or double-quoted text, or an escaped
+# character), so len(word) when the whole word is, and brace, True where the word holds an unquoted '{' that may
+# open a brace expansion (one right after a '$', or inside an open '${...}', opens a parameter expansion
+# instead). A character stops being plain literal text where a part of the word came from a parameter or
+# command expansion (a '$' or a backquote, unquoted or inside double quotes, as the reader reads it as opaque: a
+# '$' bash reads literally, as in 'x$', counts too), an ANSI-C quote $'...', a locale quote $"..." (with locale
+# False its '$' is such a '$'), or a brace expansion; a word read right after a ')' or inside an open '${...}'
+# continues one that carried a substitution, so none of it is. unquoted, True where such a part may expand to
+# several words, or came through an ANSI-C or locale quote: an unquoted parameter or command expansion (an unquoted
+# '$' or backquote, a '$' bash reads literally included, or a word read right after a ')' or inside an open
+# '${...}'), which bash may split, and, inside double quotes too, an expansion of the positional list or of an
+# array subscripted with @ (_DQ_LIST_EXPANSION_RE), which bash expands to one word per element. A word whose every
+# such part stands inside double quotes and expands to one word has it False, as does one whose only such part is a
+# brace; so a word reads as one word to bash only where no part of it can expand to several.
+_WordSpelling = collections.namedtuple("_WordSpelling", ("literal", "brace", "unquoted"))
+# One shared _WordSpelling for each value whose literal part is shorter than 64 characters, at index
+# 4 * literal + 2 * brace + unquoted: a record is immutable and its readers read only its fields, so a long run of
+# words spelled alike (a run of backquote substitutions, or of short plain words) builds no record per word.
+_WORD_SPELLINGS = tuple(_WordSpelling(literal, brace, unquoted) for literal in range(64)
+                        for brace in (False, True) for unquoted in (False, True))
+# An expansion that bash expands to one word per element even inside double quotes, as bash 5.3 printed for each
+# form: the positional list ("$@", "${@}", "${@:1}", "${@/x/y}"), an array subscripted with @ in any parameter
+# expansion form ("${A[@]}", "${A[@]:0}", "${A[@]#-}", "${A[@]@Q}", "${!A[@]}"), the names with a prefix
+# ("${!pre@}"), and an indirect expansion, whose reference (a variable, an array element read through a
+# subscript of its own, or a positional parameter or $*) can itself hold a list reference such as @ or an
+# array[@] subscript, so bash splits it into one word per element (bash 5.3: with R, A[0], H[k] or $1 set to @
+# or to B[@], "${!R}", "${!A[0]}", "${!A[$i]}", "${!H[k]}", "${!1}" and "${!*}" expanded to the positional or
+# array list); anywhere in a '${...}' the reader skips, so one nested in an operator word ("${x:-$@}") counts
+# too. A length ('${#A[@]}', '${#@}'), a '*' subscript or prefix ("$*", "${A[*]}", "${!pre*}", "${!A[0]*}"),
+# the '*' key list ("${!A[*]}"), one element ("${A[0]}") and an indirect expansion through a parameter that
+# only holds a number or the option flags ("${!#}", "${!?}", "${!-}") expand to one word, and so match nothing
+# here. The indirect form is read whatever operator follows the reference ("${!R}", "${!R:-x}", "${!R@Q}",
+# "${!A[0]:-x}" each expand the array when the reference holds a list reference), except the prefix-names-star
+# "${!pre*}", one word, so a name is matched only when a '*' does not immediately follow it, and a subscript
+# only when it is not the '*' key list ("${!A[*]}" alone; "${!A[*]:-x}" reads the joined elements indirectly)
+# and does not close right before a prefix-names star.
+_DQ_LIST_EXPANSION_RE = re.compile(
+    r"\$(?:@|\{(?:!?@|!?[A-Za-z_][A-Za-z0-9_]*\[@\]|![0-9*]"
+    r"|![A-Za-z_][A-Za-z0-9_]*(?:(?![A-Za-z0-9_*[])|\[(?!\*\]\})(?![^\]]*\]\*\}))))")
 
 
-def _skip_quoting(command, i, n):
+class _SpelledWords(list):
+    """The decoded words of one segment (its argv) as a lex inside _WordSpellings returns them: the same words, in
+    the same order, as any other lex of the command returns, with spelling beside them, a tuple holding the
+    _WordSpelling of each word."""
+
+    __slots__ = ("spelling",)
+
+    def __init__(self, words, spelling):
+        list.__init__(self, words)
+        self.spelling = tuple(spelling)
+
+
+class _WordSpellings:
+    """A context in which every lex records how each word it returns was spelled: each segment's argv that holds a
+    word is a _SpelledWords, whose words are those every other lex returns, with the _WordSpelling of each beside
+    them (a segment with no word keeps a plain empty list, in which no reader finds anything). Outside it argv is a
+    plain list and nothing is recorded. The git alias readers read the record where it is
+    there (_git_alias_defined_at, _git_local_alias); protected_line, gate_weakening, git_discard and branch_root
+    lex inside this context, and so does the partial lex of _git_alias_recovered (HOW A WORD IS SPELLED, above
+    _GIT_ALIAS_KEY_RE). It restores the previous setting on exit, as _SubstHeredocFloor does."""
+
+    on = False
+
+    def __enter__(self):
+        self.was_on = _WordSpellings.on
+        _WordSpellings.on = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _WordSpellings.on = self.was_on
+        return False
+
+
+class _LexStops:
+    """A context in which every partial lex that stops before the end of the command records, in seen, one (start,
+    words) pair per pass that stops: start, the index of the token it could not read, where the text it read no word
+    of begins, and words, the words it read of the segment it was still inside (its argv), else None. The git
+    alias reading of an unparseable command reads them (_git_alias_unread); the segments a lex returns are the same
+    inside it as outside. It restores the previous record on exit, as _WordSpellings restores its setting."""
+
+    at = None
+
+    def __enter__(self):
+        self.was = _LexStops.at
+        self.seen = _LexStops.at = []
+        return self
+
+    def __exit__(self, *exc_info):
+        _LexStops.at = self.was
+        return False
+
+# THE '#' COMMENT RULE, shared by the scanners that decide where a comment starts in what the guards read as
+# commands (the shared lexer and its word reader, the substitution skip _skip_quoting, the redirect-target
+# check, the commit-proof raw audit, the poll-loop word scan and both rules of the foreground detach scan;
+# the raw-text readings that only add matches beside the lexer read a comment their own way, see OTHER
+# SCANNERS below). Bash reads an unquoted '#' as a comment only at the start of a word,
+# and where a word starts depends on grammar these scanners do not parse. Bash 5.3 reads 'x=$(true)#' and
+# 'a=(1 2)#' as word text but '(true)#' and '((1))#' as a comment; a '#' after a blank as text inside an
+# ordinary '${x:- #}' but as a comment inside the '${ cmd; }' and '${| cmd; }' forms; and a '#' after a
+# blank or '|' as text inside a '[[ =~ ]]' regex group or an extglob group, but as a comment inside a
+# subshell or a command substitution. So a '#' opens a comment ONLY in a CERTAIN context: at the start of
+# the input, or right after an unquoted blank (space or tab), a newline, or one of ; & | < > (a
+# backslash-newline in between changes nothing, as bash removes it first), while NOTHING is open on the
+# scanner's nesting stack: no parenthesis of any kind, no '${' parameter expansion and no backquote
+# substitution. A '#' right after any other word character, a closing quote or an escaped character is
+# word text, as it is to bash in every context (ticket#123, ${#x}, ${x#y}). Every other unquoted '#' is
+# UNCERTAIN: one right after a '(', a ')' or a backquote (whatever kind it is, which also covers a case
+# pattern's ')' and a function name's '()'), and one at a word start while the nesting stack is not empty.
+# An ESCAPED backquote is a plain character to bash outside a backquote substitution (bash prints `# for
+# echo \`#), so the shared word reader (_read_word) reads it as word text that opens nothing, and a '#'
+# right after it as word text; inside a backquote substitution it opens a nested one, and a '#' right after
+# it stays uncertain. The foreground detach scan still reads a '#' right after any backquote as uncertain.
+#
+# BOTH READINGS. Bash reads an uncertain '#' outside any backquote substitution in one of two ways: as a
+# comment to the end of its line (a subshell, a command substitution, a case pattern, a function name, the
+# '${ cmd; }' forms) or as word text (an assignment's '$(...)' or '(...)', an ordinary '${...}', a regex or
+# extglob group). So the lexer judges such a command under both readings of each uncertain '#'
+# (_lex_readings), each reading a normal lex, while the command holds at most _HASH_READING_LIMIT of them
+# (four, so at most sixteen readings of the uncertain '#' characters, plus one main-compatibility reading
+# where a reading read a substitution body main's skip reads otherwise, seventeen returned in all, and
+# thirty-one lexes before that extra reading per _lex_readings call, a bound on how many lexes a
+# call makes; COST below bounds the time of each); _lex_command hands its
+# caller the segments of every reading in turn, and the poll-loop classifier and the gate-weakening deny
+# tier, whose answers are not monotone in the segments they read, judge each reading on its own and keep the
+# strictest. The base commit fc11d9bc read every such '#' as a comment (or, right after a backquote inside a
+# word, as word text), which is one of the readings, so a guard that judges every segment it is given also
+# sees the reading fc11d9bc took. That is an argument, not a proof: the self-test's base tables check, for
+# each guard row behind a set of such prefixes, that the guard decides at least as strictly as fc11d9bc did.
+# The cost: a guard can now see a shape in the reading bash does not take, which makes it stricter for some
+# commands; the multi-line 'msg=$(<newline># note<newline>...)' form, a command substitution with a comment
+# line, is a common case that takes this path. A '#' inside an open backquote substitution, or right after a
+# backquote that may open one, is read by bash as a comment that ends at the closing backquote (bash prints
+# RAN for echo `#'`; echo RAN # '), which neither reading models, so it is not enumerated.
+#
+# FALLBACK. Beyond the bound, at a '#' in or right after a backquote substitution, or where a reading itself
+# fails to lex, _lex_command raises _UncertainHashError, a ValueError, and each caller takes a fallback
+# that runs its raw probes on the command text and on that text with every backslash-newline removed first
+# (bash removes it before anything else) and then every quote character and backslash (_hash_doubt_scan).
+# That removal is not a decoder: it reads g$'i't as g$it, where bash runs git, as it does for g$'\x69't and
+# g$"i"t. So the fallback does not match by removal a command whose text holds an ANSI-C $'...' or locale
+# $"..." quote, or a quote character or backslash next to a letter (_hash_doubt_opaque): each guard that
+# reads the fallback treats such a command as cannot-evaluate and takes its fail-closed decision, the one
+# it gives a command whose text names its subject (a deny, or the note where the guard only notes). The
+# self-test's base tables record, for each guard row behind such prefixes and in both placements, the
+# decision fc11d9bc made for the plain, quoted and continued spellings, and the decisions fc11d9bc and main
+# made for ANSI-C and locale spellings of the command word and of the subcommand, and require each guard to
+# decide at least as strictly; outside those rows the property is not proven. The poll-loop word scan returns
+# no words for an uncertain '#' it meets outside a double-quoted string (one inside a substitution such a
+# string holds it reads under its readings, see below), and the foreground detach scan treats one like an
+# unbalanced quote, its fail-safe deny.
+#
+# INSIDE A DOUBLE-QUOTED STRING. The word reader skips a '$(...)', '${...}' or backquote substitution inside a
+# double-quoted string (a locale $"..." one included, under both locale readings) whole, with _skip_quoting,
+# whose own quotes nest. A comment there runs to the end of its line past any quote or ')' on it, so it moves
+# where the skip, and so the word and the command after it, ends (bash prints a and RAN for
+# echo "$(echo a # it's<newline>)"; echo RAN # ')", where reading that '#' as word text pairs the apostrophe
+# with the last quote and swallows echo RAN into the word). The skip applies the same rule: word text right
+# after a word character, a closing quote or an escaped character; cannot-evaluate right after a backquote;
+# otherwise uncertain, since the substitution or expansion is open, and judged under both readings with the
+# lexer's other uncertain '#' characters (the same bound). An uncertain '#' whose rest of line holds nothing
+# the skip reads (no quote, backslash, backquote, '$', parenthesis or brace) ends the skip at the same index
+# under both readings, so it is not enumerated (a '# heading' line in an unquoted here-document's body). No
+# '#' inside a backquote substitution is read there: the skip ends it at its first unescaped backquote, as
+# bash does, whatever a comment inside it reads. The body of a here-document with a quoted delimiter inside
+# such a '$(...)' is text to bash, with no comment rule, quote or parenthesis in it (bash prints the body for
+# x="$(cat <<'EOF'<newline># Don't merge yet<newline>EOF<newline>)", a common commit message form), so in
+# that form, the first substitution the lex skips whole, holding cat and that here-document and nothing
+# else, the lexer's skip jumps past the body and reads no '#' there. Elsewhere (an unquoted delimiter, a body
+# that does not end, a body line that begins with its delimiter but is not exactly it, a command before or
+# after the here-document inside the substitution, another '$(' substitution the lex skips whole or a
+# backquote substitution anywhere in the command, and the other cases the HERE-DOCUMENTS paragraph of
+# _skip_quoting lists) it reads the text as above, so such a body's '#' and quotes take the comment rule and
+# its readings or the fallback. The poll-loop word scan, which reads one segment of one reading with no
+# reading map of its own, reads such an uncertain '#' as word text and, where that does not scan, as a
+# comment (_orch_raw_unquoted_words), and reads no here-document body as text.
+#
+# COST. One lex takes time linear in the length of the command. The substitution skip
+# searches for the end of a '#''s line and for the next character it reads after that '#' once per stretch
+# of text, however many '#' a line holds, and searches for at most one here-document body per pass
+# (_skip_quoting); a lex that read such a body and then meets another command substitution starts again
+# with no body read, so it makes at most two passes (_lex_reading); the nesting stack counts its entries,
+# so testing it for a word, a skip or a backquote takes the same time however deep it is, and closing a
+# backquote pops only what it removes (_NestStack, _nest_track). So one _lex_readings call takes at most
+# thirty-one lexes of at most two linear passes each, and a caller that lexes a command more than once pays
+# that for each call; the foreground detach scan keeps a nesting stack of the same kind and is linear too.
+# A reading of an uncertain '#' met at a word boundary or a redirect target resumes where the lex that met it
+# stopped (_LexFork), so the text before the first such '#' is lexed once, and its segments built once,
+# however many readings there are; where the readings of a '#' line reach the same state at its newline and
+# the rest holds no further such '#', the rest is lexed once too. A '#' met inside a word starts its readings
+# from the beginning, as above.
+#
+# OTHER SCANNERS. The raw-text readings beside the lexer read a comment their own way, and none of them
+# proves a command safe on its own: _join_continuations reads a '#' at any word start (after a blank, newline
+# or metacharacter, a '(' or a group's ')' included, but not after a substitution's ')') as a comment, only to
+# keep the backslash-newline at its end, and its joined text is read beside the raw text (the de-quoted copy,
+# the discard scope scans, the continuation cause) or places the raw push splitter's splits, a backstop layer
+# whose segments keep comment text; _lex_uncertain_causes reports any '#' outside
+# the quotes of its blunt quoting model, and any '$(' or backquote even inside double quotes, so such a '#'
+# makes the lex uncertain whatever bash reads (a '#' inside a double-quoted '${...}' that holds no
+# substitution is no 'comment' cause, though a command the shared lexer cannot judge is a 'lexer' cause);
+# and the raw push splitter
+# (_raw_push_segments) keeps a word-start comment's text in its segment and, inside a substitution it skips
+# with _skip_quoting and no reading, meets an uncertain '#' as an unreadable construct, so the rest of the
+# command joins the current segment unsplit (a whole-text read, the over-denial direction).
+
+
+class _NestStack(list):
+    """A comment-rule nesting stack (_nest_track) that counts its entries, so the tests the scanners make for
+    a word or a backquote ("${" in nest, "`" in nest) take the same time however deep the stack is, where a
+    plain list's test reads every entry: a list of "(", "${" and "`" entries changed only through append,
+    extend, pop and clear."""
+
+    def __init__(self):
+        super().__init__()
+        # Each entry kind starts at zero, so a test for one never opened (the common "`" in nest) is a plain
+        # dictionary read, not a call to Counter.__missing__.
+        self._open = collections.Counter(dict.fromkeys(("(", "${", "`"), 0))
+
+    def append(self, item):
+        super().append(item)
+        self._open[item] += 1
+
+    def extend(self, items):
+        items = list(items)
+        super().extend(items)
+        self._open.update(items)
+
+    def pop(self):
+        item = super().pop()
+        self._open[item] -= 1
+        return item
+
+    def clear(self):
+        super().clear()
+        for item in self._open:
+            self._open[item] = 0
+
+    def __contains__(self, item):
+        return self._open[item] > 0
+
+    def copy(self):
+        """A stack with the same entries and counts, changed independently of this one."""
+        out = _NestStack()
+        list.extend(out, self)
+        out._open.update(self._open)
+        return out
+
+
+def _nest_track(nest, c, after_dollar):
+    """Record one UNQUOTED, unescaped character on a comment-rule nesting stack (a list, or a _NestStack). A
+    '(' opens a parenthesis and a ')' closes the innermost one when it is on top; a ')' with no parenthesis on
+    top (an unmatched one, or one met while a '${' or backquote is innermost) pops nothing. A '{' directly
+    after a '$' opens a '${' parameter expansion and a '}' closes it when it is on top (bash ends a '${...}'
+    at its first unquoted '}'). A backquote closes the innermost open backquote substitution, with anything
+    still open inside it, or else opens one; closing pops each entry it removes, so it costs time in the
+    entries removed, not in the stack's depth. Any other character leaves the stack unchanged. The stack only
+    has to tell whether ANYTHING is open: a case pattern's ')' inside an open parenthesis pops that
+    parenthesis, which can hide only a subshell or substitution parenthesis (inside which bash reads a
+    word-start '#' as a comment too), never an open '${' or backquote. That pop is safe for the '#'
+    rule only: the out-of-scope note scan's here-document rule keeps its OWN count of open command and
+    process substitutions (_orch_note_scan), because for that rule a substitution parenthesis popped
+    at a case pattern's ')' is exactly the body misread the rule exists to note."""
+    if c == "(":
+        nest.append("(")
+    elif c in ")}":
+        if nest and nest[-1] == ("(" if c == ")" else "${"):
+            nest.pop()
+    elif c == "{" and after_dollar:
+        nest.append("${")
+    elif c == "`":
+        if "`" in nest:
+            while nest.pop() != "`":
+                pass
+        else:
+            nest.append("`")
+
+
+def _hash_comment_reading(nest, prev):
+    """The comment rule (see the comment above _nest_track) for one unquoted, unescaped '#'. prev classifies
+    what comes before it, a backslash-newline aside: "break" for the start of the input or an unquoted blank,
+    newline or one of ; & | < >, "paren" for an unquoted '(' or ')', "backquote" for a backquote (escaped or
+    not), and "word" for anything else (a word character, a closing quote or an escaped character). Returns
+    True when the '#' opens a comment (a "break" with nothing open on the nesting stack), False when it is
+    word text (after a "word"), and None when the reading depends on context (cannot-evaluate)."""
+    if prev == "word":
+        return False
+    if prev == "break" and not nest:
+        return True
+    return None
+
+
+class _UncertainHashError(ValueError):
+    """The cannot-evaluate signal for an unquoted '#' whose comment reading depends on context (the comment
+    rule above _nest_track). It is a ValueError, so every caller's existing fallback applies; a caller that
+    must tell it apart from the other constructs the lexer does not model catches this subclass first. at
+    is the index of that '#' (None when the readings were abandoned rather than one '#' met), and backquote
+    is True when the '#' sits in or right after a backquote substitution, which the readings do not model."""
+
+    def __init__(self, message, at=None, backquote=False):
+        super().__init__(message)
+        self.at = at
+        self.backquote = backquote
+        self.fork = None  # the lex's _LexFork where the lex can resume at that '#', set by _lex_pass
+        self.first = None  # the first reading's _LexFork, at the command's first uncertain '#' (_lex_readings)
+        # True when the readings were abandoned because one failed to lex for another reason
+        # (_lex_readings): a partial lex of the same command does not raise there, it returns every
+        # reading's recovered segments, so a caller that would resume from first must take the full
+        # partial lex instead or it reads only the prefix before that '#' (_gate_recovered_sink).
+        self.reading_failed = False
+
+
+# The most uncertain '#' characters the lexer judges under both readings (2 ** 4 = 16 readings at most).
+_HASH_READING_LIMIT = 4
+
+
+def _hash_reading_choice(hash_reading, at, nest):
+    """The reading of the uncertain '#' at index at: True to read it as a comment to the end of its line,
+    False to read it as word text, as the caller's hash_reading maps it. Raises _UncertainHashError when the
+    reading is not given (the caller then enumerates both, _lex_readings) or when a backquote substitution
+    is open, whose comment bash ends at the closing backquote (the comment above _nest_track). With
+    _MAIN_HASH_READING it is True, a comment, as main's lexer reads a '#' at a word boundary."""
+    if hash_reading is _MAIN_HASH_READING:
+        return True  # main's lexer reads a '#' at a word boundary as a comment, whatever is open
+    if "`" in nest:
+        raise _UncertainHashError("cannot evaluate a '#' inside a backquote substitution", at, True)
+    if hash_reading is None or at not in hash_reading:
+        raise _UncertainHashError("cannot evaluate a '#' whose comment reading depends on context", at)
+    return hash_reading[at]
+
+
+def _hash_doubt_text(command):
+    """command with every backslash-newline removed first, as bash removes it before anything else (so
+    gi<backslash-newline>t reads as git), and then every quote character and backslash removed: a rough
+    quote removal (see _hash_doubt_scan)."""
+    return command.replace("\\\n", "").replace("'", "").replace('"', "").replace("\\", "")
+
+
+def _hash_doubt_scan(command):
+    """The text a fallback's raw probes read when _UncertainHashError stops the lexer (the comment above
+    _nest_track): command as written, a newline, then _hash_doubt_text(command). A probe matching either
+    part matches, so a guard subject named in the raw text, or spelled with a backslash-newline or quote
+    that touches no letter (git <backslash-newline>reset), keeps the guard's strict decision; a probe spanning
+    the two parts only over-matches, the fallback's safe direction. A caller reads a command for which
+    _hash_doubt_opaque holds as cannot-evaluate before any probe runs on this text."""
+    return command + "\n" + _hash_doubt_text(command)
+
+
+def _hash_doubt_names(command, pattern):
+    """True when pattern matches _hash_doubt_scan(command), the command as written or with its
+    backslash-newlines and then its quote characters and backslashes removed."""
+    return bool(pattern.search(_hash_doubt_scan(command)))
+
+
+# An ANSI-C $' or locale $" quote, or a quote character or backslash with a letter right before or after it
+# (_hash_doubt_opaque).
+_HASH_DOUBT_OPAQUE_RE = re.compile(r"\$['\"]|[^\W\d_]['\"\\]|['\"\\][^\W\d_]")
+
+
+def _hash_doubt_opaque(command):
+    """True when command's text holds quoting that _hash_doubt_text does not undo the way bash does: an
+    ANSI-C $'...' or locale $"..." quote anywhere (removal reads g$'i't as g$it, and bash runs git for
+    g$'\\x69't and g$"i"t), or a quote character or backslash with a letter right before or after it (g'it',
+    gi\\t, 'git', gi<backslash-newline>t). The check reads the raw text and decodes nothing, so it also
+    holds for such characters inside quoted text. A guard whose fallback reads _hash_doubt_scan takes its
+    fail-closed decision on such a command instead of matching its probes there: the decision it gives a
+    command whose text names its subject behind a '#' the lexer could not judge under both readings."""
+    return bool(_HASH_DOUBT_OPAQUE_RE.search(command))
+
+
+def _hash_doubt_opaque_reason(rule, subject):
+    """The reason a guard gives for its fail-closed decision on a command the fallback cannot evaluate
+    (_hash_doubt_opaque): rule names the rule, subject the shape the guard cannot rule out past the '#'."""
+    return ("AIQT rule {}: this command carries a '#' whose comment reading depends on context (right after "
+            "a '(', ')' or backquote, or at the start of a word inside an open parenthesis, ${{...}} or "
+            "backquote substitution) that the shared lexer could not judge under both readings (more than "
+            "four such '#', one inside or right after a backquote substitution, or a reading that does not "
+            "lex), and its text holds quoting this guard's fallback does not decode (an ANSI-C $'...' or "
+            "locale $\"...\" quote, or a quote character or backslash next to a letter), so it cannot rule out "
+            "{} past that '#' (check-fails-closed-on-unreadable). Put a blank before such a '#' outside any "
+            "grouping or substitution, or drop it.".format(rule, subject))
+
+
+def _hash_doubt_opaque_deny(rule, subject, advice=""):
+    """The deny a guard returns on a command the fallback cannot evaluate (_hash_doubt_opaque), with
+    _hash_doubt_opaque_reason(rule, subject) and then advice, if given; the banner names the rule's id."""
+    reason = _hash_doubt_opaque_reason(rule, subject)
+    return _deny(reason + " " + advice if advice else reason,
+                 "AIQT guardrail: denied a command behind a '#' this guard could not read, in quoting its "
+                 "fallback does not decode (rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
+def _hash_doubt_reason(rule, doubt):
+    """The deny reason for a guard that keeps its strict decision on a '#' whose comment reading depends on
+    context and that the shared lexer could not judge under both readings: rule names the rule, doubt says
+    what the guard cannot rule out after that '#'."""
+    return ("AIQT rule {}: this command carries a '#' whose comment reading depends on context (right after "
+            "a '(', ')' or backquote, or at the start of a word inside an open parenthesis, ${{...}} or "
+            "backquote substitution) that the shared lexer could not judge under both readings (more than "
+            "four such '#', one inside or right after a backquote substitution, or a reading that does not "
+            "lex), so it cannot tell whether the text after it is a comment or a command, and {}; it is "
+            "denied rather than allowed unread (check-fails-closed-on-unreadable). Put a blank before such a "
+            "'#' outside any grouping or substitution, or drop it.".format(rule, doubt))
+
+
+# A character the substitution skip (_skip_quoting) reads inside a command substitution or a '${...}'
+# expansion. Where the rest of an uncertain '#''s line holds none of them, its comment reading and its
+# word-text reading end the skip at the same index, so neither reading has to be enumerated.
+_SKIP_QUOTING_READS_RE = re.compile(r"[\\'\"`$(){}]")
+# The text of the commit message form's substitution before its '<<' (_subst_heredoc_close), and the
+# blanks and blank lines between the delimiter line and the ')' that closes it.
+_SUBST_HEREDOC_LEAD_RE = re.compile(r"[ \t]*cat[ \t]+")
+_SUBST_HEREDOC_CLOSE_RE = re.compile(r"[ \t\n]*\)")
+
+
+class _SubstHeredocRetry(Exception):
+    """Raised inside one lex when a command substitution follows a quoted here-document body the lex has read
+    (_SubstHeredocs.substitution); _lex_reading lexes the command again reading no body. Not a ValueError, so
+    no parse-error handler on the way out reads it as a failed lex."""
+
+
+# MAIN'S DECISION AS A FLOOR. Main's lexer reads no here-document body inside a "$(...)": its substitution
+# skip reads the body as any other text, so an unpaired quote in it pairs with a later quote and a ')' in it
+# can close the substitution early. On the commit message form it then either fails (and each guard takes
+# the path it takes on a lex that fails, whose raw scans read the whole text, with a partial lex that reads
+# on past the body) or succeeds with segments of its own, which can hold a command the body read hides. A
+# clean lex reads no command inside a word: a -c string, a string piped into a shell, a trap or eval string.
+# So once the lexer reads such a body, a guard could allow what main denied, on either outcome. Where a lex
+# reads a body in a substitution that main's skip reads otherwise (_subst_heredoc_misread: main's skip fails
+# on it or ends it at another ')'), the lexer also lexes the command as main does (_main_reading: no body
+# read, and each '#' read as main's lexer reads it, _MAIN_HASH_READING), and each guard keeps the stricter
+# of its own decision and its decision on that reading (_beside_main_reading). Where main's reading lexes,
+# its segments are returned as one more reading beside the lex's own, as for an uncertain '#' (the comment
+# above _nest_track), so a guard that judges every segment it is given decides at least as strictly as on
+# main's segments. Where it fails, _SubstHeredocs.reads moves, and each guard also takes the decision of its
+# path for a lex that fails, with every lex inside _SubstHeredocFloor reading as main's does, so a partial lex
+# there recovers what main's recovers, past the body. A guard cannot run twice and compare the two results,
+# since the hooks self-test refuses a handler's or constructor's result bound anywhere but main's dispatch,
+# so each guard reads that path's decision through its pure parts and returns it where it is stricter: in
+# place of the guard's own allow, and before the guard's own allow or note where that path denies. Each
+# guard's docstring names its parts. A partial lex returns main's partial reading beside its own on either
+# outcome, which is all bash_absolute_paths reads. git_stash_ref allows on a lex that fails, the truncation
+# guard's failed-lex path gives the note its clean path also gives when it does not deny, the poll-loop
+# classifier's gives 'indeterminate', which emits nothing, as 'none' does, and git_discard's fallback denies
+# only where its own scope scan brings the command in scope, where the form lies outside its literal grammar
+# and it denies too, so those four need only main's segments where main's reading lexes. Where main's skip
+# ends the substitution at the same ')', main lexed the form as the clean lex does (each '#' outside the body
+# aside, read by the comment rule here), and no floor applies. COST: each body a lex reads costs one more
+# skip of its substitution reading no body (_subst_heredoc_misread), linear in the command's length, since a
+# quote it opens can pair with one past the substitution, and a lex reads at most one body per pass. Where
+# that skip reads the substitution otherwise, the lexer makes one more pass, main's reading, once per call
+# whatever the number of readings of uncertain '#' characters; a lex that read a body made one pass, since a
+# later substitution starts it again reading none, so each reading still makes at most two passes. Where
+# main's reading fails, the floor adds the fallback's raw scans, each linear in the command's length, and the
+# lexes the failed-lex path makes: one partial lex in gate_weakening and branch_root, and up to six in
+# protected_line (the commit syntax twice, a full and a partial lex each, and the uncertainty causes, a lex of
+# the command and of its joined text). Each such lex reads as main's does, so it reads no body and never
+# starts again: one linear pass each.
+_SUBST_HEREDOC_MAIN_FAILS = ("a quoted here-document body in a command substitution that a lex reading no "
+                             "body, as main's lexer does, cannot parse")
+
+
+class _MainHashReading:
+    """The reading of every '#' main's lexer gives, passed as hash_reading where a lex reads as main's does
+    (_main_reading, MAIN'S DECISION AS A FLOOR above): a '#' at a word boundary outside any substitution skip
+    opens a comment, a '#' inside a word is word text, and _skip_quoting reads a '#' as plain text, as main's
+    skip does, whatever comes before it. It raises no _UncertainHashError."""
+
+
+_MAIN_HASH_READING = _MainHashReading()
+
+
+class _SubstHeredocFloor:
+    """A context in which every lex reads as main's lexer does (_main_reading): no here-document body read,
+    and each '#' as main reads it. A guard computes the decision of its failed-lex path inside it (MAIN'S
+    DECISION AS A FLOOR, above). It restores the previous setting on exit."""
+
+    def __enter__(self):
+        self.main_lex = _SubstHeredocs.main_lex
+        _SubstHeredocs.main_lex = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _SubstHeredocs.main_lex = self.main_lex
+        return False
+
+
+class _LexPlaces:
+    """A context in which the shared lexer records where it read the characters of the command it lexes, for a
+    caller that must know where the lexer places one character (the truncation guard's foreground detach,
+    _orch_lexed_amp_places). Inside it, a lex appends (start, end, kind) spans, end exclusive, to the list the
+    context returns: "quote" for a single- or double-quoted string in a word (a redirect target's included),
+    "code" for a substitution or expansion a double-quoted string holds (_read_word skips it whole, so nothing
+    inside it is recorded apart from the body below), "comment" for a '#' comment the lex reads to the end of
+    its line, and "heredoc" for the body of a quoted here-document the lex skips (the commit message form's
+    body in a substitution included, from its '<<' to the ')' that closes it). An ANSI-C $'...' quote and an
+    escape are not recorded. The spans of one pass nest or are disjoint, and each pass clears the list
+    first, so it holds the last pass's spans (_SubstHeredocRetry); a lex that resumes a fork (_LexFork) would
+    lose the spans before it, so a recording lex is one reading lexed from the start. Outside the context
+    spans is None and nothing is recorded; the segments a lex returns are the same either way. It restores
+    the previous setting on exit."""
+
+    spans = None
+
+    def __enter__(self):
+        self.saved = _LexPlaces.spans
+        _LexPlaces.spans = []
+        return _LexPlaces.spans
+
+    def __exit__(self, *exc_info):
+        _LexPlaces.spans = self.saved
+        return False
+
+
+class _SubstHeredocs:
+    """What one lex shares across its substitution skips for reading a quoted here-document's body (the
+    HERE-DOCUMENTS paragraph of _skip_quoting): on is False once a skip meets a '<<' it does not read,
+    substitutions counts the command substitutions the lex reads as opaque text (each '$(' a skip opens or
+    meets, and each backquote, quoted or not) outside a body it read, read is True once it has read a
+    body, and floor is True once it has read one in a substitution that main's skip reads otherwise
+    (_subst_heredoc_misread). Two class attributes hold across lexes: reads counts the full lexes that read
+    such a body where main's reading of the command fails (_beside_main_reading), which each guard compares
+    before and after its lexes, and main_lex is True inside _SubstHeredocFloor, where every lex reads as
+    main's does (_main_reading)."""
+
+    reads = 0
+    main_lex = False
+
+    def __init__(self):
+        self.on = True
+        self.substitutions = 0
+        self.read = False
+        self.floor = False
+
+    def substitution(self):
+        """Count one command substitution. One met after a body was read could hold a command the guards do
+        not read inside a substitution, so the lex starts again reading no body (_SubstHeredocRetry)."""
+        if self.read:
+            raise _SubstHeredocRetry()
+        self.substitutions += 1
+
+    def state(self):
+        """(on, substitutions, read, floor), the whole state one lex shares across its skips."""
+        return self.on, self.substitutions, self.read, self.floor
+
+    def restore(self, state):
+        """Set the state state() gave."""
+        self.on, self.substitutions, self.read, self.floor = state
+
+    def copy(self):
+        """A _SubstHeredocs in the same state, changed independently of this one (a resumed lex, _LexFork)."""
+        out = _SubstHeredocs()
+        out.restore(self.state())
+        return out
+
+
+def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
     """Skip the quote or substitution opened at command[i]: a single or double quote, a backquote, or a
     $( command substitution or ${ parameter expansion. Return the index just past the whole construct.
     A substitution nested in a double-quoted string opens a FRESH quoting context whose own quotes nest, so
     an inner quote never closes an outer string and a << quoted at any depth stays data, never a heredoc
     opener. Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
-    context so the caller fails closed rather than mis-pairing a later quote."""
+    context so the caller fails closed rather than mis-pairing a later quote.
+
+    HERE-DOCUMENTS. With heredoc None (the raw push splitter, the poll-loop word scan) a '<<' inside a '$(...)'
+    opens nothing here and its body is read like any other text. The lexer passes heredoc, a _SubstHeredocs
+    shared by every skip of one lex, and the skip reads a body as text in the commit message form only
+    (_subst_heredoc_close): the '<<' sits directly inside the first command substitution the lex skips whole
+    (no '$(' in a skip and no backquote before it in the lex; an unquoted '$(...)' the lexer reads as its own
+    segments, which the guards read), and that substitution's text before it is cat and blanks; its
+    delimiter is quoted, holds no '$' or backquote and has only blanks after it on its line; the body ends at
+    a line that is exactly the delimiter (_subst_heredoc_end); and only blanks and blank lines follow that
+    line before the ')' that closes the substitution. Bash reads that body as text, with no comment rule,
+    quote or parenthesis in it (bash prints the body for
+    x="$(cat <<'EOF'<newline># Don't merge yet<newline>EOF<newline>)"), so the skip jumps to that ')'. At any
+    other '<<' directly inside a '$(...)' while heredoc.on is True (an unquoted or unparseable delimiter, a
+    command before or after the here-document inside the substitution, a body that does not end, a
+    here-document in a later or nested substitution) it sets heredoc.on False and reads the rest of the lex
+    as the skip reads it with heredoc None; a '<<' inside a '$((...))' or a '(' group is read as text, as
+    with heredoc None. The guards read no command inside a double-quoted substitution or a backquote one, and
+    on a lex that fails (as a lex that reads no body fails on an apostrophe in one) their raw fallbacks read
+    the whole text, so a body read must not turn that fallback into a lex beside a command they cannot read:
+    a '$(' or backquote the lex meets after it read a body raises _SubstHeredocRetry, and _lex_reading lexes
+    the command again with no body read. So a lex makes at most one body search and, when it starts again,
+    two linear passes. A lex that reads as main's does (_main_reading) passes heredoc None and
+    _MAIN_HASH_READING, so this skips the substitution as main's skip does: no body read and no comment rule.
+
+    An unquoted '#' inside a '$(...)' command substitution or a '${...}' expansion this skips follows the
+    comment rule (see the comment above _nest_track), since a comment there runs to the end of its line,
+    past any quote or closing parenthesis on it, and so moves where the skip ends: right after a word
+    character, a closing quote or an escaped character it is word text; right after a backquote (or after an
+    escaped one while a backquote substitution is open on nest, or nest is None) it is cannot-evaluate and
+    raises _UncertainHashError; anywhere else it is uncertain, since the substitution or expansion it sits
+    in is open. An uncertain '#' whose rest of line holds a character this skip reads
+    (_SKIP_QUOTING_READS_RE) is read as hash_reading maps its index (the caller's reading of each uncertain
+    '#', see _lex_readings): True a comment to the end of its line, whose text then opens nothing, False
+    word text; one it does not map raises _UncertainHashError carrying its index, which a caller with no
+    reading (the raw push splitter) meets as any other ValueError. One whose rest of line holds no such
+    character ends the skip at the same index under both readings, so it is read as word text. No '#'
+    inside a backquote substitution is read: bash ends one at its first unescaped backquote whatever a
+    comment inside it reads, so both readings skip the same text. nest is the caller's nesting stack, read
+    only for whether a backquote substitution is open on it."""
     c = command[i]
+    opened = i
     if c == "'":
         stack = ["sq"]
         i += 1
@@ -477,13 +1094,46 @@ def _skip_quoting(command, i, n):
         stack = ["bq"]
         i += 1
     elif c == "$" and i + 1 < n and command[i + 1] == "(":
-        stack = ["paren"]
+        # "subst" is a '$(...)' command substitution, where a here-document can open; "paren" is a '$((...))'
+        # (an arithmetic expansion, or a command substitution starting with a subshell) or a '(' group.
+        stack = ["paren" if command[i + 2:i + 3] == "(" else "subst"]
         i += 2
     elif c == "$" and i + 1 < n and command[i + 1] == "{":
         stack = ["brace"]
         i += 2
     else:
         raise ValueError("not a quoting opener")
+    if heredoc is not None and stack[0] in ("bq", "paren", "subst"):
+        heredoc.substitution()
+    return _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened)
+
+
+def _skip_quoting_from(command, i, n, stack):
+    """The walk of _skip_quoting from command[i], inside the contexts already open on `stack` (innermost
+    last, consumed): the index just past the construct that closes the outermost one, or ValueError where
+    _skip_quoting raises it. A caller that has read an opener the walk does not start with (the '(' of a
+    '<(' or '>(' process substitution, which parses like '$(') passes the context it opens and the index
+    past it, so the walk reads the command in place. The walk reads a '#' under the comment rule as
+    _skip_quoting does with no nest, hash_reading or heredoc: it has no reading to judge an uncertain '#'
+    by, so it raises _UncertainHashError, a ValueError, where one would be needed, and it reads no
+    here-document body."""
+    return _skip_quoting_walk(command, i, n, stack, None, None, None, None)
+
+
+def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened):
+    """The one walk behind _skip_quoting and _skip_quoting_from: nest, hash_reading and heredoc carry
+    _skip_quoting's reading of an uncertain '#' and of a here-document body (see its docstring), and
+    opened is the index in `command` of the opener whose substitution a body read measures; only a body
+    read uses it, so _skip_quoting_from passes None beside its heredoc None."""
+    # What _hash_reading_choice reads: whether a backquote substitution is open (a copy of nest, as before,
+    # would cost each skip time in the stack's depth).
+    hash_nest = ("`",) if nest and "`" in nest else ("(",)
+    prev = "paren" if stack[0] in ("paren", "subst") else "word"  # the comment rule's class before index i
+    # eol is the end of the line of the last '#' the comment rule below read, and reads_at the first index
+    # after that '#' where _SKIP_QUOTING_READS_RE matches before eol (eol itself when none does). The skip
+    # only moves forward, so a later '#' on the same line reuses both and each search covers text no earlier
+    # search covered: the skip stays linear in the length of the command however many '#' a line holds.
+    eol = reads_at = -1
     while stack:
         if i >= n:
             raise ValueError("unterminated quote or substitution")
@@ -495,40 +1145,74 @@ def _skip_quoting(command, i, n):
                 raise ValueError("unterminated single quote")
             i = j + 1
             stack.pop()
+            prev = "word"
             continue
         if top == "bq":
+            # No '#' is read here: bash ends the substitution at its first unescaped backquote whatever a
+            # comment inside it reads, so both readings of such a '#' skip the same text.
             if c == chr(92) and i + 1 < n:
                 i += 2
             elif c == "`":
                 i += 1
                 stack.pop()
+                prev = "backquote"
             else:
                 i += 1
             continue
         if c == chr(92):
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
+            if command[i + 1] == "\n":
+                # A backslash-newline is a line continuation: bash removes the pair before it reads the
+                # line, so a '#' or quote after it keeps the classification that came before the pair.
+                # Leave prev unchanged and advance past the pair; several consecutive pairs each leave it
+                # unchanged as the loop re-enters this branch.
+                i += 2
+                continue
+            prev = "backquote" if command[i + 1] == "`" and (nest is None or "`" in nest) else "word"
             i += 2
             continue
         if top == "dq":
             if c == '"':
                 i += 1
                 stack.pop()
+                prev = "word"
                 continue
             if c == "`":
+                if heredoc is not None:
+                    heredoc.substitution()
                 stack.append("bq")
                 i += 1
                 continue
             if c == "$" and i + 1 < n and command[i + 1] == "(":
-                stack.append("paren")
+                if heredoc is not None:
+                    heredoc.substitution()
+                stack.append("paren" if command[i + 2:i + 3] == "(" else "subst")
                 i += 2
+                prev = "paren"
                 continue
             if c == "$" and i + 1 < n and command[i + 1] == "{":
                 stack.append("brace")
                 i += 2
+                prev = "word"
                 continue
             i += 1
             continue
+        if c == "#" and prev != "word" and hash_reading is not _MAIN_HASH_READING:
+            # The comment rule inside a command substitution or '${...}' expansion (see the docstring); main's
+            # skip read every '#' as plain text.
+            if prev == "backquote":
+                raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
+            if i > eol:
+                eol = command.find("\n", i)
+                eol = n if eol < 0 else eol
+                reads_at = -1
+            if reads_at <= i:
+                reads = _SKIP_QUOTING_READS_RE.search(command, i + 1, eol)
+                reads_at = reads.start() if reads else eol
+            if reads_at < eol and _hash_reading_choice(hash_reading, i, hash_nest):
+                i = eol  # a comment to the end of its line: its quotes and parentheses open nothing
+                continue
         if c == "'":
             stack.append("sq")
             i += 1
@@ -538,18 +1222,37 @@ def _skip_quoting(command, i, n):
             i += 1
             continue
         if c == "`":
+            if heredoc is not None:
+                heredoc.substitution()
             stack.append("bq")
             i += 1
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "(":
-            stack.append("paren")
+            if heredoc is not None:
+                heredoc.substitution()
+            stack.append("paren" if command[i + 2:i + 3] == "(" else "subst")
             i += 2
+            prev = "paren"
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "{":
             stack.append("brace")
             i += 2
+            prev = "word"
             continue
-        if top == "paren":
+        if c == "<" and top == "subst" and heredoc is not None and heredoc.on and command.startswith("<<", i):
+            # The commit message form's here-document (HERE-DOCUMENTS above): jump past its body to the ')'.
+            close = (_subst_heredoc_close(command, opened, i, n)
+                     if len(stack) == 1 and heredoc.substitutions == 1 else None)
+            if close is not None:
+                heredoc.read = True
+                heredoc.floor = heredoc.floor or _subst_heredoc_misread(command, opened, close, n)
+                if _LexPlaces.spans is not None:
+                    _LexPlaces.spans.append((i, close, "heredoc"))
+                i = close
+                continue
+            heredoc.on = False
+        prev = "paren" if c in "()" else "break" if c in " \t\n;&|<>" else "word"
+        if top in ("paren", "subst"):
             if c == "(":
                 stack.append("paren")
             elif c == ")":
@@ -564,7 +1267,8 @@ def _skip_quoting(command, i, n):
     return i
 
 
-def _read_word(command, i, n, locale=False):
+def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None,
+               spelling=None):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -580,12 +1284,43 @@ def _read_word(command, i, n, locale=False):
     unterminated escape. With locale True, an unquoted bash locale quote $"..." is read as the double-quoted
     string bash reads when no message catalogue translates it (the '$' dropped, so Cl$""aude is Claude);
     otherwise its '$' stays an ordinary opaque character, as every other caller reads it and as the
-    commit-identity check reads it too, alongside the locale reading."""
+    commit-identity check reads it too, alongside the locale reading.
+
+    The comment rule (see the comment above _nest_track) applies to every unquoted '#' the word reaches: a
+    '#' before the word has begun (after a backslash-newline that begins it) ends the read with nothing
+    started, so the caller, which knows what came before, decides it, unless hash_reading (the caller's
+    reading of each uncertain '#', see _lex_readings) maps its index to False, word text, when the word
+    begins with it; a '#' inside the word is word text, except right after an unescaped backquote, or an
+    escaped one while a backquote substitution is open on nest (or nest is None), where its reading depends
+    on context and this raises _UncertainHashError, a ValueError; an escaped backquote with no backquote
+    substitution open is plain word text, as it is to bash. nest,
+    when given, is the caller's nesting stack: the word's unquoted '${', '}' and backquotes are recorded on
+    it. glued is True when the word is read directly after a ')' ('x=$(true)~/a'): it may continue a word
+    that the ')' did not end, so its '~' is not a leading tilde and it is opaque (part of a word that
+    carried a substitution), as is a word read inside an open '${...}'. A substitution or expansion inside a
+    double-quoted string (a locale one included) is skipped whole by _skip_quoting, which applies the same
+    rule to a '#' inside it with nest and hash_reading, and reads a quoted here-document's body inside it as
+    text with heredoc (the lexer's shared _SubstHeredocs; None reads none, see _skip_quoting), on which an
+    unquoted backquote the word holds is counted as a command substitution too. spelling, when given, is a
+    one-element list whose item the read sets to the word's _WordSpelling (how each part of it was spelled); the
+    tuple returned is the same either way."""
     chars = []
-    opaque = False
+    opaque = bool(glued) or (nest is not None and "${" in nest)
+    # The decoded length where the first character not spelled as plain literal text begins (-1 while none has),
+    # whether an unquoted '{' may open a brace expansion, and whether such a part may expand to several words or
+    # came through an ANSI-C or locale quote (_WordSpelling). Each is set only on a character that also makes the
+    # word opaque, so an ordinary character pays nothing for it.
+    literal = 0 if opaque else -1
+    brace = False
+    unquoted = opaque
     started = False
     all_digits = True
     leading_tilde = False
+    # The index just past the last unquoted, unescaped '$' (a '{' read there opens '${') and just past the last
+    # backquote that may open a substitution (a '#' read there is cannot-evaluate). Recording where each ends,
+    # set only on those characters, leaves every other character free of this bookkeeping (COST above).
+    dollar_end = -1
+    backquote_end = -1
     # tilde_prefix_open: True while we are still INSIDE the tilde-prefix (from a leading unquoted '~' up to
     # the first UNQUOTED '/', or end of word). Bash expands the leading '~' ONLY when the WHOLE tilde-prefix
     # is unquoted and unescaped; any quoted or escaped character in that span disables expansion and the word
@@ -601,17 +1336,31 @@ def _read_word(command, i, n, locale=False):
             # A backslash-newline is a LINE CONTINUATION: it is removed entirely and does NOT start or
             # contribute to a word, so 'git \<newline> commit' is [git, commit], never [git, "", commit]
             # (a synthetic empty argv element that mis-set the subcommand and defeated the sibling guards).
+            # It joins a '$' or backquote before it to the character after it.
+            if dollar_end == i:
+                dollar_end = i + 2
+            if backquote_end == i:
+                backquote_end = i + 2
             i += 2
             continue
-        if c == "#" and not started:
-            # A '#' still at a WORD BOUNDARY (the word has not begun) starts a comment, even when the
-            # boundary was EXPOSED by a preceding continuation join ('git diff \<newline># > out.txt'):
-            # break so the caller re-applies its end-of-line comment handling rather than reading '#' as a
-            # literal word (which would tokenize a commented-out redirect/pipe and earn a false proof).
-            # A mid-word '#' (started is True, e.g. ticket#123 or a continuation-joined di\<newline>ff#x)
-            # is left literal below.
-            break
-        was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
+        if c == "#":
+            if not started and (hash_reading is None or hash_reading is _MAIN_HASH_READING
+                                or hash_reading.get(i) is not False):
+                # A '#' still at a WORD BOUNDARY (the word has not begun), a boundary EXPOSED by a preceding
+                # continuation join ('git diff \<newline># > out.txt'): break so the caller applies the comment
+                # rule there (it knows what preceded the continuation) rather than reading '#' as a literal
+                # word (which would tokenize a commented-out redirect/pipe and earn a false proof). An
+                # uncertain '#' the caller's reading takes as word text is read on as this word's first
+                # character.
+                break
+            if backquote_end == i and hash_reading is not _MAIN_HASH_READING:
+                # Right after a backquote the '#' may begin the text of a backquote substitution, a comment to
+                # bash that ends at the closing backquote, or follow a closing one as word text: neither
+                # reading models that comment, so it is cannot-evaluate whatever the reading (the comment
+                # rule). Main's lexer read it as word text, as _MAIN_HASH_READING does.
+                raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
+        # Any other mid-word '#' (ticket#123, a continuation-joined di\<newline>ff#x) is left literal below.
+        was_started = started or glued  # whether the word had begun BEFORE this char (a leading tilde needs False)
         started = True
         if locale and c == "$" and i + 1 < n and command[i + 1] == '"':
             # bash locale quoting $"...": the text is looked up in the current locale's message catalogue
@@ -619,6 +1368,9 @@ def _read_word(command, i, n, locale=False):
             # by the branch below. The word stays opaque, as its '$' made it before, since a catalogue can
             # replace the text at run time.
             opaque = True
+            unquoted = True
+            if literal < 0:
+                literal = sum(map(len, chars))
             i += 1
             c = '"'
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
@@ -628,6 +1380,8 @@ def _read_word(command, i, n, locale=False):
             j = command.find("'", i + 1)
             if j < 0:
                 raise ValueError("unterminated single quote")
+            if _LexPlaces.spans is not None:
+                _LexPlaces.spans.append((i, j + 1, "quote"))
             chars.append(command[i + 1:j])
             all_digits = False
             i = j + 1
@@ -636,6 +1390,7 @@ def _read_word(command, i, n, locale=False):
             if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
                 leading_tilde = False
                 tilde_prefix_open = False
+            quote_at = i
             i += 1
             while True:
                 if i >= n:
@@ -659,15 +1414,30 @@ def _read_word(command, i, n, locale=False):
                     i += 1
                     continue
                 if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({"):
+                    # A substitution or expansion opens a fresh context: skip it whole, applying the comment
+                    # rule to a '#' inside it under this reading (_skip_quoting).
                     _sub_start = i
-                    i = _skip_quoting(command, i, n)
+                    i = _skip_quoting(command, i, n, nest, hash_reading, heredoc)
+                    if _LexPlaces.spans is not None:
+                        _LexPlaces.spans.append((_sub_start, i, "code"))
                     opaque = True
+                    if literal < 0:
+                        literal = sum(map(len, chars))
+                    if d == "$" and command[_sub_start + 1] == "{" and _DQ_LIST_EXPANSION_RE.search(
+                            command, _sub_start, i):
+                        unquoted = True  # a list expansion: one word per element, inside double quotes too
                     chars.append(command[_sub_start:i])
                     continue
                 if d in "$`":
                     opaque = True
+                    if literal < 0:
+                        literal = sum(map(len, chars))
+                    if d == "$" and i + 1 < n and command[i + 1] == "@":
+                        unquoted = True  # "$@": one word per positional parameter
                 chars.append(d)
                 i += 1
+            if _LexPlaces.spans is not None:
+                _LexPlaces.spans.append((quote_at, i, "quote"))
             all_digits = False
             continue
         if c == "$" and i + 1 < n and command[i + 1] == "'":
@@ -681,6 +1451,9 @@ def _read_word(command, i, n, locale=False):
             if tilde_prefix_open:
                 leading_tilde = False
                 tilde_prefix_open = False
+            if literal < 0:
+                literal = sum(map(len, chars))
+            unquoted = True
             i += 2
             while True:
                 if i >= n:
@@ -705,6 +1478,11 @@ def _read_word(command, i, n, locale=False):
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
             chars.append(command[i + 1])
+            # An escaped backquote is plain word text that opens nothing while no backquote substitution is
+            # open (bash prints `# for echo \`#); inside one it opens a nested one, so a '#' right after it
+            # stays cannot-evaluate there (and wherever the caller keeps no nesting stack).
+            if command[i + 1] == "`" and (nest is None or "`" in nest):
+                backquote_end = i + 2
             all_digits = False
             i += 2
             continue
@@ -720,15 +1498,38 @@ def _read_word(command, i, n, locale=False):
             tilde_prefix_open = True  # begin tracking the tilde-prefix; a later quote/escape voids the tilde
         elif c in _OPAQUE_WORD_CHARS:
             opaque = True
+            if c in "$`{":
+                # A parameter or command expansion, or a brace: no longer plain literal text (_WordSpelling). A
+                # '{' right after a '$', or inside an open '${...}', opens a parameter expansion, not a brace one.
+                if literal < 0:
+                    literal = sum(map(len, chars))
+                if c != "{":
+                    unquoted = True
+                elif dollar_end != i and (nest is None or "${" not in nest):
+                    brace = True
         elif c == "/" and tilde_prefix_open:
             # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
             # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
             tilde_prefix_open = False
+        if c in "{}`":  # of the characters _nest_track records, '(' and ')' end the word above
+            if c == "`":
+                backquote_end = i + 1
+                if heredoc is not None:
+                    heredoc.substitution()
+            if nest is not None:
+                _nest_track(nest, c, dollar_end == i)
+        elif c == "$":
+            dollar_end = i + 1
         if not c.isdigit():
             all_digits = False
         chars.append(c)
         i += 1
-    return "".join(chars), opaque, started, all_digits, leading_tilde, i
+    text = "".join(chars)
+    if spelling is not None:
+        literal = len(text) if literal < 0 else literal
+        spelling[0] = (_WORD_SPELLINGS[4 * literal + 2 * brace + unquoted] if literal < 64
+                       else _WordSpelling(literal, brace, unquoted))
+    return text, opaque, started, all_digits, leading_tilde, i
 
 
 def _match_operator(command, i, n):
@@ -841,15 +1642,36 @@ def _parse_heredoc_delim(command, at, n):
     Returns (quoted, delim, strip_tabs, next_i) or None when it cannot be parsed (so the caller keeps the
     conservative unsupported-construct raise). `quoted` is True for the <<'EOF' / <<"EOF" / <<\\EOF forms,
     whose body bash treats as LITERAL DATA with no expansion or command substitution; `strip_tabs` is True
-    for the <<- form; `next_i` is the index just past the delimiter spec (still on the same line)."""
-    j = at
+    for the <<- form; `next_i` is the index just past the delimiter spec (still on the same line).
+
+    This is the shared in-scope parser. The out-of-scope note scanner does not use it: that scanner
+    accepts only a provably simple delimiter spelling (_orch_plain_heredoc_delim) and notes on every
+    other, so this parser's conservative None keeps its fail-closed meaning for the in-scope callers.
+
+    LINE CONTINUATIONS: bash removes a backslash-newline before it reads a token, everywhere but inside a
+    single-quoted or ANSI-C $'...' string, so the pair is no quoting: it is removed between '<<' and a
+    '-' (which still makes the <<- form), between the operator and the word, inside the word, inside a
+    double-quoted or $"..." fragment, and between a '$' and what follows it. The joined word is the
+    delimiter, quoted only by a quoting character left after that removal (<<EO\\<newline>F is the
+    UNQUOTED delimiter EOF, so its body interpolates and the caller refuses it, where reading the pair as
+    an escaped newline made a quoted delimiter no line matches and read every command after it as body).
+    Inside single quotes the pair is literal and stays in the delimiter. A word bash reads further than
+    this parser does returns None: a '$(', '${' or '$[' expansion or a backquote in the word (bash keeps
+    each whole, blanks and quotes inside it included), a '(' at the end of the word (an extglob pattern to
+    bash, or a syntax error), a '<' or '>' that opens a process substitution glued to the word, and a '#'
+    where the word would start (a comment to bash, so no word)."""
+    j = _skip_line_continuations(command, at, n)
     strip_tabs = False
     if j < n and command[j] == "-":
         strip_tabs = True
         j += 1
-    while j < n and command[j] in " \t":
-        j += 1
-    if j >= n:
+    while True:
+        j = _skip_line_continuations(command, j, n)
+        if j < n and command[j] in " \t":
+            j += 1
+            continue
+        break
+    if j >= n or command[j] == "#":
         return None
     # A heredoc delimiter is ONE shell word: the concatenation of adjacent quoted, escaped, and unquoted
     # fragments per shell word rules (round-3 finding 7). So <<'EO'F, <<EO'F', and <<E"OF" all resolve to
@@ -861,11 +1683,21 @@ def _parse_heredoc_delim(command, at, n):
     quoted = False
     started = False
     delim_chars = []
-    while j < n:
+    while True:
+        j = _skip_line_continuations(command, j, n)  # removed by bash, never quoting
+        if j >= n:
+            break
         c = command[j]
         if c in " \t\n" or c in _METACHARS:
+            if c == "(" or (c in "<>" and command.startswith("(", _skip_line_continuations(command, j + 1, n))):
+                return None             # bash reads an extglob pattern or a process substitution into the word
             break                       # an unquoted separator/whitespace ends the delimiter word
         started = True
+        if c == "`":
+            return None                 # bash keeps a backquoted span whole in the word: not modelled
+        after_dollar = _skip_line_continuations(command, j + 1, n) if c == "$" else j + 1
+        if c == "$" and after_dollar < n and command[after_dollar] in "({[":
+            return None                 # a $(...), ${...} or $[...] span bash keeps whole in the word
         if c == "'":                    # single quote: literal to the next "'"
             quoted = True
             k = command.find("'", j + 1)
@@ -876,19 +1708,11 @@ def _parse_heredoc_delim(command, at, n):
             continue
         if c == '"':                    # double quote: literal to the next '"', honouring \" \\ \$ \` escapes
             quoted = True
-            k = j + 1
-            frag = []
-            while k < n and command[k] != '"':
-                if command[k] == "\\" and k + 1 < n and command[k + 1] in '"\\$`':
-                    frag.append(command[k + 1])
-                    k += 2
-                    continue
-                frag.append(command[k])
-                k += 1
-            if k >= n:
+            read = _heredoc_dq_fragment(command, j + 1, n)
+            if read is None:
                 return None
-            delim_chars.append("".join(frag))
-            j = k + 1
+            delim_chars.append(read[0])
+            j = read[1]
             continue
         if c == "\\":                   # backslash quotes the next character -> literal body
             quoted = True
@@ -897,7 +1721,8 @@ def _parse_heredoc_delim(command, at, n):
             delim_chars.append(command[j + 1])
             j += 2
             continue
-        if c == "$" and j + 1 < n and command[j + 1] == "'":
+        if c == "$" and after_dollar < n and command[after_dollar] == "'":
+            j = after_dollar - 1        # the ANSI-C quote opens after any removed continuation
             # ROUND-6 FINDING 2 (Lens E). ANSI-C quoting $'...' as (part of) a heredoc delimiter word.
             # bash ANSI-C-expands the word, so <<$'EOF' resolves to the LITERAL delimiter EOF, and its body
             # is literal (quoted). Treating '$' as an ordinary char (the pre-round-6 bug) built the delimiter
@@ -916,31 +1741,60 @@ def _parse_heredoc_delim(command, at, n):
             delim_chars.append(frag)
             j = k + 1
             continue
-        if c == "$" and j + 1 < n and command[j + 1] == '"':
+        if c == "$" and after_dollar < n and command[after_dollar] == '"':
             # $"..." locale translation as (part of) a heredoc delimiter word: bash quote-removal yields the
             # inner text (the C-locale identity), so <<$"EOF" resolves to the literal delimiter EOF. Parsed
             # like a double-quoted fragment (honouring \" \\ \$ \` escapes) so it resolves to its literal
             # content; a form it cannot close returns None (fail closed, per the ANSI-C branch above).
             quoted = True
-            k = j + 2
-            frag = []
-            while k < n and command[k] != '"':
-                if command[k] == "\\" and k + 1 < n and command[k + 1] in '"\\$`':
-                    frag.append(command[k + 1])
-                    k += 2
-                    continue
-                frag.append(command[k])
-                k += 1
-            if k >= n:
+            read = _heredoc_dq_fragment(command, after_dollar + 1, n)
+            if read is None:
                 return None
-            delim_chars.append("".join(frag))
-            j = k + 1
+            delim_chars.append(read[0])
+            j = read[1]
             continue
         delim_chars.append(c)           # an ordinary unquoted character
         j += 1
     if not started:
         return None
     return (quoted, "".join(delim_chars), strip_tabs, j)
+
+
+def _skip_line_continuations(command, j, n):
+    """The index just past the run of backslash-newline line continuations that starts at index j (j itself
+    where none does): bash removes each such pair before it reads a token, outside single quotes."""
+    while j + 1 < n and command[j] == "\\" and command[j + 1] == "\n":
+        j += 2
+    return j
+
+
+def _heredoc_dq_fragment(command, k, n):
+    """Read a double-quoted fragment of a here-document delimiter word from index k, just past its opening
+    '"', as bash reads it: a backslash-newline is removed, a backslash before '"', '\\', '$' or a backquote
+    quotes that character, and any other character is literal. Returns (text, index just past the closing
+    '"'), or None for a fragment never closed or one holding a backquote or a '$(', '${' or '$[' span,
+    which bash reads as a nested construct whose own quotes do not close the fragment."""
+    frag = []
+    while k < n:
+        d = command[k]
+        if d == '"':
+            return "".join(frag), k + 1
+        if d == "\\" and k + 1 < n and command[k + 1] == "\n":
+            k += 2
+            continue
+        if d == "\\" and k + 1 < n and command[k + 1] in '"\\$`':
+            frag.append(command[k + 1])
+            k += 2
+            continue
+        if d == "`":
+            return None
+        if d == "$":
+            after = _skip_line_continuations(command, k + 1, n)
+            if after < n and command[after] in "({[":
+                return None
+        frag.append(d)
+        k += 1
+    return None
 
 
 def _skip_heredoc_bodies(command, i, n, heredocs):
@@ -957,6 +1811,68 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
             if cand == delim:
                 break
     return i
+
+
+def _subst_heredoc_end(command, i, n, heredocs):
+    """The index just past the bodies of the quoted here-documents (delimiter, strip_tabs) opened on one line
+    of a '$(...)' command substitution, read from index i (just past that line's newline) in the order their
+    '<<' operators appeared, each ending at a line that is exactly its delimiter (leading tabs stripped for
+    the <<- form). None where the substitution skip (_skip_quoting) does not read them as bodies: a body that
+    does not end before the command does, or a body line that begins with its delimiter but is not exactly
+    it. Bash 5.3 ends a body inside a command substitution at such a line when a ')' follows the delimiter
+    on it and reads the rest of that line as commands (bash prints RAN for
+    x=$(cat <<'EOF'<newline>EOF); echo RAN), so such a body is read as the skip reads any other text."""
+    for delim, strip_tabs in heredocs:
+        while True:
+            nl = command.find("\n", i, n)
+            if nl < 0:
+                return None
+            line = command[i:nl]
+            if strip_tabs:
+                line = line.lstrip("\t")
+            i = nl + 1
+            if line.startswith(delim):
+                if line != delim:
+                    return None
+                break
+    return i
+
+
+def _subst_heredoc_close(command, opened, at, n):
+    """The index of the ')' that closes the '$(...)' opened at index opened (its '$') when the '<<' at index
+    at, directly inside it, opens the commit message form's here-document (the HERE-DOCUMENTS paragraph of
+    _skip_quoting): the substitution's text before the '<<' is cat and blanks; the delimiter is quoted, holds
+    no '$' or backquote and has only blanks after it on its line; the body ends at a line that is exactly the
+    delimiter (_subst_heredoc_end); and only blanks and blank lines follow that line before the ')'. None
+    otherwise, a here-string '<<<' included."""
+    if command.startswith("<<<", at) or not _SUBST_HEREDOC_LEAD_RE.fullmatch(command, opened + 2, at):
+        return None
+    parsed = _parse_heredoc_delim(command, at + 2, n)
+    if parsed is None or not parsed[0]:
+        return None
+    _quoted, delim, strip_tabs, spec_end = parsed
+    spec = command[at:spec_end]
+    line_end = command.find("\n", spec_end)
+    if line_end < 0 or "$" in spec or "`" in spec or command[spec_end:line_end].strip(" \t"):
+        return None
+    end = _subst_heredoc_end(command, line_end + 1, n, ((delim, strip_tabs),))
+    close = _SUBST_HEREDOC_CLOSE_RE.match(command, end) if end is not None else None
+    return close.end() - 1 if close else None
+
+
+def _subst_heredoc_misread(command, opened, close, n):
+    """True when the '$(...)' opened at index opened, whose body the skip read to the ')' at index close, is read
+    otherwise by main's skip, which reads no body and reads every '#' as plain text (_skip_quoting with no
+    here-document and _MAIN_HASH_READING): it fails on the substitution (an unpaired quote in the body that
+    pairs with no later quote) or ends it at another index (a ')' in the body, or a quote in it that pairs
+    with one past the ')'). Main's lex then failed or read the text otherwise, and the guards take main's
+    decision as a floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading). Where it is False main's skip
+    ends the substitution at the same ')', so main read that word, and every segment around it, as the lex
+    that read the body does (each '#' outside the body aside). The skip is linear in the command's length."""
+    try:
+        return _skip_quoting(command, opened, n, hash_reading=_MAIN_HASH_READING) != close + 1
+    except ValueError:
+        return True
 
 
 # The characters after which bash starts a new word: blanks, newline and the shell metacharacters.
@@ -993,6 +1909,14 @@ def _join_continuations(command):
     if chr(92) + "\n" not in command:
         return command, list(range(len(command) + 1))
     return _join_continuations_walk(command)
+
+
+def _joined_text(command):
+    """The joined text of _join_continuations alone, for a caller that reads no raw index: the command itself where
+    it holds no backslash-newline (the same fast path), so a long command builds no index list to discard."""
+    if chr(92) + "\n" not in command:
+        return command
+    return _join_continuations_walk(command)[0]
 
 
 def _join_continuations_walk(command):
@@ -1105,9 +2029,59 @@ def _dequoted_text(command):
     example the push backstop's segments, the uncertain-lex push fallback and its git gate, the discard
     scope scan on every reading, and the unparseable-command discard fallback's scope scan), never to
     prove a command safe."""
-    joined, _raw_index = _join_continuations(command)
-    joined = re.sub(r"\$(?=['\"])", "", joined)
+    joined = re.sub(r"\$(?=['\"])", "", _joined_text(command))
     return joined.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+# An ANSI-C $'...' quote, its body running to the first single quote no backslash escapes, and one backslash
+# escape inside such a body, in the forms bash decodes there (_ansi_c_decoded).
+_ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
+_ANSI_C_ESCAPE_RE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c(.)|(.))", re.DOTALL)
+_ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+                 "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c_escape(match):
+    """The text one ANSI-C escape (_ANSI_C_ESCAPE_RE) stands for, as bash decodes it: the character of a hex,
+    Unicode or octal value (an octal value keeps its low eight bits, as bash does; a code point past
+    U+10FFFF reads as nothing), the control character of \\cX, a named escape's character, and the escape
+    itself where bash keeps it unchanged (an unknown letter)."""
+    hex_value, short_point, long_point, octal, control, other = match.groups()
+    if hex_value is not None:
+        return chr(int(hex_value, 16))
+    if short_point is not None or long_point is not None:
+        point = int(short_point or long_point, 16)
+        return chr(point) if point <= 0x10FFFF else ""
+    if octal is not None:
+        return chr(int(octal, 8) & 0xFF)
+    if control is not None:
+        return "\x7f" if control == "?" else chr(ord(control) & 0x1F)
+    return _ANSI_C_NAMED.get(other, match.group(0))
+
+
+def _ansi_c_body(match):
+    """The decoded body of one ANSI-C quote (_ANSI_C_QUOTE_RE), with no quote characters around it."""
+    return _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, match.group(1))
+
+
+def _ansi_c_decoded(command):
+    """command with each ANSI-C $'...' quote replaced by its body decoded the way bash decodes it
+    (_ansi_c_escape), so a spelling bash assembles from escapes (--no-$'\\x76'erify) reads as that spelling.
+    The quote is found in the raw text without tracking the quoting around it, so a $' inside other quotes
+    is decoded too: it is read only beside the raw text and its plain de-quoted copy (_decoded_readings),
+    where an extra reading can only add a match. Linear, never raises."""
+    return _ANSI_C_QUOTE_RE.sub(_ansi_c_body, command)
+
+
+def _decoded_readings(command):
+    """The de-quoted readings a parse-failure fallback reads BESIDE the raw text: _dequoted_text(command)
+    and, when command holds an ANSI-C $'...' quote, _dequoted_text of command with each such quote's escapes
+    decoded first (_ansi_c_decoded). A probe that matches any reading matches, so each reading can only add
+    a match to the raw text's probes, never clear one."""
+    if "$'" not in command:
+        return (_dequoted_text(command),)
+    return (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
 
 
 # The uncertainty causes _lex_uncertain_causes reports, worded for the deny messages.
@@ -1252,6 +2226,46 @@ def _lex_uncertain(command):
     return bool(_lex_uncertain_causes(command))
 
 
+class _LexFork:
+    """Where one pass of a lex (_lex_pass) stopped at an uncertain '#' its reading does not map, at the
+    start of the token that asks for that '#''s reading (the '#' itself at a word boundary, a word read that
+    began with backslash-newlines and stopped at the '#', the redirect operator, or the IO_NUMBER before it,
+    whose target begins with the '#'), before that token changed anything: the index at, the segments built
+    so far, the words, flags and redirects of the segment in
+    progress (with the words' _WordSpelling records inside _WordSpellings, else None), the start of that
+    segment, the queued here-document delimiters, the nesting stack, what
+    precedes at (glued_at and before), and the pass's _SubstHeredocs (None for a pass reading no body). A
+    lex under a reading that extends the stopped one resumes from it with its own copies (_lex_reading,
+    _lex_readings); the segments themselves are shared, and no reader changes one.
+
+    tails, shared by every _LexFork of one _lex_readings call, maps the state of a resumed pass at the first
+    newline it ends (the index after it, the nesting stack, glued_at, before and the _SubstHeredocs state;
+    no word, redirect or here-document is pending there) to what the pass that first reached that state
+    went on to build: the segments after that newline, its partial-mode flags and its final _SubstHeredocs
+    state, recorded only where it ended without stopping at another '#'. Every '#' a reading maps lies
+    before that newline (a resumed pass starts at the last one it maps), so from the same state two readings
+    lex the same rest, and a later one takes the recorded rest instead of lexing it again: readings of a '#'
+    line meet again at its newline, so the text after it is lexed once too."""
+
+    def __init__(self, at, segments, argv, argv_opaque, argv_leading_tilde, argv_spelling, redirects, opaque,
+                 seg_start, pending_heredocs, nest, glued_at, before, heredocs, tails):
+        self.at = at
+        self.segments = segments
+        self.argv = argv
+        self.argv_opaque = argv_opaque
+        self.argv_leading_tilde = argv_leading_tilde
+        self.argv_spelling = argv_spelling
+        self.redirects = redirects
+        self.opaque = opaque
+        self.seg_start = seg_start
+        self.pending_heredocs = pending_heredocs
+        self.nest = nest
+        self.glued_at = glued_at
+        self.before = before
+        self.heredocs = heredocs
+        self.tails = tails
+
+
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -1263,6 +2277,15 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
     call. Linear, non-recursive, stdlib-only.
 
+    An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
+    holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
+    every reading are returned one reading after another, each reading's last segment ending with no
+    separator as a newline-ended one does, so a caller that judges every segment it is given decides at least
+    as strictly as on the strictest single reading. Where the readings cannot be judged (more than
+    _HASH_READING_LIMIT uncertain '#', one in or right after a backquote substitution, or a reading that does
+    not lex) it raises _UncertainHashError, a ValueError, and the caller takes its fallback over
+    _hash_doubt_scan.
+
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete, in_progress), where segments are the segments recovered before the
     first unparseable construct, complete is False when such a construct truncated the scan (True when the
@@ -1273,35 +2296,254 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     inspect a resolvable PREFIX (an earlier relative cd/redirect) even when a LATER segment is unparseable,
     rather than discarding every parsed segment on the first heredoc/here-string/process-substitution. The
     default partial=False keeps the list-returning, raise-on-error contract every other caller relies on.
+    Under the readings each reading is lexed partially, the recovered segments of every reading are returned
+    in turn, complete is True only when every reading parsed whole, and in_progress is the last reading's
+    flag, so a segment an earlier reading was still inside stays in the list and is read like a complete
+    one; where the readings cannot be judged, the segments recovered before the first uncertain '#' are
+    returned with complete False.
 
-    locale is passed to _read_word for every word: True reads a bash locale quote $"..." as a double-quoted
-    string, and the default False keeps the reading every other caller relies on.
+    Where a reading read a quoted here-document's body in a substitution that main's skip reads otherwise,
+    main's reading of the command (_main_reading) follows the readings where it lexes, and a partial lex
+    always returns its recovered segments, so a caller that judges every segment it is given decides at least
+    as strictly as on main's segments too; where a full lex of main's reading fails, _SubstHeredocs.reads
+    moves instead (MAIN'S DECISION AS A FLOOR, above _MainHashReading, and _beside_main_reading).
 
-    skip_empty True leaves out every segment with no word and no redirect, whose record would be
-    _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no record,
-    list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only a
-    caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
+    locale is passed to _read_word for every word, under every reading: True reads a bash locale quote
+    $"..." as a double-quoted string, and the default False keeps the reading every other caller relies on.
+
+    skip_empty True leaves out, under every reading, every segment with no word and no redirect, whose record
+    would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
+    record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
+    a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
     list) passes it; the default False keeps every record."""
+    try:
+        readings = _lex_readings(command, partial, locale, skip_empty)
+    except _UncertainHashError as exc:
+        if not partial:
+            raise
+        return _lex_resume_partial(command, exc, locale, skip_empty)
+    if partial:
+        return ([seg for segs, _complete, _open in readings for seg in segs],
+                all(done for _segs, done, _open in readings), readings[-1][2])
+    return [seg for segs in readings for seg in segs]
+
+
+def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
+    """The partial lex of command after _lex_readings raised the _UncertainHashError exc (the readings could
+    not be judged): a lex under no reading makes the first reading's lex up to the first uncertain '#', where
+    it recovers what it read, so it resumes where that reading stopped (exc.first, when there is one) instead
+    of lexing the text before it again. Returns the partial-mode (segments, complete, in_progress) of
+    _lex_command. A caller that itself caught that error from a full lex passes it here to read the recovered
+    prefix without a second pass over that text, unless the error marks a reading that failed to lex
+    (reading_failed), where a partial lex recovers every reading's segments and the caller must lex partially
+    in full (_gate_recovered_sink); exc must come from a lex of this same command with this locale and
+    skip_empty, whose state the fork carries."""
+    lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
+    readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+    return ([seg for segs, _complete, _open in readings for seg in segs],
+            all(done for _segs, done, _open in readings), readings[-1][2])
+
+
+def _lex_readings(command, partial=False, locale=False, skip_empty=False):
+    """The lex of command under every reading of its uncertain '#' characters (the comment above
+    _nest_track): a list with one _lex_reading result per reading, a single entry for a command with none.
+    Each reading maps the index of each uncertain '#' the lex meets (one inside a substitution or expansion
+    that a double-quoted string holds included, _skip_quoting) to True (a comment to the end of its line) or
+    False (word text), and each is a normal lex of the whole command, with locale passed to every word read
+    (_read_word) and skip_empty to every pass (_lex_command). The readings are enumerated
+    depth first, the comment reading of a '#' before its word-text reading, and stop at
+    _HASH_READING_LIMIT uncertain '#' characters per reading, so at most sixteen readings of those '#'
+    characters and thirty-one lexes per call. That bounds how many lexes a call makes, not how long they take:
+    each lex makes at most two passes, each taking time linear in the length of the command (COST in the
+    comment above _nest_track), so a call takes at most sixty-two linear passes, and a caller that calls this, or
+    _lex_command, more than once makes up to that many lexes each time. Where a reading read a body in a
+    substitution that main's skip reads otherwise, main's reading follows (_beside_main_reading): one more
+    reading and one more pass per call, made only where such a reading made one pass, so seventeen readings may
+    be returned and the pass bound holds. Inside
+    _SubstHeredocFloor the list is main's reading alone (_main_reading), one pass.
+
+    A lex stopped at an uncertain '#' its reading does not map at a word boundary, or at the start of a
+    redirect target, hands over where it stopped (_LexFork), and both readings of that '#' resume there
+    instead of lexing the text before it again, sharing the segments it had built. Both readings agree
+    with the stopped one on every '#' before it, so up to that '#' each would have made the same lex. So
+    the text before the first such '#' is lexed once, not once per lex, and the segments it ends are built
+    once and shared by every reading's list; a long run of separators or parentheses before the '#'
+    characters costs one pass whatever the number of readings. An uncertain '#' met inside a word (in a
+    substitution a double-quoted string holds, or right inside a redirect target) can have changed the
+    nesting stack or the here-document state before it, so its readings lex the command again from the
+    start, as before.
+    Raises _UncertainHashError beyond that bound, at a '#' in or right after a backquote substitution,
+    and when a reading fails to lex for another reason after an uncertain '#' was read (a ValueError the
+    plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
+    another reason returns its recovered segments, as a partial lex does."""
+    if _SubstHeredocs.main_lex:
+        return [_main_reading(command, partial, locale, skip_empty)]
+    readings = []
+    misread = False
+    pending = [({}, None)]
+    first = None  # the first reading's _LexFork, where it stopped at the command's first uncertain '#'
+    while pending:
+        reading, fork = pending.pop()
+        try:
+            lexed, body = _lex_reading(command, partial, reading, locale, skip_empty, fork)
+        except _UncertainHashError as exc:
+            if not reading:
+                first = exc.fork
+            if exc.backquote or exc.at is None or exc.at in reading or len(reading) >= _HASH_READING_LIMIT:
+                exc.first = first
+                raise
+            # A stack: the comment reading, pushed last, is lexed first.
+            pending.append((_hash_reading_with(reading, exc.at, False), exc.fork))
+            pending.append((_hash_reading_with(reading, exc.at, True), exc.fork))
+        except ValueError as exc:
+            if not reading:
+                raise
+            doubt = _UncertainHashError("a reading of an uncertain '#' does not lex: {}".format(exc))
+            doubt.first = first
+            doubt.reading_failed = True
+            raise doubt from exc
+        else:
+            readings.append(lexed)
+            misread = misread or body
+    return _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings
+
+
+def _hash_reading_with(reading, at, comment):
+    """A copy of the reading map with the '#' at index at read as a comment (comment True) or word text."""
+    out = dict(reading)
+    out[at] = comment
+    return out
+
+
+def _lex_reading(command, partial, hash_reading, locale=False, skip_empty=False, fork=None):
+    """One lex of command (see _lex_command for the segments it returns, the partial contract, locale and
+    skip_empty) with
+    each uncertain '#' read as hash_reading maps its index (True a comment to the end of its line, False word
+    text). An uncertain '#' that hash_reading does not map, or any uncertain '#' when hash_reading is None,
+    raises _UncertainHashError carrying its index; in partial mode it does so too, unless hash_reading is
+    None, where the segments recovered before it are returned as for any other unparseable construct. A lex
+    that reads a quoted here-document's body inside a command substitution and then meets another command
+    substitution starts again with no body read (the HERE-DOCUMENTS paragraph of _skip_quoting), so it makes
+    at most two passes. Returns (lexed, misread): lexed is that lex, and misread is True when its result read
+    a body in a substitution that main's skip reads otherwise (_subst_heredoc_misread), in one pass, where the
+    caller adds main's reading (_beside_main_reading, MAIN'S DECISION AS A FLOOR above _MainHashReading).
+
+    fork, when given, is where a lex under a reading that hash_reading extends stopped (_LexFork, from
+    _lex_readings), and the lex resumes there: the pass it stopped in (one reading bodies, or the second,
+    reading none) made the same lex up to there under hash_reading, since the stopped reading's lex
+    consulted no '#' that hash_reading maps otherwise. A pass reading bodies that then starts again lexes
+    the command again from the start reading none, as above."""
+    if fork is not None and fork.heredocs is None:
+        return _lex_pass(command, partial, hash_reading, locale, None, skip_empty, fork), False
+    heredocs = _SubstHeredocs() if fork is None else fork.heredocs.copy()
+    try:
+        lexed = _lex_pass(command, partial, hash_reading, locale, heredocs, skip_empty, fork)
+    except _SubstHeredocRetry:
+        return _lex_pass(command, partial, hash_reading, locale, None, skip_empty), False
+    return lexed, heredocs.floor
+
+
+def _main_reading(command, partial, locale=False, skip_empty=False):
+    """Main's reading of command (MAIN'S DECISION AS A FLOOR, above _MainHashReading): one lex that reads no
+    here-document body in a substitution and reads each '#' as main's lexer reads it (_MAIN_HASH_READING), so
+    it makes one pass and raises no _UncertainHashError; see _lex_command for what it returns, the partial
+    contract, locale and skip_empty."""
+    return _lex_pass(command, partial, _MAIN_HASH_READING, locale, None, skip_empty)
+
+
+def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
+    """readings, a lex's own readings of command, one of which read a body in a substitution that main's skip
+    reads otherwise, with main's reading of command (_main_reading) after them where it lexes; a partial lex
+    of main's reading always does, with the segments it recovers past the body. Where a full lex of main's
+    reading fails, readings alone, and _SubstHeredocs.reads moves, so each guard also takes the decision of its
+    path for a lex that fails (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
+    try:
+        mains = _main_reading(command, partial, locale, skip_empty)
+    except ValueError:
+        _SubstHeredocs.reads += 1
+        return readings
+    return readings + [mains]
+
+
+def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
+    """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
+    subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
+    skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
+    is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
+    hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
+    the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
+    _WordSpellings each segment's argv that holds a word is a _SpelledWords holding the words' _WordSpelling records
+    (spelled, the word reader's one-element list, and argv_spelling, parallel to argv), and a plain list outside it
+    or with no word."""
     n = len(command)
-    segments = []
-    argv = []
-    argv_opaque = []
-    argv_leading_tilde = []
-    redirects = []
-    opaque = [False]
-    seg_start = [0]
-    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+    spelled = [None] if _WordSpellings.on else None
+    if fork is None:
+        segments = []
+        argv = []
+        argv_opaque = []
+        argv_leading_tilde = []
+        argv_spelling = None if spelled is None else []
+        redirects = []
+        opaque = [False]
+        seg_start = [0]
+        pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+        nest = _NestStack()  # the nesting stack of the '#' comment rule (see the comment above _nest_track)
+        i = 0
+        glued_at = -1  # the index just past a ')': a word read there may continue the word before the ')'
+        before = "break"  # what precedes index i, a backslash-newline aside, for _hash_comment_reading
+    else:
+        segments = list(fork.segments)
+        argv = list(fork.argv)
+        argv_opaque = list(fork.argv_opaque)
+        argv_leading_tilde = list(fork.argv_leading_tilde)
+        # A fork from a lex outside _WordSpellings carries no records to resume, so its segments get none either.
+        argv_spelling = None if spelled is None or fork.argv_spelling is None else list(fork.argv_spelling)
+        redirects = list(fork.redirects)
+        opaque = [fork.opaque]
+        seg_start = [fork.seg_start]
+        pending_heredocs = list(fork.pending_heredocs)
+        nest = fork.nest.copy()
+        i = fork.at
+        glued_at = fork.glued_at
+        before = fork.before
+    # The index of the uncertain '#' whose reading the token at i is asking for, and the index a reading that
+    # maps it resumes at (-1 for i): the start of a word read that began with backslash-newlines and stopped
+    # at that '#', since that read already asked whether the reading takes the '#' as word text (_LexFork).
+    if _LexPlaces.spans is not None:
+        del _LexPlaces.spans[:]  # a pass records afresh, so a pass that starts again drops the last one's
+    hash_at = [-1, -1]
+    unstarted = (-1, -1)  # (start, stop) of the last word read that stopped with nothing started
+    tails = {} if fork is None else fork.tails
+    tail_key = None  # this resumed pass's state at the first newline it ends (_LexFork.tails), once reached
+    tail_from = 0
+
+    def remember(flags):
+        # Record what this resumed pass built after its first newline, for a later reading that reaches the
+        # same state there (_LexFork.tails).
+        if tail_key is not None and tail_key not in tails:
+            tails[tail_key] = (segments[tail_from:], flags,
+                               None if subst_heredocs is None else subst_heredocs.state())
+
+    def words():
+        # The segment's argv: a copy of the words read so far, with their spelling records inside _WordSpellings. A
+        # segment with no word gets a plain list there too: no reader of the record finds anything in it, and a long
+        # run of separators then builds no record object per segment.
+        return list(argv) if argv_spelling is None or not argv else _SpelledWords(argv, argv_spelling)
 
     def end_segment(sep, op_start, next_start):
-        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde and opaque
-        # change only together with argv, so a skipped segment leaves them empty and False as well.
+        # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
+        # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
         if argv or redirects or not skip_empty:
-            segments.append(_Segment(list(argv), sep, list(redirects),
-                                      command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
-                                      list(argv_leading_tilde)))
+            # words(), written out: this runs once per segment, and a long run of separators makes many.
+            segments.append(_Segment(list(argv) if argv_spelling is None or not argv
+                                     else _SpelledWords(argv, argv_spelling), sep, list(redirects),
+                                     command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                     list(argv_leading_tilde)))
             del argv[:]
             del argv_opaque[:]
             del argv_leading_tilde[:]
+            if argv_spelling:
+                del argv_spelling[:]
             del redirects[:]
             opaque[0] = False
         seg_start[0] = next_start
@@ -1310,11 +2552,22 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
         k = at + oplen
         while k < n and command[k] in " \t":  # inline whitespace before the target (never a newline)
             k += 1
-        # A redirect target that begins with an unquoted '#' is a comment where a filename must be (bash
-        # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
-        if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
+        # A redirect target that begins with an unquoted '#' follows the operator or a blank, so under the
+        # comment rule it is either a certain comment where a filename must be (the redirect has no target)
+        # or, inside an open parenthesis, ${...} or backquote substitution, a '#' whose reading depends on
+        # context. Read as a comment it leaves the redirect with no target (cannot-evaluate, ASK); read as
+        # word text it begins the target.
+        hash_target = False
+        if k < n and command[k] == "#" and _hash_comment_reading(nest, "break") is None:
+            hash_at[0], hash_at[1] = k, -1
+            hash_target = _hash_reading_choice(hash_reading, k, nest) is False
+            hash_at[0] = -1
+        if (k >= n or command[k] == "\n" or command[k] in _METACHARS
+                or (command[k] == "#" and not hash_target)):
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, locale)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, nest,
+                                                                      hash_reading=hash_reading, locale=locale,
+                                                                      heredoc=subst_heredocs)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -1323,35 +2576,118 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     try:
         if "\x00" in command:
             raise ValueError("NUL in command")
-        i = 0
         while i < n:
             c = command[i]
             if c in " \t":
+                before = "break"
                 i += 1
                 continue
             if c == "\n":
+                before = "break"
                 end_segment("", i, i + 1)
                 i += 1
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s).
+                    body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
+                    if _LexPlaces.spans is not None:
+                        # The exact-delimiter-line skip above ends each body where bash ends it only
+                        # when the body is read at the TOP LEVEL of the command: inside a command or
+                        # process substitution or backquotes, bash 5.3 ends a body at a line that
+                        # merely STARTS with the delimiter when a ')' or a backquote follows it on
+                        # that line (after x=$(cat <<'EOF' then body then the line EOF), bash runs
+                        # the text after that line as commands, while this skip reads it as body),
+                        # and an unterminated body here consumes text bash executes. The nesting
+                        # stack alone cannot prove such a group closed (a bare case pattern's ')'
+                        # pops its parenthesis), so the span is recorded as a here-document body
+                        # ONLY when nothing is open on the stack AND no '(' and no backquote appears
+                        # anywhere before the body, quoted or not; every other body records as
+                        # "code", which the bare-'&' narrowing never lifts (fail closed), while the
+                        # segments are unchanged for every other reader of this lex.
+                        trusted = (not nest and command.find("(", 0, body_at) == -1
+                                   and command.find("`", 0, body_at) == -1)
+                        _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "code"))
                     del pending_heredocs[:]
                     seg_start[0] = i
+                if fork is not None and tail_key is None:
+                    # A resumed pass's first newline: where an earlier reading reached the same state, take
+                    # the rest it built (_LexFork.tails).
+                    tail_key = (i, tuple(nest), glued_at, before,
+                                None if subst_heredocs is None else subst_heredocs.state())
+                    tail_from = len(segments)
+                    seen = tails.get(tail_key)
+                    if seen is not None:
+                        rest, flags, final = seen
+                        segments.extend(rest)
+                        if subst_heredocs is not None:
+                            subst_heredocs.restore(final)
+                        return (segments,) + flags if partial else segments
                 continue
             if c == "#":
-                # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of
-                # the line is ignored, so a redirect or pipe that is actually commented out (git diff # >
-                # /tmp/x) never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally
-                # inside _read_word and never reaches this word-start position.
-                nl = command.find("\n", i)
-                i = n if nl == -1 else nl
-                continue
+                # An unquoted '#' at a WORD BOUNDARY. In a certain context (after a blank, a newline, one of
+                # ; & | < > or at the start, with nothing open on the nesting stack) it starts a comment to
+                # end of line (bash): the rest of the line is ignored, so a redirect or pipe that is actually
+                # commented out (git diff # > /tmp/x) never earns a proof. Anywhere else here (right after a
+                # '(' or ')', as in 'x=$(true)#; cmd', or inside an open parenthesis, '${...}' or backquote
+                # substitution) its reading depends on context: this reading's hash_reading decides it (a
+                # comment, or word text read by the word reader below), else cannot-evaluate. A mid-word '#'
+                # (--rev=abc#1, ticket#123) is read inside _read_word and never reaches this position.
+                comment = _hash_comment_reading(nest, before)
+                if comment is None:
+                    hash_at[0], hash_at[1] = i, unstarted[0] if unstarted[1] == i else -1
+                    comment = _hash_reading_choice(hash_reading, i, nest)
+                    hash_at[0] = -1
+                if comment:
+                    nl = command.find("\n", i)
+                    if _LexPlaces.spans is not None:
+                        _LexPlaces.spans.append((i, n if nl == -1 else nl, "comment"))
+                    i = n if nl == -1 else nl
+                    continue
             if c in _METACHARS:
                 op, kind, oplen = _match_operator(command, i, n)
                 if kind == "sep":
+                    if op in ("(", ")"):
+                        _nest_track(nest, op, False)
+                        before = "paren"
+                        if op == ")":
+                            glued_at = i + 1
+                    else:
+                        before = "break"
                     end_segment(op, i, i + oplen)
                     i += oplen
+                    if oplen == 1 and op in ";()" and i < n and command[i] == op:
+                        # A run of one same one-character separator. After end_segment, argv and redirects
+                        # are empty, so each further character of the run ends one more EMPTY segment with
+                        # this op as its separator and an empty raw slice, moves the nesting stack the way
+                        # _nest_track moves it for that character, and leaves before (set above, the same
+                        # for every character of the run) and, for ')', glued_at just past it. Building
+                        # those records in one batch leaves every record and every piece of state exactly
+                        # as the one-character-per-loop-step path leaves them, without one full loop step
+                        # (operator match, closure calls) per character, so a long run costs little more
+                        # than its length in list appends.
+                        run = i
+                        while run < n and command[run] == op:
+                            run += 1
+                        count = run - i
+                        if op == "(":
+                            nest.extend("(" * count)
+                        elif op == ")":
+                            pops = count
+                            while pops and nest and nest[-1] == "(":
+                                nest.pop()
+                                pops -= 1
+                            glued_at = run
+                        if not skip_empty:
+                            # One record per character, as on the per-character path; the records are
+                            # identical and every consumer reads a record without changing it (none
+                            # assigns to or extends a field), so they share one empty list for their
+                            # word and redirect fields rather than allocating four lists each.
+                            empty = []
+                            segments.extend([_Segment(empty, op, empty, "", False, empty, empty)
+                                             for _ in range(count)])
+                        seg_start[0] = run
+                        i = run
                     continue
                 if kind == "cannot":
                     if op == "<<":
@@ -1368,7 +2704,15 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, locale)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, nest,
+                                                                                 i == glued_at, hash_reading,
+                                                                                 locale, subst_heredocs, spelled)
+            if j == i:
+                # Unreachable while this loop decides every '#' before it calls the word reader, which then
+                # consumes at least one character (a '#' this reading takes as word text included); kept so a
+                # later change that lets the two disagree fails closed (cannot-evaluate) instead of looping
+                # forever inside a hook.
+                raise ValueError("lexer made no progress")
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -1386,11 +2730,15 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
                 argv.append(text)
                 argv_opaque.append(w_opaque)
                 argv_leading_tilde.append(w_leading_tilde)
+                if argv_spelling is not None:
+                    argv_spelling.append(spelled[0])
                 if w_opaque:
                     opaque[0] = True
+            else:
+                unstarted = (i, j)
             i = j
         end_segment("", n, n)
-    except ValueError:
+    except ValueError as exc:
         # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
         # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
         # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
@@ -1398,15 +2746,26 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
         # construct stays uninspected, a disclosed residual. The in_progress flag tells a caller that the
         # last recovered segment is that still-open one, so a caller that must judge only complete segments
         # drops exactly it and never a segment the scan had already closed. The default contract re-raises
-        # for every other caller.
-        if partial:
+        # for every other caller, and so does a partial lex that enumerates readings at an uncertain '#' it
+        # has no reading for (_lex_readings).
+        if partial and (hash_reading is None or not isinstance(exc, _UncertainHashError)):
             in_progress = bool(argv or redirects)
             if in_progress:
-                segments.append(_Segment(list(argv), "", list(redirects),
+                segments.append(_Segment(words(), "", list(redirects),
                                          command[seg_start[0]:], opaque[0], list(argv_opaque),
                                          list(argv_leading_tilde)))
+            if _LexStops.at is not None:
+                _LexStops.at.append((i, segments[-1].argv if in_progress and argv else None))
+            remember((False, in_progress))
             return segments, False, in_progress
+        if isinstance(exc, _UncertainHashError) and exc.at is not None and exc.at == hash_at[0]:
+            # Stopped at the '#' the token at i asks about, before the token changed anything: a reading
+            # that maps that '#' resumes here (_LexFork).
+            exc.fork = _LexFork(i if hash_at[1] < 0 else hash_at[1], segments, argv, argv_opaque,
+                                argv_leading_tilde, argv_spelling, redirects, opaque[0],
+                                seg_start[0], pending_heredocs, nest, glued_at, before, subst_heredocs, tails)
         raise
+    remember((True, False))
     if partial:
         return segments, True, False
     return segments
@@ -1466,10 +2825,18 @@ def _command_word(tokens):
 # own token) is never mistaken for the subcommand: '-C DIR', '-c NAME=VALUE', and the long forms below.
 # Their '--opt=value' inline shape carries the value in the same token (an '=' is present), consuming no
 # separate arg; that case is handled by the '=' test, so only the space-separated forms skip two tokens.
+# The set was checked against git(1) of git 2.53.0 and git 2.56.0 and by running every option-shaped string
+# of each git binary as a global option ('git OPT VALUE version'): on both, exactly -C, -c, --git-dir,
+# --work-tree, --namespace, --config-env, --attr-source and --shallow-file take the next word as their value.
+# --shallow-file is absent from git(1) yet consumes the next word ('git --shallow-file /dev/null version'
+# runs version; its '=' form is an unknown option), so without it 'git --shallow-file status push --force'
+# read 'status' as the subcommand. --exec-path and --super-prefix take no separate value (a bare --exec-path
+# prints the exec path and exits, and both versions reject --super-prefix as an unknown option), so the
+# word skipped after them is harmless: git runs no subcommand there.
 _GIT_ARG_OPTS = frozenset((
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
-    "--config-env", "--attr-source"))  # --attr-source (git 2.40+) consumes its value in separated form;
-    # git does NOT abbreviate top-level options, so exact membership is complete here (F-121)
+    "--config-env", "--attr-source", "--shallow-file"))  # --attr-source (git 2.40+) consumes its value in
+    # separated form; git does NOT abbreviate top-level options, so exact membership is complete here
 
 
 def _git_subcommand_rest(tokens):
@@ -1968,7 +3335,15 @@ def _has_info_flag(tokens):
     safe-direction residual is an over-ask/over-deny on ANY complete option placed immediately before help
     (a valueless flag, git commit --amend --help, or an attached-value flag, git commit -mfoo --help / git
     push -ofoo --help --force), where git shows help but the preceding '-' token makes this treat the
-    segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
+    segment as live; recoverable, re-issue as 'git <subcommand> --help'.
+    A git alias is the exception: git runs a shell alias (a value starting with '!') with the flag passed on to it
+    (on git 2.53.0 'git -c alias.c=!VALUE c -h', 'git -c alias.c=!VALUE c x -h' and 'git -c alias.c=!VALUE c x
+    --help' each ran the alias, a commit past a refusing pre-commit hook included, and so did 'git c -h' under such
+    an alias in GIT_CONFIG_PARAMETERS), and the value of an alias cannot be read with certainty here (see
+    _GIT_ALIAS_KEY_RE). So a guard that reads a git alias (_git_alias_segment) tests it whatever this returns:
+    the flag never exempts a segment that defines one for its git command or runs under one the command's text or
+    the hook's environment defines. The alias name followed directly by --help ('git -c alias.c=!VALUE c --help')
+    printed only the alias on git 2.53.0 and ran nothing; it is refused all the same, a disclosed over-refusal."""
     end = len(tokens)
     for j, tok in enumerate(tokens):
         if tok == "--" or tok == "--end-of-options":  # git's two end-of-options spellings (F-117)
@@ -2346,7 +3721,16 @@ def diff_source_pretool(data):
     quotes, a compound, an extra option, a dynamic redirect, a non-pager pipe) is a console-readability
     CONVENTION, not a hazard, so it ALLOWS with an informational note rather than prompting. Across a compound
     or multiple producers, a CONFIRMED console dump anywhere still DENIES (deny outranks the allow-note), so a
-    multi-command form is never admitted on one safe segment when another is a confirmed dump."""
+    multi-command form is never admitted on one safe segment when another is a confirmed dump. A command
+    carrying a '#' whose comment reading depends on context (the shared lexer's comment rule) is judged on
+    the segments of both readings of each such '#'; one the lexer cannot judge that way (_UncertainHashError)
+    DENIES an apparent producer its text names (_hash_doubt_names) as a possible dump rather than taking the
+    unparseable-command note (_diff_source_fallback), and DENIES as well when its text holds quoting that
+    fallback does not decode (_hash_doubt_opaque), where a producer cannot be ruled out. Where a lex read a
+    quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
+    _MainHashReading), main's segments are judged beside the lex's own where main's reading lexes, and where
+    it fails the fallback a lex that fails takes, which never denies, decides in place of this guard's
+    allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -2361,17 +3745,37 @@ def diff_source_pretool(data):
             "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
             "string, so the diff-source check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
         segments = _lex_command(command)
+    except _UncertainHashError:
+        # The fallback would only note an apparent producer; one behind a '#' whose comment reading the
+        # lexer could not judge under both readings is treated as the confirmed console dump it may be, and
+        # so is a command whose quoting the fallback does not decode.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that dumps a "
+                                           "patch to the console")
+        if _hash_doubt_names(command, _RAW_DIFF_PRODUCER_RE):
+            return _deny(
+                _hash_doubt_reason("cnsdif (no-console-diff-dumps)", "the git diff-producer its text names "
+                                   "may dump a patch to the console"),
+                "AIQT guardrail: denied an apparent git diff-producer behind a '#' this guard could not read "
+                "(rule cnsdif, fail-closed).")
+        return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
-    possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
-    if not possibles:
-        return _allow()  # no producer-capable form anywhere: the bounded true boundary allows
-    # AIRTIGHT-NARROW ALLOW: only when the WHOLE command is one of the five closed proofs.
-    if (_diff_proof_help(command) or _diff_proof_summary(command)
-            or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-            or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+    # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
+    # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
+    possibles = [(index, seg) for index, seg in enumerate(segments)
+                 if (seg.argv or seg.raw) and _is_possible_producer(seg)]
+    # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
+    # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
+    # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
+    if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
+                         or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
+                         or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+        if _SubstHeredocs.reads != reads:
+            return _diff_source_fallback(command)
         return _allow()
     # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
     # compound), and any remaining producer-capable-but-unproven form ASKS.
@@ -2952,7 +4356,7 @@ def find_ai_authorship(command):
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False):
     """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
     readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
     once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
@@ -2968,7 +4372,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
     bounds that a reading charges are spent it builds no further run line, and each rebase reads its options
     only up to the next rebase subcommand (_cmtidn_run_lines), so the cost stays linear. judged maps each word
     already scanned for a co-author trailer, on this line or another line of the command, to its result
-    (_co_author_ai). A parse error in the command itself (depth 0) raises: at once when neither reading parses
+    (_co_author_ai). from_env is True when a git alias defined outside a git command's own segment, through a git
+    configuration variable the text of a line that encloses this one names (_git_config_env_named) or the hook's
+    environment carries (_git_alias_inherited), applies to every git command of that line, which this one runs
+    under. A parse error in the command itself (depth 0) raises: at once when neither reading parses
     it, and otherwise after the other reading has found nothing."""
     readings = []  # (the readings that read the line so, its segments)
     error = None
@@ -2978,7 +4385,11 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
                 same.append(locale)  # the readings differ only at a $" (_read_word): one serves for both
             break
         try:
-            segments = _segments(command, locale=locale)
+            # skip_empty: this reader decides on each segment's words, and the equality below lets one
+            # reading serve for both locales by comparing the kept (argv, sep_after) records, so nothing
+            # it reads comes from a segment with no word and no redirect; a long run of separators builds
+            # and feeds it no record.
+            segments = _segments(command, locale=locale, skip_empty=True)
         except ValueError as exc:
             error = error or exc
             continue
@@ -2992,6 +4403,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
         unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
     elif error is not None and not readings:
         raise error
+    line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
         for tokens, _sep in segments:
@@ -2999,7 +4411,23 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
             if hit is not None:
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
-            if any(tokens[k] in COMMIT_VERBS for k in subs):
+            if not subs:
+                continue  # no git command: no commit to read and no run line to build
+            if line_env is None:
+                # The hook's environment is read at depth 0 only: a nested line is built by a git command of the
+                # line that encloses it, whose line_env, passed down as from_env, already holds that reading.
+                line_env = from_env or (depth == 0 and _git_alias_inherited()) or _git_config_env_named(command)
+            # A subcommand word after a git alias definition (_git_alias_defined_at) may name that alias, which
+            # may run a commit, so the segment is read as a commit-family one; so is every subcommand word of a
+            # line whose text names a git configuration variable (_git_config_env_named) or that runs under an
+            # alias the hook's environment carries (_git_alias_inherited).
+            if line_env:
+                alias_at = -1
+            elif _git_alias_text_may_define(" ".join(tokens)):
+                alias_at = next((j for j in range(len(tokens)) if _git_alias_defined_at(tokens, j)), len(tokens))
+            else:
+                alias_at = len(tokens)
+            if any(tokens[k] in COMMIT_VERBS or alias_at < k for k in subs):
                 hit = _commit_message_and_author_ai(tokens, judged)
                 if hit is not None:
                     return hit
@@ -3017,7 +4445,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged):
                         if depth >= _CMTIDN_RUN_DEPTH or all(spent):
                             break
                     hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
-                                          judged)
+                                          judged, line_env)
                     if hit is not None:
                         return hit
     if error is not None and depth == 0:
@@ -3069,6 +4497,8 @@ def _commit_identity_fallback(command, error):
     removed as well, since bash drops the '$' of a locale quote $"..." (--author=Cl$""aude ...); the cost is a
     disclosed over-deny of such a command whose text merely names an AI product, and the second form also joins
     the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
+    None of these scans reads the git subcommand, so a git command that runs under a git alias the command defines
+    (the reader's _git_config_env_named and _git_alias_defined_at) is judged here as a commit-family one is.
     Never silent-allow a plausibly-violating command the check could not read in full."""
     if error == _CMTIDN_TOO_LONG:
         match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
@@ -3117,7 +4547,13 @@ def _commit_identity_fallback(command, error):
 
 def commit_identity(data):
     """cmtidn (integ/commit-identity), PreToolUse/Bash: deny a git command that records an AI as
-    author, committer, or co-author. No escape hatch: the rule is absolute."""
+    author, committer, or co-author. No escape hatch: the rule is absolute. Behind a '#' whose comment
+    reading the shared lexer cannot judge under both readings, the raw scan also reads _hash_doubt_scan, and
+    a command whose quoting that scan does not decode (_hash_doubt_opaque) denies. Where a lex read a quoted
+    here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
+    _MainHashReading), main's segments are read beside the lex's own where main's reading lexes, and where it
+    fails the raw fallback a lex that fails takes, which denies or allows, decides in place of this guard's
+    allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -3132,11 +4568,24 @@ def commit_identity(data):
             "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
             "so the commit-identity check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
         hit = find_ai_authorship(command)
+    except _UncertainHashError as exc:
+        # A '#' the lexer could not judge under both readings, in the command itself under each locale
+        # reading: the raw scan also reads the text with its backslash-newlines, quote characters and
+        # backslashes removed (_hash_doubt_scan), and a command whose quoting that removal does not decode
+        # denies, since an AI identity cannot be ruled out there.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("cmtidn (commit-identity)", "a git command recording an AI "
+                                           "identity (a co-author trailer, an --author value, a git identity "
+                                           "variable or a user.name or user.email value)")
+        return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
     except ValueError as exc:
         return _commit_identity_fallback(command, str(exc))
     if hit is None:
+        if _SubstHeredocs.reads != reads:
+            return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
@@ -3254,6 +4703,9 @@ def absolute_paths(data):
 # judged, to avoid over-firing). A relative or unresolvable such position ASKS; an absolute position, and
 # a command carrying neither, allow. It never denies: the human confirming is the opt-out.
 _CD_BUILTINS = frozenset(("cd", "pushd"))
+# A cd or pushd word, or a '<', in a command's text: bash_absolute_paths' note test when a '#' whose comment
+# reading the lexer cannot judge under both readings stops it (read over _hash_doubt_scan).
+_ABSPTH_DOUBT_RE = re.compile(r"(?:^|[\s;&|()`])(?:cd|pushd)(?=$|[\s;&|()`])|<")
 # ROUND-2 FINDING 10: redirect operators that TRUNCATE (zero) their file target on open. A truncating
 # redirect to a relative/opaque target can destroy the WRONG file if the ambient cwd differs, so abspth
 # denies it. The append forms ('>>', '&>>') and the read/read-write forms ('<', '<>', '<&') do NOT truncate
@@ -3351,7 +4803,21 @@ def bash_absolute_paths(data):
     (round-2 finding 10): a DESTRUCTIVE TRUNCATING redirect ('>', '>|', '&>', or a '>&' to a file) to a
     RELATIVE or OPAQUE target DENIES-and-educates - truncation ZEROES its target, so aiming it at a
     cwd-dependent relative/unverified path can destroy the WRONG file, the exact data-loss the absolute-paths
-    rule prevents. It never asks, and it does not judge an arbitrary command operand."""
+    rule prevents. It never asks, and it does not judge an arbitrary command operand. A command carrying a
+    '#' whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments
+    of both readings of each such '#'. Where the lexer cannot judge it that way (_UncertainHashError), a
+    '>' anywhere in its text (_hash_doubt_scan) DENIES, since a truncating redirect may sit past that '#',
+    and otherwise a cd or pushd word or a '<' in that text ALLOWS WITH THE NOTE, since a relative cd or
+    redirect may sit there, as does text holding quoting that scan does not decode (_hash_doubt_opaque), where
+    a cd cannot be ruled out. A redirect operator is never quoted, so the '>' test reads the text as written.
+    The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
+    and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
+    fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
+    uncertain '#' characters it can make up to twice the thirty-one lexes of one
+    _lex_readings call, each taking time linear in the command's length. Where a lex read a quoted here-document's body
+    that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), the partial lex
+    below returns main's partial reading beside its own, the segments main's lex holds where it lexes and
+    those its partial lex recovers past the body where it fails, so a reason either list carries counts."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -3374,8 +4840,53 @@ def bash_absolute_paths(data):
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
+    # A '#' whose comment reading the lexer cannot judge under both readings is the exception: the lexer
+    # reads nothing past it, so a command whose text carries a '>' (a truncating redirect, the deny tier, may
+    # follow it) denies, and one whose text names cd or pushd or carries a '<' notes, as does one whose
+    # quoting the fallback text does not decode (a cd may be spelled in it). This full lex and the partial
+    # lex below each make up to thirty-one lexes, each linear in the command's length, on a command with
+    # uncertain '#' characters, and both skip segments with no word and no redirect unbuilt. Where this full
+    # lex parses the whole command and main's reading of a body a lex read did not fail
+    # (_SubstHeredocs.reads still, the floor signal gate_weakening also reads), a partial lex of it would
+    # recover nothing more and return the same segments, so they are read directly; a command this lex raises
+    # on, or one whose failed main's reading leaves segments only a partial lex recovers (MAIN'S DECISION AS
+    # A FLOOR), is lexed again below.
+    segments = None
+    reads = _SubstHeredocs.reads
+    try:
+        segments = _lex_command(command, skip_empty=True)
+    except _UncertainHashError:
+        scan = _hash_doubt_scan(command)
+        if ">" in scan:
+            return _deny(
+                _hash_doubt_reason("abspth (absolute-paths)", "its text carries a '>', so a truncating "
+                                   "redirect to a relative or unverified target, which can destroy the wrong "
+                                   "file, cannot be ruled out"),
+                "AIQT guardrail: denied a possible truncating redirect behind a '#' this guard could not read "
+                "(rule abspth, fail-closed).")
+        if _hash_doubt_opaque(command):
+            return _allow_note(
+                "AIQT guardrail (rule abspth, absolute-paths): this command carries a '#' whose comment reading "
+                "depends on context that the shared lexer could not judge under both readings, and its text "
+                "holds quoting this guard's fallback does not decode (an ANSI-C $'...' or locale $\"...\" "
+                "quote, or a quote character or backslash next to a letter), so a relative cd, which resolves "
+                "against a working directory that can silently differ between calls, cannot be ruled out past "
+                "that '#'. This is a convention nudge, not a hazard, so it is allowed; prefer absolute paths, "
+                "or put a blank before such a '#' outside any grouping or substitution.")
+        if _ABSPTH_DOUBT_RE.search(scan):
+            return _allow_note(
+                "AIQT guardrail (rule abspth, absolute-paths): this command carries a '#' whose comment reading "
+                "depends on context that the shared lexer could not judge under both readings, and its text "
+                "names cd or pushd or carries a '<', so a relative cd or redirect target, which resolves "
+                "against a working directory that can silently differ between calls, may sit past that '#'. "
+                "This is a convention nudge, not a hazard, so it is allowed; prefer absolute paths, or put a "
+                "blank before such a '#' outside any grouping or substitution.")
+    except ValueError:
+        pass
     # The loop reads only each segment's words and redirects, so a segment with neither is skipped unbuilt.
-    segments = _lex_command(command, partial=True, skip_empty=True)[0]
+    # With main's segments, where a reading read a body main reads otherwise.
+    if segments is None or _SubstHeredocs.reads != reads:
+        segments = _lex_command(command, partial=True, skip_empty=True)[0]
     reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
     deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
@@ -3456,8 +4967,9 @@ def bash_absolute_paths(data):
 #                           form-classifier cannot resolve - ASKS without ever consulting the probe; and a
 #                           pristine lossy form on a not-provably-clean tree (tracked OR untracked change),
 #                           a worktree the guard cannot resolve to the session cwd, a status probe that did
-#                           not complete, or a softer/index-only discard (clean of untracked files, stash
-#                           drop/clear, branch -D, restore --staged, mixed/path reset, rm --cached) also ASKS.
+#                           not complete or answered malformed, or a softer/index-only discard (clean of
+#                           untracked files, stash drop/clear, branch -D, restore --staged, mixed/path reset,
+#                           rm --cached) also ASKS.
 # The gate is PURELY LEXICAL and never parses the bash grammar: the presence of any shell metacharacter in a
 # lossy-verb command is treated as a reason to ASK (a safe over-ask), so ONLY a metacharacter-free
 # 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
@@ -3478,10 +4990,12 @@ def bash_absolute_paths(data):
 # layer (see the block comment above _SNAPSHOTTABLE_VERBS) is SIDE-EFFECTING - it writes an inert
 # refs/aiqt-recovery/* snapshot ref and an external ledger for a not-provably-clean discard - but writes only
 # git objects and one private ref, never the real index, worktree, HEAD, or a branch. HONEST RESIDUAL (not
-# caught by a lexical hook): a git alias or shell function that renames git, a discard performed outside the
-# Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
-# discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
-# marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
+# caught by a lexical hook): a git alias defined in a configuration file, or a shell function, that renames git
+# (one the command defines or runs under denies, _git_local_alias, _git_alias_inherited, _git_alias_named), a
+# discard performed outside the Bash tool, or persistent shell/config state set in a prior turn; the
+# recovery/snapshot layer backstops a discard it CAN see, but cannot snapshot content the probe itself cannot
+# see (assume-unchanged/skip-worktree marks or submodule.<name>.ignore hide work from the probe) nor ignored
+# files (git add --all excludes them).
 # REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
 # command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
 # could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
@@ -3592,6 +5106,790 @@ def _git_sub_and_args(tokens):
     return None, []
 
 
+# A git alias that the command itself defines. git runs an alias in place of a subcommand word that names no
+# built-in and no git-NAME program, matching the word to the alias name without regard to case (on git 2.53.0
+# '-c alias.lg=log' made 'git LG' run log, and '-c alias.status=log' left 'git status' running status). The
+# definition is a -c or --config-env global option whose key lies in the alias section, or in the include or
+# includeIf section, which makes git read a file as more configuration that can hold an alias ('-c
+# include.path=FILE' ran an alias FILE defined), or the same key passed by a GIT_CONFIG_PARAMETERS or
+# GIT_CONFIG_KEY_<n> assignment before the command word (each observed on git 2.53.0). Such an alias cannot be
+# expanded here with certainty: a --config-env value lives in the environment and an include in a file, a value
+# starting with '!' runs a shell command, an alias may name another alias, and git splits the value by its own
+# quoting rules. So a git command that defines one runs an unknown subcommand, possibly a mutating one, and each
+# reader of the subcommand treats it that way (_git_local_alias), wherever the git word stands in its segment: the
+# command word, or a word behind a reserved word, a '{', '!', time or a wrapper (on git 2.53.0 with bash 5.3 'if
+# true; then git -c alias.p=log p; fi', '{ git -c alias.p=log p; }' and 'time git -c alias.p=log p' each ran the
+# alias). A definition outside the git command's own segment, through a git configuration variable the command's
+# text names or the hook's environment carries, is read below (_git_alias_named, _git_alias_outside). Outside this
+# lexical reading: an alias in a configuration file git reads anyway (the repository, global or system file, or one
+# an assignment such as GIT_CONFIG_GLOBAL or HOME points git at), the value of an assignment before the command word
+# built at run time, a definition or git word built at run time, and a definition inside the text of another word
+# (an sh -c, bash -c or eval body), which is one word here.
+# HOW A WORD IS SPELLED. The decoded word a reader matches is not the word bash builds where part of it comes from
+# an expansion: '-c "${A:-alias}.l"=log', "-c $'\x61lias.l'=log", '-c $"alias".l=log' and '-c {alias,x}.l=log'
+# each pass alias.l to git while the decoded key names no alias section, and bash splits what an unquoted expansion
+# yields into several words, so with D set to '/r -c alias.l=log', 'git -C $D l' passes git -C /r -c alias.l=log l
+# while 'git -C "$D" l' passes one word (bash 5.3 printed both). So where the lexer records how each word was
+# spelled (_WordSpellings, read from argv's _SpelledWords record), the rule is closed over the whole region a git
+# word's walk reads, from the word after it through its subcommand word (_git_local_alias): a word there that
+# carries an unquoted parameter or command expansion, or whose text came through an ANSI-C or locale quote
+# (_WordSpelling.unquoted), defines a git alias whatever it decodes to and whatever its position (an option word,
+# any option's value, or the word read as the subcommand). So does a word there holding an unquoted brace and a
+# comma, since bash expands it into several words that can be global options and a definition ('git
+# {-c,alias.l=log} l' runs 'git -c alias.l=log l'), except a -c or --config-env word and its value; and so does a
+# -c value or a --config-env word whose key part (the text before its first '=', or the whole word when it has
+# none) holds a character not spelled as plain literal text (_WordSpelling.literal: a parameter or command
+# expansion, inside double quotes too, an ANSI-C or locale quote, or a brace expansion) (_git_alias_defined_at). A
+# word reads as one word to bash only when no part of it can expand to several: a double-quoted expansion of the
+# positional list or of an array subscripted with @, in any parameter-expansion form ("$@", "${A[@]}", "${A[@]:0}",
+# _DQ_LIST_EXPANSION_RE), expands to one word per element ('set -- -c alias.l=log; git "$@" l' ran the alias on bash
+# 5.3), so the reader marks it as it marks an unquoted expansion. A word whose every expansion stands inside double
+# quotes and expands to one word keeps the plain reading: behind a literal key ('-c core.pager="$P"'), as another
+# option's value ('git -C "$D" log') or as the subcommand it defines nothing. The deny reason of each git guard
+# names a word read so as one the shell builds at run time, with the fix, and keeps the alias wording for a
+# definition its decoded words spell (_git_alias_built). Disclosed over-refusal (the safe direction): an unquoted variable in a git option or subcommand
+# position now reads as an alias ('git -C $D log', 'git $SUB', 'git -c core.pager=$P log'), as does one after any
+# other word the readers take for a git word ('grep -r git $D'), and a git command inside an unquoted backquote
+# substitution whose closing backquote the lexer reads into the subcommand word ('echo `git status`'); quoting
+# the expansion restores the plain reading. A key that is literal in effect but spelled through an expansion ("-c
+# $'core.pager'=cat", '-c "${K:-core.pager}"=cat') reads as an alias, and so does a brace word in the region that
+# expands to no option ('git {log,status}'). protected_line, gate_weakening, git_discard and branch_root lex inside
+# _WordSpellings, and _git_alias_spelled reads the same rule from the de-quoted text of an unparseable command,
+# where a quoted '$' or backquote counts as an unquoted one; a git region such a command leaves unread denies (A GIT
+# REGION THE LEXER DID NOT READ, above _git_region_open). A reader given words with no record reads the decoded
+# key alone, as before: git_explicit_binding, commit_identity and commit_msg_subst lex outside _WordSpellings, so on
+# a parsed command they read no spelling, while commit_msg_subst's unparseable fallback reads it through
+# _git_alias_recovered. Outside this reading: a word past the subcommand word; the git word itself, read by its
+# decoded text alone (an unquoted expansion in it, "git$IFS-c$IFS'alias.l=log' l", or a brace word that is the git
+# word, '{git,-c,alias.l=log} l', each passed -c alias.l=log); a word in the region that bash builds by filename
+# expansion (an unquoted '*', '?' or '[': '-[c]' passed -c where a file named -c existed) or by a brace sequence
+# expression ('-{c..c}' passed -c; it holds no comma), each printed so by bash 5.3; and a word whose every expansion
+# stands inside double quotes and expands to one word, which keeps the plain reading by decision, so one that names
+# an option at run time ('git -"$C" alias.l=log l' with C set to c) is not read as one.
+_GIT_ALIAS_KEY_RE = re.compile(r"(?i)(?:alias|include|includeif)\.")
+_GIT_CONFIG_ENV_ASSIGN_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|KEY_[0-9]+)\+?=")
+
+
+def _git_key_spelled(word, literal, skip):
+    """Whether the key part of word, the text from index skip to its first '=' (to the end when there is none),
+    holds a character not spelled as plain literal text, literal being the number of leading characters of word
+    that were (_WordSpelling.literal)."""
+    key_end = word.find("=", skip)
+    return literal < (len(word) if key_end < 0 else key_end)
+
+
+def _git_alias_defined_at(tokens, i):
+    """Whether tokens[i] defines a git alias for the command (see _GIT_ALIAS_KEY_RE): a separated -c or
+    --config-env whose next word starts with a key of the alias, include or includeIf section, an attached
+    --config-env=KEY=ENVVAR with such a key, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment whose
+    value names such a section. Where tokens carries the lexer's spelling record (_SpelledWords), a separated -c
+    or --config-env whose next word has a key part not spelled as plain literal text, or an attached
+    --config-env=KEY=ENVVAR whose KEY is not, defines one too, whatever the key decodes to (HOW A WORD IS SPELLED,
+    above). This reads the key part alone, so a value spelled so behind a literal key defines nothing here; the
+    region rule of _git_local_alias reads such a value as a definition where it carries an expansion that may expand
+    to several words (an unquoted one, or a double-quoted list expansion such as "$@") or came through an ANSI-C or
+    locale quote, and as none where its every expansion stands inside double quotes and expands to one word."""
+    token = tokens[i]
+    spelling = getattr(tokens, "spelling", None)
+    if token in ("-c", "--config-env"):
+        if i + 1 >= len(tokens):
+            return False
+        return bool(_GIT_ALIAS_KEY_RE.match(tokens[i + 1])) or (
+            spelling is not None and _git_key_spelled(tokens[i + 1], spelling[i + 1].literal, 0))
+    if token.startswith("--config-env="):
+        return bool(_GIT_ALIAS_KEY_RE.match(token[len("--config-env="):])) or (
+            spelling is not None and _git_key_spelled(token, spelling[i].literal, len("--config-env=")))
+    assign = _GIT_CONFIG_ENV_ASSIGN_RE.match(token)
+    return bool(assign and _GIT_ALIAS_KEY_RE.search(token, assign.end()))
+
+
+def _git_local_alias(tokens):
+    """Whether a segment defines a git alias for a git command of its own (_git_alias_defined_at): a word that
+    names git as a word (_GIT_WORD_RE) and is no option, wherever that word stands (the command word, or a word
+    behind a reserved word, a '{', '!', time or any wrapper), with a definition among the assignments before the
+    command word or among the git global options after that git word, walked as _git_sub_and_args walks them.
+    That git command's subcommand is then unknown and possibly mutating. One pass: a git word inside the options
+    an earlier git word's walk has read is the value of one of them, so its own walk would read the same options.
+    Where tokens carries the lexer's spelling record (_SpelledWords), the rule is closed over the region the walk
+    reads after that git word, through the word it stops at, which it reads as the subcommand (HOW A WORD IS
+    SPELLED, above): a word there that carries an unquoted parameter or command expansion or came through an ANSI-C
+    or locale quote (_WordSpelling.unquoted) defines one, whatever its position (an option word, any option's
+    value, or the subcommand word), and so does a word there spelled with an unquoted brace and holding a comma,
+    other than a -c or --config-env word and its value, which are read by their key part instead. The git word
+    itself is read by its decoded text alone: the lexer reads a backquote substitution's opening backquote, or a
+    whole ANSI-C quoted sh -c body, into the word that names git ('cd `git rev-parse --show-toplevel`', "bash -c
+    $'git status'"), where no word of the region carries an expansion. A segment none of whose words names git, read
+    as one search over its words joined at blanks (a blank is neither a letter of git nor a character allowed
+    between them, so a match there lies inside one word, with the same characters around it), defines none, and
+    its words are not walked one by one."""
+    if not _GIT_WORD_RE.search(" ".join(tokens)):
+        return False
+    start = _command_word_index(tokens)
+    assigned = any(_git_alias_defined_at(tokens, j) for j in range(start))
+    spelling = getattr(tokens, "spelling", None)
+    n = len(tokens)
+    end = 0
+    for k in range(start, n):
+        if k < end or tokens[k].startswith("-") or not _GIT_WORD_RE.search(tokens[k]):
+            continue
+        if assigned:
+            return True
+        i = k + 1
+        while i < n and tokens[i].startswith("-"):
+            if _git_alias_defined_at(tokens, i):
+                return True
+            step = 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+            config = tokens[i] in ("-c", "--config-env") or tokens[i].startswith("--config-env=")
+            if spelling is not None and any(
+                    spelling[j].unquoted or (not config and spelling[j].brace and "," in tokens[j])
+                    for j in range(i, min(i + step, n))):
+                return True
+            i += step
+        if spelling is not None and i < n and (spelling[i].unquoted or (spelling[i].brace and "," in tokens[i])):
+            return True
+        end = i
+    return False
+
+
+# A git alias defined outside the git command's own segment. git reads configuration from the environment
+# variables GIT_CONFIG_PARAMETERS, and GIT_CONFIG_COUNT with GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>, and a
+# shell can set a variable in more ways than a reading of shell forms can list: an export, declare -x, typeset -x
+# or local -x word, a bare assignment or a readonly word to a variable already exported, and under set -a also a
+# bare assignment, read, printf -v, a for loop variable, ${NAME:=...} or an assignment through a nameref (declare
+# -n), each one anywhere in a compound command (on git 2.53.0 with bash 5.3 a later 'git p' ran the alias p that
+# each of these defined). So no form is recognized. When the text of a command names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or
+# GIT_CONFIG_KEY_ anywhere, read with every quote character, backslash, '$' and newline removed
+# (_git_config_env_named), so a quoted, escaped or continued spelling counts as the plain one does, in any word,
+# a here-string, a comment or an echo, and in a parsed or an unparseable command alike, every git command of the
+# command counts as running under a git alias the command defines, those written before the name included, since
+# a loop or a function can run them after it (in 'for i in 1 2; do git p; export GIT_CONFIG_PARAMETERS=...; done'
+# the second pass ran the alias). A git command here is any segment one of whose words names git as a word
+# (_names_git), wherever the word stands (behind a reserved word, '!', time or a wrapper, or inside the text of
+# an sh -c or eval word), and, for the readers that deny such a git command and on an unparseable command, git
+# named as a word anywhere in the command's text (_git_alias_named). Neither the form nor the value is read, so a
+# mention that sets nothing (an echo, a comment, an unset, an unrelated value) makes the git commands of that
+# command count too: a disclosed over-refusal. Outside this reading: a name built at run time (GIT_CONFIG_$X, a
+# brace expansion, an escape decoded inside an ANSI-C quote), and a variable set outside the command's text (in
+# the startup files of the Bash tool's shell, or in a sourced file or a script the command runs).
+# The hook's own environment counts as well (_git_alias_inherited): the shell the Bash tool runs a command in
+# inherits the session's environment, as this hook does (the premise _ambient_repo_view_override reads it on), so
+# a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> there whose value names an alias, include or includeIf key defines
+# that alias for every git command the command runs. It counts exactly as a text naming one of the variables does
+# (_git_alias_outside): every segment naming git as a word, and git named as a word anywhere in the text, wherever
+# the word stands, so no reading of shell forms is needed here either (on git 2.53.0 with bash 5.3 the alias ran
+# behind 'if true; then', inside '{ ...; }' and after time). Its value is set before the command runs and is
+# visible here, so it is read as an assignment before the command word is, and an environment carrying only
+# unrelated configuration (gc.auto) is not refused.
+_GIT_CONFIG_ENV_NAME_RE = re.compile(r"GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_)")
+# git as a word, in any case: its letters with only the characters _CMTIDN_UNREAD_CHARS_RE drops between them,
+# and no letter, digit or underscore directly before or after it, so the variable names above are not git words.
+# The test for the character before the g follows the g ('(?<!\w.)' there reads the same character as '(?<!\w)'
+# before it), so the pattern starts with the letter and a search skips to each g instead of trying every index.
+_GIT_WORD_RE = re.compile(r"(?i)g(?<!\w.)[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
+
+
+def _git_config_env_named(command):
+    """Whether the text of command names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere,
+    once every quote character, backslash, '$' and newline is removed (_CMTIDN_UNREAD_CHARS_RE). The removal only
+    joins text around the name, so a name the command spells plainly is found too (see _GIT_CONFIG_ENV_NAME_RE). It
+    removes no 'G' or '_', so a command lacking either names none of them and is not copied."""
+    if "G" not in command or "_" not in command:
+        return False
+    return bool(_GIT_CONFIG_ENV_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
+
+
+def _git_word_index(tokens):
+    """The index of the first word of a segment that names git as a word (_GIT_WORD_RE), wherever it stands in
+    the segment, or len(tokens) when no word does."""
+    return next((i for i, token in enumerate(tokens) if _GIT_WORD_RE.search(token)), len(tokens))
+
+
+def _names_git(tokens):
+    """Whether a word of a segment names git as a word (_git_word_index)."""
+    return _git_word_index(tokens) < len(tokens)
+
+
+def _git_alias_outside(command):
+    """Whether every git command of command runs under a git alias defined outside its own segment: the text of
+    command names a git configuration variable (_git_config_env_named), or the hook's environment carries one
+    naming an alias (_git_alias_inherited), which counts the same way (see _GIT_CONFIG_ENV_NAME_RE)."""
+    return _git_config_env_named(command) or _git_alias_inherited()
+
+
+def _git_alias_named(command):
+    """Whether every git command of command runs under a git alias defined outside its own segment
+    (_git_alias_outside) and its text names git as a word (_GIT_WORD_RE): every git command it runs then counts
+    as running under that alias (see _GIT_CONFIG_ENV_NAME_RE), on a parsed and an unparseable command alike."""
+    return _git_alias_outside(command) and bool(_GIT_WORD_RE.search(command))
+
+
+def _git_alias_segment(tokens, outside):
+    """Whether a segment runs git under a git alias: it names git as a word (_names_git) while outside says the
+    command's git commands run under one defined outside their segment (_git_alias_outside), or it defines one for
+    a git command of its own (_git_local_alias). Either way the git word may stand anywhere in the segment."""
+    return (outside and _names_git(tokens)) or _git_local_alias(tokens)
+
+
+def _git_alias_inherited():
+    """Whether the hook's environment carries a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> whose value names an
+    alias, include or includeIf key (read as _git_alias_defined_at reads an assignment), which defines that alias
+    for every git command the command runs (see _GIT_CONFIG_ENV_NAME_RE)."""
+    inherited = ["{}={}".format(name, value) for name, value in os.environ.items()
+                 if name.startswith("GIT_CONFIG_")]
+    return any(_git_alias_defined_at(inherited, j) for j in range(len(inherited)))
+
+
+# The words _git_alias_spelled reads: the de-quoted text split at blanks, newlines and the shell operator and opener
+# characters (; & | < > ( ) { } and the backquote), so a word next to a redirect, a here-string or a '{fd}' name
+# reads as the word the lexer would have read there.
+_GIT_ALIAS_TEXT_SPLIT_RE = re.compile(r"[\s;&|<>(){}`]+")
+# The tokens _git_alias_spelled_segments reads: in the de-quoted text with each '$' kept, a redirection operator (a
+# run of '<' and '>', with a '&' after it, '&>', '&>>' or '>|'), a command separator (a newline, or a run of ; & | (
+# and )), or a word (a run of any other text but blanks, so a '$', a backquote, '{' and '}' stay in their word).
+_GIT_ALIAS_SPELLED_TOKEN_RE = re.compile(
+    r"(?P<redirect>&>>?|>\||[<>]+&?)|(?P<sep>\n|[;&|()]+)|(?P<word>[^\s;&|<>()]+)")
+# Where a de-quoted word's plain literal text ends: its first '$', backquote or '{'. A '{' that may open a brace
+# expansion in such a word: one not right after a '$', which opens a parameter expansion instead. A part of such a
+# word that may come from an unquoted expansion or an ANSI-C or locale quote: any '$' or backquote.
+_GIT_ALIAS_SPELLED_MARK_RE = re.compile(r"[$`{]")
+_GIT_ALIAS_SPELLED_BRACE_RE = re.compile(r"(?<!\$)\{")
+_GIT_ALIAS_SPELLED_UNQUOTED_RE = re.compile(r"[$`]")
+
+
+def _git_alias_git_lines(text):
+    """The lines of text (split at each newline) that name git as a word (_GIT_WORD_RE), in order. A git word inside
+    a word of a line is a match inside that line, and a match that spans a newline is a word of no line, so a line
+    holding no match the search finds is left out. The search runs once over the whole text and steps to the end
+    of each line it keeps, so a text of many lines costs one scan, not one call per line."""
+    lines = []
+    pos = 0
+    while True:
+        match = _GIT_WORD_RE.search(text, pos)
+        if match is None:
+            return lines
+        if "\n" in match.group():
+            pos = match.end()
+            continue
+        end = text.find("\n", match.end())
+        if end < 0:
+            end = len(text)
+        lines.append(text[text.rfind("\n", 0, match.start()) + 1:end])
+        pos = end
+
+
+def _git_alias_text_may_define(text):
+    """Whether text can hold a word that defines a git alias (_git_alias_defined_at): every such word holds '-c' (a
+    -c or --config-env word, or an attached --config-env=) or 'GIT_CONFIG_' (an assignment), with or without a
+    spelling record. Neither holds a blank, so where text holds neither, no word split from it defines one, nor does
+    any word of a list whose words joined at blanks are text, and the per-word reading can be skipped."""
+    return "-c" in text or "GIT_CONFIG_" in text
+
+
+def _git_alias_spelled_segments(command):
+    """The commands of the text of command, read as _git_alias_spelled reads them: its line continuations joined
+    and its quote characters and backslashes removed, each '$' kept (so what is left of an ANSI-C or locale quote
+    is a '$'), split into commands at each separator and into words at blanks (_GIT_ALIAS_SPELLED_TOKEN_RE), with
+    each redirection, its target word, and an all-digit or '{name}' word right before it left out, as the lexer
+    leaves them out of argv. Each command is a _SpelledWords whose record reads a word's first '$', backquote or
+    '{' as where its plain literal text ends, a '{' not right after a '$' as a brace, and any '$' or backquote as an
+    unquoted expansion. The de-quoted text cannot tell a quoted or escaped '$', backquote, '{' or operator character
+    from an unquoted one, so each counts as an unquoted one would. Only the commands of a line that names git as a
+    word are returned (_git_alias_git_lines): every reader of these commands (_git_local_alias, _git_region_open,
+    _segment_runs_git_command) finds nothing in a command none of whose words names git, and a newline always ends a
+    command here, so each line is read on its own and a line naming no git is not split into words at all."""
+    text = _joined_text(command).replace("'", "").replace('"', "").replace(chr(92), "")
+    segments = []
+    for line in _git_alias_git_lines(text):
+        words = []
+        target = False  # the next word is the target of a redirection, which no argv holds
+        last_end = -1  # where the last word kept ended, while no other token has followed it
+        for match in _GIT_ALIAS_SPELLED_TOKEN_RE.finditer(line):
+            kind = match.lastgroup
+            if kind == "word":
+                if target:
+                    target = False
+                    last_end = -1
+                else:
+                    words.append(match.group())
+                    last_end = match.end()
+                continue
+            if kind == "redirect":
+                if last_end == match.start() and (words[-1].isdigit() or _FD_VAR_RE.match(words[-1])):
+                    words.pop()  # an IO number or a '{name}' before the operator is part of the redirection
+                target = True
+            else:
+                if words:
+                    segments.append(words)
+                words = []
+                target = False
+            last_end = -1
+        if words:
+            segments.append(words)
+    spelled = []
+    for seg in segments:
+        spelling = []
+        for word in seg:
+            mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
+            spelling.append(_WordSpelling(len(word) if mark is None else mark.start(),
+                                          bool(_GIT_ALIAS_SPELLED_BRACE_RE.search(word)),
+                                          bool(_GIT_ALIAS_SPELLED_UNQUOTED_RE.search(word))))
+        spelled.append(_SpelledWords(seg, spelling))
+    return spelled
+
+
+def _git_alias_spelled(command):
+    """Whether the text of a command the lexer could not read to its end defines a git alias: it names git as a word
+    (_GIT_WORD_RE) and one of its words starts a definition (_git_alias_defined_at: a -c or --config-env whose next
+    word has an alias, include or includeIf key, an attached --config-env=KEY with one, or a GIT_CONFIG_PARAMETERS
+    or GIT_CONFIG_KEY_<n> assignment naming one), the words being those of the de-quoted text (_dequoted_text) split
+    at _GIT_ALIAS_TEXT_SPLIT_RE. The lexer stops at a here-string, an unquoted heredoc, a '{fd}' redirect or an
+    unbalanced quote and recovers no word after it, so a definition there is in no segment a partial lex recovers
+    (on git 2.53.0 'git <<<x -c include.path=FILE c' ran an alias FILE defined). The whole text is read, the
+    recovered part included, so neither where the lexer stopped nor which git command a definition belongs to is
+    needed. Disclosed over-refusal (the safe direction): a definition spelling in any word of such a command counts,
+    one in an echo, a quoted sh -c body, a heredoc or here-string body or a 'grep -c alias.x' included. The rule
+    for a word spelled through an expansion, a quote or a brace (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE)
+    applies here to the de-quoted words too, through the same reader: each command of the de-quoted text, its
+    spelling read from the '$', backquote and '{' left in its words (_git_alias_spelled_segments), defines one where
+    _git_local_alias finds one in it, in the region after a git word through its subcommand word, past a here-string,
+    heredoc or '{fd}' redirect included, so any '$' or backquote there counts as an unquoted expansion. Since those
+    words cannot tell a quoted or escaped '$', backquote or '{' from an unquoted one, a quoted one counts too, a
+    disclosed over-refusal: here a double-quoted expansion in that region ('git -C "$D" log') defines one as well.
+    Read only for a command whose lex failed; it only ever denies."""
+    return _git_alias_spelled_kind(command) is not None
+
+
+def _git_alias_spelled_kind(command):
+    """What _git_alias_spelled finds in the text of command: "alias" where a de-quoted word starts a definition its
+    decoded text spells, "built" where only how a word in a git command's region is spelled reads as one (a '$',
+    backquote or brace there), and None where neither does."""
+    if not _GIT_WORD_RE.search(command):
+        return None
+    text = _dequoted_text(command)
+    if _git_alias_text_may_define(text):
+        words = _GIT_ALIAS_TEXT_SPLIT_RE.split(text)
+        if any(_git_alias_defined_at(words, j) for j in range(len(words))):
+            return "alias"
+    if any(_git_local_alias(seg) for seg in _git_alias_spelled_segments(command)):
+        return "built"
+    return None
+
+
+def _git_alias_recovered(command, unread=False, lexed=None):
+    """Whether an unparseable command runs git under a git alias the command defines: its text names git while its
+    git commands run under one defined outside their segment (_git_alias_named), its text defines one wherever the
+    lexer stopped (_git_alias_spelled), or a segment that a partial lex recovers runs git under one
+    (_git_alias_segment). The segment the lexer was still inside is kept: the words of it already read stand
+    whatever follows, and this reading only ever denies. The partial lex records how each word was spelled
+    (_WordSpellings), so a recovered word spelled through an expansion, a quote or a brace counts as on a parsed
+    command (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE), where the de-quoted reading of _git_alias_spelled
+    splits the text otherwise (a quoted blank or ';' moves its subcommand word: 'git -C "a b" $X' is read there as
+    git -C a with the subcommand b). With unread True a git command whose option region the lexer did not read
+    counts too (_git_alias_unread), read from the stops of the same partial lex: gate_weakening and git_discard pass
+    it, protected_line and branch_root read _git_alias_unread from their own partial lex, and commit_msg_subst's
+    fallback does not read it. The result is False, or "alias"
+    where a definition the decoded words spell, or one outside the segment, is found, and "built" where only how a
+    word in a git command's region is spelled, or that region left unread, reads as one (_git_alias_built), which a
+    guard's deny reason tells apart. lexed, when given, is (argvs, stops): the argv of every segment, in order, of
+    the partial lex this reading makes (_lex_command with partial True, inside _WordSpellings and _LexStops) and the
+    stops it recorded, from a caller that has just made that lex (gate_weakening), so the command is not lexed twice."""
+    outside = _git_alias_outside(command)  # read once: _git_alias_named, then every recovered segment
+    if outside and _GIT_WORD_RE.search(command):
+        return "alias"
+    kind = _git_alias_spelled_kind(command)
+    if kind is not None:
+        return kind
+    if lexed is None:
+        try:
+            with _WordSpellings(), _LexStops() as stops:
+                recovered = [seg.argv for seg in _lex_command(command, partial=True)[0]]
+        except ValueError:
+            return "built" if unread and _git_alias_unread(command, [(0, None)]) else False
+        lexed = recovered, stops.seen
+    recovered, seen = lexed
+    # A segment runs git under an alias only where one of its words names git (_git_alias_segment), so an empty
+    # segment, or one whose words joined at blanks name no git, is passed over without the per-word walk.
+    for tokens in filter(None, recovered):
+        if _GIT_WORD_RE.search(" ".join(tokens)) and _git_alias_segment(tokens, outside):
+            return "built" if _git_alias_built(tokens, outside) else "alias"
+    return "built" if unread and _git_alias_unread(command, seen) else False
+
+
+def _git_alias_built(tokens, outside):
+    """Whether a segment that runs git under a git alias (_git_alias_segment) does so only through how a word in its
+    git command's region is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): read as plain words, with no
+    spelling record, it defines none and runs under none. A guard's deny then names the word the shell builds at run
+    time, not an alias the command never wrote."""
+    return not _git_alias_segment(list(tokens), outside)
+
+
+# How each git guard's deny reason states a git command whose region holds a word the shell builds at run time, or
+# that the lexer did not read (_git_alias_built, _git_alias_unread), in place of the wording for an alias definition,
+# which such a command may never have written, and the fix.
+_GIT_BUILT_WORD_REASON = (
+    "runs git with a word in its global options or subcommand position that the shell builds at run time (an "
+    "unquoted variable or command substitution such as -C $D, a \"$@\" or \"${A[@]}\" list, an ANSI-C or locale "
+    "quote, a brace expansion with a comma, or a -c or --config-env key spelled through an expansion), or with "
+    "options this guard could not read (a here-string, heredoc, process substitution or {fd} redirect before the "
+    "subcommand word of a command the shell lexer cannot parse); bash can expand such a word into several words, "
+    "such as -c and a git alias definition, so the subcommand git runs is unknown here")
+_GIT_BUILT_WORD_FIX = (
+    "Quote the expansion (\"$D\" rather than $D): on a command the shell lexer can parse, that keeps it one word and "
+    "restores the plain reading; on one it cannot parse (a here-string, an unquoted heredoc, a process substitution "
+    "or a {fd} redirect anywhere in it) a quoted expansion in those options counts too, so write that value "
+    "literally or run the git command on its own. Spell a -c or --config-env key literally, write a list's words "
+    "out, and put a here-string or heredoc after the subcommand word.")
+
+
+# A GIT REGION THE LEXER DID NOT READ. On a command the full parse cannot read, the partial lexer stops at the first
+# construct it refuses (a here-string, an unquoted heredoc, a process substitution, a '{fd}' redirect or an unbalanced
+# quote) and reads no word after it. The segment it stopped inside is read only where it runs git AS ITS OWN COMMAND
+# (_segment_runs_git_command: its command word is git or a wrapper the guards resolve), never a git word another
+# command merely carries. Where it stops before such a git command's option region ('git <<<x -C "a b" $X l') or
+# inside it, that region is unread, and the de-quoted reading of _git_alias_spelled cannot stand in for it: a
+# quoted blank or separator moves its subcommand word ('-C "a b" $X' reads there as -C a with the subcommand b, so $X
+# stands past it; with X set to '-c alias.l=log', bash 5.3 passed git -C 'a b' -c alias.l=log l). So an unread region
+# on a git segment counts as a definition, fail closed (_git_alias_unread): a git command the lexer was still inside
+# whose walk (_git_region_open) reads no subcommand word among the words read before the stop, and, past where it
+# stopped, the UNION of two readings of the text, a deny from either standing: a quote-aware re-lex of the text past
+# each construct the reader can measure (_construct_end; a here-string's target word, or a process substitution's
+# balanced parentheses with backslash escapes honoured), each recovered command judged where its region runs open or
+# holds a word that defines one under HOW A WORD IS SPELLED (_git_local_alias), and the every-git-word reading
+# (_git_alias_unread_everyword), which walks the region of each git word in the raw text and so reaches one inside a
+# construct's own body, a comment, a redirect target or quoted text. The re-lex alone decides only where its ground
+# is proven (the construct measured with no backslash escape met, no git word inside the measured construct's own
+# text, a resume at a command separator, and every git word of the re-lexed text read as a word of a recovered
+# command, none beside a '$' or backquote in its word): there a git word the re-lex proves to be quoted text
+# ('cat <<<x; echo "run git"', a pull-request or issue body naming git) allows, while a plain git word any command carries as a word of its own
+# ('cat <<<x; flock /tmp/l git -C "a b" $X l') is still walked (_segment_union_words) and denies where its region
+# runs open or holds a word built at run time. A literal region read in full keeps its decision either way.
+# Disclosed over-refusal (the safe direction): a word naming git that is the last word read before such a construct
+# and is its command word ('git <<<x log') still denies, and so does a quoted or commented git word anywhere the
+# re-lex ground is not proven. Scoping before the stop stands: a git word only an operand of the stopped segment
+# ('grep -c git <<<"$s"') is not read as a git command. Read only for a command whose lex failed.
+
+
+def _segment_runs_git_command(tokens):
+    """Whether a segment runs git AS ITS OWN COMMAND: its command word, found past any leading reserved words, a
+    function or coprocess name, an env-assignment prefix and the wrapper words the git readers resolve
+    (_CMTIDN_GIT_WRAPPERS), names git as a word (a path to git included, read by its basename), or such a wrapper
+    stands there and a later word names git. A git word that is only an operand of another command ('grep -c git',
+    'echo "git log"', a pull-request body) makes this False. The unread-region rule is scoped by this, so it reads
+    only a git command's own unread region and never denies a command whose command words name no git command."""
+    i = 0
+    n = len(tokens)
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return False
+    word = tokens[i].rsplit("/", 1)[-1]
+    if _GIT_WORD_RE.search(word):
+        return True
+    if word in _CMTIDN_GIT_WRAPPERS:
+        return any(_GIT_WORD_RE.search(tok.rsplit("/", 1)[-1]) for tok in tokens[i + 1:])
+    return False
+
+
+def _git_region_open(tokens):
+    """Whether a git word among the words a lex read before it stopped has a region that runs past them: its walk
+    (as _git_local_alias walks it, a git word inside an earlier walk's options skipped) reads no subcommand word."""
+    start = _command_word_index(tokens)
+    n = len(tokens)
+    end = 0
+    for k in range(start, n):
+        if k < end or tokens[k].startswith("-") or not _GIT_WORD_RE.search(tokens[k]):
+            continue
+        i = k + 1
+        while i < n and tokens[i].startswith("-"):
+            i += 2 if "=" not in tokens[i] and tokens[i] in _GIT_ARG_OPTS else 1
+        if i >= n:
+            return True
+        end = i
+    return False
+
+
+def _git_region_target(command, i, n):
+    """The index past the target word of a redirection whose operator ends at i, read as the lexer reads it, or None
+    where the lexer would refuse it (no target word, or one it cannot read)."""
+    while i < n and command[i] in " \t":
+        i += 1
+    if i >= n or command[i] == "\n" or command[i] in _METACHARS or command[i] == "#":
+        return None
+    try:
+        _text, _opaque, started, _digits, _tilde, j = _read_word(command, i, n)
+    except ValueError:
+        return None
+    return j if started else None
+
+
+def _git_region_read(command, at):
+    """The words of the git command whose git word starts at index at, read from that word through its subcommand
+    word (or to the end of its segment) as the lexer reads them, blanks, redirections and their targets aside, with
+    their spelling record: (words, end), words a _SpelledWords and end the index past the last one; None where a
+    construct the lexer refuses (a here-string, a heredoc, a process substitution, a '{fd}' redirect, a word it cannot
+    read) stands before the subcommand word, so the region is unread."""
+    n = len(command)
+    words = []
+    spelling = []
+    value = False  # the next word is the value of the option before it
+    i = at
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "\n":
+            break
+        if c in _METACHARS:
+            op, kind, oplen = _match_operator(command, i, n)
+            if kind == "sep":
+                break
+            i = None if kind == "cannot" else _git_region_target(command, i + oplen, n)
+            if i is None:
+                return None
+            continue
+        holder = [None]
+        try:
+            text, _opaque, started, all_digits, _tilde, j = _read_word(command, i, n, spelling=holder)
+        except ValueError:
+            return None
+        if not started:
+            if j == i:
+                break  # a '#' that starts a word: a comment to the end of the line
+            i = j
+            continue
+        if j < n and command[j] in "<>" and (all_digits or _FD_VAR_RE.match(text)):
+            op, kind, oplen = _match_operator(command, j, n)
+            i = None if kind == "cannot" or not all_digits else _git_region_target(command, j + oplen, n)
+            if i is None:
+                return None
+            continue
+        words.append(text)
+        spelling.append(holder[0])
+        i = j
+        if len(words) == 1:
+            continue
+        if value:
+            value = False
+        elif text.startswith("-"):
+            value = "=" not in text and text in _GIT_ARG_OPTS
+        else:
+            break
+    return _SpelledWords(words, spelling), i
+
+
+def _skip_balanced_parens(command, i, n, escape=None):
+    """The index just past the ')' that closes the '(' at index i, single and double quotes, backslash escapes
+    and nested parentheses respected, or None when it is unterminated. Reads past a process substitution's body
+    to the word after it. A backslash outside quotes escapes the next character, so an escaped parenthesis
+    opens and closes nothing ('<(echo \\()' ends at its real ')'); meeting one is recorded in escape (a
+    one-element list) where the caller passes it, so the caller can keep the every-git-word reading beside a
+    measure whose body carried escapes."""
+    depth = 0
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            if escape is not None:
+                escape[0] = True
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return None
+            i = j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and command[i] != '"':
+                i += 2 if command[i] == "\\" and i + 1 < n else 1
+            if i >= n:
+                return None
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _construct_end(command, pos, escape=None):
+    """The index just past the construct the partial lexer stopped at (position pos), so the text after it lexes
+    as the lexer would read it once the redirect is consumed, or None where this reader cannot measure the
+    construct on the same text (an unquoted heredoc whose body is deferred, a '{fd}' redirect, an unbalanced
+    quote, or a substitution). A here-string ('<<<word') is read past its one target word, and a process
+    substitution ('<(...)'/'>(...)') past its balanced parentheses (backslash escapes honoured; one met is
+    recorded in escape, see _skip_balanced_parens); only these two carry their whole extent on the text the
+    reader can walk."""
+    n = len(command)
+    if command.startswith("<<<", pos):
+        j = pos + 3
+        while j < n and command[j] in " \t":
+            j += 1
+        if j >= n or command[j] == "\n" or command[j] in _METACHARS or command[j] == "#":
+            return None
+        try:
+            _text, _opaque, started, _digits, _tilde, k = _read_word(command, j, n)
+        except ValueError:
+            return None
+        return k if started else None
+    if command.startswith("<(", pos) or command.startswith(">(", pos):
+        return _skip_balanced_parens(command, pos + 1, n, escape)
+    return None
+
+
+def _git_alias_unread_everyword(command, pos):
+    """The every-git-word reading of the text from index pos: the region of each git word in the raw text is
+    read quote-aware from that word (_git_region_read), denying where it cannot be read to its subcommand word
+    (a here-string, heredoc, process substitution, '{fd}' redirect or a word the reader refuses stands before
+    it) or holds a word that defines a git alias under HOW A WORD IS SPELLED (_git_local_alias). Each git word
+    inside a region already read is skipped, so the text is read about once. The raw text is walked as written,
+    so this reading reaches a git word inside a construct's own body, a comment, a redirect target or quoted
+    text, where it can only over-refuse (a region read from inside quoted text can differ from any word bash
+    builds); _git_alias_unread narrows it only where the measured re-lex proves its ground, and takes the union
+    with it everywhere else, so no deny of this reading is lost there."""
+    end = pos
+    for match in _GIT_WORD_RE.finditer(command, pos):
+        if match.start() < end:
+            continue
+        region = _git_region_read(command, match.start())
+        if region is None:
+            return True
+        words, end = region
+        if _git_local_alias(words):
+            return True
+    return False
+
+
+# The characters no unquoted shell word can carry: a decoded word holding one was spelled through quotes or
+# escapes, so a git word beside one in its word is quoted text, never a word that can run git on its own.
+_UNQUOTED_NEVER_CHARS = " \t\n;&|<>()'\""
+
+
+def _segment_union_words(tokens):
+    """The union view of a recovered segment for _git_alias_unread: (words, expansion). words is the token list
+    with each git word the lex PROVES to be quoted text neutralized (its token carries a character no unquoted
+    word can, _UNQUOTED_NEVER_CHARS, and no '$' or backquote, so bash passes it as one operand that runs no git:
+    'echo "run git"'), or None where no token could run git as a word of its own; a plain git word any command
+    carries ('flock /tmp/l git ...') stays, so the caller's walk reads its region as the every-git-word reading
+    would. expansion says a token carries a git word beside a '$' or backquote (a substitution or expansion the
+    lex keeps opaque, 'echo "$(git ...)"'), whose region only the raw every-git-word reading can place; such a
+    word is neutralized here and the caller takes that union instead."""
+    masked = list(tokens)
+    expansion = False
+    plain = False
+    for idx, tok in enumerate(tokens):
+        if not _GIT_WORD_RE.search(tok):
+            continue
+        if "$" in tok or "`" in tok:
+            expansion = True
+            masked[idx] = _GIT_WORD_RE.sub("x", tok)
+        elif any(c in _UNQUOTED_NEVER_CHARS for c in tok):
+            masked[idx] = _GIT_WORD_RE.sub("x", tok)
+        else:
+            plain = True
+    if not plain:
+        return None, expansion
+    spelling = getattr(tokens, "spelling", None)
+    if spelling is not None:
+        return _SpelledWords(masked, spelling), expansion
+    return masked, expansion
+
+
+def _resumes_at_separator(rest):
+    """Whether the text past a measured construct resumes at a command separator (or runs out), so the construct
+    ended its segment and every later word stands at a command position the re-lex reaches. A word, a redirect
+    or a '#' there continues the stopped segment (bash reads '<(a)#b' as one word and a wrapper's options can
+    stand there, 'nice <<<x -n 5 git ...'), where the re-lex cannot place what it reads against the words read
+    before the stop."""
+    i = 0
+    n = len(rest)
+    while i < n and rest[i] in " \t":
+        i += 1
+    return i >= n or rest[i] in ";\n&|"
+
+
+def _git_alias_unread(command, stops):
+    """Whether an unparseable command holds a GIT COMMAND of its own whose option region the lexer did not read (A
+    GIT REGION THE LEXER DID NOT READ, above), given stops, the (start, words) pairs its partial lex recorded
+    (_LexStops). Before the stop, the reading is scoped to a segment that runs git as its own command
+    (_segment_runs_git_command), never a git word another command merely carries: a segment the lexer stopped
+    inside denies where its git command's region runs past the words it read (_git_region_open). Past the earliest
+    stop, the decision is the UNION of two readings, a deny from either standing: the text past each construct the
+    reader can measure (_construct_end), re-lexed quote-aware (so a quoted blank or separator does not shift the
+    region as the de-quoted reading does), each recovered command denying where it runs git as its own command, or
+    carries a plain git word (_segment_union_words), with a region that runs open or holds a word that defines a
+    git alias under HOW A WORD IS SPELLED (_git_local_alias); and the every-git-word reading of the raw text
+    (_git_alias_unread_everyword). The re-lex alone decides only where its ground is proven: the construct measured
+    with no backslash escape met, no git word inside the measured construct's own text (a process substitution's
+    body and a here-string's word are run or expanded, so a git region there keeps the raw reading), a resume at a
+    command separator, and every git word of the re-lexed text read as a word of a recovered command (one in a
+    comment or a redirect target is not), none beside a '$' or backquote in its word (a substitution the lex keeps
+    opaque, _segment_union_words); only there does a git word the re-lex proves to be quoted text allow.
+    Where a construct cannot be measured (an unquoted heredoc, a '{fd}' redirect, an unbalanced quote, or no
+    recovered position), the union is taken with the de-quoted reading beside the every-git-word reading, so a git
+    command past such a construct never goes unread."""
+    for _start, words in stops:
+        if words is not None and _segment_runs_git_command(words) and _git_region_open(words):
+            return True
+    if not stops:
+        return False
+    pos = min(start for start, _words in stops)
+    while True:
+        escape = [False]
+        end = _construct_end(command, pos, escape)
+        if end is None:
+            # The reader cannot measure this construct (or the partial lex recovered no position): the decision
+            # is the union of the every-git-word reading, which reaches a git region inside or past any construct
+            # on the raw text, and the de-quoted reading, which reaches every command word past it but cannot
+            # undo a quoted blank or separator that shifts a region; a deny from either stands, so no deny of
+            # the every-git-word reading is narrowed here.
+            return (_git_alias_unread_everyword(command, pos)
+                    or any(_segment_runs_git_command(seg)
+                           and (_git_region_open(seg) or _git_local_alias(seg))
+                           for seg in _git_alias_spelled_segments(command[pos:])))
+        rest = command[end:]
+        with _WordSpellings(), _LexStops() as rstops:
+            recovered = _lex_command(rest, partial=True, skip_empty=True)[0]
+        # The re-lex ground (docstring above): any failed condition keeps the every-git-word union below. The
+        # accounting compares the raw git words of the re-lexed span (up to the next stop, where the loop takes
+        # over) against those the recovered words carry, so one in a comment or a redirect target, which no argv
+        # holds, falls back to the raw reading instead of going unread. The measure honours backslash escapes, so
+        # one met in a process substitution's body does not misplace the construct's end; the escape term is
+        # defence in depth, keeping the raw reading past such a body, where a git word in quoted text or in an
+        # sh -c body still denies.
+        raw_limit = min((start for start, _words in rstops.seen), default=len(rest))
+        unproven = (escape[0]
+                    or bool(_GIT_WORD_RE.search(command, pos, end))
+                    or not _resumes_at_separator(rest)
+                    or len(_GIT_WORD_RE.findall(rest, 0, raw_limit)) != sum(
+                        len(_GIT_WORD_RE.findall(tok)) for seg in recovered for tok in seg.argv))
+        for seg in recovered:
+            if _segment_runs_git_command(seg.argv) and (_git_region_open(seg.argv)
+                                                        or _git_local_alias(seg.argv)):
+                return True
+            union, expansion = _segment_union_words(seg.argv)
+            if expansion:
+                unproven = True
+            if union is not None and (_git_region_open(union) or _git_local_alias(union)):
+                return True
+        if unproven and _git_alias_unread_everyword(command, pos):
+            return True
+        if not rstops.seen:
+            return False
+        command = rest
+        pos = min(start for start, _words in rstops.seen)
+
+
 # The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
 # ref), never an option, so a token that merely LOOKS like an option past this point is a literal operand.
 _EOO_TOKENS = frozenset(("--", "--end-of-options"))
@@ -3608,29 +5906,42 @@ def _split_pre_post(args):
 
 
 # --- expbnd: explicit git target and enumerated scope -----------------------------------------------
+# history, refs and repack write refs, history or objects (observed on git 2.56.0): every git history
+# subcommand (drop, fixup, reword, split) rewrites commits and moves each descendant branch; git refs create,
+# delete, update and rename write refs, and migrate and optimize rewrite the ref store; git repack rewrites
+# packs, its -d deletes redundant ones and --drop-filtered deletes objects. Only git refs list, exists and
+# verify read, so _git_is_mutating exempts those; any other form is mutating (fail-safe).
 _GIT_MUTATING_VERBS = frozenset((
-    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "init",
-    "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
-    "switch", "tag", "update-index", "update-ref", "worktree"))
+    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "history", "init",
+    "merge", "mv", "notes", "pull", "push", "rebase", "refs", "repack", "reset", "restore", "revert", "rm",
+    "stash", "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53; the long
-# universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
-# by the eb-e57..e147 differential self-test and an out-of-suite real-git differential; a future git
-# option-table change, such as a new write option absent from the table, is a DISCLOSED drift residual
-# caught by re-validating the table on a git upgrade, with a dedicated option-table drift-tripwire gate a
-# tracked follow-up, GD-158-T7). The classifier is FAIL-SAFE by
+# branch/tag classification (flag behaviour pinned to git 2.53, plus the git 2.56 branch options marked in
+# the table; the long universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated
+# against git 2.53 by the classifier's differential self-test vectors and an out-of-suite real-git
+# differential; a future git option-table change, such as a new write option absent from the table, is a
+# DISCLOSED drift residual caught by re-validating the table on a git upgrade and by the option-table
+# drift-tripwire gate, tools/check_git_option_table.py). The classifier is FAIL-SAFE by
 # construction: it DEFAULTS to MUTATING and returns READ only when every token positively resolves to a
 # recognized read-neutral role and no create/rename/delete TARGET is present (before OR after '--'). A
 # missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
-# spelling form; a missed READ is only an over-ASK (safe), so READ recognition may be incomplete. Roles,
+# spelling form; a missed READ only adds a note (safe), so READ recognition may be incomplete. Roles,
 # one char per long option: 'W' write (immediate mutating); 'L' list trigger (no value); 'V' tag verify
-# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'D'
+# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'Q'
+# filter whose value git REQUIRES even when last (sets list mode; a missing value is malformed); 'D'
 # display taking a REQUIRED value but NOT setting list mode (a following name still creates); 'O' optional
-# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). The long
+# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). One value
+# rule covers every role and both spellings ('=' or a separate argument): an EMPTY value never yields a
+# READ (git refuses an empty filter object or branch, an empty sort key, and an empty --color or --abbrev;
+# the empty values git accepts, --format and --column, only add a note), and neither does a filter value
+# that leads with a dash (git 2.53 refuses '-x' there as a malformed object name; any such value git does
+# accept only adds a note). The classifier does not check a value's content beyond that, so a nonempty
+# value git rejects (an unknown ref or sort key) stays a READ; git refuses that command, so no ref
+# changes. The long
 # universe is a conservative SUPERSET of git's real per-subcommand option table (hidden aliases, the
 # deprecated --set-upstream, and generated --no-* forms included): a MISSING entry could let a unique
 # prefix resolve to a read where real git sees a write or an ambiguity (a fail-open), while an EXTRA entry
-# only over-ASKs. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
+# only adds a note. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
 # --no-without, --no-show-current) are roled W: roling --no-list read would fail-open
 # 'git branch --list --no-list NAME' (a real create). Display negatives (--no-color, --no-sort, ...) are R
 # (no value, no mode; a positional beside them still catches the create).
@@ -3647,10 +5958,16 @@ _GIT_REF_SPECS = {
             "--recurse-submodules": "W", "--no-recurse-submodules": "W",
             "--no-list": "W", "--no-show-current": "W",
             "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
-            # L / F: list trigger and filters (set list mode; F takes a value, optional only when last).
+            # git 2.56: --delete-merged deletes merged local branches; --dry-run and --no-dry-run decide
+            # whether it does, so they are W too (a dry run beside the deletion is judged like the deletion).
+            "--delete-merged": "W", "--dry-run": "W", "--no-dry-run": "W",
+            # L / F / Q: list trigger and filters (set list mode; F takes a value, optional only when last;
+            # Q takes a value git requires, so 'git branch --points-at' alone is an error, not a listing).
             "--list": "L",
             "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
-            "--points-at": "F", "--with": "F", "--without": "F",
+            "--with": "F", "--without": "F",
+            "--points-at": "Q",
+            "--forked": "Q",  # git 2.56: lists branches whose upstream matches; implies --list
             # D: required value, NO list mode (a following name creates).
             "--format": "D", "--sort": "D",
             # O: optional '='-attached value only (never consumes a following token).
@@ -3699,12 +6016,24 @@ _GIT_REF_SPECS = {
 _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
     "-e", "--edit"))
+# git's newer subcommand spellings of config, judged by the first operand token: the write
+# subcommands (set/unset/edit/... open or alter the configuration) must be read as mutating
+# before any read-option shortcut, so 'config edit -l' or 'config set a.b c --list' is not
+# mistaken for a read because it also carries a read flag. The read subcommands report only.
+_GIT_CONFIG_WRITE_SUBCMDS = frozenset((
+    "set", "unset", "unset-all", "edit", "add", "replace-all", "rename-section",
+    "remove-section"))
+_GIT_CONFIG_READ_SUBCMDS = frozenset((
+    "get", "get-all", "get-regexp", "get-urlmatch", "list"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
+# refs followed by '/' is a ref name (refs/heads/main), which read-only commands spell too, never the refs
+# subcommand, so it is not read as one.
 _RAW_EXPBND_MUTATE_RE = _RawSequence(
     r"(?i)\bgit\b",
-    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
-    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
+    r"(?i)\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|history|init|merge|mv|notes|"
+    r"pull|push|rebase|refs(?!/)|repack|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|"
+    r"worktree)\b")
 _RAW_EXPBND_PRUNING_FETCH_RE = _RawSequence(
     r"(?i)\bgit\b", r"(?i)\bfetch\b", r"(?i)--prune(?:-tags)?\b|(?<!\S)-[^\s]*p")
 # The whole-tree breadth probe is two sequences, git then add then an add breadth selector, or git then
@@ -3762,8 +6091,9 @@ def _resolve_long_role(name, long_roles):
     (ambiguous, exactly what real git rejects) resolve to None, which the caller treats as MUTATING. The
     universe MUST be a superset of git's real option table: a missing entry could let a prefix resolve
     uniquely to a read where git sees a write or an ambiguity (a fail-open); the table is validated against
-    git 2.53 by the eb differential self-test and an out-of-suite real-git differential, with the drift
-    residual disclosed and a dedicated option-table drift-tripwire gate tracked as follow-up GD-158-T7."""
+    git 2.53 by the classifier's differential self-test vectors and an out-of-suite real-git differential,
+    with the drift residual disclosed and checked by the option-table drift-tripwire gate,
+    tools/check_git_option_table.py."""
     if name in long_roles:
         return long_roles[name]
     matches = [k for k in long_roles if k.startswith(name)]
@@ -3801,7 +6131,7 @@ def _short_cluster_verdict(chars, spec):
 
 
 def _git_ref_cmd_mutating(sub, args):
-    """Fail-safe branch/tag mutation classifier (GD-158 rounds 1-6 + tri-family synthesis). DEFAULTS to
+    """Fail-safe branch/tag mutation classifier. DEFAULTS to
     MUTATING (return True); returns READ (return False) ONLY when every option token resolves to a known
     non-W role with a parseable value form, every positional is absent or covered by list/verify mode, and
     the post-'--' region is empty or covered by list/verify mode. Any unknown, ambiguous, or malformed form
@@ -3827,24 +6157,33 @@ def _git_ref_cmd_mutating(sub, args):
                 if sep:
                     return True  # '=' on a no-value option is malformed -> MUTATING
                 list_mode = True
-            elif role == "F":
-                list_mode = True
-                if not sep:
-                    if i < n and not pre[i].startswith("-"):
-                        i += 1       # separate filter value consumed
-                    elif i < n:
-                        return True  # a dash-leading separate value cannot be certified -> MUTATING
-                    # at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
-            elif role == "D":
-                if not sep:
-                    if i < n and not pre[i].startswith("-"):
-                        i += 1       # separate display value consumed
-                    else:
-                        return True  # missing OR dash-leading required value -> MUTATING (closes D-3)
+            elif role in ("F", "Q", "D"):
+                if role != "D":
+                    list_mode = True  # a filter sets list mode; a display value does not
+                if sep:
+                    value = _val
+                elif i < n:
+                    value = pre[i]
+                    i += 1           # separate value consumed
+                elif role == "F":
+                    continue         # F at end: the filter value is optional-when-last (defaults HEAD)
+                else:
+                    return True      # Q or D at end with no value: git refuses a required value -> MUTATING
+                # One value rule for both spellings, so a form cannot pass in one and fail in the other.
+                if not value:
+                    return True      # an empty value is never certified -> MUTATING
+                # A dash-leading value is never certified either: git 2.53 refuses '-x' as a filter object,
+                # and a separate one may be an option git consumes as the value. Only a D value attached
+                # with '=' may lead with a dash (--sort=-committerdate is a valid descending key).
+                if value.startswith("-") and (role != "D" or not sep):
+                    return True      # -> MUTATING
             elif role == "R":
                 if sep:
                     return True  # '=' on a no-value option -> MUTATING
-            # role "O": optional '='-attached value only; consumes NOTHING following, sets no mode
+            elif role == "O":
+                if sep and not _val:
+                    return True  # an empty '=' value is never certified -> MUTATING
+                # otherwise an optional '='-attached value only; consumes NOTHING following, sets no mode
         else:
             verdict = _short_cluster_verdict(tok[1:], spec)
             if verdict == "MUT":
@@ -3871,15 +6210,27 @@ def _git_is_mutating(sub, args):
     if sub == "stash":
         return not args or args[0] not in ("list", "show")
     if sub == "config":
+        if args and not args[0].startswith("-"):
+            # the newer subcommand form: the first token is the subcommand, classified before any
+            # read flag so 'config edit -l', 'config set a.b c --list' and 'config unset a.b --get'
+            # are read as writes, never masked by a trailing read flag (an old-syntax read keeps its
+            # mode flag first, '--get edit', so its key token never lands here)
+            if args[0] in _GIT_CONFIG_WRITE_SUBCMDS:
+                return True
+            if args[0] in _GIT_CONFIG_READ_SUBCMDS:
+                return False
         if any(a == "-l" or a == "--list" or a.startswith("--get") for a in args):
             return False
         if any(a in _GIT_CONFIG_WRITE_FLAGS for a in args):
             return True
-        return len([a for a in args if not a.startswith("-")]) >= 2
+        operands = [a for a in args if not a.startswith("-")]
+        return len(operands) >= 2
     if sub == "worktree":
         return not args or args[0] != "list"
     if sub == "notes":
         return not args or args[0] not in ("list", "show")
+    if sub == "refs":
+        return not args or args[0] not in ("list", "exists", "verify")
     return True
 
 
@@ -3963,13 +6314,45 @@ def _expbnd_breadth_publish_deny(verb):
         "expbnd); stage explicit paths and push as a reviewed separate step.".format(verb))
 
 
-def _expbnd_fallback(command):
-    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command."""
-    if (_RAW_EXPBND_CD_RE.search(command) and
-            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
-        return _expbnd_target_ask("mutation")
+def _expbnd_git_verb(tokens):
+    """The subcommand of the first word of a segment that is git (_git_sub_and_args from that word), for the
+    expbnd messages, or 'git' when there is none (git named inside another word, such as an sh -c body)."""
+    for i, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] == "git":
+            return _git_sub_and_args(tokens[i:])[0] or "git"
+    return "git"
+
+
+def _expbnd_fallback_kind(command):
+    """The decision _expbnd_fallback gives command, by its raw probes: "publish" (a breadth stage and a
+    push) denies, "target" (a cd and a mutation or a pruning fetch, with no such breadth-push pair) notes,
+    and None allows. The publish pair is tested FIRST, mirroring the parsed pre-scan's precedence: a cd in
+    the same text earns only the relocate note, which must not stand in for the breadth-and-publish denial.
+    git_explicit_binding reads it for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading). In a
+    command whose text names a git configuration variable, or that runs under a git alias the hook's environment
+    carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
+    parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
+    first, and one git word beside a cd notes."""
+    named = _git_alias_outside(command)
+    if named and len(_GIT_WORD_RE.findall(command)) > 1:
+        return "publish"
     if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
             and _RAW_EXPBND_PUSH_RE.search(command)):
+        return "publish"
+    if (_RAW_EXPBND_CD_RE.search(command) and
+            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command)
+             or (named and _GIT_WORD_RE.search(command)))):
+        return "target"
+    return None
+
+
+def _expbnd_fallback(command):
+    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command
+    (_expbnd_fallback_kind)."""
+    kind = _expbnd_fallback_kind(command)
+    if kind == "target":
+        return _expbnd_target_ask("mutation")
+    if kind == "publish":
         return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
@@ -3982,7 +6365,18 @@ def git_explicit_binding(data):
     ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY a PUBLISH ('git push') in the SAME command
     DENIES-and-educates - the breadth selector sweeps in unrelated modified/untracked content and the push
     then publishes it irreversibly, so it is not waved through. A plain 'git commit -m' and a scoped
-    'git add <path>' are not breadth and are unaffected. It never asks."""
+    'git add <path>' are not breadth and are unaffected. It never asks. A '#' whose comment reading the
+    shared lexer CAN judge under both readings is judged one reading at a time, because both scans here are
+    order-sensitive: the strictest decision across the readings stands (a deny on any reading, then the
+    first reading's note), and the breadth-then-push or cd-then-mutation order is never read across a
+    reading boundary, so a sequence no single reading holds cannot deny or note. Behind a '#' it cannot
+    judge under both readings, the raw fallback reads _hash_doubt_scan, and a command
+    whose quoting that scan does not decode (_hash_doubt_opaque) DENIES, since the breadth-and-publish pair
+    cannot be ruled out there. Where a lex read a quoted here-document's body that main's lexer reads
+    otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments are judged beside the
+    lex's own where main's reading lexes, and where it fails the raw fallback a lex that fails takes
+    (_expbnd_fallback_kind) denies after this guard's own deny and before its notes, and decides in place of
+    its allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -3998,28 +6392,54 @@ def git_explicit_binding(data):
             "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
             "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+    reads = _SubstHeredocs.reads
     try:
-        segments = _segments(command)
+        # Both scans below read only each segment's words, and a segment with no word names no command
+        # (its _command_word is ''), so no such segment is built (_lex_command's skip_empty). The readings
+        # of an uncertain '#' (the shared lexer's comment rule) are kept apart: both scans carry order
+        # state (a breadth stage before a push, a directory change before a mutation) that is real only
+        # within one reading, so each reading is judged on its own and the strictest decision across the
+        # readings stands (a deny on any reading wins, then the first reading's note); state carried over
+        # a reading boundary would invent a sequence no single reading holds.
+        readings = _lex_readings(command, skip_empty=True)
+    except _UncertainHashError:
+        # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
+        # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
+        # whose quoting that removal does not decode takes the fallback's deny.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree "
+                                           "breadth stage (git add -A, git commit -a) followed by a git push "
+                                           "that publishes whatever the tree holds")
+        return _expbnd_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _expbnd_fallback(command)
 
-    # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
-    # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the command DENIES-and-educates, regardless of any
-    # cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd (which would
-    # otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish hazard. A push
-    # BEFORE the breadth stage publishes only the pre-breadth state and does not fire.
-    breadth_before_push = None
-    for tokens, _sep in segments:
-        eff = _expbnd_effective_tokens(tokens)
-        if _command_word(eff) != "git":
-            continue
-        s, a = _git_sub_and_args(eff)
-        if s is None:
-            continue
-        if s == "push" and breadth_before_push is not None:
-            return _expbnd_breadth_publish_deny(breadth_before_push)
-        if _git_is_breadth(s, a):
-            breadth_before_push = s
+    # BREADTH-THEN-PUBLISH PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
+    # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the same reading DENIES-and-educates, regardless
+    # of any cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd
+    # (which would otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish
+    # hazard. A push BEFORE the breadth stage publishes only the pre-breadth state and does not fire; the
+    # before/after order is read within ONE reading at a time, never across the reading boundary. A git alias
+    # the command defines may be either, so it counts as both a publish and a breadth stage: one a segment
+    # defines for a git command of its own (_git_local_alias) and, in a command whose text names a git
+    # configuration variable or that runs under an alias the hook's environment carries (_git_alias_outside),
+    # every segment naming git (_names_git), whatever its command word (_git_alias_segment).
+    named = _git_alias_outside(command)
+    for segments in readings:
+        breadth_before_push = None
+        for seg in segments:
+            eff = _expbnd_effective_tokens(seg.argv)
+            s, a = _git_sub_and_args(eff) if _command_word(eff) == "git" else (None, [])
+            aliased = _git_alias_segment(seg.argv, named)
+            if s is None and not aliased:
+                continue
+            if (s == "push" or aliased) and breadth_before_push is not None:
+                return _expbnd_breadth_publish_deny(breadth_before_push)
+            if aliased or _git_is_breadth(s, a):
+                breadth_before_push = s or _expbnd_git_verb(seg.argv)
+    floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
+    if floor and _expbnd_fallback_kind(command) == "publish":
+        return _expbnd_fallback(command)  # the deny main's failed lex takes
 
     # A cd/pushd/popd SHIFTS the target out of the session cwd (popd lands on an unknowable stack-top
     # directory, so it too confuses a following git segment). The shift confuses a git segment only when it
@@ -4029,24 +6449,29 @@ def git_explicit_binding(data):
     # only through a "||" (git runs only on the prior command's failure, so the cwd is unchanged) or a "|"
     # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow. The
     # breadth+publish deny is handled by the pre-scan above; a breadth op after a cd with NO publish is only
-    # the relocate convention nudge.
-    saw_dir_change = False
-    for tokens, _sep in segments:
-        eff = _expbnd_effective_tokens(tokens)
-        word = _command_word(eff)
-        if word in _CD_BUILTINS or word == "popd":
-            saw_dir_change = True
-            continue
-        if word != "git":
-            continue
-        sub, args = _git_sub_and_args(eff)
-        if sub is None:
-            continue
-        if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
-                and saw_dir_change):
-            return _expbnd_target_ask(sub)
-        if _git_is_breadth(sub, args) and saw_dir_change:
-            return _expbnd_breadth_ask(sub)
+    # the relocate convention nudge. The precedes relation is read within one reading at a time, as above:
+    # a cd that only one reading holds cannot confuse a git segment another reading holds.
+    for segments in readings:
+        saw_dir_change = False
+        for seg in segments:
+            eff = _expbnd_effective_tokens(seg.argv)
+            word = _command_word(eff)
+            if word in _CD_BUILTINS or word == "popd":
+                saw_dir_change = True
+                continue
+            sub, args = _git_sub_and_args(eff) if word == "git" else (None, [])
+            # its subcommand is unknown, so possibly mutating (the pre-scan above names the aliased segments)
+            aliased = _git_alias_segment(seg.argv, named)
+            if sub is None and not aliased:
+                continue
+            verb = sub or _expbnd_git_verb(seg.argv)
+            if ((aliased or _git_is_mutating(sub, args)) and not _git_target_is_explicit(eff)
+                    and saw_dir_change):
+                return _expbnd_target_ask(verb)
+            if (aliased or _git_is_breadth(sub, args)) and saw_dir_change:
+                return _expbnd_breadth_ask(verb)
+    if floor:
+        return _expbnd_fallback(command)  # its note, or the allow, in place of this allow
     return _allow()
 
 
@@ -4060,6 +6485,12 @@ def _stash_pop_apply_bare(sub, args):
     rest = args[args.index(first) + 1:]
     pre, post, _had_sep = _split_pre_post(rest)
     return not any(not a.startswith("-") for a in pre) and not post
+
+
+# git and then stash anywhere in a command's text: git_stash_ref's subject test when a '#' whose comment
+# reading the lexer cannot judge under both readings stops it (_hash_doubt_names). A _RawSequence, so the
+# test is linear in the command's length.
+_STASH_WORD_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bstash\b")
 
 
 def git_stash_ref(data):
@@ -4086,8 +6517,16 @@ def git_stash_ref(data):
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
     of stack state, with no escalation for a dangerous stack. Bash PreToolUse only; no prior-turn
     shell-state resolution. Other stash verbs, including bare stash (push), are outside this guard;
-    drop/clear/export belong to git_discard. Unparseable text silently allows. An absent/unreadable
-    command gets the sibling's convention note.
+    drop/clear/export belong to git_discard. A command carrying a '#' whose comment reading depends on
+    context (the shared lexer's comment rule) is judged on the segments of both readings of each such '#'.
+    Unparseable text is never passed clean where a bare pop/apply cannot be ruled out. On an ordinary parse
+    failure (an unbalanced quote, a here-string, a process substitution) a command whose text, as written or
+    in a de-quoted reading (_decoded_readings), names git and then stash gets the note (so does one naming
+    another stash verb, or an operand the lexer could not read: an over-note, never a refusal), and text
+    naming no such pair allows. A command whose '#' the lexer cannot judge that way gets the note when its
+    text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
+    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An absent/unreadable command gets the
+    sibling's convention note.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
@@ -4112,7 +6551,39 @@ def git_stash_ref(data):
         # The loop below passes over a segment with no word (it has no command word), so one with no word
         # and no redirect is not built at all.
         segments = _segments(command, skip_empty=True)
+    except _UncertainHashError:
+        # A stash verb behind a '#' whose comment reading the lexer could not judge under both readings keeps
+        # the note it would earn, and so does a command whose quoting the fallback text does not decode,
+        # where a stash verb cannot be ruled out.
+        if _hash_doubt_opaque(command):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): this command carries a '#' whose comment "
+                "reading depends on context, so the shared lexer could not check it, and its text holds quoting "
+                "this guard's fallback does not decode (an ANSI-C $'...' or locale $\"...\" quote, or a quote "
+                "character or backslash next to a letter), so a bare git stash pop/apply cannot be ruled out; "
+                "one acts on the top of the stash stack, ambient shared state that may not be the entry you "
+                "mean. Run 'git stash list', then name the entry explicitly, for example "
+                "\"git stash apply 'stash@{2}'\".")
+        if _hash_doubt_names(command, _STASH_WORD_RE):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): this command names git stash and carries "
+                "a '#' whose comment reading depends on context, so the shared lexer could not check it; a bare "
+                "git stash pop/apply acts on the top of the stash stack, ambient shared state that may not be "
+                "the entry you mean. Run 'git stash list', then name the entry explicitly, for example "
+                "\"git stash apply 'stash@{2}'\".")
+        return _allow()
     except ValueError:
+        # An ordinary parse failure (an unbalanced quote, a here-string, a process substitution) leaves the
+        # command unread, so it is not passed clean where a bare pop/apply cannot be ruled out: a command
+        # whose text, as written or in a de-quoted reading (_decoded_readings), names git and then stash
+        # keeps the note, as the uncertain-'#' branch above gives it; text naming no such pair allows.
+        if any(_STASH_WORD_RE.search(text) for text in (command,) + _decoded_readings(command)):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): this command could not be parsed by the "
+                "shell lexer (an unbalanced quote or an unsupported construct such as a here-string) and its "
+                "text names git stash, so a bare git stash pop/apply cannot be ruled out; one acts on the top "
+                "of the stash stack, ambient shared state that may not be the entry you mean. Run 'git stash "
+                "list', then name the entry explicitly, for example \"git stash apply 'stash@{2}'\".")
         return _allow()
 
     for tokens, _sep in segments:
@@ -4238,17 +6709,24 @@ def _tree_is_clean(repo):
     read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
     (any staged or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False
     when it reports either, None when the probe could not run (a subprocess error, a non-zero return, an
-    unreadable repo). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset
-    --hard' can destroy, so an untracked-only-dirty tree is NOT provably clean.
+    unreadable repo) or answered MALFORMED: a zero-exit answer holding a blank line or an ignored '!!' line,
+    and no change line, is not well-formed output for this call (one 'XY PATH' record per line, and porcelain
+    prints '!!' only under --ignored, which this probe never passes), so such an answer (a broken or
+    substituted git) reads as cannot-evaluate, never as clean. A change line still WINS (False): a raw
+    U+2028/U+0085 path, which a repo-local core.quotePath=false leaves unquoted, is cut by str.splitlines()
+    into its record plus a blank fragment, and False is the stricter answer at the clobber gate (DENY, where
+    None snapshots then allows). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset --hard' can
+    destroy, so an untracked-only-dirty tree is NOT provably clean.
 
     The probe FORCES untracked reporting - 'git -c status.showUntrackedFiles=all status --porcelain
     --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
     file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
     override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
-    carrying both keeps the intent legible. An ignored '!!' entry is treated as clean (porcelain does not emit
-    '!!' without --ignored anyway). A forced checkout or 'clean -x' CAN overwrite/remove an ignored file, but
-    probing --ignored would ASK on every repo carrying build artifacts, so ignored-file loss on those forms is
-    a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
+    carrying both keeps the intent legible. The probe never asks for ignored files, so an ignored file is
+    invisible to it, and a '!!' line in its answer is malformed (above), never clean. A forced checkout or
+    'clean -x' CAN overwrite/remove an ignored file, but probing --ignored would ASK on every repo carrying
+    build artifacts, so ignored-file loss on those forms is a DISCLOSED residual the recovery layer backstops
+    (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
@@ -4264,11 +6742,15 @@ def _tree_is_clean(repo):
             capture_output=True, text=True, timeout=5, env=env)
         if result.returncode != 0:
             return None
+        malformed = False
         for line in result.stdout.splitlines():
             if not line or line[:2] == "!!":
-                continue  # only an ignored entry is treated as clean
+                # a blank line is not a porcelain record, and '!!' is never printed without --ignored, which
+                # this probe does not pass: malformed on its own, but a change line still wins
+                malformed = True
+                continue
             return False  # a tracked change (staged or unstaged) OR an untracked file: not provably clean
-        return True
+        return None if malformed else True  # blank or '!!' lines only: cannot evaluate, never clean
     except Exception:
         return None
 
@@ -4821,7 +7303,7 @@ def _segment_repo_dir(tokens, cwd):
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs."""
-    if _segment_has_gitdir_redirect(tokens):
+    if _segment_has_gitdir_redirect(tokens, appended=False):
         return None
     cw = _command_word_index(tokens)
     has_worktree = any(tok.startswith("GIT_WORK_TREE=") for tok in tokens[:cw])
@@ -4953,7 +7435,14 @@ def _git_discard_fallback(command):
     (_dequoted_text: continuations joined, a '$' before a quote, quote characters and backslashes
     removed), so a fragmented 're""set' in an unparseable command is flagged and denied like its
     plain spelling. Every flagged unparseable command denies here, so a redirect a continuation or a
-    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot."""
+    quote splits ('-\\<newline>C', '-"C"') can never reach a session-directory snapshot. A command that runs git
+    under a git alias it defines (_git_alias_recovered: its text names a git configuration variable and git, its
+    text names git and defines one anywhere, past where the lexer stopped included, or a git segment a partial lex
+    recovers defines one or runs under one the session environment carries) denies first, as on a parsed command,
+    since the alias may name no work-losing verb this scan can see."""
+    kind = _git_alias_recovered(command, unread=True)
+    if kind:
+        return _git_discard_alias_deny(kind == "built")
     if not (_raw_has_lossy_git(command) or _raw_has_lossy_git(_dequoted_text(command))):
         return _allow()  # no git + work-losing verb in the raw text or its de-quoted copy: the true boundary
     return _deny(
@@ -4966,6 +7455,32 @@ def _git_discard_fallback(command):
         "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
         "AIQT guardrail: denied an unparseable command naming a git work-losing verb (rule prsunc); "
         "re-issue it as a plain, parseable git command, or commit or stash first.")
+
+
+def _git_discard_alias_deny(built=False):
+    """git_discard's deny of a git command that runs under a git alias the command defines (_git_local_alias,
+    _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one (_git_discard_fallback)
+    alike. With built True the git command reads so only through a word built at run time, or a region the lexer
+    did not read (_git_alias_built), and the reason says that, with the fix (_GIT_BUILT_WORD_REASON)."""
+    if built:
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command " + _GIT_BUILT_WORD_REASON + ", and it may "
+            "be a work-losing verb this guard cannot resolve or snapshot; denied rather than run on an unknown "
+            "discard. " + _GIT_BUILT_WORD_FIX + " Or commit or stash your work first. " + _DISCARD_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may discard "
+            "work (rule prsunc); quote the expansion or spell the option literally.")
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): this command defines a git alias for itself, or runs git "
+        "under one (a -c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> assignment naming one, the name GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or "
+        "GIT_CONFIG_KEY_ anywhere in the command's text, in any word, quoted or not, whatever sets or mentions it, "
+        "or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the session environment naming one) that may expand "
+        "to a work-losing verb this guard cannot resolve or snapshot; denied rather than run on an unknown discard. "
+        "Re-issue the command the alias expands to explicitly, with no mention of those variable names, so this "
+        "guard can classify it (an alias from the session environment needs a session started without that "
+        "variable), or commit or stash your work first. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: denied a git alias the command defines or runs under, which may discard work (rule "
+        "prsunc); run the aliased command explicitly, or commit or stash first.")
 
 
 def _pristine_single_bare_git(command, segments):
@@ -5564,15 +8079,20 @@ def _deny_with_recovery(kind, snap, note=""):
     return _discard_deny(kind, recovery + note)
 
 
-def _segment_has_gitdir_redirect(tokens):
+def _segment_has_gitdir_redirect(tokens, appended=True):
     """True when a git segment carries a --git-dir / GIT_DIR= redirect. Unlike --work-tree (which moves only
     the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it changes which repo a `git stash
     drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny) a stash discard whose target
     repository this guard cannot confidently resolve to a plain `git -C <dir>` invocation, rather than
     preserve the wrong repo's stash (round-3 finding 2)."""
+    # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches a caller: a
+    # non-cosmetic ambient GIT_* takes the override path first), so it counts too, which only sends more
+    # segments to the session-read denies. appended=False reads the '=' spelling alone: _segment_repo_dir keeps
+    # that reading, so the -C directory it returns for a GIT_DIR+= segment (the snapshot base git_discard
+    # reads before asking git, and the repository the branch-root guard probes) is unchanged.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
-        if tok.startswith("GIT_DIR="):
+        if tok.startswith("GIT_DIR=") or (appended and tok.startswith("GIT_DIR+=")):
             return True
     i = cw + 1
     n = len(tokens)
@@ -5599,6 +8119,12 @@ def _segment_gitdir_value(tokens):
     for tok in tokens[:cw]:
         if tok.startswith("GIT_DIR="):
             val = tok[len("GIT_DIR="):]  # last-wins
+        elif tok.startswith("GIT_DIR+="):
+            # With no earlier GIT_DIR assignment on the segment, GIT_DIR+= sets the value as GIT_DIR= does.
+            # After one it appends, and this reading does not build that joined value: it reads as empty,
+            # which names no repository, so _gitdir_is_session_repo fails closed (never a looser answer than
+            # the earlier assignment alone gave).
+            val = tok[len("GIT_DIR+="):] if val is None else ""
     i = cw + 1
     n = len(tokens)
     while i < n:
@@ -5651,6 +8177,239 @@ def _gitdir_is_session_repo(tokens, cwd):
     except (OSError, ValueError):
         return None
     return gd_c == sess_c
+
+
+# The global options the read-only target oracle (_segment_git_target) hands to git: the three that
+# name a directory (-C, --git-dir and --work-tree, separated or '='-attached), --bare (which makes the
+# directory git is in at that point the git dir), and the value-less flags that cannot change which git
+# dir or worktree git resolves. Any other global option (-c, --config-env, --exec-path, --namespace,
+# --super-prefix, --attr-source, -p, --help, --version, --html-path and the rest) is never handed over:
+# one prints and exits, pages, starts a program or loads configuration, so a redirect standing beside it
+# cannot be resolved read-only and the caller fails closed.
+_GIT_TARGET_VALUE_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
+_GIT_TARGET_FLAGS = frozenset((
+    "--bare", "-P", "--no-pager", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+    "--icase-pathspecs", "--no-replace-objects", "--no-optional-locks"))
+# A leading GIT_DIR / GIT_WORK_TREE assignment ('=' or '+=') on a git segment: (name, operator, value).
+_GIT_TARGET_ASSIGN_RE = re.compile(r"(GIT_DIR|GIT_WORK_TREE)(\+?=)(.*)\Z", re.DOTALL)
+
+
+def _segment_has_path_redirect(tokens):
+    """True when a git segment carries a path-valued redirect besides -C: a --git-dir or --work-tree global
+    option (separated or '='-attached), --bare, or a leading GIT_DIR / GIT_WORK_TREE assignment ('=' or
+    '+='). Each names the git dir or the worktree outright, and git takes a relative value only AFTER the
+    whole -C chain, so git_discard asks git itself where such a command lands (_segment_git_target) rather
+    than joining the value to the session directory."""
+    cw = _command_word_index(tokens)
+    if any(_GIT_TARGET_ASSIGN_RE.match(tok) for tok in tokens[:cw]):
+        return True
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok in ("--git-dir", "--work-tree", "--bare") or tok.startswith(("--git-dir=", "--work-tree=")):
+            return True
+        if "=" not in tok and tok in _GIT_ARG_OPTS:   # a separated value-consuming global option: skip both
+            i += 2
+            continue
+        i += 1
+    return False
+
+
+def _two_abs_lines(out):
+    """(first, second), each a realpath, when out is exactly two newline-terminated absolute paths, else None.
+    A path holding a newline cannot be told apart from two paths, so it is never guessed at."""
+    if not isinstance(out, str) or out.count("\n") != 2 or not out.endswith("\n"):
+        return None
+    first, second = out[:-1].split("\n")
+    if not (os.path.isabs(first) and os.path.isabs(second)):
+        return None
+    try:
+        return os.path.realpath(first), os.path.realpath(second)
+    except (OSError, ValueError):
+        return None
+
+
+def _segment_git_target(tokens, cwd):
+    """The (git dir, worktree) pair, each a realpath, that git itself resolves for a git segment run from the
+    session directory cwd, or None when it cannot be resolved unambiguously. git is the oracle: `git -C <cwd>
+    <the segment's -C, --git-dir, --work-tree and --bare options, in order> rev-parse --absolute-git-dir
+    --show-toplevel`, run through the scrubbed _recovery_git primitive (every ambient GIT_* removed) with the
+    segment's own leading GIT_DIR / GIT_WORK_TREE assignments re-applied, so every relative value is taken
+    after the whole -C chain exactly as git takes it and a --git-dir option overrides an inline GIT_DIR as it
+    does in git. rev-parse only reads. None (the caller fails closed) when there is no session directory,
+    when the segment carries any global option outside _GIT_TARGET_VALUE_OPTS and _GIT_TARGET_FLAGS or any
+    other non-cosmetic leading GIT_* assignment, when git errors or times out, or when its answer is not
+    exactly two absolute lines (a git dir with no worktree prints no toplevel)."""
+    if not (isinstance(cwd, str) and cwd):
+        return None
+    cw = _command_word_index(tokens)
+    extra = {}
+    for tok in tokens[:cw]:
+        m = _GIT_TARGET_ASSIGN_RE.match(tok)
+        if m:
+            # '+=' appends to the value an earlier assignment on this segment set; the ambient environment
+            # holds none (a non-cosmetic ambient GIT_* never reaches this oracle).
+            extra[m.group(1)] = (extra.get(m.group(1), "") if m.group(2) == "+=" else "") + m.group(3)
+            continue
+        name = tok.split("=", 1)[0].rstrip("+")
+        if name.startswith("GIT_") and name not in _COSMETIC_GIT_VARS:
+            return None
+    opts = []
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok in _GIT_TARGET_VALUE_OPTS:
+            if i + 1 >= n:
+                return None
+            opts += [tok, tokens[i + 1]]
+            i += 2
+            continue
+        if tok.startswith(("--git-dir=", "--work-tree=")) or tok in _GIT_TARGET_FLAGS:
+            opts.append(tok)
+            i += 1
+            continue
+        return None
+    try:
+        r = _recovery_git(cwd, opts + ["rev-parse", "--absolute-git-dir", "--show-toplevel"],
+                          env_extra=extra, timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    return _two_abs_lines(r.stdout)
+
+
+def _discovered_git_target(path):
+    """The (git dir, toplevel) pair, each a realpath, that git discovers from path as a plain `git -C <path>`
+    with every ambient GIT_* scrubbed, or None when path lies in no worktree or git cannot answer."""
+    try:
+        r = _recovery_git(path, ["rev-parse", "--absolute-git-dir", "--show-toplevel"], timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    if r.returncode != 0:
+        return None
+    return _two_abs_lines(r.stdout)
+
+
+def _segment_c_dir(tokens, cwd):
+    """The directory a git segment's -C chain leaves git in, applied left to right from cwd as git changes
+    directory (an empty -C value is skipped, as git skips it), or None when a relative step has no directory
+    to start from or a -C has no value."""
+    base = cwd if isinstance(cwd, str) and cwd else None
+    i = _command_word_index(tokens) + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok == "-C":
+            if i + 1 >= n:
+                return None
+            d = tokens[i + 1]
+            if d and os.path.isabs(d):
+                base = d
+            elif d:
+                if base is None:
+                    return None
+                base = os.path.join(base, d)
+            i += 2
+            continue
+        if "=" not in tok and tok in _GIT_ARG_OPTS:   # a separated value-consuming global option: skip both
+            i += 2
+            continue
+        i += 1
+    return base
+
+
+def _redirect_snapshot_plan(tokens, cwd, sub, args):
+    """Where a destructive discard carrying a path-valued redirect (_segment_has_path_redirect) is
+    snapshotted, decided from git's own answer (_segment_git_target):
+      ('base', dir)      : snapshot dir. Either the worktree git resolved, when git discovers that same git
+                           dir from it (the redirect only restates that worktree's own repository, so its
+                           snapshot holds the worktree content and the index the command discards), or, for an
+                           index-only form (_discard_index_only), the -C directory or the session directory
+                           when git discovers that git dir there (the index is all such a form discards).
+      ('deny', why, wt)  : fail closed. git could not resolve the target unambiguously (wt None), or it splits
+                           the git dir and the worktree across repositories, which no single snapshot holds
+                           (wt is that worktree when it lies in some repository, for the caller's best-effort
+                           recovery snapshot of it, else None)."""
+    tgt = _segment_git_target(tokens, cwd)
+    if tgt is None:
+        return ("deny", "git could not report, read-only, which git dir and worktree it would act on", None)
+    gd, wt = tgt
+    own = _discovered_git_target(wt)
+    if own is not None and own[0] == gd and (wt == own[1] or os.path.commonpath([wt, own[1]]) == own[1]):
+        return ("base", wt)
+    if _discard_index_only(sub, args):
+        for cand in (_segment_c_dir(tokens, cwd), cwd):
+            if isinstance(cand, str) and cand:
+                found = _discovered_git_target(cand)
+                if found is not None and found[0] == gd:
+                    return ("base", cand)
+    return ("deny", "git resolves its git dir to {} and its worktree to {}, which is not that git dir's own "
+                    "worktree".format(gd, wt), wt if own is not None else None)
+
+
+def _redirect_recovery_text(base, sub):
+    """The recovery sentence a redirect DENY folds into its reason (the denied command itself runs nothing):
+    when base is a directory inside a repository that is not provably clean, that repository is snapshotted
+    first, best-effort, and the sentence names the snapshot or the failure; empty when base is None or the
+    tree is provably clean."""
+    snap = None
+    if base is not None and _tree_is_clean(base) is not True:
+        snap = _record_recovery(base, sub)
+    return _recovery_outcome_text(snap)
+
+
+def _recovery_outcome_text(snap):
+    """The sentence a reason folds in for a recovery snapshot already attempted: the pointer when snap is
+    ('ok', info), the failure when it is ('fail', reason), and empty when snap is None (none was taken)."""
+    if snap is not None and snap[0] == "ok":
+        return " " + _recovery_pointer(snap[1])
+    if snap is not None and snap[0] == "fail":
+        return " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
+    return ""
+
+
+def _snapshot_bases_differ(first, second):
+    """False only when the directories first and second provably lie in one repository (the same toplevel,
+    compared by realpath), so a recovery snapshot of either holds the same tree; True otherwise, a side git
+    cannot resolve included, so the caller snapshots both (fail closed)."""
+    try:
+        if os.path.realpath(first) == os.path.realpath(second):
+            return False
+    except (OSError, ValueError, TypeError):
+        return True
+    top_first, top_second = _recovery_toplevel(first), _recovery_toplevel(second)
+    if not (top_first and top_second):
+        return True
+    try:
+        return os.path.realpath(top_first) != os.path.realpath(top_second)
+    except (OSError, ValueError):
+        return True
+
+
+def _redirect_deny(kind, why, wt, sub, alts):
+    """The fail-closed DENY for a destructive discard whose path-valued redirect git does not resolve to one
+    snapshottable repository (_redirect_snapshot_plan). When git placed the worktree inside a repository that
+    is not provably clean, that repository is snapshotted first, best-effort, and the outcome is folded into
+    the reason (_redirect_recovery_text)."""
+    recovery = _redirect_recovery_text(wt, sub)
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir, --work-tree, --bare or inline "
+        "GIT_DIR=/GIT_WORK_TREE= redirect, and {}, so this guard cannot snapshot the one repository the "
+        "command would discard from; denied rather than run on a possibly unrecoverable discard.{} Re-issue "
+        "it as a plain 'git -C <repo> <verb>' command for the target repository, or commit or stash your "
+        "work first. {}".format(kind, why, recovery, alts),
+        "AIQT guardrail: denied a --git-dir/--work-tree-redirected git discard whose repository git does not "
+        "resolve to one snapshottable target (rule prsunc); run it from the target repo, or commit or stash "
+        "first.")
 
 
 # PR #423: the POSITIVE LITERAL closed allowlist grammar for a NON-PRISTINE
@@ -6736,7 +9495,9 @@ def git_discard(data):
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
     config-forced porcelain probe reports no tracked change AND no untracked entry) - in which cases ALLOW.
     A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no pathspec, switch
-    --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope is judged by the
+    --force/--discard-changes) on a probed-DIRTY tree DENIES, and so does the same command behind any git
+    global option or leading assignment when the tree it targets probes dirty (an ambient GIT_* override
+    keeps its best-effort snapshot-then-allow). EVERYTHING ELSE in scope is judged by the
     POSITIVE LITERAL closed allowlist grammar (_discard_positive_grammar,
     judged on the RAW command string): a non-pristine in-scope command is accepted ONLY when every
     token is a bare literal word over the closed character class (letters, digits and
@@ -6774,8 +9535,12 @@ def git_discard(data):
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
-    reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
-    or no recognized lossy verb). A wrapper is in scope while the raw scan, the continuation-joined text or
+    reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
+    verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
+    missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
+    cannot-evaluate input, not that boundary, and DENIES under the shared fail-closed contract
+    (check-fails-closed-on-unreadable), since a discard could hide in what was not read. A wrapper is in
+    scope while the raw scan, the continuation-joined text or
     the DE-QUOTED copy (_dequoted_text: continuations joined, a '$' before a quote, quote characters and
     backslashes removed) sees a contiguous git verb keyword. The de-quoted copy is read on a
     certain lex too, so a wrapper that ALSO fragments the COMMAND WORD 'git' itself or the verb with quotes or
@@ -6784,7 +9549,10 @@ def git_discard(data):
     'any wrapper DENIES' is still NOT
     categorical: a command word or verb no raw, joined or de-quoted reading assembles (an escape decoded
     inside $'...', a word built by a parameter expansion or a command substitution at run time) reads as 'no
-    recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual. A real discard whose VERB is
+    recognized lossy verb'. Where that verb is the subcommand word and an ANSI-C quote or an unquoted expansion
+    builds it, the git alias reading denies it (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE); a verb built
+    inside double quotes ("${r}set") and a command word built at run time are silently ALLOWED - a DISCLOSED
+    best-effort residual. A real discard whose VERB is
     outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
     worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
     closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
@@ -6792,7 +9560,29 @@ def git_discard(data):
     historically this ASKED): a flagged sub the classifier cannot resolve to a known verb cannot be proven
     non-destructive and cannot be snapshotted, so it never wins the catch-all allow. The status probe (git
     status --porcelain,
-    config-forced to report untracked) is read-only and offline.
+    config-forced to report untracked) is read-only and offline. A command carrying a '#' whose comment
+    reading depends on context (the shared lexer's comment rule) is judged on the segments of both readings
+    of each such '#'; one the lexer cannot judge that way is unparseable, and its raw scan also runs on the
+    text with backslash-newlines and then quote characters and backslashes removed (_hash_doubt_scan), so a
+    continued spelling (git <backslash-newline>reset --hard) behind such a '#' is still flagged and DENIED;
+    one whose text holds quoting that removal does not decode (_hash_doubt_opaque: g$'i't, g'it' re'set'
+    --hard) is DENIED without the scan, since a work-losing git verb cannot be ruled out there. No such
+    command reaches a recovery snapshot: its '(', ')', backquote or '${' is outside the closed allowlist
+    grammar and its raw text is never pristine, so it either allows at the true boundary or denies. Where a
+    lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR,
+    above _MainHashReading), this guard needs no floor of its own: the fallback a lex that fails takes denies
+    exactly where the raw text or its de-quoted copy names git with a work-losing verb, the scope scan below
+    reads that text too (and the joined text), and such a command holds the form's '"', '$', '(' and '<<',
+    so it is never pristine and the closed allowlist grammar denies it (as does the missing session
+    directory); where the fallback allows, this guard's own decision is at least as strict. A git alias the
+    command defines denies however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): the lex here
+    runs inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
+    unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
+    --config-env key part spelled through any expansion, quote or brace defines one, parsed or unparseable
+    (_git_alias_recovered); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a
+    value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a git
+    option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -6824,18 +9614,48 @@ def git_discard(data):
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
+    if tool_name is None:
+        # A missing tool_name is a malformed payload, not another tool: it cannot be matched, so it is not
+        # cleared (the shared fail-closed contract), whatever its tool_input holds.
+        return _deny_missing_tool_name("prsunc")
     if tool_name != "Bash":
-        return _allow()  # boundary: a missing or other tool is out of scope
+        return _allow()  # boundary: a present non-Bash tool is out of scope
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
-        return _allow()  # boundary: unreadable/malformed command container
+        # A missing, non-object or non-string command container is a cannot-evaluate input, not the true
+        # boundary: a discard could hide in what was not read, so it denies under the shared fail-closed
+        # contract (check-fails-closed-on-unreadable) rather than passing clean.
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): the Bash payload carried no readable command "
+            "string, so the discard check could not run; failing closed. Re-issue the call with a string "
+            "command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule prsunc, fail-closed).")
     try:
         # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
         # when the command holds any shell metacharacter (every separator and the newline among them), so
         # it reads only the single segment that ends the command, and drops that one too when it has no word.
-        segments = _segments(command, skip_empty=True)
+        # Each word's spelling is recorded for the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            segments = _segments(command, skip_empty=True)
+    except _UncertainHashError:
+        # The same raw scan, also run on the text with its backslash-newlines and then its quote characters
+        # and backslashes removed: the lexer saw nothing past a '#' whose comment reading it could not judge
+        # under both readings, so a continued spelling it would have decoded is still flagged, and a command
+        # whose quoting that removal does not decode (g$'i't reset) denies without the scan.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("prsunc (preserve-uncommitted-work)", "a git work-losing verb "
+                                           "(checkout, switch, restore, reset, clean, stash, rm or branch)",
+                                           _DISCARD_ALTS)
+        if _raw_has_lossy_git(_hash_doubt_scan(command)):
+            return _deny(
+                _hash_doubt_reason("prsunc (preserve-uncommitted-work)", "its text names git together with a "
+                                   "work-losing verb keyword, so this guard cannot establish what it would run "
+                                   "or where") + " " + _DISCARD_ALTS,
+                "AIQT guardrail: denied a command naming a git work-losing verb behind a '#' this guard could "
+                "not read (rule prsunc, fail-closed).")
+        return _git_discard_fallback(command)
     except ValueError:
         # Conservative raw scan, not a silent allow (the unparseable-command fallback): an unparseable command the raw scan
         # flags is denied outright; only a command the scan clears is allowed at the true boundary.
@@ -6886,6 +9706,18 @@ def git_discard(data):
     raw_lossy = (_raw_has_lossy_git(command)
                  or _raw_has_lossy_git(_join_continuations(command)[0])
                  or _raw_has_lossy_git(_dequoted_text(command)))
+    # A git alias the command defines runs a subcommand this guard cannot resolve, whether or not the text names a
+    # work-losing verb (a --config-env value, a configuration variable's value or an included file names none), so
+    # it cannot be classified or snapshotted and denies, on a clean tree as on a dirty one: one a segment defines
+    # for a git command of its own (_git_local_alias), and every git command of a command whose text names a git
+    # configuration variable or that runs under an alias the hook's environment carries (_git_alias_named,
+    # _git_alias_segment), wherever its git word stands.
+    outside = _git_alias_outside(command)
+    if _git_alias_named(command):
+        return _git_discard_alias_deny()
+    for tokens, _sep in segments:
+        if _git_alias_segment(tokens, outside):
+            return _git_discard_alias_deny(_git_alias_built(tokens, outside))
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
@@ -6913,8 +9745,10 @@ def git_discard(data):
         # scan, and the grammar denies it (eval and a concatenated quote are outside it). A verb
         # obfuscated so thoroughly that it evades even that scan (built by an escape decoded inside
         # $'...' or by a parameter expansion at run time, so no raw, joined or de-quoted reading holds a
-        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at
-        # the in-scope boundary above, a DISCLOSED best-effort residual, not something this path closes.
+        # contiguous `reset` for _raw_has_lossy_git to catch) never reaches here at all: as the subcommand
+        # word spelled through an ANSI-C quote or an unquoted expansion it denies above as a git alias, and
+        # built inside double quotes it is ALLOWED at the in-scope boundary above, a DISCLOSED best-effort
+        # residual, not something this path closes.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
         if np_base is None:
@@ -7033,9 +9867,15 @@ def git_discard(data):
         # ambient GIT_* override, resolve the ACTUAL target worktree and snapshot THAT repo, not the session
         # cwd, so the recovery ref contains the state the command will discard. If the redirect target cannot
         # be resolved, or a destructive verb's target cannot be snapshotted, DENY - never allow-note a discard
-        # whose recovery ref does not contain the discarded state. A --git-dir/GIT_DIR/-c redirect (which does
-        # NOT move the worktree) resolves to None and keeps the sound session-cwd snapshot; the ambient-GIT_*
-        # case (unreadable from the command) keeps its disclosed best-effort session-cwd snapshot.
+        # whose recovery ref does not contain the discarded state. _segment_repo_dir reads a --git-dir/GIT_DIR/-c
+        # redirect as None, the session directory. A destructive discard carrying --git-dir, --work-tree, --bare
+        # or a leading GIT_DIR/GIT_WORK_TREE assignment is then resolved by git below (beside -C, a relative
+        # --git-dir is taken after the whole -C chain) and snapshotted at the repository git resolves; the -C or
+        # session directory read here stays a floor, snapshotted as well (when not provably clean) whenever it
+        # lies in another repository; a failed snapshot there DENIES unless the repository git resolved was
+        # probed and is provably clean or was snapshotted successfully. A -c or other global option with no
+        # -C keeps the session-cwd snapshot; the ambient-GIT_* case (unreadable from the command) keeps its
+        # disclosed best-effort session-cwd snapshot.
         # ROUND-7 (codex findings 1 and 2): resolve the REPO git's index/ref/stash op acts on via
         # _segment_repo_dir (-C/ambient, --work-tree treated as worktree-only), NOT _segment_redirect_worktree
         # (which returned the --work-tree VALUE and so landed the snapshot/stash/probe on the wrong repo). A
@@ -7043,6 +9883,7 @@ def git_discard(data):
         # closed just below.
         repo_dir = None if ambient_override else _segment_repo_dir(pristine, cwd_base)
         has_wt = False if ambient_override else _segment_has_worktree_redirect(pristine)
+        resolved_by_git = False
         destructive = sub in _SNAPSHOTTABLE_VERBS and role != "allow"
         # CLAUDE-F1 (round-7): a discard that entered this view-override branch (an ambient GIT_* view-override,
         # OR a command-local -C/--git-dir/--work-tree/-c/inline-GIT_*= redirect) whose raw scan flagged a lossy
@@ -7065,24 +9906,51 @@ def git_discard(data):
                 "recognized, provable form, or commit or stash your work first. {}".format(sub, alts),
                 "AIQT guardrail: denied a redirected git command whose subcommand this guard cannot prove "
                 "non-destructive (rule prsunc); commit or stash first, or re-issue in a recognized form.")
+        # A destructive discard carrying a path-valued redirect (--git-dir, --work-tree or --bare, or a
+        # leading GIT_DIR/GIT_WORK_TREE assignment) is resolved by git itself, never by joining a value to the
+        # session directory: git takes a relative --git-dir/--work-tree only after the WHOLE -C chain, so
+        # 'git -C <dirty repo> --git-dir=.git reset --hard' from a clean session acts on the -C repository,
+        # and an absolute --git-dir naming the session repository beside '-C <other>' makes that other
+        # directory the worktree it overwrites. _redirect_snapshot_plan reads git's answer: a worktree whose
+        # own repository is that git dir is snapshotted there (an index-only form wherever git discovers that
+        # git dir), and every other case DENIES - a git dir and worktree split across repositories, which no
+        # single snapshot holds (a --work-tree outside the repository, or a --git-dir naming a repository
+        # other than the worktree's own), or a target git cannot resolve read-only - with a best-effort
+        # snapshot of the worktree's own repository folded into the reason. A non-cosmetic ambient GIT_*
+        # variable beside such a redirect leaves the actual command's view unprovable, so that DENIES too.
+        redirect_base = None
+        if destructive and _segment_has_path_redirect(pristine):
+            plan = (("deny", "a non-cosmetic ambient GIT_* variable also shapes the repository it acts on",
+                     None) if ambient_override else _redirect_snapshot_plan(pristine, cwd_base, sub, args))
+            if plan[0] == "deny":
+                return _redirect_deny(kind or "a git work-losing verb", plan[1], plan[2], sub, alts)
+            redirect_base = plan[1]
+        # The two denies below decided these redirects before git resolved them, and they still DENY when
+        # git resolves the command to one snapshottable repository, so resolving through git never turns
+        # one of them into a snapshot-then-allow: a --git-dir/GIT_DIR whose value, read from the session
+        # directory, is not the session repository's git dir ('git -C <repo> --git-dir=<repo>/.git reset
+        # --hard'), and a worktree-content discard whose --work-tree/GIT_WORK_TREE worktree lies outside the
+        # repository read from the -C or session directory ('git -C <repo> --git-dir=.git --work-tree=. reset
+        # --hard'). The repository git resolved is snapshotted first when it is not provably clean, and the
+        # outcome is folded into the reason.
         # ROUND-6 FINDING 5: a destructive discard carrying a --git-dir/GIT_DIR redirect (which does NOT move
         # the worktree, so redir_wt is None and the code below would snapshot the SESSION worktree) destroys
         # the REDIRECTED repository's INDEX/refs - which a session-worktree+index snapshot does NOT capture -
         # when that git-dir names a DIFFERENT repository than the session cwd (e.g. 'git --git-dir=T/.git
         # restore --staged'). Resolving the worktree alone cannot identify the redirected index, so a
         # --git-dir staged/worktree discard whose git-dir is not PROVABLY the session repo DENIES rather than
-        # allow-note a session snapshot lacking that index. A --git-dir naming the SAME repo as cwd (the
-        # session index IS the one discarded) still allows via the session snapshot below (dir-e).
+        # allow-note a session snapshot lacking that index. A --git-dir naming the SAME repo as cwd passes this
+        # check, and the repository git resolved above is the one snapshotted below.
         if destructive and _segment_has_gitdir_redirect(pristine):
             if _gitdir_is_session_repo(pristine, cwd_base) is not True:
                 return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir/GIT_DIR redirect to "
-                    "a repository this guard cannot prove is the session repository, so the index and refs "
-                    "the command would discard live in a DIFFERENT repository than the session worktree; a "
-                    "session snapshot cannot capture that redirected index, so this discard could be "
-                    "unrecoverable and is denied rather than run. Re-issue it as a plain 'git -C <repo> "
-                    "<verb>' command run from the target repository, or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", alts),
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir/GIT_DIR redirect whose "
+                    "value, read from the session directory, does not name the session repository's git dir, so "
+                    "the index and refs the command would discard may live in a DIFFERENT repository than the "
+                    "session worktree; this guard denies such a redirect rather than run it, even where git "
+                    "resolves the command to one repository it could snapshot.{} Re-issue it as a plain 'git -C "
+                    "<repo> <verb>' command run from the target repository, or commit or stash your work first. {}"
+                    .format(kind or "a git work-losing verb", _redirect_recovery_text(redirect_base, sub), alts),
                     "AIQT guardrail: denied a --git-dir/GIT_DIR-redirected git discard whose repository this "
                     "guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or commit "
                     "or stash first.")
@@ -7101,16 +9969,31 @@ def git_discard(data):
             if not _worktree_within_repo(wt_dir, repo_probe):
                 return _deny(
                     "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --work-tree/GIT_WORK_TREE "
-                    "redirect that relocates ONLY the working tree, so git discards WORKING-TREE content from "
-                    "that directory while the index and refs stay in the ambient (or --git-dir) repository; "
-                    "a single recovery snapshot cannot capture that split state, so this guard cannot snapshot "
-                    "the exact content the command would discard and denies rather than run on a possibly "
-                    "unrecoverable discard. Re-issue it as a plain 'git <verb>' command run FROM the target "
-                    "working tree (without --work-tree), or commit or stash your work first. {}"
-                    .format(kind or "a git work-losing verb", alts),
+                    "redirect whose worktree lies outside the repository this guard reads from the -C or "
+                    "session directory, so git may discard WORKING-TREE content from that directory while the "
+                    "index and refs stay in another repository, a split state a single recovery snapshot "
+                    "cannot hold; this guard denies such a discard rather than run it, even where git resolves "
+                    "the command to one repository it could snapshot.{} Re-issue it as a plain 'git <verb>' "
+                    "command run FROM the target working tree (without --work-tree), or commit or stash your "
+                    "work first. {}".format(kind or "a git work-losing verb",
+                                            _redirect_recovery_text(redirect_base, sub), alts),
                     "AIQT guardrail: denied a --work-tree-redirected worktree-content git discard whose split "
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
+        # The base read above without asking git (the -C directory, or the session directory beside a
+        # --git-dir or leading GIT_DIR=) also stays a floor under git's answer: when it lies in another
+        # repository than the one git resolved, it is probed and, when not provably clean, snapshotted as well
+        # below. A failed snapshot there is allowed past, with the failure named, only when the repository git
+        # resolved, which the command acts on, was probed and is provably clean or was snapshotted
+        # successfully; otherwise it DENIES. The repository git resolved is snapshotted in either case.
+        pre_base = pre_desc = None
+        if redirect_base is not None and repo_dir != "opaque":
+            if _snapshot_bases_differ(repo_dir if isinstance(repo_dir, str) else cwd_base, redirect_base):
+                pre_base = repo_dir if isinstance(repo_dir, str) else cwd_base
+                pre_desc = ("the -C target ({})".format(repo_dir)
+                            if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+            repo_dir = redirect_base
+            resolved_by_git = True
         # ROUND-3 FINDING 2: a redirected/ambient 'git stash drop'/'clear' must PRESERVE the stash of the
         # repository it actually clears (drop/clear is NOT reflog-recoverable afterwards) or DENY when that
         # repository cannot be resolved. stash is not snapshottable, so the destructive/worktree logic below
@@ -7120,6 +10003,8 @@ def git_discard(data):
         if sub == "stash":
             stash_op = next((a for a in args if not a.startswith("-")), None)
             if stash_op in ("drop", "clear"):
+                # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches
+                # here), so it denies alike: _segment_has_gitdir_redirect reads both spellings.
                 if ambient_override or repo_dir == "opaque" or _segment_has_gitdir_redirect(pristine):
                     return _deny(
                         "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
@@ -7163,8 +10048,11 @@ def git_discard(data):
         # ROUND-7 (codex findings 1/2): snapshot the REPO git acts on (repo_dir: a -C target, or the session
         # cwd when only --work-tree/--git-dir/-c is present), never the --work-tree value.
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
-        target_desc = ("the -C target ({})".format(repo_dir)
-                       if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        if resolved_by_git and repo_dir != cwd_base:
+            target_desc = "the repository git resolves for it ({})".format(repo_dir)
+        else:
+            target_desc = ("the -C target ({})".format(repo_dir)
+                           if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
         # ROUND-8 (class-width of the orchestrator-confirmed fail-open): a DESTRUCTIVE verb deciding on this
         # view-override branch with NO resolvable base (no session cwd and no resolved -C target: a benign
         # leading assignment such as FOO=1, a -c or other global option, or an ambient GIT_* override, each
@@ -7181,24 +10069,73 @@ def git_discard(data):
                 .format(kind or "a git work-losing verb", alts),
                 "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
                 "(rule prsunc); run it from the target repo, or commit or stash first.")
+        # The floor base (pre_base, set only beside a redirect git resolved to another repository) is probed
+        # and snapshotted first, exactly as the base itself was before git was asked, and the repository git
+        # resolved is probed and snapshotted next. A successful floor snapshot is named in the outcome below,
+        # after the resolved snapshot. A failed one is named too, and it alone does not deny when the
+        # repository git resolved (the one the command acts on) was probed and is provably clean or was
+        # snapshotted successfully; when that probe did not complete or that snapshot failed, it DENIES with
+        # both outcomes named.
+        pre_snap = None
+        pre_text = ""
+        if pre_base is not None and _tree_is_clean(pre_base) is not True:
+            pre_snap = _record_recovery(pre_base, sub)
         ao_snap = None
-        if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
+        ao_clean = _tree_is_clean(target_base) if (target_base is not None and destructive) else None
+        if target_base is not None and destructive and ao_clean is not True:
             ao_snap = _record_recovery(target_base, sub)
-            if ao_snap is not None and ao_snap[0] == "fail":
+        if pre_snap is not None and pre_snap[0] == "fail":
+            if not (ao_clean is True or (ao_clean is False and ao_snap is not None and ao_snap[0] == "ok")):
                 return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
-                    "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
-                    "than run. Re-issue it as a plain git command from the target repository, or commit or "
-                    "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
-                                                       ao_snap[1], alts),
-                    "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
-                    "run it from the target repo, or commit or stash first.")
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a redirect that git resolves to {}, "
+                    "but this guard also snapshots {}, the directory it reads that redirect from without asking "
+                    "git, and could not snapshot it ({}); a discard whose snapshot there fails is allowed only "
+                    "when the repository git resolved was probed and is provably clean or was snapshotted, and "
+                    "{}, so it is denied rather than run.{} Re-issue it as a plain 'git -C <repo> <verb>' command "
+                    "run from the target repository, or commit or stash your work first. {}".format(
+                        kind or "a git work-losing verb", target_base, pre_desc, pre_snap[1],
+                        "its probe did not complete" if ao_clean is None else "its snapshot failed",
+                        _recovery_outcome_text(ao_snap), alts),
+                    "AIQT guardrail: denied a redirected git discard because a directory it reads could not be "
+                    "snapshotted (rule prsunc); run it from the target repo, or commit or stash first.")
+            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, could not "
+                        "be snapshotted ({}); that failure alone does not deny the command, because the "
+                        "repository git resolved, which it acts on, {}.".format(
+                            pre_desc[:1].upper(), pre_desc[1:], pre_snap[1],
+                            "was probed and is provably clean" if ao_clean is True else "was snapshotted first"))
+        elif pre_snap is not None:
+            pre_text = (" {}{}, the directory this guard reads the redirect from without asking git, was "
+                        "snapshotted as well.{}".format(pre_desc[:1].upper(), pre_desc[1:],
+                                                        _recovery_outcome_text(pre_snap)))
+        if ao_snap is not None and ao_snap[0] == "fail":
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
+                "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
+                "than run. Re-issue it as a plain git command from the target repository, or commit or "
+                "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
+                                                   ao_snap[1], alts),
+                "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
+                "run it from the target repo, or commit or stash first.")
+        # A whole-tree clobber (reset --hard, an operand-free checkout -f, switch --force/--discard-changes)
+        # on a target the probe confirms DIRTY denies here exactly as the bare command does below, with the
+        # snapshot just taken folded into the reason. A command-local cause of this branch (any git global
+        # option, value-taking or flag-only, known or unknown, or a leading assignment) only makes the
+        # repository view less certain; it never makes a certain whole-tree loss acceptable, so it must not
+        # turn the bare deny into a snapshot-then-allow. An ambient GIT_* override keeps its best-effort
+        # snapshot-then-allow: it is unreadable from the command, which may not act on the probed tree at
+        # all. A probe that did not complete keeps the bare path's snapshot-then-allow. Either outcome names
+        # the floor base's snapshot or its failure (pre_text) ahead of `note`, which still ends the reason or
+        # note.
+        if role == "clobber" and ao_clean is False and not ambient_override:
+            return _deny_with_recovery(kind, ao_snap, pre_text + note)
         return _discard_recovery_result(
             kind or "a git work-losing verb",
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
             "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment); the recovery "
-            "snapshot targets {} (a --git-dir/GIT_DIR alone leaves the worktree at the session directory)"
-            .format(target_desc), ao_snap, note)
+            "snapshot targets {}{}".format(
+                target_desc, " (git itself, asked read-only, resolved the git dir and worktree that redirect "
+                             "acts on, after the whole -C chain)" if resolved_by_git else ""),
+            ao_snap, pre_text + note)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _deny(
@@ -7328,8 +10265,8 @@ def git_discard(data):
     if clean is None:
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
         return _discard_recovery_result(
-            kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean", snap, note)
+            kind, "targets a repository whose status probe did not complete or answered malformed, so this "
+                  "guard cannot prove the working tree clean", snap, note)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
         return _deny_with_recovery(kind, snap, note)  # a confirmed whole-tree loss, still recoverable if approved
@@ -7452,6 +10389,47 @@ _RAW_PUSH_DELETE_RE = re.compile(
     + r"|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
+
+
+class _RawMirrorConfig:
+    """The raw mirror-configuration probe: search() returns the match the single regex `pattern` returns
+    (an option, then 'remote.', then a key run of characters that are neither whitespace nor '=' with a
+    '.mirror' after its first character), or None, at linear cost. The regex reads the whole key run after
+    each option it finds and gives it back one character at a time looking for '.mirror', so a run holding
+    many options and no '.mirror' (git push '-c'remote.'-c'remote. and so on, with no blank to end the run)
+    cost time quadratic in its length: about 3.1 s of CPU for one search of a 180 KB run, against about
+    0.02 s for this probe on a 1 MB run (in-process on a 24-core host with Python 3.14.4, 2026-10-18).
+    Here `option` finds each option once, in order, `key` reads the run after it and `mirror` looks for
+    '.mirror' in that run once; an option whose key starts inside a run already read with no '.mirror'
+    after that earlier key is passed over, because its own run is a tail of that one. `option` matches
+    what the regex's two alternatives match before their shared key run; at a given start at most one
+    alternative can match, and only up to one place, so each option the regex can start from is read with
+    the key it would read. No option match starts inside another, so the runs read do not overlap. Only
+    the start of the leftmost match is read again, by `pattern` itself, for the match it returns.
+    tools/selftest_aiqt_hooks.py holds this probe equal to the regex over a generated corpus."""
+    __slots__ = ("pattern", "option", "key", "mirror")
+
+    def __init__(self, pattern, option, key, mirror):
+        self.pattern = re.compile(pattern)
+        self.option = re.compile(option)
+        self.key = re.compile(key)
+        self.mirror = re.compile(mirror)
+
+    def search(self, text):
+        pos, read_from, read_to = 0, 0, -1
+        while True:
+            found = self.option.search(text, pos)
+            if found is None:
+                return None
+            start = found.end()
+            if not read_from <= start < read_to:
+                run = self.key.match(text, start)
+                read_from, read_to = start, (run.end() if run else start)
+                if self.mirror.search(text, start + 1, read_to):
+                    return self.pattern.match(text, found.start())
+            pos = found.start() + 1
+
+
 # GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
 # (a wrapped or unparseable 'git -c remote.<name>.mirror=true push' / '--config-env=remote.<name>.mirror
 # =ENV push'). Anchored to the OPTION token ('-c' then whitespace and/or a shell quote, or '--config-env'
@@ -7472,10 +10450,14 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 # chased with more regex variants.
 # The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
 # branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
-# (accepted, documented), mirroring the raw scan's over-matching posture.
-_RAW_PUSH_MIRRORCFG_RE = re.compile(
+# (accepted, documented), mirroring the raw scan's over-matching posture. It is a _RawMirrorConfig probe of
+# the regex below, which decides the same at linear cost.
+_RAW_PUSH_MIRRORCFG_RE = _RawMirrorConfig(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
-    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
+    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror",
+    r"(?i)(?:^|[\s'\"])(?:-c[\s'\"]+|--config-env[=\s]['\"]*)remote\.",
+    r"(?i)[^\s=]+",
+    r"(?i)\.mirror")
 _RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 
 # Commit proof contract. Recognizers establish syntax, never authorization.
@@ -7576,7 +10558,12 @@ def _commit_raw_literal(raw):
             i += 1
             continue
         if c == "#" and boundary:
-            # A comment runs to the end of this segment's raw slice.
+            # A comment runs to the end of this segment's raw slice. Within the slice this is the comment
+            # rule's certain context (above _nest_track): the '#' follows the start or a blank, and nothing
+            # opened in the slice can be open, because this audit rejects every '$', backquote and
+            # parenthesis below before it reaches the '#'. Something opened in an earlier segment can still
+            # make that '#' uncertain in the whole command: the lexer then returns the segment once for each
+            # reading of it (_lex_readings), and this audit reads the '#' as a comment in every one of them.
             return "\n" not in raw[i:]
         if c in ("$", chr(96), "<", ">", ";", "|", "&", "(", ")", "\n"):
             return False
@@ -7644,18 +10631,26 @@ def _commit_syntax_step(seg):
     return _CommitStep(kind, target, branch, seg)
 
 
-def _commit_apparent_segment(seg):
+def _commit_apparent_segment(seg, named=False):
     """Conservative detection for an UNCLASSIFIED segment only.
 
     Decoded words expose ordinary quote/backslash fragmentation. Raw text additionally
     exposes apparent commands inside opaque syntax. Neither scan is applied to data
     in an already admitted literal commit/printf segment.
 
+    A git alias the segment defines for a git command of its own (_git_local_alias)
+    runs a subcommand this reading cannot see, possibly a commit, so that segment is
+    apparent too, and so is every segment naming git (_names_git) when named says the
+    command's text names a git configuration variable or the hook's environment
+    carries one naming an alias (_git_alias_outside, _git_alias_segment).
+
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
     sub, _args = _git_sub_and_args(seg.argv)
     if _command_word(seg.argv) == "git" and sub == "commit":
+        return True
+    if _git_alias_segment(seg.argv, named):
         return True
     return bool(_RAW_COMMIT_RE.search(" ".join(seg.argv))
                 or _RAW_COMMIT_RE.search(seg.raw))
@@ -7697,12 +10692,26 @@ def _commit_command_syntax(command):
         return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted")
     try:
         records = tuple(_lex_command(command))
-    except ValueError:
-        # Partial records improve detection only. They can NEVER establish a proof.
-        partial, _complete, _in_progress = _lex_command(command, partial=True)
-        apparent = bool(_RAW_COMMIT_RE.search(command))
+    except ValueError as exc:
+        # Partial records improve detection only. They can NEVER establish a proof. Behind a '#' whose
+        # comment reading the lexer could not judge under both readings, the raw commit probe also reads the
+        # text with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and
+        # a command whose quoting that removal does not decode (_hash_doubt_opaque) is an apparent commit.
+        with _LexStops() as stops:
+            partial, _complete, _in_progress = _lex_command(command, partial=True)
+        doubt = isinstance(exc, _UncertainHashError)
+        scan = _hash_doubt_scan(command) if doubt else command
+        apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
         apparent = apparent or not _commit_quote_bytes_known(command)
-        apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
+        # Every git command of a command whose text names a git configuration variable, or that runs under an
+        # alias the hook's environment carries, is apparent, the ones the partial lex does not recover included
+        # (_git_alias_named), and so is a command whose text defines a git alias wherever the lexer stopped
+        # (_git_alias_spelled), and so is a git command whose option region the lexer did not read
+        # (_git_alias_unread, from the stops of the partial lex above).
+        apparent = (apparent or _git_alias_named(command) or _git_alias_spelled(command)
+                    or _git_alias_unread(command, stops.seen))
+        named = _git_alias_outside(command)
+        apparent = apparent or any(_commit_apparent_segment(seg, named) for seg in partial)
         status = "unverifiable" if apparent else "outside"
         return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
     if len(records) > _COMMIT_MAX_SEGMENTS:
@@ -7714,7 +10723,8 @@ def _commit_command_syntax(command):
                              "ANSI-C or locale quoting has unknown execution-time bytes")
     commits = tuple(i for i, step in enumerate(steps)
                     if step is not None and step.kind == "commit")
-    hidden = any(_commit_apparent_segment(seg)
+    named = _git_alias_outside(command)
+    hidden = any(_commit_apparent_segment(seg, named)
                  for seg, step in zip(records, steps) if step is None)
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
@@ -8096,9 +11106,11 @@ def _push_protected(tokens, args, cwd):
     # push.default=matching configured-state residual (which could force every matching branch) is
     # disclosed, not modelled; likewise a bare 'git push --prune <remote>' whose deletion is driven
     # by a configured remote.<name>.push refspec, and a PERSISTED mirror mode (remote.<name>.mirror
-    # =true in repository, worktree, global, or system git config, or the GIT_CONFIG_* env protocol),
-    # which reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard
-    # reads no git config offline, so these are disclosed residuals, not modelled (GD-145). The
+    # =true in repository, worktree, global, or system git config, or the GIT_CONFIG_* env protocol from the
+    # session environment; a command whose text names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_
+    # denies before this reading, _git_alias_named), which reproduce the force-and-delete sweep with no bulk flag
+    # in the judged push args: the guard reads no git config offline, so these are disclosed residuals, not
+    # modelled (GD-145). The
     # COMMAND-LOCAL mirror configuration ('git -c remote.<name>.mirror=true push', or the key through
     # --config-env) IS now modelled at the mirror clause above (GD-146), since it lives in the command
     # string the guard can read. A '--repo=<remote>'
@@ -8501,7 +11513,9 @@ def _raw_push_segments(command):
     conservative where quoting is readable: a quote, backquote or substitution is consumed as ONE
     opaque unit, so its content (separators included) stays inside the surrounding segment; a line
     continuation does not split. On an unterminated or unreadable construct the REST of the command
-    joins the current segment unsplit, degrading toward a whole-text read (over-denial).
+    joins the current segment unsplit, degrading toward a whole-text read (over-denial); a '#' whose
+    comment reading depends on context inside a substitution the split skips is such a construct
+    (_skip_quoting applies the shared lexer's comment rule there, with no reading to judge it by).
     The splits themselves carry NO one-sided guarantee: a separator inside text bash reads
     differently (an unquoted-heredoc body line, a construct the quoting model mis-pairs) can still
     divide a pairing bash would run together, so this segment read stays one layer beside the parsed
@@ -8564,9 +11578,11 @@ def _raw_push_segments(command):
             word_start = False
             continue
         if c == "(" and prev_redir:
-            # a '<(' or '>(' process substitution: skip it as the '$(' it parses like, one opaque unit
+            # a '<(' or '>(' process substitution: skip it as the '$(' it parses like, one opaque unit,
+            # read in place (a copy of the rest of the command for each one cost time quadratic in the
+            # length of a command that holds many)
             try:
-                i += _skip_quoting("$" + joined[i:], 0, n - i + 1) - 1
+                i = _skip_quoting_from(joined, i + 1, n, ["paren"])
             except ValueError:
                 break
             prev_redir = False
@@ -8667,6 +11683,13 @@ def _fallback_push_hit(text):
                                                or _RAW_PUSH_MIRRORCFG_RE.search(text)))
 
 
+def _protected_line_fallback_push(command):
+    """True when _protected_line_fallback's push scan denies command (its commit syntax aside): the raw text or
+    its de-quoted copy (_dequoted_text) pairs a git..push spelling with a force, delete or mirror spelling.
+    protected_line reads it for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
+    return _fallback_push_hit(command) or _fallback_push_hit(_dequoted_text(command))
+
+
 def _protected_line_fallback(command, wrapped=False):
     """Commit-free push fallback; commit syntax is checked before this path.
 
@@ -8700,7 +11723,7 @@ def _protected_line_fallback(command, wrapped=False):
     plain = _dequoted_text(command)
     # R10: raw and unstripped; stripping could remove a real, mis-paired line. The de-quoted copy
     # is read beside it, never instead of it.
-    if _fallback_push_hit(command) or _fallback_push_hit(plain):
+    if _protected_line_fallback_push(command):
         named = (" a protected branch" if (_RAW_PROTECTED_RE.search(command) or _RAW_PROTECTED_RE.search(plain))
                  else " a target this guard cannot read")
         causes = [_LEX_UNCERTAIN_CAUSE_TEXT[key] for key in _lex_uncertain_causes(command)]
@@ -8728,6 +11751,11 @@ def protected_line(data):
     opaque script or unparseable fragmentation; other commit-producing verbs and
     other tools remain outside this boundary. Server protection does not validate
     this pre-execution proof. Push coverage retains its existing separate limits.
+    A '#' whose comment reading depends on context is judged under both readings
+    (the shared lexer's comment rule); where the lexer cannot judge it that way, an
+    apparent commit or push its text names (_hash_doubt_scan) denies, and so does
+    text holding quoting that scan does not decode (_hash_doubt_opaque), which the
+    commit recognizer reads as an apparent commit.
 
     A raw-text backstop (_raw_push_guard) scans the unmodified command on every
     call, before any parsing, and denies a force/delete/mirror push spelling paired with a
@@ -8744,6 +11772,27 @@ def protected_line(data):
     reached only for commit-free commands after the input validation, the raw backstop, the
     'help' early return and the commit-grammar reading above it; it is not the unconditional
     backstop.
+
+    Where a lex read a quoted here-document's body that main's lexer reads otherwise
+    (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments are read
+    beside the lex's own where main's reading lexes. Where it fails, the path main's
+    failed lex takes denies wherever it would, after this guard's own denies of the
+    same stage and before its allows: the commit syntax read as main reads it (inside
+    _SubstHeredocFloor), and the push scan of the fallback (_protected_line_fallback_push)
+    on a commit-free command (a commit the grammar proves cannot carry that body, since
+    a '$' is outside the literal grammar).
+
+    A git alias the command defines denies however it is spelled (HOW A WORD IS SPELLED,
+    above _GIT_ALIAS_KEY_RE): the commit syntax is lexed inside _WordSpellings, so in the
+    region after a git word through its subcommand word a word carrying an unquoted
+    parameter or command expansion or an ANSI-C or locale quote, a brace word with a
+    comma, or a -c or --config-env key part spelled through any expansion, quote or brace
+    defines one, on an unparseable command too (_git_alias_spelled). A word whose every
+    expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a value so spelled
+    behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in
+    a git option or subcommand position, or after any word naming git, now denies
+    ('git -C $D log'; quoting it restores the plain reading), and so does a key literal
+    in effect but spelled through an expansion or quote.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -8769,11 +11818,57 @@ def protected_line(data):
     if _raw_push_match(command):
         return _raw_push_guard(command)
     deadline = time.monotonic() + _COMMIT_SECONDS
-    syntax = _commit_command_syntax(command)
+    reads = _SubstHeredocs.reads
+    # Each lex of the commit syntax records each word's spelling for the git alias reading below and the commit
+    # recognizer's (_WordSpellings).
+    with _WordSpellings():
+        syntax = _commit_command_syntax(command)
+    # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails. The path
+    # main's failed lex takes denies or allows: an apparent commit its commit syntax, read as main reads it,
+    # cannot prove denies, and so does its push fallback on a commit-free command. Each such deny stands after
+    # this guard's own denies and before its allows.
+    floor = _SubstHeredocs.reads != reads
+    if floor:
+        with _SubstHeredocFloor(), _WordSpellings():
+            failed = _commit_command_syntax(command)
+    # A git alias the command defines runs a subcommand neither reading below can see: it may commit on the
+    # protected line or force-push to it (git -c alias.p=push p --force origin names no push), so it denies on any
+    # branch, as a commit outside the admitted grammar does: one a segment defines for a git command of its own
+    # (_git_local_alias), and every git command of a command whose text names a git configuration variable or that
+    # runs under an alias the hook's environment carries (_git_alias_named, _git_alias_segment), parsed or not,
+    # wherever its git word stands. The commit recognizer reads the same segments as apparent commits
+    # (_commit_apparent_segment), which covers main's reading of the floor, and on an unparseable command it reads a
+    # definition anywhere in the text, past where the lexer stopped included, as an apparent commit too
+    # (_git_alias_spelled), which denies below as an unverifiable commit.
+    outside = _git_alias_outside(command)
+    aliased = [seg.argv for seg in syntax.records if _git_alias_segment(seg.argv, outside)]
+    if aliased and not _git_alias_named(command) and all(_git_alias_built(tokens, outside) for tokens in aliased):
+        return _deny(
+            "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
+            + _GIT_BUILT_WORD_REASON + ", and it may be a commit on the protected line or a push that rewrites it; "
+            "denied fail-safe. " + _GIT_BUILT_WORD_FIX + " " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may commit to "
+            "or force-push the protected branch (rules prtbrn, artbr1); quote the expansion or spell the option "
+            "literally.")
+    if _git_alias_named(command) or aliased:
+        return _deny(
+            "AIQT rules prtbrn (protected-branch-integrity) and artbr1 (branch-and-merge-on-green): this command "
+            "defines a git alias for itself, or runs git under one (a -c or --config-env alias.<name>, include.path "
+            "or includeIf key, a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> assignment naming one, the name "
+            "GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere in the command's text, in any word, "
+            "quoted or not, whatever sets or mentions it, or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the "
+            "session environment naming one), so the subcommand it runs is unknown here and may be a commit on the "
+            "protected line or a push that rewrites it; denied fail-safe. Re-issue the command the alias expands to "
+            "explicitly, with no mention of those variable names, so this guard can classify it (an alias from the "
+            "session environment needs a session started without that variable). " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a git alias the command defines or runs under, which may commit to or "
+            "force-push the protected branch (rules prtbrn, artbr1); run the aliased command explicitly.")
     if syntax.status == "help":
         return _allow()  # only literal lone git commit --help / -h
     if syntax.status == "unverifiable":
         return _commit_denial(syntax.detail)
+    if floor and failed.status == "unverifiable":
+        return _commit_denial(failed.detail)
     if syntax.status == "grammar":
         evidence = _commit_evaluate(syntax, data.get("cwd"), deadline)
         if not evidence:
@@ -8787,6 +11882,19 @@ def protected_line(data):
     # Only commit-free commands reach the existing push classifier/help shortcut.
     try:
         seg_records = _lex_command(command)
+    except _UncertainHashError:
+        # A '#' whose comment reading the lexer could not judge under both readings: any git push its text
+        # names (_hash_doubt_scan, which also reads a continued spelling) may target the protected line
+        # past that '#', where the push classifier would have read it, so it denies. A command whose quoting
+        # that scan does not decode never reaches here: the commit recognizer above reads it as an apparent
+        # commit (_commit_command_syntax), which denies.
+        if _hash_doubt_names(command, _RAW_PUSH_RE):
+            return _deny(
+                _hash_doubt_reason("prtbrn (protected-branch-integrity)", "its text names a git push, so "
+                                   "this guard cannot prove the push misses the protected line"),
+                "AIQT guardrail: denied an apparent git push behind a '#' this guard could not read "
+                "(rule prtbrn, fail-closed).")
+        return _protected_line_fallback(command)
     except ValueError:
         return _protected_line_fallback(command)
     cwd = data.get("cwd")
@@ -8843,6 +11951,9 @@ def protected_line(data):
     if ((not saw_git or _lex_uncertain(command))
             and (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequoted_text(command)))):
         return _protected_line_fallback(command, wrapped=not saw_git)
+    if floor and failed.status == "outside" and _protected_line_fallback_push(command):
+        with _SubstHeredocFloor():
+            return _protected_line_fallback(command)  # the push deny main's failed lex takes
     return _allow()
 
 
@@ -9269,6 +12380,32 @@ def _branch_root_probe(repo, start):
     return ("unknown", "git merge-base returned status {}".format(merge.returncode))
 
 
+# git and then a verb that can create a branch anywhere in a command's text: branch_root's subject test when
+# a '#' whose comment reading the lexer cannot judge under both readings stops it (_hash_doubt_names). A
+# _RawSequence, so the test is linear in the command's length.
+_BRANCH_CREATE_WORD_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:checkout|switch|branch|worktree)\b")
+# branch_root's (reason, banner) for a form it cannot classify, a git command running under a git alias the
+# command defines included.
+_BRNROT_UNCLASSIFIED = (
+    "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form this guard cannot "
+    "classify with confidence (an --orphan, an abbreviated or negated option, an option of unknown arity, or a git "
+    "alias the command defines or runs under, every git command of a command whose text names "
+    "GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ anywhere included); it may create a branch from an "
+    "unverified or orphaned start, so its ancestry cannot be checked here and it is denied fail-safe. Re-issue it "
+    "with an explicit start point (e.g. 'git switch -c <name> origin/HEAD'), with no mention of those variable "
+    "names; the CI branch-root gate remains the authoritative backstop.",
+    "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
+    "(rule brnrot); re-issue with an explicit start point.")
+# branch_root's deny of a git command that reads as running under a git alias only through a word built at run time,
+# or a region the lexer did not read (_git_alias_built, _git_alias_unread), in place of the alias wording above.
+_BRNROT_BUILT = (
+    "AIQT rule brnrot (branch-rooted-on-live-main): this command " + _GIT_BUILT_WORD_REASON + ", and it may create "
+    "a branch from an unverified or orphaned start, so its ancestry cannot be checked here and it is denied "
+    "fail-safe. " + _GIT_BUILT_WORD_FIX + " The CI branch-root gate remains the authoritative backstop.",
+    "AIQT guardrail: denied a git command whose options hold a word built at run time, which may create a branch "
+    "from an unchecked start (rule brnrot); quote the expansion or spell the option literally.")
+
+
 def branch_root(data):
     """brnrot PreToolUse/Bash guard over recognized branch-creation forms. NO-ASK posture: branch rooting is
     a hazard class (an orphan/unrooted branch dispatches work onto a retired root), so a confirmed orphan
@@ -9284,7 +12421,27 @@ def branch_root(data):
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
     ONLY a redirect whose worktree this guard cannot pin at all - a --git-dir/GIT_DIR/-c form, or a
     value-less/empty/relative-with-no-cwd -C/--work-tree that resolves 'opaque' - ALLOWS-WITH-NOTE (the CI
-    branch-root gate remains the backstop) rather than denying. It never asks."""
+    branch-root gate remains the backstop) rather than denying. It never asks. A command carrying a '#'
+    whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments of
+    both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
+    git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
+    decode (_hash_doubt_opaque), DENIES fail-safe, since the lexer reads nothing past that '#'; any other
+    unparseable command takes the partial-recovery path below, where one whose text names git and defines a git
+    alias anywhere, past where the lexer stopped included (_git_alias_spelled), DENIES as a form this guard cannot
+    classify. Where a lex read a quoted here-document's body
+    that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments
+    are judged beside the lex's own where main's reading lexes (a partial lex returns main's partial reading
+    beside its own), and where it fails the segments main's partial lex recovers, past the body, are judged
+    too, after the clean lex's own, so a creation either list holds is checked (a cd in the clean lex's
+    segments also counts for a creation in the recovered ones, the stricter way). A git alias the command
+    defines counts however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE): each lex here runs
+    inside _WordSpellings, so in the region after a git word through its subcommand word a word carrying an
+    unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma, or a -c or
+    --config-env key part spelled through any expansion, quote or brace defines one, on an unparseable command
+    too (_git_alias_spelled); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading,
+    so a value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a
+    git option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -9301,53 +12458,99 @@ def branch_root(data):
             "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
             "command string, so branch creation could not be checked; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    named = _git_alias_named(command)
+    built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
+    reads = _SubstHeredocs.reads
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
-        # and no redirect is not built at all, here or in the partial reread.
-        segments = _segments(command, skip_empty=True)
-    except ValueError:
+        # and no redirect is not built at all, here, in the partial reread or in main's floor reread. Each lex
+        # records each word's spelling for the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            segments = _segments(command, skip_empty=True)
+    except ValueError as exc:
+        # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
+        # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
+        # allow below, and so does a command whose quoting the fallback text does not decode.
+        if isinstance(exc, _UncertainHashError) and _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("brnrot (branch-rooted-on-live-main)", "a git verb that creates a "
+                                           "branch (checkout, switch, branch, worktree) whose root this guard "
+                                           "cannot check")
+        if isinstance(exc, _UncertainHashError) and _hash_doubt_names(command, _BRANCH_CREATE_WORD_RE):
+            return _deny(
+                _hash_doubt_reason("brnrot (branch-rooted-on-live-main)", "its text names a git verb that "
+                                   "can create a branch, so this guard cannot check where that branch is "
+                                   "rooted"),
+                "AIQT guardrail: denied a branch-capable git command behind a '#' this guard could not read "
+                "(rule brnrot, fail-closed).")
+        # A git alias the text defines past where the lexer stopped is in no segment the partial lex recovers
+        # (_git_alias_spelled), so every git command of the command counts as running under it, as under a text
+        # naming a git configuration variable: a form this guard cannot classify. One the text reads only through
+        # how a word in a git command's region is spelled is a word built at run time (_BRNROT_BUILT).
+        spelled = _git_alias_spelled_kind(command)
+        named = named or spelled == "alias"
+        built = spelled == "built"
         # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
         # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
         # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
-        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
+        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed). A git
+        # command whose option region the lexer did not read counts as built at run time (_git_alias_unread).
         try:
-            segments = [(seg.argv, seg.sep_after)
-                        for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+            with _WordSpellings(), _LexStops() as stops:
+                segments = [(seg.argv, seg.sep_after)
+                            for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
         except ValueError:
+            if named:
+                return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
+            if built or _git_alias_unread(command, [(0, None)]):
+                return _deny(*_BRNROT_BUILT)
             return _allow()  # even partial recovery failed: open grammar, best-effort
+        built = built or _git_alias_unread(command, stops.seen)
+    if _SubstHeredocs.reads != reads:
+        # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
+        # segments main's partial lex recovers, past the body, are judged too.
+        with _SubstHeredocFloor(), _WordSpellings():
+            segments = segments + [(seg.argv, seg.sep_after)
+                                   for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
     # correct action (an explicit start point, a plain command from the target repo, or restoring
     # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny's (reason, banner) is held in
-    # pending_deny so a confirmed orphan elsewhere wins first.
-    pending_deny = None
+    # pending_deny so a confirmed orphan elsewhere wins first. Every git command of a command whose text names a
+    # git configuration variable, or that runs under an alias the hook's environment carries, runs under a git
+    # alias (_git_alias_named), a subcommand this guard cannot read, so that command holds a form this guard cannot
+    # classify from the start; one that reads so only through a word built at run time holds one too (_BRNROT_BUILT).
+    pending_deny = _BRNROT_UNCLASSIFIED if named else (_BRNROT_BUILT if built else None)
     pending_note = None
     saw_dir_change = False
+    outside = _git_alias_outside(command)
     for tokens, _sep in segments:
         word = _command_word(tokens)
+        # A git command behind a reserved word, a '{', '!', time or a wrapper that runs under a git alias, or
+        # defines one for itself (_git_alias_segment), runs a subcommand this guard cannot read, as one whose
+        # command word is git does below.
+        if word != "git" and pending_deny is None and _git_alias_segment(tokens, outside):
+            pending_deny = _BRNROT_BUILT if _git_alias_built(tokens, outside) else _BRNROT_UNCLASSIFIED
         if word in _CD_BUILTINS or word == "popd":
             # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
             # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
             saw_dir_change = True
             continue
-        if word != "git" or _has_info_flag(tokens):
+        # An info flag exempts a git command only when it runs under no git alias: git runs an alias with the flag
+        # passed on to it (_has_info_flag), so a segment with one reaches the alias test below, flag or no flag.
+        if word != "git" or (_has_info_flag(tokens) and not _git_alias_segment(tokens, outside)):
             continue
         sub, args = _git_sub_and_args(tokens)
-        start = _branch_creation_start(sub, args)
+        # A git alias the segment runs under or defines for itself (_git_alias_segment) runs a subcommand this
+        # guard cannot read, possibly a branch creation, so it is a form this guard cannot classify.
+        aliased = _git_alias_segment(tokens, outside)
+        start = _ASK_START if aliased else _branch_creation_start(sub, args)
         if start is None:
             continue
         if start is _ASK_START:
             if pending_deny is None:
-                pending_deny = (
-                    "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
-                    "this guard cannot classify with confidence (an --orphan, an abbreviated or negated "
-                    "option, or an option of unknown arity); it may create a branch "
-                    "from an unverified or orphaned start, so its ancestry cannot be checked here and it is "
-                    "denied fail-safe. Re-issue it with an explicit start point (e.g. 'git switch -c <name> "
-                    "origin/HEAD'); the CI branch-root gate remains the authoritative backstop.",
-                    "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
-                    "(rule brnrot); re-issue with an explicit start point.")
+                pending_deny = (_BRNROT_BUILT if aliased and _git_alias_built(tokens, outside)
+                                else _BRNROT_UNCLASSIFIED)
             continue
         cwd0 = data.get("cwd")
         cwd0 = cwd0 if isinstance(cwd0, str) and cwd0 else None
@@ -9437,10 +12640,13 @@ _NOVERIFY_SHORT_N_VERBS = frozenset(("commit", "am"))
 # sets are the mandatory-value long options in their SEPARATED form (--message <msg>), whose value
 # token could itself begin with '-n' and must be skipped (their '--opt=value' shape carries the value
 # in the same token and consumes nothing). These sets cover the COMMON value-taking options rather
-# than claiming an exhaustive enumeration: an OMITTED value-taking option is safe-direction (on a
+# than claiming an exhaustive enumeration: an option NOT in these sets is safe-direction (on a
 # contrived input whose value itself spells -n or --no-verify it can only cause an over-ask/over-deny,
 # never a silent allow), so an option is added only once confirmed value-taking (adding a NON-value-
 # taking option would wrongly skip a real operand and could cause a silent allow, so it is never done).
+# The value-aware '--' boundary (_gate_terminator_index) matches a listed long option by UNAMBIGUOUS
+# PREFIX as git does, so an abbreviated value-taking option (--mess for --message) consuming the '--'
+# that follows it does NOT leave the trailing -n a silent allow.
 _GATE_SHORT_VALUE_OPTS = {
     "commit": frozenset(("m", "F", "C", "c", "t")),
     "am": frozenset(()),
@@ -9494,11 +12700,22 @@ _GATE_ALTS = (
     "Safe route: run the gate as-is and let its exit status stand; a failing gate is signal, so fix "
     "the artefact it guards. A genuinely broken hook or check is repaired or retired at its source "
     "through a reviewed change, never bypassed for one run.")
+# The way on named in every hook-skip and grammar deny a git commit whose quoted message only quotes a
+# hook-skip spelling can draw: the message read from a file is never opened here, so git commit -F FILE and
+# cat FILE | git commit -F - allow (a '<' redirection or a here-document on the git segment still denies).
+_GATE_FILE_ROUTE = (
+    "If a commit message only quotes a hook-skip spelling, write it to a file and commit with git commit -F FILE "
+    "(or cat FILE | git commit -F -): this guard does not read the file, so its text is data.")
 
 # Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
+# These probes serve the plain parse-error fallback (which also runs the two deny probes over its de-quoted
+# readings, _decoded_readings) and the failed-main-reading floor; behind a '#' whose comment reading the
+# shared lexer could not judge under both readings, gate_weakening takes the stricter bounded doubt tests below
+# (_gate_doubt_bypass, _gate_doubt_checker) instead of these spelling probes, so widening a spelling here
+# is never the mechanism that closes a doubt-path gap.
 _RAW_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|merge|push|pull|rebase|am)\b")
 _RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
 _RAW_SHORT_NOVERIFY_VERB_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\b(?:commit|am)\b")
@@ -9514,13 +12731,107 @@ _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
 # checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
 _RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
 _RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
+# A sink word the gatdis deny tier lists (_truncating_sink_kind) anywhere at or after the first '|':
+# gate_weakening's deny test when a '#' whose comment reading the lexer cannot judge under both readings
+# stops it (read over _hash_doubt_scan). The test deliberately models NOTHING between the pipe and the sink
+# word: behind such a '#' this guard cannot tell a blank or comment continuation line, a redirect, an
+# assignment or a quoted newline from stage text, and a probe that spells out stage shapes misses the next
+# spelling it did not enumerate, so any listed sink word after a pipe is read as reachable by the pipeline
+# and denies. That is fail-closed by construction (the deny rests on no stage grammar a new spelling could
+# escape) and it only widens the deny over a stage-modelling probe, whose every match holds a '|' before a
+# listed sink word. Read over the doubled _hash_doubt_scan text (the command, then its de-quoted copy), a
+# sink word anywhere in the command counts once any '|' stands in it: a match spanning the two parts only
+# over-matches, the fallback's safe direction (_hash_doubt_scan). The scan is linear: one find for the
+# first '|', then one pass of this word probe over the suffix, so each character is read a bounded number
+# of times.
+_GATE_DOUBT_SINK_WORD_RE = re.compile(r"\b(?:head|tail|grep|egrep|fgrep|rg)\b")
+
+
+def _gate_doubt_sink(scan):
+    """True when a sink word the gatdis deny tier lists stands at or after the first '|' in scan (a
+    _hash_doubt_scan text): the fail-closed sink test behind a '#' whose comment reading the shared lexer
+    could not judge under both readings (the comment above _GATE_DOUBT_SINK_WORD_RE)."""
+    pipe = scan.find("|")
+    return pipe >= 0 and _GATE_DOUBT_SINK_WORD_RE.search(scan, pipe) is not None
+
+
+# The hook-bypass test behind a '#' whose comment reading the shared lexer could not judge under both
+# readings. Like the sink test above it is fail-closed BY CONSTRUCTION, not spelling-matched: text that
+# names git with a subcommand that accepts --no-verify (commit, merge, push, pull, rebase, am) and
+# carries ANY dash-prefixed option token DENIES, because behind such a '#' nothing can bind an option to
+# that subcommand's grammar, so no dash-prefixed token can be proven harmless, and a probe that spells
+# out bypass forms (--no-verify abbreviations, -n cluster alphabets, token endings) misses the next
+# spelling it did not enumerate. An option token starts at the text's start, after whitespace or after a
+# shell operator character (; & | < > ( )), and takes one of two shapes. In the first, a '-' stands
+# right at that start and one character follows it that does not end the token in bash: anything but a
+# blank (space, tab, newline) or one of those operator characters. So a lone '-' (a stdin operand)
+# spelled with no quote or backslash next to it does not match, even where an operator ends it
+# ('git am -;true', 'git am -<p', '(git am -)'), while '--' (the end-of-options word) does: behind the
+# doubt nothing proves the bypass sits after it. A carriage return, form feed or other character
+# Python's \s holds but bash does not split on stays part of the token ('-\rn' is one word to bash), so
+# it counts. A '<' or '>' that opens a process substitution also counts, because bash glues the
+# substitution's path to the '-' ('-<(true)' and '->(true)' are each the one word '-/dev/fd/63'). A quote
+# character or backslash right after the '-' is not in the ending set either, so it counts. In the
+# second shape, a run of quote characters and backslashes stands between that start and the '-', and the
+# token counts WHATEVER follows the '-': quoting or escaping can keep the next character from ending the
+# word ('"-;"', '"-"\;' and '\-\;' are each the one word '-;' to bash), and the de-quoted half of the scan
+# no longer shows whether that character was protected, so the test does not try to tell. The option
+# search also runs over the scan with every backslash-newline removed, as bash removes it first, so a
+# line continuation inside that run ('"\<newline>-;"', the word '-;') does not hide the '-'. The cost is a
+# further OVER-DENIAL in the safe direction: a '-' that bash reads as the lone stdin operand but that is
+# spelled with a quote or backslash next to it ('"-"', '\-', '-""') counts as an option. The start class
+# is exactly Python's \s plus those operator characters: it holds every character bash splits words on
+# and leaves out every other one, quotes and backslash included (the second shape covers those).
+# Leaving out the characters that open an expansion, a substitution, a brace or a pathname pattern ('$',
+# '`', '{', '}', ',', '[', '*', '?') never counts a lone '-' as an option, which only narrows the
+# over-denial below; it also means a word whose expansion leaves a leading '-' ('${x}-n', '`true`-n',
+# '{,-n}' with x and the substitution empty, or '[-]n' where a file named '-n' exists) is not read as an
+# option here, a reading the readable parsed path shares (it allows the same text when no '#' stops it).
+# The deliberate cost is an OVER-DENIAL, stated in the gate_weakening docstring and the manifest residue:
+# behind such a '#' a harmless option on those subcommands ('git commit -m x', 'git push --dry-run') also
+# denies; put a blank before the '#' outside any grouping or substitution, or drop it. The verb and
+# option searches run over the doubled _hash_doubt_scan text independently, so the verb and the option
+# need not share a segment: a cross-segment match only over-denies, the fallback's safe direction. Each
+# search is one linear pass: the start class and the quote-and-backslash run share no character, so
+# every run is read from the one start before it. These doubt tests run
+# ONLY behind such an unjudged '#': the plain parse-error fallback (over its de-quoted readings too) and the
+# failed-main-reading floor keep the conservative spelling probes above, never these doubt tests.
+_RAW_DOUBT_OPTION_RE = re.compile(r"(?:^|[\s;&|<>()])(?:-(?:[^ \t\n;&|<>()]|[<>]\()|['\"\\]+-)")
+
+
+def _gate_doubt_bypass(scan):
+    """True when scan (a _hash_doubt_scan text) names git with a subcommand that accepts --no-verify and
+    carries a dash-prefixed option token anywhere, read in scan as written and with its backslash-newlines
+    removed (the comment above _RAW_DOUBT_OPTION_RE): the bounded fail-closed hook-bypass test behind a '#'
+    whose comment reading the shared lexer could not judge under both readings."""
+    return _RAW_NOVERIFY_VERB_RE.search(scan) is not None and (
+        _RAW_DOUBT_OPTION_RE.search(scan) is not None
+        or _RAW_DOUBT_OPTION_RE.search(scan.replace("\\\n", "")) is not None)
+
+
+def _gate_doubt_checker(scan):
+    """True when scan (a _hash_doubt_scan text) holds a checker-shaped word, judged with the parsed
+    recognizer's own name splitter and lexicon rather than a re-spelled probe: the parts _NAME_SPLIT_RE
+    leaves in the lowercased text (exactly how _name_parts_hit splits a command name, so a non-ASCII
+    letter separates here precisely as it separates there) hit on any _CHECKER_NAME_PARTS part
+    (_name_parts_hit itself) or on any _CHECKER_WORDS word, a multi-part word (pre-commit,
+    golangci-lint, clang-tidy) when every one of its parts is present. A multi-part word's parts standing
+    apart in the text can over-match, which costs the note tier's note only, the doubt path's safe
+    direction; 'latest' never hits, because only whole parts are compared."""
+    if _name_parts_hit(scan):
+        return True
+    parts = set(_NAME_SPLIT_RE.split(scan.lower()))
+    return any(all(part in parts for part in _NAME_SPLIT_RE.split(word)) for word in _CHECKER_WORDS)
+
+
 _RAW_COMMIT_MSG_GIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
 def _no_verify_spelling(sub, args):
     """The matched hook-bypass spelling on this git segment, or None. The long form: a --no-verify
-    token in the option region (before '--'/'--end-of-options', via the shipped _split_pre_post),
+    token in the option region (before the FIRST real '--'/'--end-of-options' terminator, via
+    _gate_terminator_index so a '--' consumed as a value-taking option's value does not end the region),
     matched exact or by CONSERVATIVE LONG PREFIX (_has_long_prefix, exactly as protected_line matches
     'force'): an ambiguous abbreviation git itself would reject ('--no-ver') matches ANYWAY, and a
     separated option VALUE in pre is scanned too - both err toward a deny, never an allow, while a
@@ -9528,8 +12839,10 @@ def _no_verify_spelling(sub, args):
     is not a prefix of 'no-verify'. The short form: a bare or clustered -n, ONLY on the verbs where -n
     IS --no-verify (commit, am), with the value-taking short and long options skipped (mirroring
     _push_parse) so an attached value ('-m-n ...'), a separated value ('--message -n'), or a stuck
-    optional value ('-Skeyid') is never char-scanned as the flag."""
-    pre, _post, _had_sep = _split_pre_post(args)
+    optional value ('-Skeyid') is never char-scanned as the flag. The value-aware terminator closes the
+    gap where a value-consuming option eats the '--' (git commit -m -- -n, git commit --message -- -n:
+    the '--' is that option's value, so the following -n is still an option, the bypass)."""
+    pre = args[:_gate_terminator_index(sub, args)]
     if _has_long_prefix(pre, "no-verify"):
         return "a --no-verify spelling"
     if sub not in _NOVERIFY_SHORT_N_VERBS:
@@ -9557,6 +12870,520 @@ def _no_verify_spelling(sub, args):
                     break
                 if ch == "n":
                     return "the short -n (--no-verify) in {!r}".format(tok[:40])
+    return None
+
+
+def _gate_terminator_index(sub, lits):
+    """Index of the FIRST '--'/'--end-of-options' that is a real option terminator, or len(lits). A '--'
+    CONSUMED as the value of a preceding value-taking option (git commit --message -- ...: the '--' is the
+    message) is NOT a terminator, so a '-n' after it is still an option, not an operand. An ABBREVIATED
+    value-taking long option consumes its value the same way (git commit --mess -- -n: git resolves --mess
+    to --message, so the '--' is its value and -n is still the bypass), so a '--<name>' that is a prefix of
+    a value-taking long option also skips the next token; an abbreviation git would reject as ambiguous is
+    skipped too, a safe-direction over-match on a command git itself errors on, never a silent allow. lits
+    is the per-word literal text, None for a word that is not purely literal (an expansion is never '--'
+    nor a known value-taking option). Value tables exist for commit and am; other verbs keep the plain
+    split."""
+    value_opts = _GATE_SHORT_VALUE_OPTS.get(sub, frozenset())
+    stuck = _GATE_SHORT_STUCK_OPTS.get(sub, frozenset())
+    long_val = _GATE_LONG_ARG_OPTS.get(sub, frozenset())
+    skip = False
+    for idx, lit in enumerate(lits):
+        if skip:
+            skip = False
+            continue
+        if lit in _EOO_TOKENS:
+            return idx
+        if lit is None:
+            continue
+        if lit.startswith("--"):
+            if "=" not in lit and any(opt.startswith(lit) for opt in long_val):
+                skip = True  # exact OR an unambiguous abbreviation (--mess for --message) consumes its value
+            continue
+        if lit.startswith("-") and len(lit) > 1:
+            for j, ch in enumerate(lit[1:]):
+                if ch in value_opts:
+                    if j == len(lit) - 2:
+                        skip = True
+                    break
+                if ch in stuck:
+                    break
+    return len(lits)
+
+
+# The uncertain-git-segment scan holds the RAW command text to a CLOSED LITERAL allowlist grammar
+# wherever it names git. This is the fail-closed shape the work-discarding git guard already uses
+# (_discard_grammar_lex, the positive literal grammar judged directly on the raw string): only
+# constructs the grammar spells out can reach an accepted segment, so no quoting, expansion, operator
+# or continuation it does not spell out needs to be modelled on this path. An earlier revision
+# modelled those shapes one at a time (an expansion-aware word reader with per-word narrowings), and
+# spellings it mis-modelled kept surfacing (a process substitution split the segment, an expansion
+# in the subcommand or global-option position was waved through, a glob was read as inert, and a raw
+# backslash-newline replacement rewrote an escaped backslash and a comment tail, turning two denied
+# spellings into allows); the closed grammar replaces that reader outright. The grammar
+# accepts: bare words of _GATE_GRAMMAR_WORD_CHARS (a '#' or '~' may appear inside a word, where bash
+# treats it literally, but never lead one, where it is a comment or a tilde expansion); ONE
+# standalone complete single-quoted literal per word; ONE standalone complete double-quoted literal
+# per word whose interior stays on one line and holds no '$', backquote, backslash or '!' (inside
+# double quotes bash treats every other character literally, so such a word is exactly the literal
+# between the quotes, and its decoded interior is judged like a bare word; '!' is refused because
+# bash history expansion can rewrite it before git parses its options); the three harmless redirect
+# spellings (>/dev/null, 2>/dev/null, 2>&1), which bash removes from the argument list and which
+# write no file; on a parsed command only, the git commit message form git commit -m "$(cat <<'EOF'
+# ... EOF)" as the value of a separated -m (_gate_heredoc_message: a single-quoted delimiter, so bash
+# reads the body as literal text, a substitution holding nothing but that cat, and a body with no '$'
+# or backquote); and a segment end at ';', '&', '|', ')', a newline or the end of the text.
+# EVERYTHING ELSE DENIES BY CONSTRUCTION on a flagged segment: an expansion, substitution or
+# backquote (inside double quotes too), a process substitution, a backslash (a line continuation
+# included, inside double quotes too), a double-quoted word that is glued, unterminated, spans a
+# newline or holds an interior '!', a glob character, a brace, a leading '#' comment or '~', a
+# here-document, here-string or any other redirection, a glued or unterminated single quote. A
+# segment is FLAGGED when its resolved literal subcommand is on the no-verify roster, OR when its
+# subcommand cannot be resolved because a global option, a global option's value, or the subcommand
+# word itself is outside the grammar (git $g commit, git -C $d: the verb bash will run cannot be
+# known, so the segment fails closed). A segment whose subcommand resolves to a verb OFF the roster
+# is left alone (git log --format="$f" stays allowed), as is a git word inside a region an earlier
+# accepted scan consumed (the -m value in git commit -m 'git commit x' is data, not a command). But
+# a quoted interior that could hold live command text leaves the quote's pairing ambiguous (the scan
+# begins at a git word, not at the command start), so it is NOT treated as consumed data: a git inside
+# such a span is re-judged as its own segment, catching a bypass hidden where bash's own close and the
+# next open bracket live command text. A single-quoted interior triggers this on ANY byte that is not
+# a bare-word character or a space or tab (so a backquote, a '$', a shell operator, a newline or a
+# double quote all count); a double-quoted interior triggers it on a shell operator or a single quote
+# (a '$', backquote, backslash or newline inside double quotes already denies outright). An interior
+# that is ALL bare-word bytes and spaces still counts when it names a roster git command (a 'git' word
+# followed by a no-verify roster verb, _gate_span_hides_roster_git): bash's own close and the next open
+# could bracket that live 'git <verb>', so it is re-judged whatever the interior bytes hold, which
+# denies a roster-verb git command named inside otherwise-literal quoted data (a disclosed over-deny).
+_GATE_GRAMMAR_WORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=@:+,%^#~")
+# What may follow a completed bare word or quoted literal: whitespace, a segment end, or a
+# redirect operator (judged on its own). Any other adjacency glues onto the word and denies.
+_GATE_GRAMMAR_TOKEN_END = frozenset(" \t\n;&|)<>")
+_GATE_GRAMMAR_REDIR_WHY = "carries a redirection outside the accepted >/dev/null, 2>/dev/null and 2>&1 forms"
+_GATE_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+# Whitespace-delimited tokens of a quoted span interior, tokenized ONCE so _gate_span_hides_roster_git
+# can read each 'git' match's option-walk outcome by token position instead of re-splitting the suffix.
+_GATE_SPAN_TOKEN_RE = re.compile(r"\S+")
+# A shell operator or newline inside a quoted word makes the quote's pairing ambiguous: this gate
+# starts its scan at a 'git' word, so it cannot tell whether such a quote OPENS a word or CLOSES a
+# double- or single-quoted span bash opened earlier. When one appears (or the other quote character),
+# the quoted span is not treated as CONSUMED data, so a 'git' inside it is still judged as its own
+# segment (see _gate_grammar_lex and _gate_closed_grammar_scan); the enclosing word is still read for
+# its own bypass spelling, so a real flag after the quote is not missed.
+_GATE_GRAMMAR_QUOTE_BREAK = frozenset(";&|()\n")
+_GATE_GRAMMAR_BANG_WHY = ("carries '!' inside double quotes, which bash history expansion can rewrite "
+                          "before git parses its options (re-issue with the interior single-quoted)")
+
+
+def _gate_grammar_violation(command, word_start, offender, n):
+    """(snippet, why) naming the first byte outside the closed literal grammar: snippet is the raw
+    non-whitespace run around it, from word_start (so the deny names the word as typed, '${x}-n' and
+    not '-n'), why names the construct class the grammar refuses."""
+    j = word_start
+    while j < n and command[j] not in " \t\n":
+        j += 1
+    snippet = command[word_start:j][:40]
+    c = command[offender]
+    nxt = command[offender + 1:offender + 2]
+    if c in "<>" and nxt == "(":
+        why = "opens a process substitution"
+    elif c == "<":
+        why = "carries a '<' redirection, here-document or here-string, which this gate does not accept"
+    elif c == ">":
+        why = _GATE_GRAMMAR_REDIR_WHY
+    elif c in "$`":
+        why = "carries a shell expansion, substitution or backquote"
+    elif c == '"':
+        why = ("carries a double-quoted word this gate cannot accept as one literal: it is "
+               "unterminated, glued to adjacent text, or spans a newline")
+    elif c == "\\":
+        why = "carries a backslash escape or line continuation"
+    elif c in "*?[]":
+        why = "carries a glob character, which a matching filename can turn into an option word"
+    elif c in "{}":
+        why = "carries a brace-expansion character"
+    elif c == "#":
+        why = "starts a comment, whose reach over the rest of the line this gate does not model"
+    elif c == "~":
+        why = "leads with a tilde expansion"
+    elif c == "(":
+        why = "opens a subshell or function form"
+    elif c == "'":
+        why = "carries a single quote that is unterminated or glued to adjacent text"
+    else:
+        why = "carries {!r}, a character outside the closed literal grammar".format(c)
+    return snippet, why
+
+
+def _gate_grammar_redirect(command, i, start, fd):
+    """Accept ONE redirect whose '>' sits at command[i]: exactly >/dev/null (fd "1"), 2>/dev/null or
+    2>&1 (fd "2"), whitespace allowed before the /dev/null target; `start` is where the spelling
+    begins (the fd digit when present) so a refusal names it as typed. Returns (next index, None)
+    when accepted, else (i, (snippet, why))."""
+    n = len(command)
+    j = i + 1
+    if command[j:j + 1] == "(":
+        return i, _gate_grammar_violation(command, start, i, n)
+    if command[j:j + 1] in (">", "|"):
+        return i, (command[start:j + 1][:40], _GATE_GRAMMAR_REDIR_WHY)
+    if command[j:j + 1] == "&":
+        if fd == "2" and command[j + 1:j + 2] == "1" and (
+                j + 2 >= n or command[j + 2] in _GATE_GRAMMAR_TOKEN_END):
+            return j + 2, None
+        return i, (command[start:j + 2][:40], _GATE_GRAMMAR_REDIR_WHY)
+    while j < n and command[j] in " \t":
+        j += 1
+    k = j
+    while k < n and command[k] in _GATE_GRAMMAR_WORD_CHARS:
+        k += 1
+    if command[j:k] != "/dev/null" or (k < n and command[k] not in _GATE_GRAMMAR_TOKEN_END):
+        return i, (command[start:max(k, j + 1)][:40], _GATE_GRAMMAR_REDIR_WHY)
+    return k, None
+
+
+def _gate_span_hides_roster_git(interior):
+    """True when a quoted span's interior NAMES a roster git command: a 'git' word whose own next
+    non-option word is a no-verify roster verb (git commit, git push, ...), OR a 'git' word whose
+    option walk runs off the end of the interior before any non-option word is reached (git --namespace
+    at the interior's end). In the second case the would-be verb falls in the NEXT span bash's own close
+    and open could bracket, so the pairing is treated as live command text and FAILS CLOSED. Bash's own
+    quote close and the next open could bracket the hidden git as live command text, so a span naming
+    one is NOT treated as consumed data even when every interior byte is a bare-word character or a
+    space: the hidden git is re-judged as its own segment. The global-option skip mirrors
+    _gate_grammar_sub (a separated arg-consuming global option swallows the next word). A disclosed
+    safe-direction over-deny: quoted text that merely names such a command is re-judged and denies.
+    Linear in the interior length: the interior is tokenized ONCE, the outcome of an option walk from
+    every token position is filled ONCE from the end (a walk from k ends where the walk from the
+    position after k's option, and its value, ends), and each 'git' match reads the outcome at its
+    forward-only base pointer, so no match re-walks the later tokens (a run of option words that each
+    hold a 'git' match, or a '-C git' chain whose values are git words, costs one pass, not one per match)."""
+    toks = [(mt.start(), mt.group()) for mt in _GATE_SPAN_TOKEN_RE.finditer(interior)]
+    # hides[k]: True when an option walk starting at token k reaches a roster verb or runs out of interior
+    # before a non-option word (the two entries past the end: fail closed), False at an off-roster word.
+    hides = [True] * (len(toks) + 2)
+    for k in range(len(toks) - 1, -1, -1):
+        w = toks[k][1]
+        if w.startswith("-") and w != "-":
+            hides[k] = hides[k + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
+        else:
+            hides[k] = w.lower() in _NOVERIFY_VERBS
+    base = 0
+    for gm in _GATE_GIT_WORD_RE.finditer(interior):
+        gend = gm.end()
+        while base < len(toks) and toks[base][0] < gend:
+            base += 1
+        if hides[base]:
+            return True
+    return False
+
+
+# The one here-document shape the closed literal grammar accepts (_gate_heredoc_message): from the opening
+# double quote to the newline that ends the '<<' line, a '$(' holding cat and blanks, then '<<' and a
+# single-quoted delimiter of word characters; and, after the delimiter line, only blanks and blank lines
+# before the ')' that closes the substitution, with the closing double quote right after it.
+_GATE_HEREDOC_OPEN_RE = re.compile(r"\"\$\([ \t]*cat[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'[ \t]*\n")
+_GATE_HEREDOC_CLOSE_RE = re.compile(r"[ \t\n]*\)\"")
+
+
+def _gate_heredoc_message(command, i):
+    """(end, value) when the double quote at command[i] opens the git commit message form
+    "$(cat <<'EOF'<newline>BODY<newline>EOF<newline>)": the substitution holds nothing but cat and one
+    here-document (_GATE_HEREDOC_OPEN_RE and _GATE_HEREDOC_CLOSE_RE); its delimiter is single-quoted, so bash
+    reads the body as literal text; the body ends at the first line that begins with the delimiter, which
+    must be exactly it (_subst_heredoc_end, the rule the lexer's body read uses); and the body holds no '$'
+    or backquote, so no further substitution or expansion stands in it. end is the index just past the
+    closing double quote; value is the word bash builds there, the body with its trailing newlines removed
+    (a command substitution strips them). None for any other shape: an unquoted, double-quoted, escaped or
+    <<- delimiter, another command before or after the here-document inside the substitution, a body that
+    does not end, or a '$' or backquote in the body. Linear in the length of the text it reads."""
+    opened = _GATE_HEREDOC_OPEN_RE.match(command, i)
+    if opened is None:
+        return None
+    delim = opened.group(1)
+    end = _subst_heredoc_end(command, opened.end(), len(command), ((delim, False),))
+    if end is None:
+        return None
+    body = command[opened.end():end - len(delim) - 1]  # the text before the delimiter line
+    if "$" in body or "`" in body:
+        return None
+    close = _GATE_HEREDOC_CLOSE_RE.match(command, end)
+    if close is None:
+        return None
+    return close.end(), body.rstrip("\n")
+
+
+def _gate_commit_message_next(words):
+    """True when the words of a flagged segment read so far (words[0] the git word) resolve the subcommand
+    commit and end with a -m that git reads as an option, so the next word is that -m's separated value:
+    not the value of an option before it and not past the option terminator. Read with the value tables of
+    _gate_terminator_index: a '--' in the -m's place is a real terminator exactly when the -m there is an
+    option."""
+    sub, args, resolved = _gate_grammar_sub(words)
+    if not resolved or sub != "commit" or not args or args[-1] != "-m":
+        return False
+    return _gate_terminator_index(sub, args[:-1] + ["--"]) == len(args) - 1
+
+
+def _gate_grammar_lex(command, start, heredoc_message=False):
+    """Lex ONE flagged segment of the raw command under the closed literal grammar, starting at the
+    'git' word at command[start]. Returns (words, end, bad, data_end): words is the ordered list of
+    resolved literal word texts (a quoted word contributes its content; everything accepted is
+    literal, so the list IS the argv bash would build), end is the index scanning stopped at (the
+    segment terminator, the first violation, or len(command)), bad is None or the (snippet, why) of
+    the first byte outside the grammar, and data_end is how far a caller may treat this segment as
+    CONSUMED data when it leaves the segment alone: `end` normally, but the index of the FIRST quoted
+    word whose interior turned the quote's pairing ambiguous (inside single quotes: any byte that is
+    not a bare-word character or a space or tab; inside double quotes: a shell operator or the other
+    quote character; in either quote: an all-literal interior that names a roster git command,
+    _gate_span_hides_roster_git) when there was one, so a 'git' hidden in such a span is re-judged as its
+    own segment rather than swallowed. The lexer never guesses past a violation: scanning stops there,
+    so `end` is also where a caller may safely resume. As soon as the words already resolve an
+    OFF-ROSTER subcommand and an ambiguous quote is seen, the lexer stops at that quote
+    (offroster_resolved): the segment can carry no bypass and the caller consumes it only to
+    data_end, so reading the rest is discarded work. That early stop bounds each off-roster lex to its
+    first ambiguous quote, keeping the whole-command pass linear when many off-roster git words that
+    each open an ambiguous quote share one line; a ROSTER verb's segment is still read to its end (its
+    own flags may sit anywhere before the terminator), so a line packing many ambiguity-opening
+    roster-verb git words is still super-linear, bounded by the hook deadline (it fails closed).
+    heredoc_message (True on a parsed command only) also accepts ONE git commit message form per segment
+    (_gate_heredoc_message) where the segment's words so far end with a -m whose value it is
+    (_gate_commit_message_next): its value word is the literal body, so a bypass spelling after it is still
+    read, and the word always leaves the quote's pairing ambiguous (data_end stops at it), so a 'git' in
+    the body is re-judged as its own segment. A second such word on the segment denies like any other '$'."""
+    words = []
+    i = start
+    n = len(command)
+    data_stop = None  # first ambiguous-pairing quote position; None until one is seen
+    # Off-roster resolution, CACHED so a line with many ambiguous quotes never re-walks `words` from the
+    # start at each one: the scan pointer only advances as words are appended, so the per-quote stop is
+    # O(1) amortized and the whole pass stays linear. _sub_off is None until the subcommand resolves,
+    # then True when that subcommand is OFF the no-verify roster.
+    _sub_scan = [1]
+    _sub_off = [None]
+
+    def result(end, bad):
+        return words, end, bad, (end if data_stop is None else data_stop)
+
+    def offroster_resolved():
+        # True once the words resolve an off-roster subcommand. Mirrors _gate_grammar_sub's global-option
+        # skip but resumes from the cached pointer (a separated arg-consuming global option swallows the
+        # next word). While the subcommand is unresolved (an option's value fell on an ambiguous quote)
+        # it returns False, so the lexer keeps scanning and the segment still fails closed.
+        if _sub_off[0] is None:
+            p = _sub_scan[0]
+            while p < len(words):
+                w = words[p]
+                if w.startswith("-") and w != "-":
+                    p += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
+                    continue
+                _sub_off[0] = w.lower() not in _NOVERIFY_VERBS
+                break
+            _sub_scan[0] = p
+        return _sub_off[0] is True
+
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c in "\n;&|)":
+            return result(i, None)
+        if c == ">":
+            i, bad = _gate_grammar_redirect(command, i, i, "1")
+            if bad is not None:
+                return result(i, bad)
+            continue
+        if c == "'":
+            # Everything between single quotes is literal to bash, but an interior byte that is not a
+            # bare-word character or a space or tab (a shell operator, a newline, a double quote, a
+            # backquote, a '$', or any other shape) leaves the quote's pairing ambiguous: this scan
+            # began at a 'git' word, so it cannot know bash's quote context, and such a byte is exactly
+            # where bash's own close and the next open can bracket live command text. The span is then
+            # not treated as consumed data, so a 'git' inside it is re-judged, while the word itself is
+            # still read. (A backquote or '$' in particular would otherwise hide a live substitution the
+            # shell runs between a mis-paired single-quote close and the next open.) An interior that is
+            # ALL bare-word bytes and spaces still leaves the pairing ambiguous when it names a roster
+            # git command (_gate_span_hides_roster_git): bash's own close and the next open could bracket
+            # that live 'git <roster verb>', so it is re-judged too, whatever bytes the interior holds.
+            j = command.find("'", i + 1)
+            if j < 0:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            if data_stop is None:
+                for k in range(i + 1, j):
+                    ck = command[k]
+                    if ck not in _GATE_GRAMMAR_WORD_CHARS and ck not in " \t":
+                        data_stop = i
+                        break
+                if data_stop is None and _gate_span_hides_roster_git(command[i + 1:j]):
+                    data_stop = i
+            # The off-roster early stop sits OUTSIDE the `data_stop is None` guard (like the double-quote
+            # branch): once the words so far resolve an off-roster subcommand, every later ambiguous
+            # quote on the segment can stop here even after an earlier quote already set data_stop, which
+            # keeps a line of many off-roster git words that each open an ambiguous quote linear. The
+            # cached offroster_resolved never re-walks the words from the start, so the stop stays O(1).
+            if data_stop is not None and offroster_resolved():
+                return result(i, None)
+            if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            words.append(command[i + 1:j])
+            i = j + 1
+            continue
+        if c == '"':
+            # Inside double quotes bash treats most characters literally, but '$', a backquote and a
+            # backslash still expand or escape, '!' can trigger history expansion, and the closing
+            # quote ends the word; so a complete standalone pair holding none of those is exactly the
+            # literal between the quotes and its interior is judged like a bare word (a quoted '-n' or
+            # '--no-verify' still reaches _no_verify_spelling). An interior '$', backquote or
+            # backslash denies at that byte; an interior '!' denies (history expansion could rewrite
+            # it); an interior newline denies at the quote (the segment model ends at a newline, so a
+            # quoted one cannot be carried); a glued or unterminated pair denies like its
+            # single-quoted counterpart. An interior shell operator or single quote leaves the quote's
+            # pairing ambiguous, so the span is not treated as consumed data (a 'git' inside it is
+            # re-judged) while the word itself is still read for its own bypass spelling.
+            if heredoc_message and words and words[-1] == "-m":
+                message = _gate_heredoc_message(command, i)
+                if (message is not None and (message[0] >= n or command[message[0]] in _GATE_GRAMMAR_TOKEN_END)
+                        and _gate_commit_message_next(words)):
+                    heredoc_message = False  # one message word per segment, so the -m check stays linear
+                    if data_stop is None:
+                        data_stop = i
+                    words.append(message[1])
+                    i = message[0]
+                    continue
+            j = command.find('"', i + 1)
+            if j < 0:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            for k in range(i + 1, j):
+                ck = command[k]
+                if ck in "$`\\":
+                    return result(i, _gate_grammar_violation(command, i, k, n))
+                if ck == "\n":
+                    return result(i, _gate_grammar_violation(command, i, i, n))
+                if ck == "!":
+                    return result(i, (command[i:j + 1][:40], _GATE_GRAMMAR_BANG_WHY))
+                if data_stop is None and (ck in _GATE_GRAMMAR_QUOTE_BREAK or ck == "'"):
+                    data_stop = i
+            if data_stop is None and _gate_span_hides_roster_git(command[i + 1:j]):
+                data_stop = i  # an all-literal interior still re-judged when it names a roster git
+            if data_stop is not None and offroster_resolved():
+                return result(i, None)
+            if j + 1 < n and command[j + 1] not in _GATE_GRAMMAR_TOKEN_END:
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            words.append(command[i + 1:j])
+            i = j + 1
+            continue
+        if c in _GATE_GRAMMAR_WORD_CHARS:
+            if c in "#~":
+                return result(i, _gate_grammar_violation(command, i, i, n))
+            j = i
+            while j < n and command[j] in _GATE_GRAMMAR_WORD_CHARS:
+                j += 1
+            word = command[i:j]
+            nxt = command[j:j + 1]
+            if nxt == ">":
+                if word.isdigit():
+                    # an ALL-DIGIT word standing immediately before '>' is bash's IO number, not a
+                    # word; only 2 is accepted (the 2>/dev/null and 2>&1 forms)
+                    if word != "2":
+                        return result(i, (command[i:j + 1][:40], _GATE_GRAMMAR_REDIR_WHY))
+                    i, bad = _gate_grammar_redirect(command, j, i, "2")
+                    if bad is not None:
+                        return result(i, bad)
+                    continue
+                words.append(word)  # the word ends at the operator, judged on the next pass
+                i = j
+                continue
+            if nxt and nxt not in _GATE_GRAMMAR_TOKEN_END:
+                return result(i, _gate_grammar_violation(command, i, j, n))
+            words.append(word)
+            i = j
+            continue
+        return result(i, _gate_grammar_violation(command, i, i, n))
+    return result(n, None)
+
+
+def _gate_grammar_sub(words):
+    """(sub, args, resolved) for a lexed flagged segment whose words[0] is the git word: the first
+    word after the git global options, and every word after it. git does not abbreviate its global
+    options, so a '-'-leading word here is a global option: an inline '--opt=value' form carries its
+    value in its own word, a separated arg-consuming global option (_GIT_ARG_OPTS: -C DIR, -c
+    NAME=VALUE, --git-dir DIR, ...) consumes the next word, and any other is bare. resolved is False
+    when the words end before a subcommand word appears (bare 'git', 'git -C dir' at a segment end,
+    or a lex violation where a global option's value or the subcommand was expected: the caller
+    fails closed on the latter, since the verb bash will run cannot be known)."""
+    i = 1
+    n = len(words)
+    while i < n:
+        w = words[i]
+        if w.startswith("-") and w != "-":
+            if "=" in w:
+                i += 1  # an inline '--opt=value' global option carries its value in this word
+            elif w in _GIT_ARG_OPTS:
+                i += 2  # a separated arg-consuming global option: skip its value word
+            else:
+                i += 1
+            continue
+        return w, words[i + 1:], True
+    return None, [], False
+
+
+def _gate_closed_grammar_scan(command, heredoc_message=False):
+    """(kind, what, how) for the first raw 'git' occurrence whose segment the closed literal grammar
+    refuses, or None. kind is 'bypass' when the resolved literal words already spell the hook bypass
+    (what is the subcommand, how the matched spelling, via _no_verify_spelling, so the value-aware
+    '--' boundary and the value-taking option tables apply here exactly as on the parsed path);
+    'grammar' when a roster-verb segment carries a byte outside the grammar; 'unresolved' when the
+    subcommand cannot be resolved because the violation sits where a global option's value or the
+    subcommand is expected (for both: what is the raw snippet, how the construct class). EVERY
+    '\\bgit\\b' occurrence is scanned, wherever it sits: bash runs git wherever the word reaches a
+    command position, and this gate deliberately does not model which positions those are, so a git
+    occurrence inside quoted text or a here-document body is judged as if it ran (a disclosed
+    over-deny; the roster probe is case-insensitive for the same reason). An occurrence inside a
+    region an earlier scan consumed is skipped: there it is literal data or an operand of an
+    accepted or off-roster git command, already judged by that scan. The consumed watermark advances
+    only to the lexer's data_end, which stops SHORT of a quoted span whose interior turned the
+    quote's pairing ambiguous (inside single quotes, any non-word non-space byte; inside double quotes,
+    a shell operator or the other quote; in either quote, an all-literal interior that names a roster
+    git command), so a 'git' hidden in such a span is re-judged as
+    its own segment instead of swallowed. Scanning resumes at each scan's stop point, and the watermark
+    never moves backwards. The pass is linear in the command length while off-roster segments dominate:
+    the lexer stops an off-roster segment at its first ambiguous quote (the stop sits outside the
+    single-quote branch's data_stop guard, like the double-quote branch, so a later off-roster quote
+    stops the lex even after an earlier quote set data_stop), so each such segment is read
+    once and the watermark passes it. A ROSTER-verb segment is read to its end (its own flags may sit
+    anywhere before the terminator), so a line packing many ambiguity-opening roster-verb git words
+    re-reads the remainder from each and is super-linear in that count; such a line is bounded by the
+    PreToolUse hook deadline, past which the check fails closed (deny). WHERE that deadline is armed (a
+    platform with SIGALRM/setitimer, the alarm unblocked, on the main thread) this is an availability
+    cost, never a bypass; on a platform or call that runs with no deadline (see the module docstring:
+    Windows, a blocked SIGALRM, an off-main-thread call) such a line is not time-bounded here, so the
+    super-linear cost is not fail-closed and the fallback to platform-level limits is all that remains.
+    heredoc_message is True only where the shared lexer parsed the command (gate_weakening's parsed path and
+    the failed-main-reading floor after it): there the grammar also accepts the git commit message form
+    (_gate_heredoc_message, read by _gate_grammar_lex). The parse-error fallback and the doubt path keep
+    False, so on a command the lexer cannot parse that form still denies."""
+    consumed = 0
+    for m in _GATE_GIT_WORD_RE.finditer(command):
+        p = m.start()
+        if p < consumed:
+            continue
+        words, end, bad, data_end = _gate_grammar_lex(command, p, heredoc_message)
+        sub, args, resolved = _gate_grammar_sub(words)
+        if not resolved:
+            if bad is not None:
+                return ("unresolved",) + bad
+            consumed = data_end  # bare git at a segment end: no verb runs
+            continue
+        if sub.lower() not in _NOVERIFY_VERBS:
+            consumed = data_end  # off-roster verb: this gate leaves the segment alone
+            continue
+        spelling = _no_verify_spelling(sub.lower(), args)
+        if spelling is not None:
+            return ("bypass", sub, spelling)
+        if bad is not None:
+            return ("grammar",) + bad
+        consumed = data_end
     return None
 
 
@@ -9941,21 +13768,20 @@ def _gate_plain_filter(argv):
 
 
 def _gate_case_depths(records):
-    """The number of case compounds open at each segment (a segment opens one when 'case' follows only
-    reserved words, and one starting with 'esac' closes one). Inside a case its pattern words and the ')'
-    and '|' between them lex as commands and separators, so no pipeline there is canonical."""
-    depths = []
+    """The number of case compounds open at each segment, yielded in order as the caller reaches it (a
+    segment opens one when 'case' follows only reserved words, and one starting with 'esac' closes one), so
+    a caller that stops early reads no further. Inside a case its pattern words and the ')' and '|' between
+    them lex as commands and separators, so no pipeline there is canonical."""
     depth = 0
     for seg in records:
         if seg.argv and seg.argv[0] == "esac" and depth:
             depth -= 1
-        depths.append(depth)
+        yield depth
         for word in seg.argv:
             if word == "case":
                 depth += 1
             if word not in _GATE_RESERVED:
                 break
-    return depths
 
 
 # The commands that may come before the producer pipeline in the same command while the deny tier still holds,
@@ -10019,13 +13845,12 @@ def _verification_sink(records):
     (_gate_plain_filter) with stdout not redirected, ending in '|' or '|&'. A real-file tee stage does NOT
     exempt the pipeline (by default the status is still the final stage's); it is returned so the message can
     say what the file holds, and a tr or uniq stage before it marks that file as filtered."""
-    case_depths = _gate_case_depths(records)
     n = len(records)
-    for i, seg in enumerate(records):
+    for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records)):
         if i and not _gate_benign_prefix(records[i - 1]):
             return None   # an earlier command may set the run's environment or configuration: it only notes
         if (seg.sep_after not in _GATE_PIPES
-                or case_depths[i] or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
+                or case_depth or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
             continue
         if _gate_conditional_run(records, i):
             return None   # a pipeline run only when an earlier command fails, or never: it only notes
@@ -10125,8 +13950,9 @@ def _gate_flow_note(records, command):
         return (_GATE_SUBST_TEXT + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw "
                 "text, where either may be quoted text, so it does not prove that the substitution runs, that the "
                 "pipe exists, or that any output is dropped; this is a note, not a refusal." + _GATE_NOTE_ADVICE)
-    first = next((i for i, seg in enumerate(records)
-                  if any(_is_checker_segment(s) or _gate_verify_shaped(s) for s in _gate_suffixes(seg.argv))), None)
+    first = next((i for i, seg in enumerate(records)  # a segment with no word has no suffix (_gate_suffixes)
+                  if seg.argv and any(_is_checker_segment(s) or _gate_verify_shaped(s)
+                                      for s in _gate_suffixes(seg.argv))), None)
     by_subst = first is None and subst
     if by_subst:
         first = 0
@@ -10149,33 +13975,79 @@ def _gate_flow_note(records, command):
             .format(kind) + _GATE_NOTE_TAIL)
 
 
-def _gate_weakening_fallback(command):
+def _gate_grammar_messages(kind, what, how, unparsed):
+    """(reason, banner) for a _gate_closed_grammar_scan hit, for the parsed path (unparsed False) and
+    the unparseable fallback (unparsed True): a 'bypass' hit names the subcommand and the matched
+    spelling; a 'grammar' or 'unresolved' hit names the offending word as typed and the construct
+    class, and tells the caller to re-issue the git command plainly (the closed literal grammar)."""
+    lead = ("the command could not be parsed by the shell lexer (likely unbalanced quotes) and its "
+            "raw text " if unparsed else "the raw command text ")
+    if kind == "bypass":
+        return (
+            "AIQT rule gatdis (gate-discipline): {}names a git {} carrying {}, a deliberate bypass "
+            "of the verification hooks that gate it. The gate reads the raw text, so a bypass "
+            "spelling inside quoted data denies too; never weaken a gate to obtain a pass, and keep "
+            "hook-bypass spellings out of command text. {} {}".format(lead, what, how, _GATE_ALTS,
+                                                                     _GATE_FILE_ROUTE),
+            "AIQT guardrail: denied a command whose text names a git verification-hook bypass "
+            "(--no-verify family) (rule gatdis, fail-closed).")
+    where = ("where its subcommand or a global option's value is expected, so the verb bash would "
+             "run cannot be resolved" if kind == "unresolved"
+             else "on a git subcommand whose verification hooks a skip option can turn off")
+    return (
+        "AIQT rule gatdis (gate-discipline): {}names a git command, and the word {!r} {} {}. The "
+        "gate holds such a git segment to a closed literal grammar (bare literal words, one "
+        "standalone single-quoted literal per word, one standalone double-quoted literal per word "
+        "holding no '$', backquote, backslash or '!', literal global-option values, and only the "
+        ">/dev/null, 2>/dev/null and 2>&1 redirections), because bash rewrites anything else before "
+        "git parses its options (an empty expansion leaves a bare '-n' or '--no-verify', silently "
+        "skipping the verification hooks), and this gate does not model those rewrites; it denies "
+        "fail-closed. Re-issue the command plainly: spell every word of the git command literally, "
+        "resolve any expansion before the call, and keep comments, redirections and here-documents "
+        "off the git segment. {} {}".format(lead, what[:60], how, where, _GATE_ALTS, _GATE_FILE_ROUTE),
+        "AIQT guardrail: denied a git command whose word {!r} is outside the gate's closed literal "
+        "grammar (rule gatdis, fail-closed).".format(what[:40]))
+
+
+def _gate_weakening_fallback(command, heredoc_message=False):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
-    a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
-    prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
+    a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
+    so it cannot prove the -n is the bypass rather than an unrelated flag, and it reads the cluster as
+    the bypass, the safe direction); a raw git naming whose segment the closed literal grammar refuses
+    (_gate_closed_grammar_scan, the same scan the parsed path runs over the raw text) DENIES;
+    a checker keyword next to a raw swallow
     or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
     design, the documented posture of the sibling fallbacks (_diff_source_fallback,
-    _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
-    if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
+    _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable. Which decision the
+    text earns is _gate_weakening_fallback_kind's. heredoc_message is passed to the grammar scan: True only
+    on the failed-main-reading floor, where the lexer did parse the command. Every caller passes the raw
+    text; gate_weakening's ordinary-parse-failure branch first denies a bypass that the de-quoted unread
+    text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
+    it calls this."""
+    kind = _gate_weakening_fallback_kind(command)
+    if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
-            "spelling; failing closed. {}".format(_GATE_ALTS),
+            "spelling; failing closed. {} {}".format(_GATE_ALTS, _GATE_FILE_ROUTE),
             "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
             "hooks (rule gatdis, fail-safe).")
-    if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
+    if kind == "short-n":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
             "which on those verbs bypasses the verification hooks; it is denied fail-safe. Never weaken a "
-            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {}"
-            .format(_GATE_ALTS),
+            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {} {}"
+            .format(_GATE_ALTS, _GATE_FILE_ROUTE),
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    grammar_hit = _gate_closed_grammar_scan(command, heredoc_message)
+    if grammar_hit is not None:
+        grammar_kind, what, how = grammar_hit
+        reason, banner = _gate_grammar_messages(grammar_kind, what, how, True)
+        return _deny(reason, banner)
+    if kind == "swallow":
         # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
         # --no-verify bypass spellings above still deny fail-safe, and the caller first denies a verification
@@ -10190,13 +14062,733 @@ def _gate_weakening_fallback(command):
     return _allow()
 
 
+def _gate_alias_deny(built=False):
+    """gate_weakening's deny of a git command that runs under a git alias the command defines (_git_local_alias,
+    _git_alias_inherited, _git_alias_named), on a parsed command and on an unparseable one alike. With built True the
+    git command reads so only through a word built at run time, or a region the lexer did not read
+    (_git_alias_built), and the reason says that, with the fix (_GIT_BUILT_WORD_REASON)."""
+    if built:
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): this command " + _GIT_BUILT_WORD_REASON + ", so a bypass of the "
+            "verification hooks (--no-verify, or -n on commit or am) cannot be ruled out. " + _GIT_BUILT_WORD_FIX +
+            " " + _GATE_ALTS,
+            "AIQT guardrail: denied a git command whose options hold a word built at run time, which may bypass "
+            "verification hooks (rule gatdis); quote the expansion or spell the option literally.")
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): this git command defines a git alias for itself, or runs under one (a "
+        "-c or --config-env alias.<name>, include.path or includeIf key, a GIT_CONFIG_PARAMETERS or "
+        "GIT_CONFIG_KEY_<n> assignment naming one, the name GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or "
+        "GIT_CONFIG_KEY_ anywhere in the command's text, in any word, quoted or not, whatever sets or mentions it, "
+        "or a GIT_CONFIG_PARAMETERS or GIT_CONFIG_KEY_<n> in the session environment naming one), so this guard "
+        "cannot read the subcommand or the options it runs, and a bypass of the verification hooks (--no-verify, "
+        "or -n on commit or am) cannot be ruled out. Re-issue the command the alias expands to explicitly, with no "
+        "mention of those variable names (an alias from the session environment needs a session started without "
+        "that variable). {}".format(_GATE_ALTS),
+        "AIQT guardrail: denied a git alias the command defines or runs under, which may bypass verification hooks "
+        "(rule gatdis); run the aliased command explicitly.")
+
+
+# The command-running wrappers whose own options and operands stand BEFORE the git command they run, so
+# the gate-weakening parsed path judges the git behind one (env 'A=git' git commit -nv runs git commit
+# -nv; the command word 'env' would otherwise hide it). Each maps to (options taking a separate value,
+# valueless flag options); env also consumes leading VAR=value assignments, timeout a trailing duration
+# operand, and 'command -v'/'-V' looks a name up and runs nothing. A wrapper option this grammar does
+# NOT resolve (an attached short-option value such as env -uX, nice -n5, a combined flag) fails closed:
+# the peel returns _GATE_PEEL_UNRESOLVED and the caller judges the dequoted words, so a quoted git
+# spelling (g'i't) the raw \bgit\b scan cannot see still denies. The same wrapper class the sibling
+# commit-identity finder reads (_CMTIDN_GIT_WRAPPERS), less sudo/xargs/setsid/stdbuf, which carry operand
+# shapes (an -I replacement string, a sudo command vector) this bounded peel does not model; those
+# unlisted wrappers (_GATE_UNLISTED_WRAPPERS) get the SAME dequoted fail-closed judgement in the caller.
+_GATE_NOVERIFY_WRAPPERS = dict((
+    ("env", (frozenset(("-u", "--unset", "-C", "--chdir")),
+             frozenset(("-i", "--ignore-environment", "-0", "--null", "-v", "--debug")))),
+    ("nice", (frozenset(("-n", "--adjustment")), frozenset())),
+    ("timeout", (frozenset(("-s", "--signal", "-k", "--kill-after")),
+                 frozenset(("--preserve-status", "--foreground", "-v", "--verbose", "-f")))),
+    ("time", (frozenset(("-o", "--output", "-f", "--format")),
+              frozenset(("-p", "--portability", "-a", "--append", "-v", "--verbose", "-q", "--quiet")))),
+    ("exec", (frozenset(("-a",)), frozenset(("-c", "-l")))),
+    ("nohup", (frozenset(), frozenset())),
+    ("command", (frozenset(), frozenset(("-p",)))),
+))
+
+# The command-running wrappers the sibling commit-identity finder recognizes but this bounded peel does
+# not model (their operand shapes are not parsed here). The caller judges a segment that runs the git
+# behind one with the fail-closed dequoted-word scan, so a hidden roster-git bypass still denies.
+_GATE_UNLISTED_WRAPPERS = _CMTIDN_GIT_WRAPPERS - frozenset(_GATE_NOVERIFY_WRAPPERS)
+
+# Peel sentinel: a wrapper option the grammar could not resolve, so the command behind it is unknown
+# here. Distinct from None (no command runs) and from an argv list (a resolved command word).
+_GATE_PEEL_UNRESOLVED = ("__gate_peel_unresolved__",)
+
+
+def _gate_novrf_peel(argv):
+    """The argv of the command a segment runs after the wrappers in _GATE_NOVERIFY_WRAPPERS (each with
+    its own option grammar) are peeled; _GATE_PEEL_UNRESOLVED when a wrapper option is outside that
+    grammar (fail closed: the command behind it is unknown here, so the caller judges the dequoted
+    words); or None when no command runs here (an empty result or a 'command -v'/'-V' name lookup).
+    Leading VAR=value words are skipped first. Purely lexical, bounded by the token count."""
+    i = _command_word_index(argv)
+    n = len(argv)
+    while i < n:
+        word = _gate_word(argv[i])
+        grammar = _GATE_NOVERIFY_WRAPPERS.get(word)
+        if grammar is None:
+            return argv[i:]
+        value_opts, flag_opts = grammar
+        i += 1
+        while i < n:
+            tok = argv[i]
+            if word == "env" and _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "--":
+                i += 1
+                break
+            if not tok.startswith("-") or (tok == "-" and word != "env"):
+                break
+            if word == "command" and tok in ("-v", "-V"):
+                return None  # a name lookup runs no command
+            if tok in value_opts:
+                i += 2
+            elif (tok in flag_opts or tok.split("=", 1)[0] in value_opts
+                  or (word == "nice" and tok[1:].isdigit())):
+                i += 1
+            else:
+                # a wrapper option outside the grammar: fail closed, the caller judges the dequoted words
+                return _GATE_PEEL_UNRESOLVED
+        if word == "timeout":
+            i += 1   # the duration operand
+    return None
+
+
+def _gate_novrf_dequoted_bypass(words):
+    """(sub, spelling) when the already shell-dequoted literal words name a git whose roster subcommand
+    carries a no-verify bypass (-n in a short cluster, or --no-verify), else None. This is the fail-
+    closed judgement for a wrapper whose option grammar did not resolve the command (env -uX, nice -n5,
+    a combined flag) and for an unlisted command-running wrapper (sudo, xargs, setsid, stdbuf), read over the
+    lexer's words (the de-quoted text readings use the any-word walk, _gate_any_word_bypass, which finds every
+    bypass this walk finds on the same words): the
+    spelling is read from the dequoted argv bash would build, so a quote-concatenated git spelling the
+    raw \\bgit\\b scan cannot see (g'i't) still denies. Any word whose basename is 'git' starts the
+    roster/spelling walk, so text that merely names such a command is a disclosed safe-direction
+    over-deny. Purely lexical, and linear in the word count. The subcommand each git word resolves is read
+    from two tables filled ONCE from the end, the run of leading VAR=value words at each position (the
+    _command_word_index skip) and where a global-option walk from each position stops (the _git_sub_and_args
+    walk). A roster-verb subcommand's arguments are read to its option terminator (_no_verify_spelling), but
+    that reading can find a bypass only in a '--' word naming a prefix of no-verify or a single-dash word
+    holding an 'n', so it stops after the last such word and a roster git with none after its verb is passed
+    over; the terminator is found over slices that double in length, so a walk costs what it reads; and a walk
+    that found no bypass has already read, in the same state, every word a later git word with the same verb
+    would read (that verb is a plain word, so no option value is pending after it, and both walks end at the
+    same terminator or at that last word), so such a later git word is passed over too. Each verb's walks so
+    read disjoint stretches of the list, and every decision, and the spelling returned, is the one a full
+    walk from every git word gives."""
+    n = len(words)
+    assigns = [0] * (n + 1)  # assigns[p]: how many leading VAR=value words start at p
+    subs = [None] * (n + 2)  # subs[p]: index of the word a global-option walk from p stops at, or None
+    last = -1  # the last word _no_verify_spelling can read as a bypass, or -1
+    for p in range(n - 1, -1, -1):
+        w = words[p]
+        if last < 0 and (_has_long_prefix((w,), "no-verify") or (w[:1] == "-" and w[1:2] != "-" and "n" in w)):
+            last = p
+        if _ENV_ASSIGN_RE.match(w):
+            assigns[p] = assigns[p + 1] + 1
+        if w.startswith("-"):
+            subs[p] = subs[p + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
+        else:
+            subs[p] = p
+    read_to = {}  # verb -> the end of the stretch a walk for that verb read without finding a bypass
+    for idx in range(max(last, 0)):
+        if _gate_word(words[idx]) != "git":
+            continue
+        s = subs[idx + assigns[idx] + 1]  # skip the leading assignments and the command word itself
+        if s is None or s >= last or words[s] not in _NOVERIFY_VERBS or s < read_to.get(words[s], 0):
+            continue
+        sub = words[s]
+        size = 16
+        while True:  # the walk's end: its terminator, or the word after last
+            stop = min(s + 1 + size, last + 1)
+            end = s + 1 + _gate_terminator_index(sub, words[s + 1:stop])
+            if end < stop or stop == last + 1:
+                break
+            size *= 2
+        spelling = _no_verify_spelling(sub, words[s + 1:end])
+        if spelling is not None:
+            return sub, spelling
+        read_to[sub] = end
+    return None
+
+
+def _gate_novrf_segment_bypass(tokens):
+    """(sub, spelling) when a segment runs a roster git carrying a no-verify bypass behind the command-
+    running wrappers, else None. A recognized wrapper (_GATE_NOVERIFY_WRAPPERS) is peeled and the git
+    behind it judged directly; a wrapper option the grammar could not resolve (_GATE_PEEL_UNRESOLVED) and
+    an unlisted command-running wrapper (_GATE_UNLISTED_WRAPPERS: sudo, xargs, setsid, stdbuf) both fall
+    to the fail-closed dequoted-word scan."""
+    peeled = _gate_novrf_peel(tokens)
+    if peeled is _GATE_PEEL_UNRESOLVED or (
+            peeled is not None and _command_word(peeled) in _GATE_UNLISTED_WRAPPERS):
+        return _gate_novrf_dequoted_bypass(tokens)
+    if peeled is not None and _command_word(peeled) == "git" and not _has_info_flag(peeled):
+        sub, args = _git_sub_and_args(peeled)
+        if sub in _NOVERIFY_VERBS:
+            spelling = _no_verify_spelling(sub, args)
+            if spelling is not None:
+                return sub, spelling
+    return None
+
+
+# The kinds of _gate_weakening_fallback_kind on which _gate_weakening_fallback denies.
+_GATE_FALLBACK_DENIES = frozenset(("no-verify", "short-n"))
+
+
+def _gate_weakening_fallback_kind(command):
+    """The decision _gate_weakening_fallback gives command, by its raw probes: "no-verify" (a no-verify verb
+    and a --no-ver spelling) and "short-n" (git commit or am and a short -n cluster) deny, "swallow" (a
+    checker keyword and a swallow or truncating-pipe spelling) notes, and None allows. gate_weakening reads it
+    for its floor (MAIN'S DECISION AS A FLOOR, above _MainHashReading)."""
+    if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
+        return "no-verify"
+    if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
+        return "short-n"
+    if _RAW_CHECKER_RE.search(command) and (
+            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+        return "swallow"
+    return None
+
+
+def _gate_partial_segments(command, doubt=None):
+    """(complete, open_segment) from a partial lex of command: complete is the list of complete segments it
+    recovers, and open_segment is the in-progress segment the lexer was inside when it stopped (its words
+    and redirects read before the construct, and its raw slice, which runs from that segment's start to the
+    end of command), or None where a construct that begins a new segment stopped it, leaving every
+    recovered segment complete. doubt, when given, is the _UncertainHashError the caller's own full lex of
+    command just raised: where a partial lex of the same command would raise it too, the partial lex resumes
+    from the fork it carries (_lex_resume_partial) instead of lexing the text before the command's first
+    uncertain '#' a second time. A doubt raised because a reading failed to lex (reading_failed) takes the
+    full partial lex instead: a partial lex does not raise there, it returns every reading's recovered
+    segments, so resuming from the fork would drop the segments of the readings that lex whole and miss a
+    sink past the first uncertain '#'."""
+    if _gate_partial_resumes(doubt):
+        recovered, _complete, in_progress = _lex_resume_partial(command, doubt)
+    else:
+        recovered, _complete, in_progress = _lex_command(command, partial=True)
+    if in_progress:
+        return recovered[:-1], recovered[-1]
+    return recovered, None
+
+
+def _gate_partial_resumes(doubt):
+    """Whether _gate_partial_segments resumes from the fork of doubt (an uncertain-'#' doubt that no failed reading
+    raised) rather than making a fresh partial lex of the whole command, the lex _git_alias_recovered makes."""
+    return doubt is not None and not doubt.reading_failed
+
+
+def _gate_partial_lex(command, doubt=None):
+    """(complete, open_segment, lexed): the partial lex of _gate_partial_segments, and lexed, where that lex is a
+    fresh partial lex of the whole command (_gate_partial_resumes is False), the (argvs, stops) of it that
+    _git_alias_recovered reads instead of lexing the command again, else None. The fresh lex runs inside
+    _WordSpellings and _LexStops, which record what the alias reading reads and leave every segment's words, the
+    only part the other checks of gate_weakening read, unchanged."""
+    if _gate_partial_resumes(doubt):
+        recovered, open_seg = _gate_partial_segments(command, doubt)
+        return recovered, open_seg, None
+    with _WordSpellings(), _LexStops() as stops:
+        recovered, open_seg = _gate_partial_segments(command, doubt)
+    argvs = [seg.argv for seg in recovered] + ([open_seg.argv] if open_seg is not None else [])
+    return recovered, open_seg, (argvs, stops.seen)
+
+
+def _gate_recovered_segments(command, doubt=None):
+    """The complete segments a partial lex of command recovers (_gate_partial_segments): the in-progress
+    segment the lexer was inside is dropped, since its unseen tokens could change it, so a sink check reads
+    only segments whose every token was seen."""
+    return _gate_partial_segments(command, doubt)[0]
+
+
+# An ANSI-C $'...' quote with its body (escapes kept), and one escape in such a body: an octal, \x, \u or \U
+# code, a \c control character, or any other escaped character (_gate_dequoted_words).
+_GATE_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+_GATE_ANSI_C_ESCAPE_RE = re.compile(
+    r"\\(?:([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c(.)|(.))", re.S)
+_GATE_ANSI_C_LETTERS = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                        "t": "\t", "v": "\v"}
+
+
+def _gate_ansi_c_escape(match):
+    """The character bash reads for one ANSI-C escape (_GATE_ANSI_C_ESCAPE_RE); '' for a code past Unicode."""
+    octal, hex2, hex4, hex8, control, other = match.groups()
+    if control is not None:
+        return chr(ord(control) & 0x1F)
+    if other is not None:
+        return _GATE_ANSI_C_LETTERS.get(other, other)
+    code = int(octal, 8) if octal is not None else int(hex2 or hex4 or hex8, 16)
+    return chr(code) if code <= 0x10FFFF else ""
+
+
+def _gate_dequoted_words(text):
+    """The words the fail-closed dequoted-word scan reads from raw text: each ANSI-C $'...' quote decoded
+    first, escapes included (so $'g\\x69t' reads git), then the de-quoted copy (_dequoted_text: continuations
+    joined, quote characters and backslashes removed) split at blanks. After an option word whose attached
+    value names git (a '--name=' value whose basename is git, or a single-dash word ending in git:
+    env --split-string='g"i"t ...', env -S'git ...') a 'git' word is added, so the git that option runs starts
+    the walk too. A raw-text reading only: it can only add a deny, never prove a command safe. It reads no
+    git word built at run time (an expansion, a substitution, a glob or brace expansion), and a quote is
+    removed wherever it stands, so a quoted word holding a blank is split into several words. This is the
+    blank-split reading: its escapes keep a NUL and the rest of the quote, and it splits at every character
+    str.split() treats as whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
+    deny it gives is kept."""
+    words = []
+    decoded = _GATE_ANSI_C_RE.sub(lambda m: _GATE_ANSI_C_ESCAPE_RE.sub(_gate_ansi_c_escape, m.group(1)), text)
+    for w in _dequoted_text(decoded).split():
+        words.append(w)
+        if w[:2] == "--":
+            if "=" in w and _gate_word(w.split("=", 1)[1]) == "git":
+                words.append("git")
+        elif w[:1] == "-" and len(w) > 4 and w[-3:].lower() == "git":
+            words.append("git")
+    return words
+
+
+# The escapes of an ANSI-C $'...' body as bash decodes them (bash 5.3.9, checked 2026-10-25): an octal code of
+# one to three digits, and a \x code of one or two hex digits or \x{...} with any number, keep their low byte;
+# \u and \U take up to four and eight hex digits; \c reads the next character as a control character (\c\\
+# takes both backslashes, \c? is DEL); the letter escapes and \\, \', \" and \? decode; any other escape keeps
+# its backslash, so env -S still sees the \_ of $'git\_commit'. The body of one such quote runs to the first
+# quote no backslash escapes (_GATE_ANSI_C_BODY_RE).
+_GATE_BASH_ESCAPE_RE = re.compile(
+    r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
+    r"|c(\\\\|.)|(.))", re.S)
+_GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+
+# Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
+# Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
+# the backquote, so $(, <( and >( split at their '('), wherever each stands, quoted or not, so a git inside a
+# quoted script (sh -c 'true;g"i"t commit -nv') or glued to an operator (cat <(g'i't commit -nv)) is a word.
+_GATE_WORD_BREAK_RE = re.compile(r"[ \t\n;&|()<>`]+")
+
+
+def _gate_ansi_c_text(body):
+    """The text bash reads for the body of one ANSI-C $'...' quote: each escape decoded as bash decodes it
+    (_GATE_BASH_ESCAPE_RE), and the body cut at the first escape that yields a NUL byte (\\0, \\x00, \\x{},
+    \\u0000, \\c@ and their kin), since bash ends that quote's text there and keeps the rest of the word."""
+    out = []
+    pos = 0
+    for m in _GATE_BASH_ESCAPE_RE.finditer(body):
+        octal, braced, hex2, hex4, hex8, control, other = m.groups()
+        if control is not None:
+            # bash reads one byte here: a multibyte character gives its first byte, and the rest stays text
+            first = control[0].encode("utf-8", "surrogatepass")[0]
+            char = "\x7f" if control == "?" else chr(first & 0x1F)
+            if first > 0x7F:
+                char += "\ufffd"
+        elif other is not None:
+            char = _GATE_ANSI_C_LETTERS.get(other, other if other in "\\'\"?" else "\\" + other)
+        elif octal is not None:
+            char = chr(int(octal, 8) & 0xFF)
+        elif braced is not None:
+            char = chr(int(braced[-2:] or "0", 16))
+        elif hex2 is not None:
+            char = chr(int(hex2, 16))
+        else:
+            code = int(hex4 or hex8, 16)
+            char = chr(code) if code <= 0x10FFFF else ""
+        out.append(body[pos:m.start()])
+        if char[:1] == "\x00":
+            return "".join(out)
+        out.append(char)
+        pos = m.end()
+    out.append(body[pos:])
+    return "".join(out)
+
+
+def _gate_shell_level(text):
+    """text with one level of shell quoting read as bash reads it: a backslash outside quotes escapes the next
+    character, a single-quoted span is literal, a double-quoted span is literal but for a backslash before $,
+    backquote, double quote, backslash or newline, and an ANSI-C $'...' span is decoded (_gate_ansi_c_text). A
+    quote is removed only where it opens or closes a span at this level, so the quoting of a script handed on
+    inside it (sh -c, eval, env -S) is left for the next level; a quote left open runs to the end. Raw text
+    only: no expansion or substitution is performed, and a quote inside a command substitution that stands in
+    double quotes is read at this level, where bash reads it inside the substitution."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            out.append(text[i + 1:i + 2])
+            i += 2
+        elif c == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end
+            out.append(text[i + 1:end])
+            i = end + 1
+        elif c == "$" and text[i + 1:i + 2] == "'":
+            body = _GATE_ANSI_C_BODY_RE.match(text, i + 2)
+            out.append(_gate_ansi_c_text(body.group()))
+            i = body.end() + 1
+        elif c == '"' or (c == "$" and text[i + 1:i + 2] == '"'):
+            i += 1 if c == '"' else 2
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and text[i + 1:i + 2] in ("$", "`", '"', "\\", "\n"):
+                    i += 1
+                out.append(text[i])
+                i += 1
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _gate_reading_words(text):
+    """The words of one bash-model reading (_gate_bash_readings): env -S's \\_ read as a separator wherever it
+    stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
+    _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
+    _gate_dequoted_words."""
+    plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
+    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    words = []
+    for w in _GATE_WORD_BREAK_RE.split(plain):
+        if not w:
+            continue
+        words.append(w)
+        if w[:2] == "--":
+            if "=" in w and _gate_word(w.split("=", 1)[1]) == "git":
+                words.append("git")
+        elif w[:1] == "-" and len(w) > 4 and w[-3:].lower() == "git":
+            words.append("git")
+    return words
+
+
+def _gate_bash_readings(text):
+    """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
+    own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
+    to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    joined = _join_continuations(text)[0]
+    outer = _gate_shell_level(joined)
+    decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
+    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
+            _gate_reading_words(decoded))
+
+
+def _gate_any_word_bypass(words):
+    """(sub, spelling) when a word after the first word naming git (_gate_word) is a roster verb and a word after
+    that verb is a hook-skip spelling for it, else None: a '--' word naming a prefix of no-verify
+    (_has_long_prefix) after any roster verb, or a single-dash word holding an 'n' after commit or am. Each word
+    is read on its own: no '--' ends the options, no option takes the next word or the rest of its own word as
+    its value, and no global option between git and the verb is resolved, so a quoted span that splits into a
+    '--', a value-taking option or a global option can never swallow a real -n. One pass from the end, linear
+    in the word count."""
+    first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+    long_at = short_at = None  # the nearest long and short spelling words after the word being read
+    found = None
+    for p in range(len(words) - 1, first, -1):
+        w = words[p]
+        if w in _NOVERIFY_VERBS:
+            if long_at is not None:
+                found = (w, "a --no-verify spelling")
+            elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
+                found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
+        if _has_long_prefix((w,), "no-verify"):
+            long_at = p
+        elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
+            short_at = p
+    return found
+
+
+# The characters a de-quoted reading can remove from between two letters of a word: the quote characters, '$',
+# a backslash and the newline of a backslash-newline pair (_gate_text_may_name_git).
+_GATE_READING_DROPS = str.maketrans("", "", "'\"$\n" + chr(92))
+
+
+def _gate_text_may_name_git(text):
+    """False when no de-quoted reading of text (_gate_dequoted_words, _gate_bash_readings) can hold a word that
+    _gate_word reads as git, so _gate_text_bypass, whose any-word walk starts only at such a word, passes text
+    over without building the readings; True otherwise. Only an ANSI-C $'...' escape decodes a character text
+    does not hold, and that needs both a '$' and a backslash. Without one of them, each reading only removes
+    characters (quote characters, a '$' before a quote, backslashes, a backslash-newline pair), reads env -S's
+    \\_ as a blank and splits what is left into words, so a word is a run of text's own characters with only
+    removed ones between them, and the 'git' word added after an option word stands for letters that word
+    holds. A word _gate_word reads as git ends in g, i and t, each in either case (no other character
+    lowercases to one of them), so those three letters stand in text with only quote characters, '$',
+    backslashes and newlines between them, and text with those removed and lowercased holds 'git'. One
+    translate and one substring test, where the readings take several passes per character and per word."""
+    if "$" in text and chr(92) in text:
+        return True
+    return "git" in text.translate(_GATE_READING_DROPS).lower()
+
+
+def _gate_text_bypass(text, skip_own=False):
+    """(sub, spelling) when a de-quoted reading of text names a roster git carrying a no-verify bypass, else
+    None. The blank-split reading (_gate_dequoted_words) and the bash-model readings (_gate_bash_readings) are
+    each judged by the any-word walk (_gate_any_word_bypass), which finds every bypass the value-aware walk
+    (_gate_novrf_dequoted_bypass) finds on the same words, so a deny the blank-split reading gave is kept. With
+    skip_own, each reading's first git word is dropped first. That word is the segment's own git only in text
+    that starts at it, so that git keeps the value-aware reading of the lexer's words; in a whole segment's
+    text the first git word may be one hidden before it, in an assignment, a redirection or a wrapper's option
+    value (A="$(g'i't commit -nv)" git status), and dropping it would pass that git over, so a caller that
+    passes skip_own for such text also reads the text before the own git without it (_gate_behind_bypass). A
+    raw-text reading only: it can only add a deny, never prove a command safe. Text in which no reading can
+    hold a git word (_gate_text_may_name_git) gives None before any reading is built, the result every walk
+    gives it, so a long segment that names no git (echo and many plain words) costs a translate, not the
+    readings."""
+    if not _gate_text_may_name_git(text):
+        return None
+    for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        if skip_own:
+            k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+            words = words[k + 1:]
+        bypass = _gate_any_word_bypass(words)
+        if bypass is not None:
+            return bypass
+    return None
+
+
+def _gate_unread_bypass(text):
+    """(sub, spelling) when text, the part of a command a partial lex could not read, names a roster git
+    carrying a no-verify bypass, else None. text is split into raw command segments at the ;, &, | and newline
+    separators outside any quoting _skip_quoting can prove (_raw_push_segments, the bounded split the push
+    backstop reads), and each segment is judged by its de-quoted readings (_gate_text_bypass), so a
+    quote-concatenated git (g'i't) past a here-string or process substitution the lexer stops at is still read.
+    A raw-text reading only, read beside the partial lex and the raw fallback, so it can only add a deny, never
+    prove a command safe. Disclosed safe-direction over-deny: a quoted word holding a blank or an operator is
+    split into several words here (g'i't commit -m 'fix -n' <<<x reads a -n), and any word whose basename is
+    git starts the walk, so text that merely names such a command denies too."""
+    for segment in _raw_push_segments(text):
+        bypass = _gate_text_bypass(segment)
+        if bypass is not None:
+            return bypass
+    return None
+
+
+def _gate_word_start(raw, argv, idx):
+    """The index in raw, the raw slice of one lexed segment whose words are argv, at which the word argv[idx]
+    starts, or None where this rescan cannot place it. raw is read from its start as the lexer reads it:
+    blanks are passed over, each redirection operator is skipped with its target word (a digits-only word
+    glued to the operator is its source descriptor), and every other word is read by the shared word reader
+    (_read_word) and must decode to the next word of argv. A '#' at a word boundary, any other operator, a
+    word that differs from argv, an unreadable word, or text that ends first gives None. Linear in the length
+    of the text read up to that word."""
+    i, n, k = 0, len(raw), 0
+    try:
+        while i < n and k < len(argv):
+            c = raw[i]
+            if c in " \t\n":
+                i += 1
+                continue
+            if c == "#":
+                return None
+            op_at = i
+            if c not in _METACHARS:
+                text, _opaque, started, all_digits, _tilde, j = _read_word(raw, i, n)
+                if j == i:
+                    return None
+                if not (all_digits and text and j < n and raw[j] in "<>"):
+                    if started:
+                        if text != argv[k]:
+                            return None
+                        if k == idx:
+                            return i
+                        k += 1
+                    i = j
+                    continue
+                op_at = j
+            _op, kind, oplen = _match_operator(raw, op_at, n)
+            if kind != "redirect":
+                return None
+            i = op_at + oplen
+            while i < n and raw[i] in " \t":
+                i += 1
+            if i >= n or raw[i] in "#\n" or raw[i] in _METACHARS:
+                return None
+            _target, _opaque, started, _digits, _tilde, i = _read_word(raw, i, n)
+            if not started:
+                return None
+    except ValueError:
+        return None
+    return None
+
+
+def _gate_behind_bypass(seg):
+    """(sub, spelling) when the de-quoted text of one lexed segment (seg.raw, read by _gate_text_bypass) names a
+    roster git carrying a no-verify bypass behind any other word of that segment, else None: one rule for every
+    command word, with no list of wrappers, so a git that ionice, doas, taskset, flock, chroot, builtin exec or
+    env -S runs, or one spelled with quotes inside an operand (sh -c 'true;g"i"t commit -nv'), is judged
+    whatever runs it. The segment's OWN git, the command word the parsed path's wrapper peel resolves to git
+    and _gate_novrf_segment_bypass judges over the lexer's words, is left to that value-aware reading, so git
+    commit -m 'fix -n' keeps its allow: the text from that word on is read with its first git word, the own
+    git, dropped. The text before it (leading assignments, the peeled wrappers with their options and values,
+    and any redirection there) is read with no git word dropped, so a hook-skipping git in a substitution there
+    denies (A="$(g'i't commit -nv)" git status, exec -a "$(g'i't commit -nv)" git status, >"$(g'i't commit -nv)"
+    git status), and the whole text with its first git word dropped is read as before too, so no deny it gave is
+    lost. Where the own git's place in the text cannot be found (_gate_word_start), the whole text is read
+    with no git word dropped. A segment with no command word runs none, but bash still expands its
+    redirection words, so the text of one that holds a redirection is read with no git word dropped
+    (>"$(g'i't commit -nv)"); one with neither a word nor a redirection is passed over.
+    Disclosed safe-direction over-deny: behind a command word the peel does not resolve to git (sudo, ionice,
+    nice -n5), a quoted word holding a blank is split, so ionice git commit -m 'fix -n' reads a -n, and so is
+    one on a git before the own git or in a redirection of a segment with no command word (A="$(g'i't commit
+    -m 'fix -n')" git status), one after an own git that cannot be placed, and one after an own git with a
+    git word before it, which the kept whole-text reading drops instead (exec -a git git commit -m 'fix -n',
+    > /tmp/git git commit -m 'fix -n'); and text that merely names a
+    roster git with a bypass spelling denies wherever it is read: behind any word (echo g'i't commit -nv),
+    before the own git (exec -a "g'i't commit -n" git status), in a redirection of a segment with no command
+    word (>'g'i't commit -nv') or in a comment after one (>x # g'i't commit -nv)."""
+    if not seg.argv:
+        return _gate_text_bypass(seg.raw) if seg.redirects else None
+    peeled = _gate_novrf_peel(seg.argv)
+    if not isinstance(peeled, list) or _command_word(peeled) != "git":
+        return _gate_text_bypass(seg.raw)
+    at = _gate_word_start(seg.raw, seg.argv, len(seg.argv) - len(peeled) + _command_word_index(peeled))
+    if at is None:
+        return _gate_text_bypass(seg.raw)
+    if not seg.raw[:at].strip():
+        return _gate_text_bypass(seg.raw, True)
+    for text, skip_own in ((seg.raw[:at], False), (seg.raw[at:], True), (seg.raw, True)):
+        bypass = _gate_text_bypass(text, skip_own)
+        if bypass is not None:
+            return bypass
+    return None
+
+
+def _gate_recovered_sink(command, doubt=None):
+    """The verification run piped into a truncating sink (_verification_sink) that the complete segments a
+    partial lex of command recovers (_gate_recovered_segments) prove, or None: gate_weakening's first check
+    on a lex that fails, before its raw fallback."""
+    return _verification_sink(_gate_recovered_segments(command, doubt))
+
+
 def gate_weakening(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
     is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
-    immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    immediately), and the option region is read with a value-aware boundary so a '--' consumed as a
+    value-taking option's value (git commit -m -- -n: the '--' is the message) does not end it and the
+    following -n is still read as the bypass. UNCERTAIN GIT SEGMENTS also DENY, fail-closed, via
+    _gate_closed_grammar_scan over the raw command: every raw 'git' naming is held to a CLOSED LITERAL
+    allowlist grammar (the git_discard shape, judged directly on the raw string), under which an accepted
+    segment can hold ONLY bare literal words, one standalone single-quoted literal per word, one
+    standalone double-quoted literal per word whose interior stays on one line and holds no '$',
+    backquote, backslash or '!' (bash reads such a word as exactly the literal between the quotes),
+    literal global-option values, a literal subcommand and the >/dev/null, 2>/dev/null and 2>&1
+    redirections. On a segment whose resolved subcommand is on the roster, ANY other construct DENIES
+    naming the word as typed: an expansion, substitution or backquote ('${x}-n', '$x-n', '`true`-n',
+    '-m $(date)', and a dash-free '-m "$msg"' or '--author="$a"' alike, inside double quotes too), a
+    process substitution, a backslash (a line continuation included, inside double quotes too), a
+    double-quoted word that is glued, unterminated, spans a newline or holds an interior '!', a glob or
+    brace character, a '#' comment or leading '~', a here-document, here-string or unlisted redirection,
+    an ANSI-C '$'...'' word, or a glued quote. One here-document shape is accepted where the shared lexer
+    parsed the command (this parsed path and the failed-main-reading floor, never the parse-error fallback
+    or the doubt path): the git commit message form git commit -m "$(cat <<'EOF' ... EOF)" as a separated
+    -m's value, with a single-quoted delimiter, a substitution holding nothing but that cat and a body with
+    no '$' or backquote (_gate_heredoc_message); its body is that -m's value, and a git named in the body is
+    re-judged. A segment whose subcommand CANNOT be resolved (an
+    expansion where the subcommand or a global option's value is expected: git $g commit, git -C $d)
+    also DENIES: the verb bash will run cannot be known.
+    Accepted literal words are then checked for the bypass spellings themselves (_no_verify_spelling on
+    the resolved words, so a single- or double-quoted '-n' or '--no-verify' still denies while '-m'
+    consumes its value), and EVERY raw 'git' occurrence is scanned, wherever it sits, so a bypass the
+    shared lexer cannot place (after an escaped-backslash line end or a backslash-continued comment,
+    inside quoted text or a here-document body) is still judged; an occurrence inside a region an earlier
+    accepted scan consumed is data, not a command, and is skipped, EXCEPT where that region is a quoted
+    interior that could bracket live command text: a single-quoted interior holding ANY byte that is not
+    a bare-word character or a space or tab (a backquote, a '$', a shell operator, a newline or a double
+    quote), or a double-quoted interior holding a shell operator or a single quote (a '$', backquote,
+    backslash or newline there already denies outright), or, in EITHER quote, an all-literal interior
+    that names a roster git command (a 'git' word followed by a no-verify roster verb): the
+    quote's pairing is then ambiguous (the scan starts at a git word, not at the command start), so the
+    span is not treated as consumed data and a git inside it is re-judged as its own segment (the
+    enclosing word is still read for its own bypass spelling, so a real flag after the quote is not
+    missed). The parsed path also PEELS the command-running wrappers in _GATE_NOVERIFY_WRAPPERS (env with
+    its assignments and options, exec -a, nice, nohup, command, time, timeout) so the git command behind
+    one is judged (env 'A=git log ' git commit -nv runs git commit -nv). A wrapper option the peel cannot
+    resolve (an attached short-option value, a combined flag: env -uX, nice -n5) and an unlisted command-
+    running wrapper (sudo, xargs, setsid, stdbuf) FAIL CLOSED instead: the dequoted words are scanned
+    (_gate_novrf_dequoted_bypass) and a roster git carrying a no-verify spelling denies even when the git
+    word is a quote-concatenation (g'i't) the raw \bgit\b scan cannot see. DISCLOSED
+    OVER-DENIAL (the deliberate cost of the closed grammar): outside that one
+    accepted here-document message form, a roster-verb git command carrying ANY live expansion denies even
+    where it is a safe operand or value (git commit -m
+    "$msg", git push origin "$branch", git merge "release-$v"), and so does one carrying a comment, a
+    file redirection, or a glob, and so does TEXT that merely names such a git command inside quoted data
+    or a here-document body (echo 'git commit -n', the heredoc line of cat <<EOF); a plain double-quoted
+    literal that stays on one line and holds no '$', backquote, backslash or '!' inside is accepted like
+    a bare word (git commit -m "fix the parser"), but an interior '!' denies (history expansion could
+    rewrite it; single-quote the text instead), and a quoted interior that could bracket live command
+    text (a single-quoted non-word byte, a double-quoted shell operator or the other quote, or an
+    all-literal interior that names a roster git command) re-judges any git named inside it and so denies
+    a NAMED roster-verb bypass there EVEN when the interior is all bare-word characters and spaces. This
+    over-deny is wider than one commit message: a quoted operand on ANY raw git line, roster or off-roster,
+    in EITHER quote style and matched case-insensitively, re-judges a roster-git naming inside it, so
+    git commit -m 'fix; git commit -nv', git commit -m 'hi `git commit -nv`', git commit -m 'git commit
+    -nv', git commit -m 'docs: git commit -n is banned', git commit -m 'mention git push', git log --grep
+    'git push' and git commit -m 'Use GIT PUSH carefully' all deny; a 'git' word whose own verb falls off
+    the end of such a span (git commit -m 'look at git --namespace') fails closed and denies too. An
+    interior naming only an OFF-roster git (git commit -m 'see git log for history'), or no git at all, or
+    a benign operator message (git commit -m "a; b | c") still allows; re-issue anything else plainly with
+    every word literal, or keep git-with-roster-verb spellings out of quoted data. Every hook-skip and grammar
+    deny such a message can draw (parsed, de-quoted, parse-error fallback and opaque '#' doubt) ends with the
+    way on (_GATE_FILE_ROUTE): commit the message from a file with git commit -F FILE, or cat FILE | git
+    commit -F -, which allows because this guard never opens the file; a '<' redirection or here-document on
+    the git segment, or a stage before it whose own text names the spelling, still denies.
+    DISCLOSED RESIDUAL: a '-n'/'--no-verify' assembled in a separate stage the shell runs and feeds to
+    git (printf ... | xargs git commit) is not reconstructed, and an alias or shell function that renames
+    git is not resolved. A command-running wrapper outside _GATE_NOVERIFY_WRAPPERS (sudo, xargs, setsid,
+    stdbuf) and a wrapper option the peel cannot resolve FAIL CLOSED through the dequoted-word scan
+    (_gate_novrf_segment_bypass), and behind ANY other word of a segment, a wrapper on no list included,
+    the segment's de-quoted text is read too (_gate_behind_bypass, _gate_text_bypass), in four readings: the
+    blank-split reading (_gate_dequoted_words), and three bash-model readings (_gate_bash_readings): the text
+    at its own quoting level as bash reads it, that result read once more as a shell it is handed to reads it
+    (sh -c, eval, env -S), and the text with every ANSI-C quote the raw match finds decoded. In those three an
+    ANSI-C quote is decoded with bash's own escapes and cut at its first NUL escape as bash cuts it
+    ($'gi\\0zz't is git), words split only at bash's blanks (space, tab, newline) and at every shell operator
+    character and opener (; & | ( ) < >, the backquote, so $(, <( and >( too), wherever each stands, and env
+    -S's \\_ is a separator; in all four a git named by an option's attached value counts, and the blank-split
+    reading keeps the escapes, NUL and split it read before, so a deny it gave is kept. Each reading is judged
+    by the any-word walk
+    (_gate_any_word_bypass): after a git word, ANY later roster-verb word, and after it ANY no-verify prefix or,
+    on commit and am, any single-dash word holding an 'n', with no '--', option value or global option read,
+    so a quoted span that splits into one cannot swallow a real -n. So ionice g'i't commit -nv, doas g'i't commit
+    -nv, env -S 'g"i"t\\_commit\\_-nv', env $'g\\x69t\\0' commit -nv, ionice g'i't commit 'x --' -n,
+    sh -c 'true;g"i"t commit -nv' and cat <(g'i't commit -nv) deny; only the segment's own git, the command
+    word the wrapper peel resolves, keeps its value-aware reading: the text from that word on is read with only
+    that git dropped, and the text before it (assignments, wrapper options and values, redirections) with no
+    git word dropped, so a hook-skipping git in a substitution before the own git denies (A="$(g'i't commit -nv)"
+    git status, exec -a "$(g'i't commit -nv)" git status, >"$(g'i't commit -nv)" git status); where the own
+    git cannot be placed in the text (_gate_word_start) no git word is dropped. A segment with no command word
+    runs none, but bash still expands its redirection words, so the text of one holding a redirection is read
+    too (>"$(g'i't commit -nv)" denies). Disclosed safe-direction over-deny: text that merely names git with
+    a roster verb and a no-verify spelling behind any word denies (echo g'i't commit -nv), and
+    so does such text before the own git (exec -a "g'i't commit -n" git status), in a redirection of a
+    segment with no command word (>'g'i't commit -nv') or in a comment after one (>x # g'i't commit -nv); a
+    quoted value holding a blank is split on a git before the own git or in such a redirection (A="$(g'i't
+    commit -m 'fix -n')" git status denies), after an own git that cannot be placed, and after an own git with
+    a git word before it, which the whole text, still read with its first git word dropped, drops instead
+    (exec -a git git commit -m 'fix -n' denies);
+    behind a command word the peel does not resolve to git a quoted value holding a blank is split, so sudo git
+    commit -m 'fix -n' denies, and an option value holding an 'n' counts, so ionice git commit -uno -m x and
+    ionice git commit -mnew deny; any later roster-verb word counts as the verb (ionice git log --grep commit
+    -n 3 denies); a quoted message or here-document body on a git line that names git, then a roster verb, then
+    such a word denies (git commit -m 'see git log; then commit -n'); a quoted operator or blank splits words
+    inside any script, so a later unrelated -n there counts (sh -c 'git commit -m x; ls -n'); and a \\_ is
+    read as a separator wherever it stands, not only inside an env -S value (env -S g"i"t\\_commit\\_-nv, which
+    bash does not split, denies). This reading still cannot see a git word built at run time (an expansion, a
+    substitution, a glob or brace expansion: $g commit -nv, g$()it commit -nv), a here-document body a shell
+    reads as commands, or an ANSI-C quote the two level readings do not decode (two or more shell levels in,
+    or behind a quote inside a command substitution standing in double quotes, which they pair at the outer
+    level) whose opener the raw match also pairs with an earlier '$''. A verb off the roster
+    is untouched (git log ${x}-n, git log
+    --format="$f"). On a parse error the same judgement reads every segment the partial lex recovers, the
+    in-progress segment the lexer stopped in included, and outside the doubt path the text from that
+    segment onward (the whole command where none was in progress) is read by the bounded de-quoted reading
+    (_gate_unread_bypass), so a bypass before or past a here-string or process substitution denies (sudo
+    g'i't commit -nv <<<x, cat <<<x; g'i't commit -nv); the failed-main-reading floor keeps its own probes.
+    The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
     through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
@@ -10216,8 +14808,56 @@ def gate_weakening(data):
     awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
     followed by a pipe and later a stage that may pass on only part of its input). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
-    otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
-    xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    otherwise the raw fallback stands. A '#' whose comment reading depends on context (the shared lexer's
+    comment rule) is judged under both readings: the deny tier on each reading alone, everything else on the
+    segments of all readings in turn. Where the lexer cannot judge it that way, text holding quoting
+    _hash_doubt_scan does not decode (_hash_doubt_opaque) DENIES, a listed sink word in text that holds a
+    '|' DENIES wherever each stands (_gate_doubt_sink, fail-closed by construction over the doubled scan),
+    text naming git with a subcommand that accepts --no-verify plus ANY dash-prefixed option token DENIES
+    (_gate_doubt_bypass, fail-closed by construction: no list of bypass spellings is left for a new
+    abbreviation, cluster alphabet or token ending to escape, at the stated cost of a NEW OVER-DENIAL,
+    since a harmless option there, 'git commit -m x' behind such a '#', denies too, as does a lone '-'
+    spelled with a quote or backslash next to it), and remaining text
+    holding a checker-shaped word (_gate_doubt_checker, the parsed recognizer's own name splitter and
+    lexicon, called rather than re-spelled) and a pipe, process substitution or here-string
+    ALLOWS-WITH-NOTE, never a silent allow quieter than the note tier a readable spelling of the same
+    shape earns. These doubt tests run ONLY on the uncertain-'#' path. On an ORDINARY parse failure (an
+    unbalanced quote, a here-string, a process substitution) the raw fallback probes decide, and a
+    verification-hook bypass that only a de-quoted reading of the text spells (_decoded_readings: quote
+    characters, backslashes and a '$' before a quote removed, each ANSI-C quote's escapes decoded), such as
+    git co'mmit' --no-verify, git commit -"n" or --no-$'\\x76'erify, DENIES as its plain spelling does.
+    Quoting alone is no ground to deny there: a quoted argument or here-string that spells no bypass (wc
+    -l <<<"hello", diff <(sort "a.txt") <(sort "b.txt")) keeps the raw probes' decision, which on a
+    roster-verb git segment (git commit -m "fix bug" <<<x) is the closed grammar's deny, and a bypass
+    spelled so that no such reading assembles it (a variable, an alias) is the open-grammar residual.
+    The failed-main-reading floor keeps the conservative raw probes alone (a disclosed narrowing of the
+    floor, not of the parse-failure fallback).
+    Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A
+    FLOOR, above _MainHashReading), main's reading is one more reading here where it lexes. Where it fails, the
+    decision of the path main's failed lex takes is a floor: the sink that main's partial lex proves past the
+    body (_gate_recovered_sink inside _SubstHeredocFloor) and a raw fallback deny
+    (_gate_weakening_fallback_kind) deny after this guard's own denies, and the raw fallback decides in place
+    of this guard's allow.
+    A git command that defines a git alias for itself (_git_local_alias), or runs under one the session
+    environment carries (_git_alias_inherited), DENIES: the subcommand and options it runs cannot be read, so a
+    hook bypass cannot be ruled out; so does a command whose text names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or
+    GIT_CONFIG_KEY_ anywhere and git (_git_alias_named), every git command of which runs under an alias the
+    command may define. On a parse error such a command DENIES too (_git_alias_recovered: the text, a definition
+    anywhere in it, past where the lexer stopped included, or a git segment the partial lex recovers), after the
+    recovered sink. A definition counts however it is spelled (HOW A WORD IS SPELLED, above _GIT_ALIAS_KEY_RE):
+    the lex here runs inside _WordSpellings, so in the region after a git word through its subcommand word a word
+    carrying an unquoted parameter or command expansion or an ANSI-C or locale quote, a brace word with a comma,
+    or a -c or --config-env key part spelled through any expansion, quote or brace defines one, parsed or
+    unparseable; a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading, so a value so
+    spelled behind a literal key defines no alias. Disclosed over-refusal: an unquoted variable in a git option or
+    subcommand position, or after any word naming git, now denies ('git -C $D log'), and so does a key literal in
+    effect but spelled through an expansion or quote. In this guard quoting the variable does not restore an allow:
+    the closed literal grammar (_gate_closed_grammar_scan) denies an expansion in a git command's global options or
+    subcommand word, quoted or not ('git -C "$D" log'), as it does one anywhere else on a roster-verb git segment
+    outside its one accepted commit-message here-document form (_gate_heredoc_message).
+    Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
+    xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
+    options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:
@@ -10234,47 +14874,224 @@ def gate_weakening(data):
             "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    reads = _SubstHeredocs.reads
     try:
-        records = _lex_command(command)
-    except ValueError:
+        # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
+        # below, whose canonical shape needs every earlier segment benign; every other check reads the
+        # segments of all readings in turn, as _lex_command returns them. Each word's spelling is recorded for
+        # the git alias reading below (_WordSpellings).
+        with _WordSpellings():
+            readings = _lex_readings(command)
+    except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
-        # otherwise the raw fallback stands. Only the in-progress segment the lexer was inside is dropped,
-        # since its unseen tokens could change it; a construct that begins a new segment (a lone quote after
-        # 'pytest | head;') leaves every recovered segment complete, so none is dropped.
-        recovered, _complete, in_progress = _lex_command(command, partial=True)
-        if in_progress:
-            recovered = recovered[:-1]
+        # otherwise the raw fallback stands. The sink check drops the in-progress segment the lexer was
+        # inside, since its unseen tokens could change it; a construct that begins a new segment (a lone quote
+        # after 'pytest | head;') leaves every recovered segment complete, so none is dropped.
+        recovered, open_seg, lexed = _gate_partial_lex(command, exc if isinstance(exc, _UncertainHashError) else None)
+        for seg in recovered + ([open_seg] if open_seg is not None else []):
+            # the same fail-closed wrapper judgement as the parsed path, over each recovered segment's
+            # dequoted argv, so a git bypass hidden behind an unresolved or unlisted wrapper on an
+            # otherwise-unparseable line (env -uX git commit -nv ...) still denies. The in-progress segment
+            # is judged too, exactly as a complete one, over the words read before the construct the lexer
+            # stopped at (sudo g'i't commit -nv <<<x): a later or glued token cannot turn an option read
+            # there back into a value or an operand, at most make git refuse the command (a safe-direction
+            # over-deny).
+            bypass = _gate_novrf_segment_bypass(seg.argv)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
+                    "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
+                    "artefact instead. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                    "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
+                    "(rule gatdis).")
+        for seg in recovered:
+            # each complete segment's de-quoted text too, as on the parsed path (a git behind any other word:
+            # ionice g'i't commit -nv; cat <<<x; or in a redirection of a segment with no command word:
+            # >"$(g'i't commit -nv)"; cat <<<x); the in-progress segment's text is read below
+            bypass = _gate_behind_bypass(seg)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): this command's text, with quotes and backslashes "
+                    "removed, names a git {} carrying {} after another word of the same command (a wrapper on "
+                    "no list, an assignment or option value, a redirection or quoted text), a deliberate bypass "
+                    "of the verification hooks that gate it whatever runs that git; it is denied fail-closed. "
+                    "Never weaken a gate to obtain a pass; fix the artefact instead. If the text only names "
+                    "such a command, keep that spelling out of it. {} {}".format(sub, spelling, _GATE_ALTS,
+                                                                                 _GATE_FILE_ROUTE),
+                    "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another "
+                    "word of the command (rule gatdis, fail-closed).")
         hit = _verification_sink(recovered)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        return _gate_weakening_fallback(command)
-    segments = [(seg.argv, seg.sep_after) for seg in records]
+        # A git command that runs under a git alias the command defines denies as on a parsed command
+        # (_git_alias_recovered: a text naming a git configuration variable and git, a text naming git that defines
+        # one past where the lexer stopped, or a recovered git segment): its subcommand and options cannot be read,
+        # and the raw probes below may see no bypass spelling in an alias value they cannot reach.
+        kind = _git_alias_recovered(command, unread=True, lexed=lexed)
+        # A doubt that a failed reading raised holds this frame in a reference cycle through its traceback until the
+        # collector runs, so the shared lex is not left here for each later collection to scan.
+        lexed = None
+        if kind:
+            return _gate_alias_deny(kind == "built")
+        if not isinstance(exc, _UncertainHashError):
+            # The text the partial lex could not read, from the start of the in-progress segment (its raw
+            # slice runs to the end of command) or the whole command where no segment was in progress, is
+            # read by the bounded de-quoted reading (_gate_unread_bypass), so a git bypass past the construct
+            # the lexer stopped at (cat <<<x; g'i't commit -nv) denies. A '#' the lexer could not judge takes
+            # the doubt tests below instead, whose bypass test reads the de-quoted text more broadly.
+            unread = command
+            if open_seg is not None and command.endswith(open_seg.raw):
+                unread = open_seg.raw
+            bypass = _gate_unread_bypass(unread)
+            if bypass is not None:
+                sub, spelling = bypass
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+                    "(a here-string, a process substitution, an unquoted here-document or an unbalanced quote) "
+                    "and its text from the segment the lexer stopped in onward, with quotes and backslashes removed, "
+                    "names a git {} carrying {}, a deliberate bypass of the verification hooks that gate it; "
+                    "it is denied fail-closed. Never weaken a gate to obtain a pass; fix the artefact instead. "
+                    "{} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                    "AIQT guardrail: denied an unparseable command whose de-quoted text names a git "
+                    "verification-hook bypass (--no-verify family) (rule gatdis, fail-closed).")
+            # An ordinary parse failure (an unbalanced quote, a here-string, a process substitution): the raw
+            # fallback probes decide, except that a verification-hook bypass the raw text hides behind quoting
+            # (git co'mmit' --no-verify, git commit -"n", --no-$'\x76'erify) denies when a de-quoted reading
+            # spells it (_decoded_readings: quote characters, backslashes and a '$' before a quote removed,
+            # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
+            # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
+            # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
+            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+                    and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
+                            for text in _decoded_readings(command))):
+                return _deny(
+                    "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell "
+                    "lexer (an unbalanced quote or an unsupported construct such as a here-string or a "
+                    "process substitution), and with its quoting removed (quote characters, backslashes and "
+                    "a '$' before a quote dropped, ANSI-C $'...' escapes decoded) it spells a "
+                    "verification-hook bypass (a --no-verify spelling, or -n on git commit or am) that its "
+                    "raw text does not show; it is denied fail-safe. Never weaken a gate to obtain a pass; "
+                    "re-issue it as a parseable command with plain spellings and no bypass so the hooks "
+                    "run. " + _GATE_ALTS,
+                    "AIQT guardrail: denied an unparseable command whose quoting spells a git "
+                    "verification-hook bypass (rule gatdis, fail-safe).")
+            return _gate_weakening_fallback(command)
+        # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
+        # text does not decode may hide a hook bypass or a sink there, so it denies.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("gatdis (gate-discipline)", "a git hook bypass (a --no-verify "
+                                           "spelling, or -n on commit or am) or a verification run piped into "
+                                           "a truncating sink", _GATE_ALTS + " " + _GATE_FILE_ROUTE)
+        # Behind a '#' the lexer could not judge under both readings, a sink word the deny tier lists
+        # (head, tail, grep, egrep, fgrep, rg) anywhere in text that holds a '|' may receive a verification
+        # run's output past that '#' whatever stands between or around them (a blank or comment continuation
+        # line, a redirect, an assignment, a quoted newline; the doubled scan makes a word before the pipe
+        # count too), so it denies fail-closed (_gate_doubt_sink); the doubt tests below read the same text,
+        # with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan).
+        scan = _hash_doubt_scan(command)
+        if _gate_doubt_sink(scan):
+            return _deny(
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text holds a pipe and a stage word that "
+                                   "can truncate or swallow a check's output (head, tail, grep, egrep, fgrep "
+                                   "or rg), wherever each stands in it, so a verification run cut short there "
+                                   "cannot be ruled out") + " " +
+                _GATE_ALTS,
+                "AIQT guardrail: denied a possible verification run piped into a truncating sink behind a '#' "
+                "this guard could not read (rule gatdis, fail-closed).")
+        # The bounded hook-bypass test decides next (_gate_doubt_bypass): behind such a '#' nothing can
+        # bind an option to its subcommand's grammar, so text naming git with a subcommand that accepts
+        # --no-verify plus any dash-prefixed option token denies fail-closed, rather than matching bypass
+        # spellings a new abbreviation, cluster alphabet or token ending could escape (the stated
+        # over-denial: a harmless option there denies too).
+        if _gate_doubt_bypass(scan):
+            return _deny(
+                _hash_doubt_reason("gatdis (gate-discipline)", "its text names git with a subcommand that "
+                                   "accepts --no-verify (commit, merge, push, pull, rebase or am) and "
+                                   "carries a dash-prefixed option this guard cannot bind to that "
+                                   "subcommand's grammar past that '#', so a verification-hook bypass "
+                                   "spelling cannot be ruled out") + " " +
+                _GATE_ALTS + " " + _GATE_FILE_ROUTE,
+                "AIQT guardrail: denied a git call that could bypass verification hooks behind a '#' this "
+                "guard could not read (rule gatdis, fail-closed).")
+        # The closed literal grammar reads the raw text and needs no lex, so it judges this command as it
+        # judges a parsed one: a git naming it refuses denies before any note.
+        grammar_hit = _gate_closed_grammar_scan(command)
+        if grammar_hit is not None:
+            kind, what, how = grammar_hit
+            reason, banner = _gate_grammar_messages(kind, what, how, False)
+            return _deny(reason, banner)
+        # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
+        # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
+        # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
+        # a pipe, a process substitution or a here-string, a stage that keeps only part of a check's output
+        # cannot be ruled out past that '#', so the command keeps at least the note the broad tier gives a
+        # readable spelling of the same shape, never a silent allow; text with no such pairing allows.
+        if _gate_doubt_checker(scan) and ("|" in scan or _RAW_FLOW_RE.search(scan)):
+            return _allow_note(
+                "AIQT guardrail (rule gatdis, gate-discipline): this command carries a '#' whose comment "
+                "reading depends on context that the shared lexer could not judge under both readings, and "
+                "its text holds a checker-shaped word and a pipe, process substitution or here-string, so a "
+                "stage that keeps only part of a check's output cannot be ruled out past that '#'. If a "
+                "check gates this work, run it bare with its full output in a file at an absolute path and "
+                "read that; if this is a benign optional probe, this is allowed.")
+        return _allow()
+    floor = _SubstHeredocs.reads != reads  # main's reading of a body the lex read fails: its decision is a floor
+    records = [seg for reading in readings for seg in reading]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
-    for index, (tokens, sep_after) in enumerate(segments):
-        if _command_word(tokens) == "git" and not _has_info_flag(tokens):
-            sub, args = _git_sub_and_args(tokens)
-            if sub in _NOVERIFY_VERBS:
-                spelling = _no_verify_spelling(sub, args)
-                if spelling is not None:
-                    return _deny(
-                        "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate "
-                        "bypass of the verification hooks that gate it. Never weaken a gate to obtain "
-                        "a pass; fix the artefact instead. {}".format(sub, spelling, _GATE_ALTS),
-                        "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
-                        "(rule gatdis).")
-        if not _is_checker_segment(tokens):
-            continue
+    # A git alias the command defines runs a subcommand, and options in its value, that this guard cannot read, so
+    # a hook bypass cannot be ruled out: it denies like one. Every git command of a command whose text names a git
+    # configuration variable, or that runs under an alias the hook's environment carries, runs under one
+    # (_git_alias_named), whatever segment holds it; so does a git command that a segment defines one for
+    # (_git_local_alias), wherever its git word stands (_git_alias_segment), an info flag included: git runs an
+    # alias with the flag passed on to it (_has_info_flag), so the flag exempts only a git command under no alias.
+    if _git_alias_named(command):
+        return _gate_alias_deny()
+    outside = _git_alias_outside(command)
+    for index, seg in enumerate(records):
+        tokens = seg.argv
+        if not tokens and not seg.redirects:
+            continue  # no word and no redirection, so nothing runs or expands (a run of separators reads nothing here)
+        sep_after = seg.sep_after
+        if _git_alias_segment(tokens, outside):
+            return _gate_alias_deny(_git_alias_built(tokens, outside))
+        bypass = _gate_novrf_segment_bypass(tokens)
+        if bypass is not None:
+            sub, spelling = bypass
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate bypass of "
+                "the verification hooks that gate it. Never weaken a gate to obtain a pass; fix the "
+                "artefact instead. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) (rule gatdis).")
+        # A git behind any other word of the segment (a wrapper on no list, an option value, quoted text), before
+        # its own git, or in a redirection of a segment with no command word, which bash still expands, is read
+        # from the segment's de-quoted text, whatever runs it (_gate_behind_bypass).
+        bypass = _gate_behind_bypass(seg)
+        if bypass is not None:
+            sub, spelling = bypass
+            return _deny(
+                "AIQT rule gatdis (gate-discipline): this command's text, with quotes and backslashes removed, "
+                "names a git {} carrying {} after another word of the same command (a wrapper on no list, an "
+                "assignment or option value, a redirection or quoted text), a deliberate bypass of the "
+                "verification hooks that gate it whatever runs that git; it is denied fail-closed. Never weaken a "
+                "gate to obtain a pass; fix the artefact instead. If the text only names such a command, keep "
+                "that spelling out of it. {} {}".format(sub, spelling, _GATE_ALTS, _GATE_FILE_ROUTE),
+                "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) behind another word "
+                "of the command (rule gatdis, fail-closed).")
+        if not tokens or not _is_checker_segment(tokens):
+            continue  # with no command word, neither git nor a checker runs here
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
         # line-continuation/newline inserts a segment with no tokens, so 'pytest ||\n true' and
         # 'pytest |\n head' would otherwise read as having no following swallow/sink and miss the
         # note). Only genuinely empty segments are skipped; a real intervening command (a non-empty
         # segment) still breaks adjacency and is NOT skipped.
         nxt_index = index + 1
-        while nxt_index < len(segments) and not segments[nxt_index][0]:
+        while nxt_index < len(records) and not records[nxt_index].argv:
             nxt_index += 1
-        nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
+        nxt = records[nxt_index].argv if nxt_index < len(records) else []
         # ROUND-2 FINDING 14: the broad checker-shape swallow ('|| true'/'|| :') and truncating-pipe
         # ('| head/tail') HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest
         # || true' while iterating, 'make | head' to glance at output) is common and is not a gate bypass - so
@@ -10298,16 +15115,38 @@ def gate_weakening(data):
                     "is not discarded; if it is only a benign output glance, this is allowed."
                     .format(_command_word(tokens), _command_word(nxt)))
     # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
-    # with its own message; a verification-sink deny then outranks (and suppresses) the broad-tier note.
-    hit = _verification_sink(records)
+    # with its own message; the closed-grammar deny and a verification-sink deny then outrank (and
+    # suppress) the broad-tier note. The sink check judges each reading of an uncertain '#' on its own and
+    # denies on the first reading that holds the shape. The lexer parsed this command, so the grammar also
+    # accepts the git commit message form (_gate_heredoc_message).
+    grammar_hit = _gate_closed_grammar_scan(command, heredoc_message=True)
+    if grammar_hit is not None:
+        kind, what, how = grammar_hit
+        reason, banner = _gate_grammar_messages(kind, what, how, False)
+        return _deny(reason, banner)
+    hit = next((found for found in (_verification_sink(reading) for reading in readings) if found is not None),
+               None)
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
+    if floor:
+        # The path main's failed lex takes denies here before any note: a sink main's partial lex proves past
+        # the body, or a raw bypass spelling anywhere in the text.
+        with _SubstHeredocFloor():
+            hit = _gate_recovered_sink(command)
+        if hit is not None:
+            reason, banner = _verification_sink_message(hit)
+            return _deny(reason, banner)
+        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
+    if floor:
+        # its note, or the allow, in place of this allow
+        return _gate_weakening_fallback(command, heredoc_message=True)
     return _allow()
 
 
@@ -10371,19 +15210,33 @@ def _commit_msg_command_index(tokens):
     return i
 
 
-def _commit_msg_subst_hit(seg):
+def _commit_msg_subst_hit(seg, named=False):
     """Return (argument, marker) for the first post-subcommand hit in a recognized git commit segment.
 
     Every token after commit is inspected without Git option binding: Bash performs substitution before Git
     parses options or an end-of-options token, so neither an option value nor `--` makes a marker safe.
+    named is True when the command's text names a git configuration variable or the hook's environment carries
+    one naming an alias (_git_alias_outside): every segment naming git (_names_git) then runs git under an alias,
+    whatever its command word, and so does a segment that defines one for a git command of its own
+    (_git_local_alias, wherever its git word stands), so every token from its first word naming git on
+    (_git_word_index) is read as a commit's argument (that word too, which may be the text of an sh -c or eval
+    word).
     """
     tokens = seg.argv
+    if _git_alias_segment(tokens, named):
+        for index in range(_git_word_index(tokens), len(tokens)):
+            marker = _commit_msg_subst_marker(tokens[index], seg.argv_opaque[index], index, seg)
+            if marker is not None:
+                return tokens[index], marker
     command_index = _commit_msg_command_index(tokens)
     if (command_index >= len(tokens)
             or tokens[command_index].rsplit("/", 1)[-1] != "git"):
         return None
     sub, args = _git_sub_and_args(tokens[command_index:])
-    if sub != "commit":
+    # A git alias an assignment before the command word defines (env NAME=VALUE words included) may run git
+    # commit, so its arguments are read as a commit's.
+    aliased = any(_git_alias_defined_at(tokens, j) for j in range(command_index))
+    if sub != "commit" and not (sub is not None and aliased):
         return None
     offset = len(tokens) - len(args)
     for index, token in enumerate(args, offset):
@@ -10397,15 +15250,21 @@ def _commit_msg_subst_fallback(command):
     """Conservative raw fallback for an unparseable command: an apparent git commit + substitution marker is
     a HAZARD-class (command-injection) case this guard cannot parse, so it DENIES-and-educates (hooks never
     ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named).
+    A command that runs git under a git alias it defines (_git_alias_recovered: its text names a git
+    configuration variable and git, its text names git and defines one anywhere, past where the lexer stopped
+    included, or a git segment a partial lex recovers defines one or runs under one the session environment
+    carries) may run git commit under another name, so a marker anywhere in it denies too.
     Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
-    if (_RAW_COMMIT_MSG_GIT_RE.search(command)
-            and _RAW_COMMIT_MSG_MARKER_RE.search(command)):
+    if (_RAW_COMMIT_MSG_MARKER_RE.search(command)
+            and (_RAW_COMMIT_MSG_GIT_RE.search(command) or _git_alias_recovered(command))):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
-            "lexer and appears to carry a backtick or $( command substitution in a git commit argument, "
-            "which the shell may execute BEFORE git processes the argument; it is denied fail-safe. Re-issue "
-            "with single quotes, escape the marker as \\` or \\$(, or write the message to a file and use "
-            "git commit -F <file>.",
+            "lexer and appears to carry a backtick or $( command substitution in a git commit argument, or in "
+            "an argument of a git command that runs under a git alias the command defines (a -c or "
+            "--config-env alias key, or the name GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ "
+            "anywhere in its text), which the shell may execute BEFORE git processes the argument; it is denied "
+            "fail-safe. Re-issue with single quotes, escape the marker as \\` or \\$(, or write the message to a "
+            "file and use git commit -F <file>.",
             "AIQT guardrail: denied an unparseable git commit argument that appears to carry an executable "
             "command substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
     return _allow()
@@ -10415,7 +15274,13 @@ def commit_msg_subst(data):
     """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate when a token after a
     recognized git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or
     $( command substitution (a command-injection hazard the shell runs before git sees the argument). Hooks
-    never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>."""
+    never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>.
+    Behind a '#' whose comment reading the shared lexer cannot judge under both readings, the raw fallback
+    reads _hash_doubt_scan, and a command whose quoting that scan does not decode (_hash_doubt_opaque)
+    DENIES. Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION
+    AS A FLOOR, above _MainHashReading), main's segments are judged beside the lex's own where main's reading
+    lexes, and where it fails the raw fallback a lex that fails takes, which denies or allows, decides in place
+    of this guard's allow."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -10433,12 +15298,25 @@ def commit_msg_subst(data):
             "(the payload could not be parsed safely). Re-issue a well-formed Bash command.",
             "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
             "(rule sectvl, fail-safe).")
+    reads = _SubstHeredocs.reads
     try:
-        segments = _lex_command(command)
+        # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
+        # none, so no such segment is built (_lex_command's skip_empty).
+        segments = _lex_command(command, skip_empty=True)
+    except _UncertainHashError:
+        # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
+        # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
+        # whose quoting that removal does not decode takes the fallback's deny.
+        if _hash_doubt_opaque(command):
+            return _hash_doubt_opaque_deny("sectvl (tool-argument-validation)", "a backtick or $( command "
+                                           "substitution in a git commit argument, which the shell runs before "
+                                           "git sees the argument")
+        return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
+    named = _git_alias_outside(command)
     for seg in segments:
-        hit = _commit_msg_subst_hit(seg)
+        hit = _commit_msg_subst_hit(seg, named)
         if hit is None:
             continue
         argument, marker = hit
@@ -10451,6 +15329,8 @@ def commit_msg_subst(data):
             .format(argument[:80], marker),
             "AIQT guardrail: denied a git commit argument that appears to carry an executable command "
             "substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
+    if _SubstHeredocs.reads != reads:
+        return _commit_msg_subst_fallback(command)  # main's reading of a body the lex read fails: its fallback
     return _allow()
 
 
@@ -10704,6 +15584,17 @@ _GENSRC_TOOLS = ("Write", "Edit", "MultiEdit")   # MultiEdit carries ONE top-lev
 _GENSRC_REGISTRY_REL = os.path.join(".aiqt", "gensrc.json")
 _GENSRC_VERSION = 1
 _GENSRC_MAX_BYTES = 1_000_000  # the real registry is ~5 KB; a larger one is malformed (SECA bound)
+# The optional entry scope. Absent: the entry governs every tree holding the registry. "authoring": tools/
+# gen_gensrc.py marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets (the repository-local
+# .claude/settings.json), which exist only in the pack authoring tree, so the entry is honoured only where the
+# authoring marker below sits at the repo root (_gensrc_authoring_marker); an adopter tree holding the shipped
+# registry keeps its own .claude/settings.json. Any other value is a malformed entry.
+_GENSRC_SCOPES = ("authoring",)
+# The authoring marker tools/gen_hooks.py reads (AUTHORING_MARKER_REL, AUTHORING_MARKER), spelled here because
+# the dispatcher imports nothing from tools/; tools/selftest_aiqt_hooks.py pins both, and _GENSRC_MAX_BYTES as the
+# marker size bound (AUTHORING_MARKER_MAX_BYTES), against gen_hooks.
+_GENSRC_MARKER_REL = os.path.join(".aiqt", "authoring.toml")
+_GENSRC_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 
 
 def _gensrc_fail_ask(detail):
@@ -10725,9 +15616,11 @@ def _gensrc_fail_ask(detail):
 
 def _load_gensrc_registry(root):
     """Read <root>/.aiqt/gensrc.json AT DECISION TIME and return one of ("absent", None),
-    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate)
+    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate, scope)
     tuples in registry order with kind=block entries dropped (a path guard cannot see which lines an
-    edit touches; the block drift gates backstop those).
+    edit touches; the block drift gates backstop those). scope is None for an entry with no "scope" key and
+    "authoring" for an authoring-only entry (_GENSRC_SCOPES); any other present value, a JSON null
+    included, is a malformed entry.
 
     ABSENT (FileNotFoundError from the lstat probe: ENOENT on the file or a missing .aiqt/ component) is
     the inert boundary: a repo with no registry gets no coverage (adopters author their own). Every OTHER
@@ -10743,8 +15636,10 @@ def _load_gensrc_registry(root):
     validation only guarantees THIS repo's registry; an adopter-authored or hand-tampered registry the
     guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
     tolerated: the version field pins the schema, and strictness on additions would break a
-    forward-compatibly authored registry. This loader is BEST-EFFORT against the ACCIDENTAL case, not a
-    hardened TOCTOU check: it rejects a STATIONARY non-regular registry and fails a delete race safe to
+    forward-compatibly authored registry. "scope" is the one optional key this guard reads; a guard older
+    than it tolerated the key as unknown, so it honours an authoring-only entry in every tree. This loader
+    is BEST-EFFORT against the ACCIDENTAL case, not a hardened TOCTOU check: it rejects a STATIONARY
+    non-regular registry and fails a delete race safe to
     BAD, but a registry concurrently SWAPPED to a different file type in the lstat-to-open window is a
     disclosed residual (see the comment below and the control residue), a sibling of the hard-link,
     case-insensitive-filesystem, and NFC/NFD aliases."""
@@ -10841,10 +15736,59 @@ def _load_gensrc_registry(root):
             return ("bad", "a registry entry has malformed sources")
         if not isinstance(regenerate, str) or not regenerate:
             return ("bad", "a registry entry has a malformed regenerate command")
+        # Validated BEFORE the block skip, like the control-character rule: a scope this guard cannot read
+        # must never silently widen or narrow coverage, so an unknown value (null included) is BAD.
+        scope = item.get("scope")
+        if "scope" in item and scope not in _GENSRC_SCOPES:
+            return ("bad", "a registry entry has an unknown scope")
         if kind == "block":
             continue  # blocks are excluded from matching by design; the block drift gates backstop them
-        entries.append((kind, target, sources, regenerate))
+        entries.append((kind, target, sources, regenerate, scope))
     return ("ok", entries)
+
+
+def _gensrc_authoring_marker(root):
+    """Read <root>/.aiqt/authoring.toml, the pack authoring-tree marker, and return ("absent", None),
+    ("authoring", None) or ("bad", detail). Called only when an authoring-scoped registry entry matches the
+    target, so a damaged marker never touches any other edit. It mirrors tools/gen_hooks.py authoring_tree,
+    which exits 2 on a present marker that is not exact: ABSENT (FileNotFoundError from the lstat probe) is
+    an adopter tree; a REGULAR file whose UTF-8 TOML is exactly _GENSRC_MARKER (format-version the integer 1,
+    never the bool true, which == 1 in Python) is the authoring tree; everything else is BAD and the caller
+    denies fail-closed: any other lstat fault, a symlink, FIFO, directory or other non-regular file (lstat
+    is probed BEFORE the open, so a STATIONARY FIFO never blocks), a marker gone at the open (a delete race
+    in the lstat->open window, never read as absent), an unreadable, oversized (over _GENSRC_MAX_BYTES, the
+    same bound gen_hooks applies), non-UTF-8, unparseable or too deeply nested file, or any other content. A
+    marker SWAPPED to another type in the lstat->open window is the same disclosed residual as the registry
+    read."""
+    path = os.path.join(root, _GENSRC_MARKER_REL)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return ("absent", None)
+    except OSError as exc:
+        return ("bad", "the authoring marker could not be stat'd ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode):
+        return ("bad", "the authoring marker is not a regular file (a symlink, FIFO, directory, ...)")
+    try:
+        with open(path, "rb") as handle:
+            raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return ("bad", "the authoring marker disappeared during the read (a concurrent change); failing safe")
+    except OSError as exc:
+        return ("bad", "the authoring marker could not be read ({})".format(exc))
+    if len(raw_bytes) > _GENSRC_MAX_BYTES:
+        return ("bad", "the authoring marker exceeds the {}-byte bound".format(_GENSRC_MAX_BYTES))
+    try:
+        import tomllib  # read here only: the one handler branch that parses TOML
+        data = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (ImportError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError covers UnicodeDecodeError, TOMLDecodeError and the bare ValueError tomllib raises on an
+        # oversized integer; RecursionError or MemoryError a too deeply nested table.
+        return ("bad", "the authoring marker is not readable UTF-8 TOML ({})".format(exc))
+    if data != _GENSRC_MARKER or type(data.get("format-version")) is not int:
+        return ("bad", "the authoring marker does not hold exactly format-version = 1 and "
+                       "role = \"pack-authoring-repository\"")
+    return ("authoring", None)
 
 
 _GENSRC_MATCH_FAULT = object()  # sentinel: a resolution/containment fault so no-match cannot be PROVEN
@@ -10870,29 +15814,41 @@ def _gensrc_within(candidate, parent):
 
 def _gensrc_match(entries, target, root_c):
     """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
-    (entry_target, sources, regenerate); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT sentinel
-    when a resolution or containment fault means no-match cannot be proven (the handler turns the
+    (entry_target, sources, regenerate, marker); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT
+    sentinel when a resolution or containment fault means no-match cannot be proven (the handler turns the
     sentinel into an allow with a warning systemMessage via _gensrc_fail_ask, never a match and never a
     silent allow; there is no ask posture). A FILE entry matches on
     realpath EQUALITY; a TREE entry matches when `target` is the tree root or lies under it, by
     component-boundary containment (_gensrc_within), never a raw string prefix, so gen-extra/ never
     matches gen/ and GEN.md.bak never matches GEN.md. Each entry target is repo-root-relative, so it is
     joined onto root_c and canonicalized under try/except: an unresolvable entry is a fault, not a
-    no-match. Block entries were dropped at load."""
-    for kind, entry_target, sources, regenerate in entries:
+    no-match. Block entries were dropped at load. A matching AUTHORING-scoped entry consults the marker
+    (_gensrc_authoring_marker, read at most once per call): an ABSENT marker (an adopter tree) skips the
+    entry SILENTLY and matching goes on with the next entry, so an adopter keeps its own
+    .claude/settings.json; a present marker returns the match with marker ("authoring", None) or
+    ("bad", detail), and the handler denies either way. An unscoped match returns marker None."""
+    marker = None
+    for kind, entry_target, sources, regenerate, scope in entries:
         try:
             entry_c = os.path.realpath(os.path.join(root_c, entry_target))
         except (OSError, ValueError):
             return _GENSRC_MATCH_FAULT
         if kind == "file":
-            if entry_c == target:
-                return (entry_target, sources, regenerate)
+            if entry_c != target:
+                continue
         else:  # tree
             verdict = _gensrc_within(target, entry_c)
             if verdict == "err":
                 return _GENSRC_MATCH_FAULT
-            if verdict == "in":
-                return (entry_target, sources, regenerate)
+            if verdict != "in":
+                continue
+        if scope is None:
+            return (entry_target, sources, regenerate, None)
+        if marker is None:
+            marker = _gensrc_authoring_marker(root_c)
+        if marker[0] == "absent":
+            continue  # an adopter tree: the authoring-only entry is not this tree's to enforce
+        return (entry_target, sources, regenerate, marker)
     return None
 
 
@@ -10903,7 +15859,11 @@ def gensrc_guard(data):
     fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
     exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. NO-ASK posture:
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write, Edit or
+    MultiEdit to a sibling settings file such as .claude/settings.local.json is not judged either (no generator
+    writes it, so no registry entry names it; that it holds only personal settings is a convention, not
+    enforced), yet it can change hook behaviour for later sessions; the settings precedence Claude Code gives
+    it is not verified by this pack. NO-ASK posture:
     a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
@@ -10914,10 +15874,15 @@ def gensrc_guard(data):
     target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
     are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
     expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
-    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). The CI
+    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). An entry scoped
+    "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in the
+    pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
+    skips the entry silently (an adopter's own .claude/settings.json is theirs), the exact marker honours it,
+    and a PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI
     generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
-    guard denies fail-closed in exactly three cases: a missing tool_name (the shared fail-closed contract), a
-    PRESENT-but-unreadable/malformed registry, and a mis-wired event (a hard block, exit 2). The repo root is
+    guard denies fail-closed in exactly four cases: a missing tool_name (the shared fail-closed contract), a
+    PRESENT-but-unreadable/malformed registry, a PRESENT-but-malformed authoring marker on a matching
+    authoring-scoped entry, and a mis-wired event (a hard block, exit 2). The repo root is
     the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
@@ -10925,13 +15890,15 @@ def gensrc_guard(data):
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        # A missing field cannot be matched. This is one of three fail-closed denies, with a present but
-        # unreadable/malformed registry and a mis-wired event (the hard block above).
+        # A missing field cannot be matched. This is one of four fail-closed denies, with a present but
+        # unreadable/malformed registry, a present but malformed authoring marker on an authoring-scoped
+        # match, and a mis-wired event (the hard block above).
         return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
         # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
         # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
-        # denies are a MISSING tool_name, a present but unreadable/malformed registry, and a mis-wired event.
+        # denies are a MISSING tool_name, a present but unreadable/malformed registry, a present but
+        # malformed authoring marker on an authoring-scoped match, and a mis-wired event.
         return _gensrc_fail_ask("the tool_name was unreadable")
     if tool_name not in _GENSRC_TOOLS:
         return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
@@ -10999,8 +15966,24 @@ def gensrc_guard(data):
         return _gensrc_fail_ask("a registry entry could not be resolved for containment, so a no-match "
                                 "cannot be proven")
     if match is None:
-        return _allow()  # not a registered generated artefact
-    entry_target, sources, regenerate = match
+        return _allow()  # not a registered generated artefact (or an authoring-only one in an adopter tree)
+    entry_target, sources, regenerate, marker = match
+    if marker is not None and marker[0] == "bad":
+        # An authoring-only entry matched and the authoring marker is PRESENT but not exact: the guard cannot
+        # tell the authoring tree from an adopter tree, so it fails CLOSED, as tools/gen_hooks.py exits 2 on
+        # the same marker. The message names the marker repair, never the regenerate command, which a
+        # damaged marker would not reconcile.
+        return _deny(
+            "AIQT rule gensrc (generated-artefact-source-only): {} is an authoring-only generated artefact "
+            "({} in .aiqt/gensrc.json, scope authoring), and the authoring marker .aiqt/authoring.toml is "
+            "PRESENT but malformed ({}), so this guard cannot tell the pack authoring tree from an adopter "
+            "tree. It fails closed and denies the edit. Repair .aiqt/authoring.toml (exactly format-version = "
+            "1 and role = \"pack-authoring-repository\"), or remove it if this is not the pack authoring "
+            "repository, through Bash, which this guard does not judge, then retry."
+            .format(file_path, entry_target, marker[1]),
+            "AIQT guardrail: denied a {} to the authoring-only artefact {} because .aiqt/authoring.toml is "
+            "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair or remove the marker, "
+            "then retry.".format(tool_name, entry_target))
     reason = ("AIQT rule gensrc (generated-artefact-source-only): {} is a generated artefact ({} in "
               ".aiqt/gensrc.json); it is changed only through its source, so a hand-edit is denied. Edit {} "
               "and regenerate with '{}' instead; source and derivative land in the same change."
@@ -11019,9 +16002,9 @@ def gensrc_guard(data):
 # not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
 # toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope denies (a malformed
 # tool_name, a Bash call's malformed cwd, an unwalkable cwd) apply before that scope in every session,
-# registry or not; a malformed tool_input is checked only after the scope (inert with no registry). Second, in the opt-in
+# registry or not; a malformed tool_input is checked only after the scope (with no registry that guard denies nothing, so such a call is allowed, with a note naming the field it could not read). Second, in the opt-in
 # registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
-# _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
+# _orch_registry_required) that guard does NOT keep the denies-nothing no-registry posture: a Bash call that passes its pre-scope
 # checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
 # registry entry the discovery probe cannot confirm (_ORCH_REG_CANNOT_EVALUATE: a discovery fault is not a
 # registry). No other suite component reads that variable, so strict mode changes no other component's
@@ -11147,7 +16130,7 @@ def _orch_dirfd_has_registry(dirfd):
     registry) when the first registry name present inside a real `.aiqt` directory (the local name first,
     the whole-file precedence _orch_registry applies) is a regular file under a no-follow stat (presence,
     not validity, decides scope: a present-but-unreadable or malformed regular registry has always kept the
-    guard ACTIVE, never inert). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
+    guard ACTIVE, never in the denies-nothing no-registry posture). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
     lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, or any other
     fault), or a first present registry name that is not a regular file (a directory, a symlink, a FIFO, a
     socket, a device) or whose no-follow stat faults. For a real `.aiqt` directory the deciding permission
@@ -11392,7 +16375,7 @@ def _orch_git_toplevel_has_registry(cwd):
     does not exist holds no registry, exactly as the walk reads a missing `.aiqt` entry as a clean
     not-present, so there is no fault to report. It still fails closed where that matters: with nothing
     on the walk the scope is then ('none', None), which registry-required mode DENIES as an absent
-    registry, and the default mode is inert there exactly as for any other absent registry."""
+    registry, and the default mode denies nothing there exactly as for any other absent registry."""
     top = _recovery_toplevel(cwd)
     if top is None:
         return False
@@ -11851,7 +16834,8 @@ def _orch_mode_detail(reg, root):
         string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
         object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
-        `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard allows the ask.
+        `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
+        the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
     Soundness rules the reader enforces (each closing a fail-open leg an incremental scan leaked):
       1. A leading byte-order mark is stripped ONCE at the top, so every later check sees BOM-free text and a
          BOM-prefixed declaration OR JSON marker is classified rather than missed.
@@ -12148,7 +17132,11 @@ def _orch_enumerate(reg, root):
     agent's context), via the fixed argv array the registry declares (no shell string)."""
     spec = reg.get("enumerator")
     if not isinstance(spec, dict):
-        return ("NO_ENUMERATOR", "the registry declares no enumerator")
+        # a DECLARED enumerator that is not an object is a configuration error, named as such so the
+        # deny tells the operator what to fix; both shapes stay NO_ENUMERATOR (same status, same basis)
+        return ("NO_ENUMERATOR",
+                "the registry declares no enumerator" if "enumerator" not in reg
+                else "the declared enumerator is not an object (a configuration error)")
     argv = spec.get("argv")
     if not isinstance(argv, list) or not argv or not all(
             isinstance(a, str) and a for a in argv):
@@ -12363,8 +17351,18 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
 def decide_yield(ctx):
     """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
     actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
-    Returns (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
+    kind is "stop", "schedule_idle", or "ask" (the attended blocking-question binding: a blocking
+    question parks the run exactly as a scheduled idle does, but it has NO wake-naming requirement,
+    since a question names no recheck wake, and its cap relief covers the CANNOT-EVALUATE denies only
+    (a whole-enumerator failure or an unreadable item proof source, states the session may be unable to
+    repair) and only while NO item is actionable; its ACTIONABLE deny is never cap-relieved, because
+    that deny names two exits that are always available (dispatch the items, or record them as blocked
+    by this decision, then re-issue), so repeating the question changes nothing a cap should relieve,
+    and a backlog holding both an actionable item and a cannot-evaluate item keeps that actionable
+    deny, which then also names the held items in one reason). Returns
+    (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
     kind = ctx["kind"]
+    capped = kind in ("schedule_idle", "ask")  # the cap-relieved kinds; "stop" takes the loop bound
     disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
                    + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
                    + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
@@ -12372,17 +17370,33 @@ def decide_yield(ctx):
                    + [("proposed", i, "", "") for i in ctx["proposed"]])
     if ctx["escape"]:
         return ("ALLOW", "operator escape artefact present (logged)", disposition)
-    if kind != "schedule_idle" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
+    if not capped and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
         return ("ALLOW_WITH_FINDINGS",
                 "loop bound reached after {} denial(s); yielding with the unresolved items as "
                 "findings rather than re-firing".format(ctx["counter"]), disposition)
     if ctx["enum_status"] != "ok":
-        if kind == "schedule_idle":
-            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
+        if capped:
+            # the ask kind's cap relief needs an EMPTY actionable set: actionable work keeps the
+            # deny whatever the count (a failed enumeration yields no items, so on this path the
+            # set is empty by construction; the condition pins that invariant in the pure core)
+            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"] \
+                    and (kind != "ask" or not ctx["actionable"]):
+                if kind == "ask":
+                    return ("ALLOW_WITH_FINDINGS",
+                            "{} ask denials on an unchanged basis; a guard that can be farmed "
+                            "trains its own bypass, so this question proceeds with findings"
+                            .format(ctx["schedule_denials"]), disposition)
                 return ("ALLOW_WITH_FINDINGS",
                         "{} schedule denials on an unchanged basis; a guard that can be farmed "
                         "trains its own bypass, so this yield proceeds with findings"
                         .format(ctx["schedule_denials"]), disposition)
+            if kind == "ask":
+                return ("DENY",
+                        "cntdef: the backlog is not enumerable ({}: {}); a blocking question would "
+                        "park the run on work this session cannot even enumerate (cannot-evaluate). "
+                        "Fix the enumerator or the registry, or release through the operator-owned "
+                        "escape sentinel, then re-issue the question".format(
+                            ctx["enum_status"], ctx["enum_detail"]), disposition)
             return ("DENY",
                     "the backlog is not enumerable ({}: {}); missing evidence never licenses a new "
                     "idle or wake. Fix the enumerator or the registry, or release through the "
@@ -12397,12 +17411,25 @@ def decide_yield(ctx):
     # ITEM-LEVEL cannot-evaluate (an unreadable proof source for a specific item) is missing evidence: the
     # schedule path DENIES (never licenses an idle), and (FIX 1) the stop path DENIES too, because an
     # unconfirmable blocker cannot confirm exhaustion (ignorance refuses the wind-down); the operator
-    # escape is the release.
-    if ctx.get("cannot_evaluate", []) and kind == "schedule_idle":
+    # escape is the release. For the ask kind this branch, its cap relief included, applies only while
+    # NO item is actionable: a backlog holding both an actionable item and a cannot-evaluate item falls
+    # through to the actionable deny below, which names the held items too, so held work never relieves
+    # a question past work the enumeration still classifies as actionable. The narrowing reads the
+    # CLASSIFIED sets only: a proof-source failure that holds every otherwise-actionable item (examples:
+    # one schema-invalid dispatch-ledger line, an unreadable or undeclared pending-decisions record, or
+    # a declared attestation register whose validated snapshot is absent or stale) or an enumeration
+    # failure that hides items (a duplicate id fails the whole enumeration) leaves nothing classified
+    # actionable, so the cap can still relieve the question on such a shape; each relief ATTEMPTS a
+    # forced_unresolved record and a guard-events row in the releasing binding, a failed write is
+    # reported in the released message, and the relief still proceeds.
+    if ctx.get("cannot_evaluate", []) and capped and (kind != "ask" or not ctx["actionable"]):
         if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
             return ("ALLOW_WITH_FINDINGS",
-                    "{} schedule denials on an unchanged basis; yielding with findings"
-                    .format(ctx["schedule_denials"]), disposition)
+                    "{} {} denials on an unchanged basis; {} with findings"
+                    .format(ctx["schedule_denials"],
+                            "schedule" if kind == "schedule_idle" else "ask",
+                            "yielding" if kind == "schedule_idle"
+                            else "the question proceeds"), disposition)
         sched_cannot = ctx.get("cannot_evaluate", [])
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
@@ -12412,8 +17439,12 @@ def decide_yield(ctx):
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
                 "a proof source for {} open item(s) is unreadable (cannot-evaluate): {}. Missing "
-                "evidence never licenses a new idle or wake. Fix the source, or release through "
-                "the operator-owned escape sentinel.".format(len(sched_cannot), named_sched),
+                "evidence never licenses {}. Fix the source, or release through "
+                "the operator-owned escape sentinel{}.".format(
+                    len(sched_cannot), named_sched,
+                    "a new idle or wake" if kind == "schedule_idle"
+                    else "parking the run on a blocking question",
+                    "" if kind == "schedule_idle" else ", then re-issue the question"),
                 disposition)
     if not ctx["actionable"]:
         rechecked = ctx["waiting"] + ctx["blocked"]
@@ -12442,6 +17473,11 @@ def decide_yield(ctx):
                     "for a genuine block.".format(len(cannot_items), named_cannot), disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
+    # The cap relieves the ACTIONABLE deny for the schedule kind only. The ask kind gets no relief
+    # here: its actionable deny names two exits that are always available (dispatch, or record the
+    # blocker then re-issue), so re-asking an unchanged question is not a farmed guard, it is the
+    # deny working; relief for "ask" exists only on the cannot-evaluate paths above, and those grant
+    # it only while no item is actionable, so this deny is reached whenever one is.
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
             and ctx["basis_unchanged"]:
         return ("ALLOW_WITH_FINDINGS",
@@ -12452,6 +17488,25 @@ def decide_yield(ctx):
     listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
+    if kind == "ask":
+        held = ctx.get("cannot_evaluate", [])
+        held_note = ""
+        if held:
+            # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
+            # two exits, and the held items are named so the operator knows what to repair
+            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            if len(held) > _ORCH_MAX_NAMED:
+                named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
+            held_note = (" Additionally, a proof source for {} open item(s) is unreadable "
+                         "(cannot-evaluate): {}; fix the source, or release through the "
+                         "operator-owned escape sentinel.".format(len(held), named_held))
+        return ("DENY",
+                "AIQT rule cntdef: {} granted open item(s) are actionable while this attended session "
+                "raises a blocking question that would idle them: {}. Two ways forward: DISPATCH the "
+                "actionable items (each then waits on a live tracked task), or RECORD each as blocked "
+                "by this decision (a human-decision blocker on the item plus a matching row in the "
+                "pending-decisions record); then re-issue the question. A fired timer or an existing "
+                "cron is neither.{}".format(len(ctx["actionable"]), listing, held_note), disposition)
     return ("DENY",
             "AIQT rules setcmp/cntdef: {} granted open item(s) are actionable: {}. Two legal exits: "
             "do one of them, or record a proven blocker on each (a live tracked-task ref, a matching "
@@ -12502,17 +17557,23 @@ def _schema_turn_state(raw):
     """A counter is 0 when its key is ABSENT on a readable turn-state (a fresh count), the value when
     present and valid, and None when present-but-malformed OR the whole turn-state is unreadable (raw is
     not a dict). The CALLER maps None to the fail-safe direction (stop -> the loop bound, so a malformed
-    or unreadable counter never licenses unbounded denies; schedule -> 0, so it never buys cap relief).
-    schedule_basis is a string or None."""
+    or unreadable counter never licenses unbounded denies; schedule and ask -> 0, so neither ever buys
+    cap relief). schedule_basis and ask_basis are each a string or None. The ask counters are the
+    attended-ask binding's own (a question is never relieved by schedule denials, and ask denials never
+    relieve a scheduling call)."""
     if not isinstance(raw, dict):
-        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None})
+        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None,
+                       "ask_denials": None, "ask_basis": None})
 
     def _count(key):
         return 0 if key not in raw else _v_exact_int(raw[key], 0, _ORCH_COUNTER_MAX)
     basis = raw.get("schedule_basis")
+    ask_basis = raw.get("ask_basis")
     return ("ok", {"stop_denials": _count("stop_denials"),
                    "schedule_denials": _count("schedule_denials"),
-                   "schedule_basis": basis if isinstance(basis, str) else None})
+                   "schedule_basis": basis if isinstance(basis, str) else None,
+                   "ask_denials": _count("ask_denials"),
+                   "ask_basis": ask_basis if isinstance(ask_basis, str) else None})
 
 
 _ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
@@ -12664,8 +17725,13 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     tstate = _orch_validate("turn_state", ts)[1]
     # stop counter fails OPEN to the loop bound (an unreadable counter never licenses unbounded denies);
     # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief, CX-R4-3).
+    # The ask kind reads its OWN cap counter (same fail-closed direction), so a question is never
+    # relieved by schedule denials and ask denials never relieve a scheduling call.
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
-    schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
+    if kind == "ask":
+        schedule_denials = tstate["ask_denials"] if tstate["ask_denials"] is not None else 0
+    else:
+        schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
     record_warn = []
     if status == "ok":
@@ -12699,7 +17765,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     if kind == "schedule_idle" and rechecked:
         wake_named = any(_orch_token_present(i, wake_text) or _orch_token_present(p, wake_text)
                          for i, _c, p in rechecked)
-    basis_unchanged = tstate["schedule_basis"] == basis
+    basis_unchanged = (tstate["ask_basis"] if kind == "ask" else tstate["schedule_basis"]) == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
            "record_warn": " ".join(record_warn),
@@ -12719,13 +17785,16 @@ def _orch_record_denial(root, ts, kind, basis):
     so a tampered non-int counter cannot raise here; a STOP-path caller that gets a failure must fail OPEN,
     since an un-persistable counter never reaches the loop bound and would otherwise re-deny forever."""
     state = dict(ts or {})
-    if kind == "schedule_idle":
-        prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
+    if kind in ("schedule_idle", "ask"):
+        count_key, basis_key = (("ask_denials", "ask_basis") if kind == "ask"
+                                else ("schedule_denials", "schedule_basis"))
+        prior = _v_exact_int(state.get(count_key), 0, _ORCH_COUNTER_MAX)
         prior = prior if prior is not None else 0
         # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
-        # never buy premature cap relief on this one.
-        state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
-        state["schedule_basis"] = basis
+        # never buy premature cap relief on this one. The ask kind keeps its own pair, so neither
+        # cap-relieved binding's denials relieve the other.
+        state[count_key] = prior + 1 if state.get(basis_key) == basis else 1
+        state[basis_key] = basis
     else:
         prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
         state["stop_denials"] = (prior if prior is not None else 0) + 1
@@ -13034,7 +18103,11 @@ def orch_ask_guard(data):
     file, or content with no declaration line that does not parse as JSON and whose first non-whitespace character
     is not `{`, `[`, or `"` (ordinary prose, for example `42 items done` or `true trailing`, so prose beginning
     with a number or word does not arm) is the fail-OPEN no-marker default (this guards one mistake shape, not a
-    security boundary). Its regression vectors are held by the behaviour self-test."""
+    security boundary). A mode that reads in the ATTENDED family no longer allows unconditionally: where the
+    registry also declares a backlog enumerator, the question is judged against the same fresh enumeration the
+    yield guard uses (_orch_ask_attended below), because an attended-family spelling with queued work was the
+    incident shape the unattended deny could not see. Its regression vectors are held by the behaviour
+    self-test."""
     if data.get("tool_name") != "AskUserQuestion":
         return _allow()
     root = _orch_root(data)
@@ -13044,8 +18117,8 @@ def orch_ask_guard(data):
     if status != "ok":
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
     mode, unread = _orch_mode_detail(reg, root)
-    if mode is None or "unattended" not in mode:
-        if mode is None and not _orch_guard_event(
+    if mode is None:
+        if not _orch_guard_event(
                 root, "ask-guard", "fail-open",
                 "mode record absent, empty, or prose with no declaration or JSON marker"):
             # the fail-open stands; only the failed guard-events row is surfaced, never a silent loss
@@ -13053,6 +18126,8 @@ def orch_ask_guard(data):
                                "could read as a declaration), and the guard-events row recording that "
                                "fail-open could not be written; record it manually (nocncl).")
         return _allow()
+    if "unattended" not in mode:
+        return _orch_ask_attended(data, reg, root)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
     text = json.dumps(tool_input, sort_keys=True)
@@ -13084,6 +18159,107 @@ def orch_ask_guard(data):
     return _deny(reason + tail, banner + tail)
 
 
+def _orch_ask_attended(data, reg, root):
+    """cntdef at the attended-ask boundary: an attended-family mode never disarms the backlog judgement.
+    A blocking question parks the session on its answer exactly as a scheduled idle parks it on a timer,
+    so it is judged against the same FRESH enumeration the yield guard uses (ctx kind "ask": the shared
+    decision core, with no wake-naming requirement, since a question names no recheck wake, and with the
+    schedule cap narrowed to the cannot-evaluate denies). It is session-scoped exactly as the yield guard is: a session that is not within
+    the live scope (a bounded co-located worker a holder-scoped lease does not name, CX-M3) does not
+    inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
+    (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
+    holder can be confirmed: a lease file that cannot be stat'ed, and, for a NON-EMPTY lease the
+    session-id and holder-token checks run on (one the age classifier reads as fresh or cannot-evaluate
+    under a declared max_age_hours, or, with no horizon declared, every non-empty lease whatever its
+    mtime), a lease that cannot be read, a call that carries no session id, or a lease that names no
+    session. Every other lease shape skips the holder check and falls through to the live-mode scope
+    source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
+    lease stale past a declared max_age_hours, and a lease future-dated past the tolerated clock skew
+    under a declared usable max_age_hours (an unusable one reads cannot-evaluate whatever the mtime,
+    so the holder check runs); a live mode record then keeps every session in scope there, an id-less
+    caller included, so the judgement stays on (erring toward denying). The question is
+    DENIED while granted open
+    items are actionable, neither dispatched (waiting on a live tracked task) nor blocked by a human
+    decision recorded in the declared pending-decisions record (the stop guard's blocker grammar; fresh
+    external evidence and a not-before time also block); the deny names up to _ORCH_MAX_NAMED items and
+    the two ways forward (dispatch them, or record them as blocked by this decision, then re-issue the
+    question), and it is NEVER cap-relieved: those two exits are always available, so the fourth
+    unchanged question is denied exactly as the first, and a backlog holding both an actionable item
+    and a cannot-evaluate item keeps that actionable deny, which then also names the held items in one
+    reason (held work never relieves a question past work the enumeration still classifies as
+    actionable; a proof-source failure that holds every otherwise-actionable item, such as one
+    schema-invalid dispatch-ledger line, an unreadable or undeclared pending-decisions record, or a
+    declared attestation register whose validated snapshot is absent or stale, or an enumeration
+    failure that hides items, such as a duplicate item id, leaves nothing classified actionable, so
+    the cap can still relieve the question on such a shape; each relief attempts a forced_unresolved
+    record and a guard-events row, a failed write is reported in the released message, and the
+    relief still proceeds). An enumerator error or an
+    unreadable item proof source is a cannot-evaluate DENY, bounded by _ORCH_SCHEDULE_CAP ask denials
+    on an unchanged basis ONLY while no item is actionable, after which the question is allowed with
+    findings (a guard that can be farmed trains its own bypass;
+    cannot-evaluate is a state the session may be unable to repair, which the actionable deny is not);
+    the ask counters (ask_denials/ask_basis in turn-state.json) are this binding's own, so neither
+    cap-relieved binding's denials relieve the other, and genuine human input resets them
+    (orch_prompt_stamp) exactly as it resets the schedule pair. A registry that declares NO enumerator
+    key leaves this judgement out of scope (allow); a DECLARED enumerator that is not an object is a
+    configuration error, judged through the same fresh-enumeration path (_orch_enumerate reports it as
+    not enumerable), so it denies as cannot-evaluate with a guard-events row exactly as in the yield
+    guard, never a silent allow; the operator escape sentinel releases the deny exactly as in the yield
+    guard; a deny whose counter cannot be saved stands and says so."""
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
+        # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
+        # In this attended branch the mode record reads live, so _orch_scope_live is never 'cannot'
+        # here: it is False only through the holder-scoped lease check.
+        return _allow()
+    if "enumerator" not in reg:
+        return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
+    ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+                  if ctx.get("escape_spoof") else "")
+    verdict, reason, _disposition = decide_yield(ctx)
+    if verdict == "DENY":
+        # the deny stands when its counter cannot be saved; relief on a later question comes only from
+        # the count that question reads from turn-state.json (the same contract as the yield guard's
+        # schedule path, and the failure is reported on the deny)
+        unsaved = _orch_record_denial(root, ts, "ask", basis)
+        counter_warn = "" if unsaved is None else (
+            "Additionally, the denial counter could not be written to turn-state.json ({}), so this "
+            "deny does not count toward the ask cap; a later question is relieved only when the count "
+            "it reads from turn-state.json is at or above the cap on an unchanged basis; record it "
+            "manually (nocncl).".format(unsaved))
+        tail = _orch_warn_tail(_orch_event_warn(root, "ask-guard", "deny", reason), counter_warn,
+                               spoof_warn, ctx["record_warn"])
+        return _deny(reason + tail,
+                     "AIQT guardrail: denied a blocking question past the enumerated backlog.{}"
+                     .format(tail))
+    if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, "ask-guard", verdict.lower(), reason)
+        msg = "AIQT guardrail: {}".format(reason)
+        if _orch_open_dispositions(ctx) or ctx["enum_status"] != "ok":
+            # the cap released this question past open work (or during a whole-enumerator failure);
+            # mark it forced_unresolved for the next resume audit's triage, a failed record surfacing
+            # in the note rather than silently vanishing
+            extra = _orch_record_forced_exit(root, "ask-guard", ctx, reason)
+            if extra:
+                msg += " " + extra
+        return _allow_note(msg + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, "ask-guard", reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed
+        # append is not surfaced
+        _orch_guard_event(root, "ask-guard", verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _allow_note("AIQT guardrail:" + tail)
+    return _allow()
+
+
 _ORCH_PLAIN_COMMAND_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
 # Shell reserved words that change execution without a metacharacter: `coproc` backgrounds a coprocess whose
 # output the harness does not capture, and the compound/prefix keywords start a construct that is not a plain
@@ -13097,83 +18273,144 @@ _ORCH_SHELL_KEYWORDS = frozenset((
 # Bash's own word-start rule for a `#` comment: a `#` opens a comment only at the start of a word, and bash
 # delimits words with its blanks (space, tab) and newline and with its metacharacters (; & | ( ) < >). Other
 # characters that Python's str.isspace() accepts (carriage return, vertical tab, form feed, no-break space,
-# the 0x1c-0x1f separators, NEL, and the Unicode spaces) are ordinary word characters to bash.
+# the 0x1c-0x1f separators, NEL, and the Unicode spaces) are ordinary word characters to bash. Whether a `#`
+# right after a `(` or `)` begins a word depends on the kind of parenthesis, so the shared comment rule
+# (above _nest_track) reads such a `#` as uncertain, never as a comment.
 _ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
-def _orch_foreground_scan(command, bash_word_starts):
+def _orch_foreground_scan(command, bash_word_starts, amps=None):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
-    quote, None otherwise. bash_word_starts selects where a `#` opens a comment: False keeps the historical
-    rule (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
-    BOTH and denies when either reports, so the bash rule can only ADD denies to the historical one."""
+    quote or meets a `#` whose comment reading depends on context, None otherwise. amps, when given, is a
+    list the pass appends the index of each such bare `&` to, reading on past it instead of returning
+    "detach", so it returns only "unbalanced" or None (_orch_foreground_amps). bash_word_starts selects
+    which characters put a `#` at a word start: False keeps the historical rule (after any str.isspace()
+    character), True uses bash's rule (a blank, a newline or one of ; & | < >). Under BOTH rules the shared
+    comment rule decides the rest (_hash_comment_reading, over a nesting stack this scan keeps): a
+    word-start `#` opens a comment only while no parenthesis, ${...} or backquote substitution is open; a
+    `#` after any other character is text; a backslash-newline changes nothing, since bash removes it
+    first, so a `#` after `cmd \\<newline>` is at a word start; and a `#` right after a `(`, a `)` or a
+    backquote, or at a word start while something is open, is uncertain and ends the scan as "unbalanced",
+    the same fail-safe deny as an open quote. Inside a double-quoted string the scan also keeps a stack of
+    the `$(...)` and backquote substitutions opened there: a `#` that is not right after a word character
+    while one is open (outside a single-quoted span in it) is a comment to bash, which can hide the string's
+    closing quote, so it is uncertain too. The guard runs BOTH and denies when either reports, so the bash
+    rule can only ADD denies to the historical one."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
-    word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
+    prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
+    after_dollar = False  # the previous char was an unquoted, unescaped `$` (a following `{` opens ${...})
+    nest = _NestStack()
+    dq_nest = _NestStack()  # the substitutions opened inside the current double-quoted string: "(" or a backquote
+    dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
+    dq_single = False  # inside a single-quoted span within such a substitution
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if escaped:
-            escaped, prev_dup, word_start = False, False, False
+            escaped, prev_dup = False, False
+            if ch != "\n":  # a backslash-newline is removed before bash reads the line: the classes stay
+                prev = dq_prev = "backquote" if ch == "`" else "word"
+            after_dollar = after_dollar and ch == "\n"  # a backslash-newline joins `$` to what follows it
             i += 1
             continue
         if in_single:
             if ch == "'":
                 in_single = False
-            prev_dup, word_start = False, False
+            prev_dup, prev = False, "word"
             i += 1
             continue
         if in_double:
             if ch == "\\":
                 escaped = True
             elif ch == '"':
-                in_double = False
-            prev_dup, word_start = False, False
+                in_double, dq_single = False, False
+                dq_nest.clear()
+            elif dq_single:
+                dq_single = ch != "'"
+            elif dq_nest and ch == "#" and dq_prev != "word":
+                # A comment to bash inside the substitution, running to the end of the line and past any
+                # quote on it, which this scan would read as the string's closing quote.
+                return "unbalanced"
+            elif dq_nest and ch == "'":
+                dq_single = True
+            else:
+                if ch == "(" and (dq_nest or after_dollar):
+                    dq_nest.append("(")
+                elif ch == ")" and dq_nest and dq_nest[-1] == "(":
+                    dq_nest.pop()
+                elif ch == "`":
+                    _nest_track(dq_nest, ch, False)
+                dq_prev = ("paren" if ch in "()" else "backquote" if ch == "`"
+                           else "break" if ch.isspace() or ch in ";&|<>" else "word")
+            prev_dup, prev, after_dollar = False, "word", ch == "$"
             i += 1
             continue
-        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of THIS line is not code
-            # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command. Skip
-            # to the next newline and resume the scan, so a real bare `&` on a LATER line is not smuggled
-            # past by a comment on an earlier one. Breaking the whole scan here silently allowed exactly that
-            # (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the comment-obscured detach.
-            nl = command.find("\n", i)
-            if nl == -1:
-                break  # no later line: the comment runs to the end of the string, nothing more to scan
-            i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
-            continue
+        if ch == "#":
+            reading = _hash_comment_reading(nest, prev)
+            if reading is None:
+                # The scan cannot tell whether the text after this `#` is code, so, like a quote it cannot
+                # close, it fails toward the DENY rather than allow a possibly-real detach after it.
+                return "unbalanced"
+            if reading:  # a certain comment: the rest of THIS line is not code
+                # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command.
+                # Skip to the next newline and resume the scan, so a real bare `&` on a LATER line is not
+                # smuggled past by a comment on an earlier one. Breaking the whole scan here silently
+                # allowed exactly that (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the
+                # comment-obscured detach.
+                nl = command.find("\n", i)
+                if nl == -1:
+                    break  # no later line: the comment runs to the end of the string, nothing more to scan
+                i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
+                continue
         if ch.isspace():
-            prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
+            prev_dup, after_dollar = False, False
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
             i += 1
             continue
         if ch == "\\":
-            escaped, prev_dup, word_start = True, False, False
+            escaped, prev_dup = True, False
             i += 1
             continue
         if ch == "'":
-            in_single, prev_dup, word_start = True, False, False
+            in_single, prev_dup, prev, after_dollar = True, False, "word", False
             i += 1
             continue
         if ch == '"':
-            in_double, prev_dup, word_start = True, False, False
+            in_double, prev_dup, prev, after_dollar = True, False, "word", False
             i += 1
             continue
         if ch == "&":
+            after_dollar = False
+            prev = "break" if bash_word_starts else "word"
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 2
                 continue
             if nxt == ">":  # `&>` / `&>>` redirect: not a detach
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 1
                 continue
             if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
-                prev_dup, word_start = False, bash_word_starts
+                prev_dup = False
                 i += 1
                 continue
-            return "detach"  # an executable bare `&` control operator: a foreground detach
+            if amps is None:
+                return "detach"  # an executable bare `&` control operator: a foreground detach
+            amps.append(i)
+            i += 1
+            continue
+        _nest_track(nest, ch, after_dollar)
+        if ch in "()":
+            prev = "paren"
+        elif ch == "`":
+            prev = "backquote"
+        else:
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS and bash_word_starts else "word"
         prev_dup = ch in (">", "<", "|")
-        word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
+        after_dollar = ch == "$"
         i += 1
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
     # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
@@ -13181,16 +18418,132 @@ def _orch_foreground_scan(command, bash_word_starts):
 
 
 def _orch_foreground_detach_kind(command):
-    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote,
-    else None. The historical rule and bash's `#` word-start rule are both run so that the bash rule only
-    ADDS denies: a `#` after a character bash does not treat as a word break (a carriage return, a
-    no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a comment to
-    bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to bash, so a
-    quote in that comment no longer shifts the scan past a real `&` on the next line."""
+    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote
+    or meets a `#` whose comment reading depends on context, else None. The historical rule and bash's `#`
+    word-start rule are both run so that the bash rule only ADDS denies: a `#` after a character bash does
+    not treat as a word break (a carriage return, a no-break space, a 0x1c separator, any other non-blank
+    str.isspace() character) is not a comment to bash, so an `&` after it is scanned; a `#` after a
+    metacharacter (`;#`) IS a comment to bash, so a quote in that comment no longer shifts the scan past a
+    real `&` on the next line. A `#` right after a `(`, `)` or backquote (`x=$(true)#`, `(true)#`), or at a
+    word start inside an open parenthesis, ${...} or backquote substitution, or inside a "$(...)" or
+    backquote substitution in a double-quoted string, is uncertain under both rules, and a backslash-newline
+    before a `#` changes nothing under either."""
     kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
     if "detach" in kinds:
         return "detach"
     return "unbalanced" if "unbalanced" in kinds else None
+
+
+# The places the shared lexer may put a bare `&` the foreground scan reads, for that `&` to read as no detach
+# (_orch_foreground_detach_lexed), as _LexPlaces span kinds: a single- or double-quoted string, a '#'
+# comment, and a quoted here-document's body. They are the only narrowing of the scan's detach. A
+# here-document body whose end the lexer cannot prove is where bash ends it records as "code", not
+# "heredoc" (the span comment in _lex_pass), so it is never a lifting place.
+_ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
+
+
+def _orch_foreground_amps(command):
+    """The indices of every bare `&` either scan rule reads in command, each rule reading on past each one
+    (_orch_foreground_scan with amps), or None when either rule's pass ends inside a quote or meets a `#`
+    whose comment reading depends on context, so it does not read the command to its end."""
+    amps = []
+    for bash_word_starts in (False, True):
+        if _orch_foreground_scan(command, bash_word_starts, amps) is not None:
+            return None
+    return amps
+
+
+def _orch_lexed_amp_places(command, amps):
+    """The kind of the innermost _LexPlaces span holding each index in amps, as the shared lexer reads command
+    in its one reading, listed in the order of sorted(amps) (None for an index no span holds); or None where
+    the lexer gives no single reading: the lex raises (an uncertain '#' included, whose two readings can place
+    an index differently), reads a body in a substitution that main's skip reads otherwise (its segments then
+    sit beside main's reading, MAIN'S DECISION AS A FLOOR above _MainHashReading), runs inside
+    _SubstHeredocFloor, or records two spans that overlap without nesting. The spans of one reading nest or
+    are disjoint, so one sweep over them in start order, with a stack of the open ones, finds each innermost
+    span."""
+    if _SubstHeredocs.main_lex:
+        return None
+    with _LexPlaces() as spans:
+        try:
+            _lexed, misread = _lex_reading(command, False, {})
+        except ValueError:
+            return None
+    if misread:
+        return None
+    order = sorted(spans, key=lambda span: (span[0], -span[1]))
+    kinds, open_spans, k = [], [], 0
+    for at in sorted(amps):
+        while k < len(order) and order[k][0] <= at:
+            while open_spans and open_spans[-1][1] <= order[k][0]:
+                open_spans.pop()
+            if open_spans and open_spans[-1][1] < order[k][1]:
+                return None  # two spans overlap without nesting: no place is read
+            open_spans.append(order[k])
+            k += 1
+        while open_spans and open_spans[-1][1] <= at:
+            open_spans.pop()
+        kinds.append(open_spans[-1][2] if open_spans else None)
+    return kinds
+
+
+def _orch_foreground_detach_lexed(command, lifts=None):
+    """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
+    scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
+    where it can (_lex_command, skip_empty NOT passed: the segment after `(job)` that carries the `&` has no
+    word): a segment of any reading of the command's uncertain '#' characters that ends with a bare `&`
+    separator is a "detach" whatever the scan reads, so a real detach the scan reads as quoted or commented
+    text (the QUOTE SHIFT and COMMENT SHIFT false allows of _orch_foreground_detach) denies. Where the lexer
+    refuses the command (a ValueError, _UncertainHashError included: an unquoted here-document, a here-string,
+    a process substitution, an open quote, a NUL, or '#' readings it cannot judge), the scan alone decides.
+    Where the lexer reads no bare `&`, the scan's verdict stands, with ONE narrowing: its "detach" reads as
+    None only when both scan rules read the whole command (no quote open at the end and no uncertain '#') and
+    every bare `&` they read lies, where the lexer places it in its one reading of the command
+    (_orch_lexed_amp_places), inside one of three shapes: (1) the body of a here-document under a quoted
+    delimiter (<<'EOF' or <<"EOF") whose end the lexer can prove is where bash ends it: one read at the
+    top level of the command, with nothing open on the nesting stack and no '(' and no backquote
+    anywhere before the body (inside a command or process substitution or backquotes bash 5.3 can end a
+    body at a line that merely STARTS with the delimiter when a ')' or a backquote follows it on that
+    line, running what this lex would read as body, so such a body records as "code" and is never
+    lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
+    close the lex itself resolves; (2)
+    a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
+    disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
+    holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
+    ANSI-C $'...' quote or behind an escape; a scan that ends inside a quote or meets an uncertain '#'
+    ("unbalanced", an apostrophe in a quoted here-document's body included); and a command the lexer reads
+    in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
+    where it places an `&` inside one of the three shapes but bash reads that `&` as an operator, the detach
+    is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
+    appends True to where that narrowing reads the scan's "detach" as None, so a caller that must know
+    whether it did reads the list instead of running the scan again.
+
+    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
+    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
+    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
+    gives None from both scan rules (they return anything else only at one of those four characters, or
+    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
+    either way."""
+    if "&" not in command:
+        if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        return _orch_foreground_detach_kind(command)
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return _orch_foreground_detach_kind(command)
+    if any(seg.sep_after == "&" for seg in segments):
+        return "detach"
+    kind = _orch_foreground_detach_kind(command)
+    if kind != "detach":
+        return kind
+    amps = _orch_foreground_amps(command)
+    places = _orch_lexed_amp_places(command, amps) if amps else None
+    if places is not None and all(place in _ORCH_AMP_PLACES for place in places):
+        if lifts is not None:
+            lifts.append(True)
+        return None
+    return kind
 
 
 def _orch_foreground_detach(command):
@@ -13199,14 +18552,22 @@ def _orch_foreground_detach(command):
     detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
     `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
     pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
-    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
-    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
-    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    inside an unquoted, word-start `#` comment (comment text, not an operator). This raw scan is what the
+    guard reads beside the shared lexer (_orch_foreground_detach_lexed): it decides alone where the lexer
+    refuses the command, and where the lexer reads no bare `&` its verdict stands, but for a detach whose
+    every `&` the lexer places in a quoted here-document body, a quoted string or a comment. It drops a
     word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
     comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
     is still caught rather than smuggled past. Where a `#` starts a comment is read under two rules, the
-    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or
-    metacharacter), and either rule's detach denies (_orch_foreground_detach_kind).
+    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or one of
+    ; & | < >), and either rule's detach denies (_orch_foreground_detach_kind). Under both rules the shared
+    comment rule applies (above _nest_track): a word-start `#` is a comment only while no parenthesis,
+    ${...} parameter expansion or backquote substitution is open, and a `#` whose reading depends on context
+    (right after a `(`, `)` or backquote, as in `x=$(true)#`, or at a word start while one of those is
+    open, as in `echo ${x:- #}`, or one inside a double-quoted "$(...)" or backquote substitution that is not
+    right after a word character, as in echo "$(echo a # ") denies like an unbalanced quote (below) rather
+    than skipping the text after it. A backslash-newline changes nothing about where a word starts: after
+    `echo a \\<newline>` a `#` with nothing open is a comment, as bash reads it.
 
     A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
     or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
@@ -13224,18 +18585,24 @@ def _orch_foreground_detach(command):
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
     in the manifest.
 
-    OVER-REFUSAL RESIDUAL (disclosed): a here-document body is scanned as CODE, not data, even under a
-    quoted delimiter (<<'EOF'). A safe here-document whose body carries an unquoted `&` (`cat > f <<'EOF'`
-    then `Fix A & B`) or an unbalanced apostrophe (`the user's file`) is therefore DENIED although nothing
-    detaches. In the commit-message form wrapped in double quotes ("$(cat <<'EOF' ... EOF)") the body is
-    read as double-quoted text, and each double quote in the body toggles that reading, so whether a body
-    `&` is denied depends on where it falls relative to those quotes (`say "a & b"` is denied, `say "hi" &
-    bye` is allowed). The remedy is to write the text to a file and pass the file. This misreading is NOT
-    only in the safe direction: the same body quotes cause the quote-shift false-allow below.
+    OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as CODE, not data, even under a
+    quoted delimiter (<<'EOF'). The guard's lexer reading lifts that for an `&` only: a body `&` under a
+    quoted delimiter (`cat > f <<'EOF'` then `Fix A & B`, or `say "a & b"` in the commit-message form
+    "$(cat <<'EOF' ... EOF)") is allowed where the scan reads the rest of the command to its end. A body
+    with an unbalanced apostrophe (`the user's file`), or one whose quote leaves the scan open at the end,
+    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
+    lexer refuses. The remedy is to quote the delimiter where the body needs no expansion, or to write the
+    text to a file and pass the file.
 
-    KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the same
-    cases): the scan reads only the outer quoting level, and its quote and comment tracking can diverge from
-    bash's in further ways than those listed here, so this list is NOT complete. Known cases include a real
+    KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
+    lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
+    can diverge from bash's in further ways than those listed here, so this list is NOT complete. The
+    guard's lexer reading denies a bare `&` the lexer reads as a separator wherever it reads the command,
+    which catches the (5) and (6) examples below and the ANSI-C example echo $'\\'' & echo x\\' of (3), so
+    those remain silent allows only where the lexer refuses the command (an unquoted here-document, a
+    here-string, a process substitution, or '#' readings it cannot judge). The lexer misses the (1) and (2)
+    examples as this scan does, and a (4) whose substitution sits in double quotes, as in
+    echo $(( a["$(job &)"] )). Known cases include a real
     detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick wrapped in
     double quotes (echo "$(job &)"); (2) inside a string that eval or quote removal re-reads as code
     (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
@@ -13244,13 +18611,781 @@ def _orch_foreground_detach(command):
     quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
     including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
     real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
-    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
-    which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
-    that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
+    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that bash reads as quoted text
+    but the scan reads as a comment, where a double-quoted string nested inside a double-quoted "$(...)"
+    ends the scan's double quote early, so a `#` inside the nested string reads as a word-start comment
+    and a real bare `&` later on that line is skipped (echo "$(echo "a" "b # ")" & job # ")."""
     return _orch_foreground_detach_kind(command) is not None
 
 
-# ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
+# Commands that detach work, or keep it alive past the call, without a bare `&`, each with the effect the
+# out-of-scope note names. setsid without -w can return before its command finishes: it forks and returns
+# when it is already a process-group leader, as it is when bash runs it as the last simple command of a
+# command string without forking and that bash leads its own process group (or always, under -f).
+_ORCH_DETACH_WORD_EFFECTS = {
+    "setsid": "starts the command in a new session and, without -w, can return before it finishes",
+    "nohup": "lets the command outlive the session that started it",
+    "disown": "drops a job from this shell's job table, so nothing waits for it",
+}
+# Words after which the next word is still in command position: reserved words that open or continue a
+# compound command, and command-modifier wrappers. An option, a number or an assignment after one of these
+# keeps command position as well (_orch_note_scan), so `timeout 5 nohup job` reads nohup as the command.
+_ORCH_NOTE_COMMAND_PREFIXES = frozenset((
+    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "time", "function",
+    "builtin", "command", "doas", "env", "exec", "ionice", "nice", "nohup", "setsid", "stdbuf", "sudo",
+    "timeout"))
+# One run of plain word characters: no blank, quote, escape, expansion or shell metacharacter.
+_ORCH_NOTE_WORD_RE = re.compile(r"[^\s;&|()<>'\"\\$`]+")
+_ORCH_NOTE_NUMBER_RE = re.compile(r"[0-9][0-9.]*[smhd]?")
+# A named descriptor written directly before a redirect operator ({fd}> file): part of the redirect.
+_ORCH_NOTE_NAMED_FD_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+# An fd prefix (a number or a {name}) written directly before a redirect operator, and the redirect
+# operators whose target is one word. `<<` (a here-document opener, whose body is not one word) is excluded.
+_ORCH_NOTE_IO_PREFIX_RE = re.compile(r"[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\}")
+_ORCH_NOTE_REDIR_OPS = ("&>>", "&>", ">>", "<<<", ">|", ">&", "<&", "<>", ">", "<")
+# The whole of a here-document delimiter word whose body the note scan skips silently, and the character
+# that must open a `${...}` redirect target it consumes silently (a name: a letter, digit or underscore).
+_ORCH_NOTE_DELIM_RE = re.compile(r"[A-Za-z0-9_.+-]+")
+_ORCH_NOTE_NAME_START_RE = re.compile(r"[A-Za-z0-9_]")
+
+
+def _orch_skip_redirect(command, i, n):
+    """If a redirect (an optional fd prefix, a redirect operator, then after any blanks one target word)
+    begins at index i, return the index just past its target operand; else None. bash removes a redirect
+    from the argument list, so an option scan passes over it. A `<<` here-document opener is not a
+    one-word-target redirect and returns None; a target that is not a plain word (an expansion, a quote)
+    returns None as well, so the caller keeps its conservative reading there. An fd prefix is accepted
+    only before an operator bash takes it for: `&>` and `&>>` never take one (bash reads `2&>f` as the
+    word `2` followed by `&>f`), so a prefixed `&>` returns None and the prefix is read as a word."""
+    j = i
+    pre = _ORCH_NOTE_IO_PREFIX_RE.match(command, j)
+    if pre is not None:
+        j = pre.end()
+    op = None
+    for cand in _ORCH_NOTE_REDIR_OPS:
+        if command.startswith(cand, j):
+            op = cand
+            break
+    if op is None or (op == "<" and command.startswith("<<", j)):
+        return None
+    if pre is not None and op.startswith("&"):
+        return None  # bash accepts no fd prefix before `&>` or `&>>`: the prefix is a word
+    j += len(op)
+    while j < n and command[j] in " \t":
+        j += 1
+    target = _ORCH_NOTE_WORD_RE.match(command, j)
+    if target is None:
+        return None
+    return target.end()
+
+
+def _orch_setsid_waits(command, i):
+    """True when the options after a setsid word that ends at index i include -w or --wait (or a unique
+    prefix of --wait, of which --w is the shortest), so setsid waits for its command. The option words are
+    read up to the first word that is not an option, or up to `--`; a redirect between the options, which
+    bash removes from the argument list, is passed over (_orch_skip_redirect)."""
+    n = len(command)
+    while True:
+        while i < n and command[i] in " \t":
+            i += 1
+        skip = _orch_skip_redirect(command, i, n)
+        if skip is not None:
+            i = skip
+            continue
+        match = _ORCH_NOTE_WORD_RE.match(command, i)
+        if match is None:
+            return False
+        word = match.group()
+        if word == "--" or not word.startswith("-") or word == "-":
+            return False
+        if word.startswith("--"):
+            if len(word) >= 3 and "--wait".startswith(word):
+                return True
+        elif "w" in word[1:]:
+            return True
+        i = match.end()
+
+
+def _orch_arith_closes(command):
+    """For each index of an opening parenthesis, the index of its matching closing one (-1 when it has
+    none), matched by nesting alone. Quotes are not read, so a quoted parenthesis inside an arithmetic
+    expression can misalign the match; such a misread only adds or drops a note outside registry scope."""
+    closes = [-1] * len(command)
+    stack = []
+    for i, ch in enumerate(command):
+        if ch == "(":
+            stack.append(i)
+        elif ch == ")" and stack:
+            closes[stack.pop()] = i
+    return closes
+
+
+def _orch_skip_param_expansion(command, i, n):
+    """Given index i at the `$` of a `${...}` parameter expansion, return the index just past the `}` that
+    closes it, or None when the expansion is not PROVABLY SIMPLE, which the note scanner reports by
+    emitting the note (never by guessing at the remainder). Provably simple means the span opens with a
+    name character (a letter, digit or underscore) and holds, up to the first `}`, only that name and
+    literal characters. Any other opening character returns None: a blank, newline or `|` there opens a
+    bash 5.3 `${ cmd; }` or `${| cmd; }` command substitution, which runs its command in the current shell
+    even in a redirect target, and any other one (a `#`, `!` or special parameter) is a form the scan does
+    not model. The span then holds no single or double quote and no backslash (bash's quoting contexts
+    nest in ways a lexical skip cannot read with certainty, a quote can hide or expose a substitution, and
+    an escaped `\\}` does not close the expansion to bash), no `$` (a nested `${...}` expansion or a
+    `$(...)` command substitution) and no backquote (bash runs a command substitution even inside a
+    redirect target), and no `<` or `>` (a `<(...)` or `>(...)` process substitution runs there too). For
+    such a span the first `}` is where bash closes it (a literal `{` in a default does not open anything
+    to bash). Every other spelling returns None rather than being modelled; nothing here shows that this
+    character list is every way bash can read further than the first `}` or run a command there, only
+    that each listed character is one of them. Used to consume a parameter expansion as ONE word so a
+    blank inside it (a `${x:-a b}` default) does not end the operand."""
+    if _ORCH_NOTE_NAME_START_RE.match(command, i + 2) is None:
+        return None  # no name opens the span (a `${ cmd; }` or `${| cmd; }` included): the scan notes
+    j = i + 2
+    while j < n:
+        c = command[j]
+        if c == "}":
+            return j + 1
+        if c in "'\"\\$`<>":
+            return None  # quoting or substitution syntax inside: not provably simple, so the scan notes
+        j += 1
+    return None  # never closed
+
+
+def _orch_plain_heredoc_delim(command, at, n):
+    """Parse the here-document delimiter spec starting immediately after '<<' (index `at`) for the
+    out-of-scope note scanner, accepting ONLY a PROVABLY SIMPLE spelling: an optional '-' (the <<- form),
+    optional blanks, then a whole word that is a non-empty run of letters, digits and `_ . + -`
+    (_ORCH_NOTE_DELIM_RE), ended where bash itself ends it: at the end of the command, a blank or newline,
+    or one of the metacharacters `; & | )`, or a `<` or `>` that does not open a `<(` or `>(` process
+    substitution. Returns (delim, strip_tabs, next_i), or None for every other spec: no delimiter word at
+    all, a word holding any other character (a quote, a backslash escape or line continuation, a `$` or
+    backquote expansion, a brace), or a word bash reads further than this scan does (a `(` after it, as
+    in an extglob `+(...)`, or a `<(...)` or `>(...)` glued to it). bash joins, quote-removes or extends
+    such a word under rules this scanner does not model, and a wrong guess would skip the body at an
+    invented delimiter and read real commands as data, so the caller notes instead. An allowed word is its
+    own delimiter (bash performs no expansion on the word), and the body is skipped at the line that
+    matches it exactly. The shared in-scope parser (_parse_heredoc_delim) is deliberately not used here:
+    it models the joined spellings for the fail-closed deny path."""
+    j = at
+    strip_tabs = False
+    if j < n and command[j] == "-":
+        strip_tabs = True
+        j += 1
+    while j < n and command[j] in " \t":
+        j += 1
+    word = _ORCH_NOTE_DELIM_RE.match(command, j)
+    if word is None:
+        return None  # no delimiter word, or one that opens with a character outside the plain set
+    end = word.end()
+    if end < n and not (command[end] in " \t\n;&|)"
+                        or (command[end] in "<>" and not command.startswith("(", end + 1))):
+        return None  # the word goes on past the plain characters (to bash or as an unknown): the scan notes
+    return (word.group(), strip_tabs, end)
+
+
+def _orch_span_blank(command, start, end):
+    """True when command[start:end] holds only blanks (spaces and tabs), read in place by a running
+    index. A slice copy here made closing the nested glued substitutions of x=$(x=$(...)) cost time
+    quadratic in the nesting depth (each closer copied the whole enclosed text to test it for
+    emptiness); this walk stops at the first non-blank character instead, and because every opener
+    is itself non-blank, the blank run after one opener is read by that opener's close alone, so the
+    positions read over a whole scan stay linear in the command."""
+    j = start
+    while j < end and command[j] in " \t":
+        j += 1
+    return j >= end
+
+
+def _orch_heredoc_bodies_end(command, i, n, heredocs):
+    """The index just past the bodies of the here-documents (delimiter, strip_tabs) opened on one line,
+    read for the out-of-scope note scanner from index i (just past that line's newline) in the order
+    their `<<` operators appeared, each body ending at a line that is EXACTLY its delimiter (leading
+    tabs stripped for the <<- form), and whether EVERY body's closing delimiter line was found. A body
+    whose delimiter line never comes consumes the rest of the command and reads as NOT closed: bash
+    would still be reading here-document input there, so nothing past that opener was really checked and
+    the caller notes instead of reading the consumed text as data."""
+    closed = True
+    for delim, strip_tabs in heredocs:
+        matched = False
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            cand = line.lstrip("\t") if strip_tabs else line
+            i = n if nl == -1 else nl + 1
+            if cand == delim:
+                matched = True
+                break
+        closed = closed and matched
+    return i, closed
+
+
+def _orch_note_scan(command, bash_word_starts, lifted=False):
+    """The scan behind the note outside registry scope. It reads quotes and escapes as _orch_foreground_scan
+    does, and reads each unquoted `#` by the comment rule that scan applies (_hash_comment_reading, over a
+    nesting stack this scan keeps, with bash_word_starts selecting the same word-start rule): a word-start
+    `#` opens a comment to the end of its line only while no parenthesis, ${...} or backquote substitution
+    is open, a `#` after any other character is text, and a `#` whose reading depends on context (right
+    after a `(`, a `)` or a backquote, as in `x=$(true)#`, or at a word start while one of those is open,
+    as in `echo ${x:- #}`) returns "unreadable", so the note is emitted instead of a guess at whether the
+    text after it is code. Inside a double-quoted string it keeps that scan's stack of the `$(...)` and
+    backquote substitutions opened there, and a `#` that is not right after a word character while one is
+    open (outside a single-quoted span in it) returns "unreadable" as well, since bash reads it as a
+    comment that can hide the string's closing quote. It adds several things that scan does not model. A
+    backslash-newline line continuation anywhere outside a single-quoted span returns "unreadable" the
+    moment the scan meets it: bash removes the pair before it tokenizes, so ANY token can be split
+    across one (a `<` or `>` split from its `(` still opens a process substitution to bash, which this
+    raw scan would not count on the substitution count below, a split detacher or `case` keyword is
+    still that word to bash, and a split delimiter word is not this scan's delimiter), so the class is
+    closed as a whole rather than shape by shape, as far as this scan's quote reading matches bash's
+    (where that reading diverges, as after the ANSI-C $'...' spelling the known misses below name, a
+    continuation can sit in text the scan reads as quoted and stay silent with the rest of that
+    divergence); each span this scan skips as data is checked for one
+    too (a certain comment's line ending in a backslash, a skipped arithmetic span, and a here-document
+    body, below), and only a pair inside a single-quoted span, which is literal data to bash, stays
+    silent, a single-quoted span inside a double-quoted substitution included (a backslash there is
+    literal data too, never an escape). A
+    here-document whose delimiter spec is provably simple (a whole word of
+    letters, digits and `_ . + -` that bash ends where this scan does, _orch_plain_heredoc_delim), opened
+    while NO parenthesis, `${...}` or backquote substitution is open on the nesting stack AND no
+    command or process substitution is open on the scan's own substitution count, has its
+    body skipped as data at the exact delimiter line, so an `&` or an apostrophe in the body neither notes
+    nor shifts the quote state; EVERY other delimiter spelling (a quoted or ANSI-C fragment, a backslash
+    escape or line continuation in the word, a `$`, backquote or brace in it, a `(`, `<(` or `>(` glued
+    to it, a quote left open, or no delimiter word at all) returns "unreadable", and so does a body in
+    which a backslash-newline appears anywhere up to its closing delimiter line (bash joins it before
+    matching that line; this raw match does not), and so does one that opens while anything is open on
+    that stack (bash 5.3 ends a body inside a command or process substitution or backquotes at a line
+    that merely STARTS with the delimiter when a `)` or a backquote follows it on that line, as in
+    x=$(cat <<EOF ... EOF), and reads the rest of that line as commands, so the exact-line skip would
+    misread where such a body ends), so the note is emitted rather than guessing where the
+    body ends or reading the remainder as code. Whether such a substitution is open is read from the
+    scan's own count of unquoted `$(`, `<(` and `>(` openers as well as from the stack, because a bare
+    case pattern's `)` pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF): from the
+    first such opener to the end of the command a here-document draws the note unless the count proves
+    every substitution closed, and the count falls only at a `)` the stack itself matches against a
+    `(` on top (one met while a `${...}` or a backquote is innermost is text to bash, as in
+    x=$(echo ${y%)}; ...), so it closes nothing on the count, and the text after it up to the
+    expansion's real `}` is read in command position, which can only over-note) and met before any
+    `case` keyword was read in command position, since a later `)` cannot be told from a bare
+    pattern's, so after a `case` a closed substitution stays counted open
+    and a later here-document in the same command draws the note, an over-note; and a `<<` met inside a
+    double-quoted command or backquote substitution (the commit-message form) returns "unreadable" at
+    the operator itself, a best-effort rule: the scan tracks quotes and parentheses inside such a
+    substitution only approximately, and any shape whose quote or parenthesis state it misreads can
+    leave the `<<` unread as inside a substitution (the known misses below): bash reads such a body
+    under its own here-document rules, while this scan read
+    it as double-quoted text whose quote state each body quote toggles, so a stray quote in the body
+    once shifted that state onto a later real bare `&` outside the substitution, which read as quoted
+    text and was silently allowed; the note replaces that reading (a `<<<` here-string there, and a
+    body of pure data, draw the same note, an over-note), and a `#` in such a
+    substitution that is not right after a word character (Fixes #12) still notes as the double-quoted
+    comment rule above. An arithmetic expansion $(( ... )) or
+    arithmetic command (( ... )) is skipped, so a bitwise `&` in it does not note; it counts as arithmetic
+    only when its two opening parentheses close as `))`, which is how bash tells it from a nested subshell.
+    A redirect operator and its target operand are passed over without disturbing the pending command
+    position (next_command), so a leading `2> /dev/null` does not hide the command word after its target
+    and a spaced redirect target named like a detacher is not read as one; a target that begins with a
+    provably simple `${...}` parameter expansion (a name, then only literal characters up to the first
+    `}`, _orch_skip_param_expansion) is consumed as one word, so a blank inside a `${x:-a b}` default does
+    not split a word out of the operand nor expose a following detacher (a literal `{` in the default does
+    not nest: the expansion ends at its matching `}` as in bash), while every other such target (one left
+    unclosed, one that does not open with a name, such as a bash 5.3 `${ cmd; }` or `${| cmd; }` command
+    substitution, or one holding any quote, backslash, `$`, backquote, `<` or `>`) returns "unreadable"
+    and notes, and so does any further `${` anywhere in a redirect target operand, quoted with double
+    quotes or not (one glued after another operand character, `> a${x:-b c}`, or after a skipped
+    expansion). The same
+    holds for a here-string `<<<`, whose word is a redirect target and never a here-document delimiter, for
+    the noclobber redirect `>|`, read as one operator and not as a redirect then a pipe, and for a named
+    descriptor written directly before its operator ({fd}> file). A setsid, nohup or disown in command
+    position (at the start of a command, after an operator or a reserved word such as then or do, after
+    a wrapper such as env, nice, sudo or timeout and its options, numbers, assignments and redirects,
+    after a case pattern's `)`, parenthesised or bare (a word directly after a subshell's `)` is a syntax
+    error to bash, so reading it in command position too can only over-note), or inside a function body
+    the command itself defines, `f() { ...; }` or `function f { ...; }`, whose empty `()` or `function`
+    keyword and name keep command position for the body) is
+    reported, setsid only without -w or --wait (or a unique prefix of --wait, of which --w is the shortest).
+
+    Known misses, each also disclosed in the manifest residue: a detacher after a backtick is not
+    read in command position; an unquoted expansion as the
+    command word hides the detacher after it ($SUDO setsid -f job, $(true) nohup job: an empty
+    expansion vanishes to bash, which runs the word after it as the command, while this scan reads
+    that word as an argument); a `case` keyword this scan does not read in command position, such as
+    one after coproc, which is not a recognized command prefix (a spelling hidden by a
+    backslash-newline line continuation, split by one or followed by one, draws the continuation note
+    above instead), leaves a bare pattern's `)` after it read as a substitution's close on the count
+    exactly as it pops the stack, so a later here-document inside that substitution can be skipped at
+    a wrong line; a command substitution inside
+    skipped arithmetic is skipped with it; a `<<` inside the old-style $[ ... ] arithmetic reads as a
+    here-document opener and skips the lines after it; a redirect target written as an arithmetic
+    expansion drops the pending command position; a bash 5.3 `${ cmd; }` or `${| cmd; }` command
+    substitution outside a redirect target (`echo ${ setsid -f job; }`) is read char by char, so an `&`
+    in it notes but a detacher word in it is not read in command position, and one in an unquoted
+    here-document body is skipped with the body. Inside a double-quoted command or backquote
+    substitution this scan tracks quotes and parentheses only approximately (it reads every unescaped
+    double quote there as the end of the outer string, and a `)` there as closing the innermost open
+    parenthesis, where bash may read the character otherwise), so the here-document rule above is best
+    effort there: any shape whose quote or parenthesis state the scan misreads can leave a real
+    background operator unnoted. Such a shape can hide a later `<<` in the substitution from that
+    rule, its body is then read as double-quoted text again, and a stray quote in it can carry a real
+    bare `&` after the substitution into quoted text; or it can shift the quote state onto that `&`
+    directly. Known examples, not a complete list: a nested double-quoted string (`: "$(cat "-"
+    <<'EOF'`, or `"$(x="a"; cat <<'EOF'`), a single-quoted span holding a double quote (`echo "$(echo
+    'x"y')" & job # '`), a case pattern's close paren (`: "$(case a in a) cat <<'EOF'`) and a close
+    paren inside `${...}` (`: "$(echo ${y%)}; cat <<'EOF'`). In each the `&` stays silent while bash
+    backgrounds the job. A setsid whose wait option sits
+    behind a redirect target that is not a plain word (an expansion or a quoted word) reads the redirect as the end of
+    the options, so that setsid is still noted: an over-note of a setsid that in fact waits, never a
+    miss.
+
+    Returns "detach" when it meets a bare `&` control operator, "unreadable" the moment it meets a
+    backslash-newline line continuation outside a single-quoted span, a span it
+    would skip but cannot read with certainty (the here-document and `${...}` redirect-target cases above,
+    a `<<` the scan reads as inside a double-quoted substitution included, a best-effort rule)
+    or a `#` whose comment reading depends on context (everything past that point is unknown, so the note
+    is emitted unconditionally), else the first such
+    command word it met (setsid, nohup or disown), else None. A scan that ends inside an open quote
+    returns "unreadable": bash reads the remainder differently from this scan, so a detach past the point
+    the quote opened cannot be ruled out, and the note is emitted, never a silent allow; and so does one
+    that ends with any opened construct still open (a here-document opener whose body never started or
+    whose closing delimiter line never came, an unclosed parenthesis, `${...}` or backquote
+    substitution, or a trailing backslash that escapes nothing): bash would still be reading input
+    there, so what the open construct holds was never really checked (a substitution whose `(` the
+    scan already read as closed at a `)` that closes nothing to bash, such as a bare case pattern's,
+    is not seen by this end check; its here-documents are still noted
+    through the substitution count, and with no here-document and no detach after it the scan stays
+    silent, a disclosed miss). The in-scope deny
+    does not use this scan; it reads _orch_foreground_detach_lexed.
+
+    LIFTED MODE (lifted True; the caller passes it ONLY after the in-scope detector lifted every bare
+    `&` its raw scan reads, with the shared lexer placing each in a quoted here-document body, a quoted
+    string or a comment): the two here-document shapes that lift vouches for are read as the lexer
+    reads them, so the note they alone would draw is dropped while every note ANOTHER cause draws is
+    kept (the single note is then the true union). Exactly two readings change. (1) A here-document
+    opened with nothing on the nesting stack and no substitution counted open, whose delimiter spec is
+    not provably simple but which the shared in-scope parser (_parse_heredoc_delim) reads as QUOTED,
+    has its body skipped as literal data at the exact delimiter line, like a plain one; its body is
+    literal to bash, so a backslash-newline inside THAT body stays silent (an unquoted plain-delimiter
+    body keeps its continuation note: bash joins there). (2) A `<<` met directly inside the first
+    `$(...)` of a double-quoted string, where the commit-message form resolves to its exact close
+    (_subst_heredoc_close: a cat-and-blanks lead, a quoted delimiter, the body ending at a line that is
+    exactly the delimiter, then only blanks before the `)`), is skipped whole to that `)` as data
+    instead of noting at the operator. Every other reading is unchanged: a quoted-delimiter heredoc
+    opened while anything is open on the stack or the count still notes, a shape the parsers refuse
+    still notes, and a continuation, an unclosed construct, a detacher word and every other cause note
+    exactly as above."""
+    in_single = in_double = escaped = False
+    prev_dup = False
+    redirect_target = False  # between a redirect operator and the start of its target operand
+    target_word = False  # inside a redirect's target operand, up to the unquoted blank or metacharacter
+    prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
+    after_dollar = False  # the previous char was an unquoted, unescaped `$` (a following `{` opens ${...})
+    nest = _NestStack()
+    dq_nest = _NestStack()  # the substitutions opened inside the current double-quoted string: "(" or a backquote
+    dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
+    dq_single = False  # inside a single-quoted span within such a substitution
+    dq_subst_opened = -1  # the index of the `$` that opened the innermost dq substitution, or -1 (lifted mode)
+    command_position = next_command = True  # next_command: the position the next word takes after a blank
+    after_function = False  # the previous command-position word was the `function` keyword
+    groups = []  # (glued, next_command, index, is_subst) saved at each unquoted `(`, restored at its `)`
+    # Open command and process substitutions, counted apart from the nesting stack: a bare case
+    # pattern's `)` pops that stack's parenthesis, so the stack alone would read the substitution as
+    # closed while bash still ends a here-document body inside it early. From a substitution's opener
+    # to the end of the command a here-document draws the note unless this count proves every such
+    # substitution closed, and the count falls only at a `)` the nesting stack matches against a `(`
+    # on top (one met while a `${...}` or a backquote is innermost is text to bash and closes
+    # nothing) and that cannot be a case pattern's (none read after a `case` keyword in command
+    # position can be ruled out, so after one the count never falls: an over-note, never a missed
+    # body misread).
+    subst_open = 0
+    case_word = False  # a `case` keyword was read in command position: a later `)` may be a bare pattern
+    heredocs = []  # (delimiter, strip_tabs) opened on the current line; their bodies follow its newline
+    closes = _orch_arith_closes(command) if "((" in command else None
+    found = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            if ch == "\n":
+                # A backslash-newline line continuation: bash removes the pair before it tokenizes, so
+                # ANY token can be split across one (a `<` or `>` split from its `(` still opens a
+                # process substitution, a split detacher or `case` keyword is still that word), and a
+                # raw scan of the unjoined text gets each such shape wrong in its own way. The whole
+                # class notes instead of a per-shape guess: a continuation anywhere outside a
+                # single-quoted span returns "unreadable" (inside single quotes the pair is literal
+                # data to bash, so it never reaches this escape handling).
+                return "unreadable"
+            escaped, prev_dup = False, False
+            prev = dq_prev = "backquote" if ch == "`" else "word"
+            after_dollar = False
+            i += 1
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            prev_dup, prev = False, "word"
+            i += 1
+            continue
+        if in_double:
+            if target_word and ch == "$" and command.startswith("{", i + 1):
+                return "unreadable"  # a `${` in a redirect target, double-quoted or not, is never skipped
+            if ch == "\\" and not dq_single:
+                # Inside a single-quoted span within a substitution a backslash is literal data to bash
+                # (so a backslash-newline there is no line continuation and stays silent); it is left to
+                # the dq_single branch below rather than read as an escape.
+                escaped = True
+            elif ch == '"':
+                in_double, dq_single = False, False
+                dq_nest.clear()
+                dq_subst_opened = -1
+            elif dq_single:
+                dq_single = ch != "'"
+            elif dq_nest and ch == "#" and dq_prev != "word":
+                # A comment to bash inside the substitution, running to the end of the line and past any
+                # quote on it, which this scan would read as the string's closing quote: it notes.
+                return "unreadable"
+            elif dq_nest and ch == "<" and command.startswith("<<", i):
+                # A here-document opened inside a double-quoted command or backquote substitution (the
+                # commit-message form): bash reads its body under bash's own here-document rules, while
+                # this scan reads the span as double-quoted text whose quote state each body quote
+                # toggles, so a stray quote in such a body once shifted that state onto a later REAL
+                # bare `&` outside the substitution, which read as quoted text and was silently
+                # allowed. Where that body ends cannot be read with certainty, so the scan notes at
+                # the `<<` itself (a `<<<` here-string here draws the same note: an over-note, never
+                # a miss). Best effort only: dq_nest follows quotes and parentheses in the
+                # substitution approximately, so a misread quote or `)` can hide this `<<` (the
+                # known misses in the docstring). In LIFTED MODE the commit-message form that
+                # resolves to its exact close is the shape the lift vouches for, so it is skipped
+                # whole to the `)` as data (the LIFTED MODE paragraph of the docstring); the `)`
+                # itself is re-read by the branch below, which pops the substitution.
+                if lifted and len(dq_nest) == 1 and dq_nest[-1] == "(" and dq_subst_opened >= 0:
+                    close = _subst_heredoc_close(command, dq_subst_opened, i, n)
+                    if close is not None:
+                        prev_dup, prev, after_dollar = False, "word", False
+                        dq_prev = "word"
+                        i = close
+                        continue
+                return "unreadable"
+            elif dq_nest and ch == "'":
+                dq_single = True
+            else:
+                if ch == "(" and (dq_nest or after_dollar):
+                    if not dq_nest and after_dollar:
+                        # The index of the `$` that opened the substitution now innermost in this
+                        # string, for the lifted commit-message-form close above; stale once the
+                        # substitution closes or the string ends (both reset it below).
+                        dq_subst_opened = i - 1
+                    dq_nest.append("(")
+                elif ch == ")" and dq_nest and dq_nest[-1] == "(":
+                    dq_nest.pop()
+                    if not dq_nest:
+                        dq_subst_opened = -1
+                elif ch == "`":
+                    _nest_track(dq_nest, ch, False)
+                dq_prev = ("paren" if ch in "()" else "backquote" if ch == "`"
+                           else "break" if ch.isspace() or ch in ";&|<>" else "word")
+            prev_dup, prev, after_dollar = False, "word", ch == "$"
+            i += 1
+            continue
+        if redirect_target and not (ch in "<> \t" or (ch == "&" and prev_dup)
+                                    or (ch == "|" and command[i - 1] == ">")):
+            redirect_target = False  # the redirect's target operand starts at this character
+            target_word = True
+            if ch == "$" and i + 1 < n and command[i + 1] == "{":
+                # The operand begins with a `${...}` parameter expansion: bash parses it as ONE word, so
+                # a provably simple expansion (a name, then only literal characters up to the first `}`)
+                # is consumed whole (its inner blanks do not end the operand nor restore the pending
+                # command position) rather than letting a `${x:-a b}` split a word out of it. Every other
+                # spelling (left unclosed, not opened by a name, as a bash 5.3 `${ cmd; }` is, or holding
+                # any quote, backslash, `$`, backquote, `<` or `>`) draws the note: the scan never reads
+                # the remainder as code to decide silence.
+                end = _orch_skip_param_expansion(command, i, n)
+                if end is None:
+                    return "unreadable"
+                prev_dup, prev, after_dollar = False, "word", False
+                i = end
+                continue
+        if target_word:
+            if ch in " \t\n;&|()<>":
+                target_word = False  # the target operand ends here
+            elif ch == "$" and command.startswith("{", i + 1):
+                # Any other `${` in a redirect target (glued after another operand character, or after a
+                # skipped expansion, a bash 5.3 `${ cmd; }` included) draws the note: it is not read.
+                return "unreadable"
+        if ch == "#":
+            reading = _hash_comment_reading(nest, prev)
+            if reading is None:
+                # The scan cannot tell whether the text after this `#` is code, so it emits the note
+                # rather than read that text as a comment or as words.
+                return "unreadable"
+            if reading:  # a certain comment: the rest of THIS line is not code
+                nl = command.find("\n", i)
+                if nl == -1:
+                    break
+                if command[nl - 1] == "\\":
+                    # The comment's line ends in a backslash-newline. bash ends the comment at the
+                    # newline regardless, but every backslash-newline outside a single-quoted span
+                    # notes (the uniform continuation rule above), so each span this scan skips as
+                    # data is checked for one: this comment's line here, a skipped arithmetic span
+                    # and a skipped here-document body at their own skips (nl > i always: the `#`
+                    # at i is not a newline, so nl - 1 is at least i and inside the comment).
+                    return "unreadable"
+                i = nl
+                continue
+        if ch == "\n" and heredocs:
+            # The bodies of the here-documents opened on this line follow its newline: skip them as data.
+            # bash joins a backslash-newline in an unquoted body before it compares a line with the
+            # delimiter, which this raw line match does not, so one anywhere up to the closing line (or
+            # to the end, for a body left open) draws the note instead; and a body whose closing
+            # delimiter line never comes consumes the rest of the command while bash would still be
+            # reading here-document input, so nothing past its opener was really checked and it notes
+            # too (the open-construct rule at the end of this scan), never a silent skip. A body under
+            # a QUOTED delimiter (reached only in lifted mode) is literal to bash, a backslash-newline
+            # in it included, so only an unquoted body draws the continuation note; and such a literal
+            # body whose closing line never comes (a quoted delimiter holding a backslash-newline
+            # matches no line) is data to the end of the command to bash too, so it is skipped to the
+            # end rather than noted, exactly as the lexer the lift vouched it with reads it.
+            end = i + 1
+            for delim, strip_tabs, literal_body in heredocs:
+                body_end, body_closed = _orch_heredoc_bodies_end(
+                    command, end, n, ((delim, strip_tabs),))
+                if literal_body:
+                    end = body_end
+                    continue
+                if not body_closed or command.find("\\\n", end, body_end) != -1:
+                    return "unreadable"
+                end = body_end
+            i = end
+            heredocs = []
+            prev_dup, prev, after_dollar = False, "break", False
+            command_position = next_command = True
+            continue
+        if ch.isspace():
+            prev_dup, after_dollar = False, False
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
+            if ch == "\n":
+                command_position = next_command = True
+            elif ch in " \t":
+                if not redirect_target:  # a blank before a redirect's target does not restore position
+                    command_position = next_command
+            else:
+                command_position = next_command = False  # any other space is a word character to bash
+            i += 1
+            continue
+        if ch in "\\'\"":
+            if ch == "\\":
+                escaped = True  # the classes are left to the character it escapes
+            elif ch == "'":
+                in_single, prev, after_dollar = True, "word", False
+            else:
+                in_double, prev, after_dollar = True, "word", False
+            prev_dup = False
+            if command_position:
+                command_position = next_command = False  # a quoted or escaped command word is not read
+            i += 1
+            continue
+        if ch == "&":
+            after_dollar = False
+            prev = "break" if bash_word_starts else "word"
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt == "&":
+                prev_dup = False
+                command_position = next_command = True
+                i += 2
+                continue
+            if nxt == ">":
+                prev_dup = False
+                i += 1
+                continue
+            if prev_dup:
+                if command[i - 1] == "|":
+                    command_position = next_command = True
+                prev_dup = False
+                i += 1
+                continue
+            return "detach"
+        if closes is not None and ch in "$(" and command.startswith("((", i + (ch == "$")):
+            start = i + (ch == "$")
+            end = closes[start]
+            if end != -1 and closes[start + 1] == end - 1:
+                # arithmetic: `$((` or `((` whose parentheses close as `))`; its `&` is a bitwise AND,
+                # and the `)` it ends at leaves a following `#` uncertain, as it does after any `)`
+                if command.find("\\\n", start, end) != -1:
+                    # The skipped span holds a backslash-newline: the uniform continuation rule
+                    # (the escape handling above) notes for one anywhere outside a single-quoted
+                    # span, and this skip would otherwise pass over it as data. Each span is
+                    # scanned once (the scan resumes past it), so this stays linear.
+                    return "unreadable"
+                prev_dup, prev, after_dollar = False, "paren", False
+                command_position = next_command = False
+                i = end + 1
+                continue
+        if (ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
+                and not (prev_dup and command[i - 1] == "<")):  # the `<<` that ends a `<<<` opens nothing
+            if nest or subst_open:
+                # A here-document opened while a parenthesis, `${...}` or backquote substitution is
+                # open: bash 5.3 ends such a body inside a command or process substitution or
+                # backquotes at a line that merely STARTS with the delimiter when a `)` or a backquote
+                # follows it on that line (x=$(cat <<EOF ... EOF) runs the rest of that line as
+                # commands), so the exact-delimiter-line skip below would misread where the body ends
+                # and read real commands as data. Where the body ends is unknown, so the scan notes.
+                # The substitution count is read as well as the stack: a bare case pattern's `)`
+                # pops the stack's parenthesis (x=$(case y in y) :;; esac; cat <<EOF), but it cannot
+                # close a command or process substitution on the count, and neither can a `)` the
+                # stack does not match against a `(` on top (text inside a `${...}` expansion or a
+                # backquote span, x=$(echo ${y%)}; ...)), so the body is still noted.
+                return "unreadable"
+            parsed = _orch_plain_heredoc_delim(command, i + 2, n)
+            if parsed is None:
+                # A here-document delimiter that is not provably simple (a character outside the plain
+                # set, a word bash reads further than this scan, or no delimiter word at all) draws the
+                # note: where the body ends is unknown, so the scan never reads the remainder as code to
+                # decide silence. In LIFTED MODE a spec the shared in-scope parser reads as QUOTED is
+                # the shape the lift vouches for, so its literal body is skipped as data at the exact
+                # delimiter line instead (the LIFTED MODE paragraph of the docstring); every spec that
+                # parser refuses, and every unquoted one it alone reads, still notes.
+                shared = _parse_heredoc_delim(command, i + 2, n) if lifted else None
+                if shared is None or not shared[0]:
+                    return "unreadable"
+                heredocs.append((shared[1], shared[2], True))
+                prev_dup, prev, after_dollar = False, "word", False
+                command_position = False
+                i = shared[3]
+                continue
+            heredocs.append((parsed[0], parsed[1], False))
+            prev_dup, prev, after_dollar = False, "word", False
+            command_position = False
+            i = parsed[2]
+            continue
+        if command_position:
+            match = _ORCH_NOTE_WORD_RE.match(command, i)
+            if match is not None:
+                word, end = match.group(), match.end()
+                base = word.rsplit("/", 1)[-1]
+                at_break = end >= n or command[end] in _ORCH_BASH_WORD_BREAKS
+                if (found is None and at_break and base in _ORCH_DETACH_WORD_EFFECTS
+                        and not (base == "setsid" and _orch_setsid_waits(command, end))):
+                    found = base
+                next_command = bool(
+                    _ENV_ASSIGN_RE.match(word) or word.startswith("-")
+                    or (at_break and (base in _ORCH_NOTE_COMMAND_PREFIXES
+                                      or _ORCH_NOTE_NUMBER_RE.fullmatch(word)))
+                    or (end < n and command[end] in "<>" and _ORCH_NOTE_NAMED_FD_RE.fullmatch(word))
+                    # The word after a `function` keyword is the function's NAME, and the token after
+                    # the name opens its body (`function f { ...; }`): the body is bash code, so the
+                    # name keeps command position for it.
+                    or after_function)
+                after_function = at_break and base == "function"
+                if at_break and word == "case":
+                    # A `case` statement can hold bare patterns, whose `)` is no close to bash: from
+                    # here on no `)` can be told from one, so the substitution count stops falling.
+                    case_word = True
+                command_position = False
+                for c in word:
+                    _nest_track(nest, c, False)  # of the stack's characters a word holds only `}`
+                prev_dup, prev, after_dollar = False, "word", False
+                i = end
+                continue
+        if ch in ";|" and not redirect_target:
+            command_position = next_command = True
+        elif ch == "(":
+            # A `(` glued to the character before it opens a substitution or an extglob (`$(`, `<(`,
+            # `>(`, `a+(`); any other `(` opens a subshell or a parenthesised case pattern. The
+            # distinction decides what its `)` restores below, so it is saved with the `(`.
+            glued = i > 0 and command[i - 1] not in " \t\n;&|("
+            # A command or process substitution's `(` (one after an unquoted, unescaped `$`, `<` or
+            # `>`; an escaped or quoted opener never reaches here with after_dollar set, and reading
+            # a literal `\<(` as one can only over-note) also raises the substitution count above.
+            is_subst = after_dollar or (i > 0 and command[i - 1] in "<>")
+            groups.append((glued, next_command, i, is_subst))
+            subst_open += is_subst
+            command_position = next_command = True
+        elif ch == ")":
+            if groups and nest and nest[-1] == "(":
+                # Only a `)` the nesting stack itself matches against a `(` on top closes a group
+                # here: one met while a `${...}` or a backquote is innermost is text to bash, as in
+                # x=$(echo ${y%)}; ...), so it closes nothing on the substitution count below
+                # either. From its opener to the end of the command a substitution stays counted
+                # open unless this same stack proves it closed (a count any `)` lowered read that
+                # substitution as closed and skipped a later here-document body at a wrong line).
+                glued, saved, opened, is_subst = groups.pop()
+                if is_subst and not case_word:
+                    # The `)` of a closed command or process substitution. After a `case` keyword it
+                    # could instead be a bare pattern's, so the count stays up there and a later
+                    # here-document draws the note (an over-note, never a body skipped at a wrong line).
+                    subst_open -= 1
+                if not glued or _orch_span_blank(command, opened + 1, i):
+                    # A word directly after a `)` is bash code only where the `)` closes a case
+                    # pattern (after a subshell's `)` it is a syntax error), and after glued EMPTY
+                    # parens, which close a function definition (`f()`) whose body follows (an empty
+                    # `$()` leaves only an over-note). So such a `)` restores command position:
+                    # `case x in (x) setsid job;; esac` and a function body are read as code, and a
+                    # wrong restore can only over-note, never miss.
+                    command_position = next_command = True
+                else:
+                    next_command = saved
+                    command_position = False
+            else:
+                # A case pattern's `)`, or one the stack does not match (text inside a `${...}`
+                # expansion or a backquote span): a command can follow, and a wrong restore can
+                # only over-note, never miss.
+                command_position = next_command = True
+        elif ch in "<>|":
+            # a redirect: the operand that follows is its target, not a command, so the pending command
+            # position (next_command) must survive the operator, any blanks, and the whole target operand
+            # (a `|` reaches here only as the second character of the noclobber redirect `>|`)
+            command_position = False
+            redirect_target = True
+        elif command_position:
+            command_position = next_command = False
+        _nest_track(nest, ch, after_dollar)
+        if ch in "()":
+            prev = "paren"
+        elif ch == "`":
+            prev = "backquote"
+        else:
+            prev = "break" if ch in _ORCH_BASH_WORD_BREAKS and bash_word_starts else "word"
+        prev_dup = ch in (">", "<", "|")
+        after_dollar = ch == "$"
+        i += 1
+    if in_single or in_double:
+        # The scan ends inside an open quote: bash reads the remainder differently from this scan
+        # (an unbalanced quote, or a quote state shifted by text the scan cannot model), so a detach
+        # past the point the quote opened cannot be ruled out. The note is emitted, never a silent
+        # allow.
+        return "unreadable"
+    if escaped or heredocs or nest or groups:
+        # The scan ends with an opened construct still open: a trailing backslash that escapes
+        # nothing, a here-document opener whose body never started (no newline follows it on the
+        # command), or an unclosed parenthesis, `${...}` or backquote substitution. bash would still
+        # be reading input there, or rejects the command, so what the opened construct holds was
+        # never really checked and a detach in it cannot be ruled out: the note is emitted, never a
+        # silent allow. A substitution whose `(` the scan already read as closed at a `)` that
+        # closes nothing to bash, such as a bare case pattern's, is not seen here (its
+        # here-documents are still noted through the substitution count above, and
+        # with no here-document and no detach after it the scan stays silent, a disclosed miss).
+        return "unreadable"
+    return found
+
+
+def _orch_foreground_note_kind(command, lifted=False):
+    """What the note outside registry scope names for a foreground command: "detach" when either `#`
+    comment rule (_orch_note_scan) meets a bare `&`, else the first kind either rule met ("unreadable"
+    for a skipped span it could not read with certainty, a backslash-newline line continuation outside
+    a single-quoted span, a `#` whose comment reading depends on context, a scan that ends inside an
+    open quote or with an opened construct still open, or a `<<` it reads as inside a double-quoted
+    substitution, a best-effort rule, or a setsid, nohup or disown command word),
+    else None. Any non-None kind draws the note; none of them ever blocks. lifted is passed to both
+    scans (the LIFTED MODE paragraph of _orch_note_scan): the caller sets it only after the in-scope
+    detector lifted every bare `&` the raw scan reads, so the two vouched here-document shapes are
+    read as data and the returned kind is the first note cause OUTSIDE them (the true union), never
+    a note those shapes alone would draw."""
+    kinds = (_orch_note_scan(command, False, lifted), _orch_note_scan(command, True, lifted))
+    if "detach" in kinds:
+        return "detach"
+    return kinds[0] or kinds[1]
+
+
+# Sinks that TRUNCATE their input, so a producer piped into one loses both its full
 # output and (absent `pipefail`) its exit status. A subset of _CONSOLE_SINKS: cat/tee pass output through
 # (tee can even durably capture to a real file), so only head/tail are truncating.
 _ORCH_TRUNCATING_SINKS = frozenset(("head", "tail"))
@@ -13734,7 +19869,8 @@ def _orch_registry_required():
     case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
     nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
     around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
-    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
+    Bash call that passes the pre-scope checks instead of the default outcome, in which
+    orch_truncation_guard denies nothing, and ABSENT
     includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
     there a git failure alone denies; a registry entry the discovery probe cannot confirm
     (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
@@ -13756,9 +19892,26 @@ def _orch_registry_required():
     return not (value.isascii() and value.lower() in _ORCH_REQUIRE_REGISTRY_OFF_VALUES)
 
 
+def _orch_oos_unreadable_input_note(detail):
+    """The out-of-scope note for a Bash call whose tool input this guard cannot read (a tool_input that
+    is missing, null or not a JSON object, a command that is missing or not a string, or a
+    run_in_background that is present but not a real boolean): allowed WITH A NOTE naming the field it
+    could not read, never the silent allow such a call once was here (a detach such an input carries is
+    never scanned, so silence would read ignorance as clean) and never a deny (outside registry scope
+    this guard denies nothing)."""
+    return _allow_note(
+        "AIQT guardrail (note, rule trkasy): this Bash call's input could not be read: {}. Whether the "
+        "call detaches work that runs on after it returns cannot be ruled out from input this guard "
+        "cannot read. No orchestration registry scopes this session, so this is a note, not a deny. "
+        "Re-issue the call with a tool_input object carrying a string command and a boolean "
+        "run_in_background to make it readable.".format(detail))
+
+
 def orch_truncation_guard(data):
-    """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
-    performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
+    """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: its
+    background ALLOW test performs NO shell parsing, so no lexical or quoting edge can fabricate a capture
+    (the truncating-sink deny and the foreground detach detector below do read the command through the
+    shared lexer, and only to deny or to lift a deny). A background dispatch
     is ALLOWED only when its command is a PLAIN command carrying no shell metacharacter and no shell reserved
     word (whose full stdout the harness binds to the TaskOutput completion signal); ANY shell metacharacter -
     a pipe, redirect, separator, quote, expansion, substitution, grouping, glob, comment, or newline - or a
@@ -13773,7 +19926,11 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait); every other foreground call in registry scope remains out of scope (the harness returns its
+    and wait). The detach is read by _orch_foreground_detach_lexed: the shared lexer's bare `&` separator
+    denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
+    is lifted ONLY where every `&` it reads lies, as the lexer places it, in a quoted here-document body, a
+    single- or double-quoted string, or a comment. Every other foreground call in registry scope remains
+    out of scope (the harness returns its
     output directly; in registry-required mode a cwd with no registry is denied before this point).
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
@@ -13787,13 +19944,42 @@ def orch_truncation_guard(data):
     the ancestor chain; by default a git discovery failure alone - no git binary, a dubious-ownership
     refusal, a broken config, a bare repository - still never denies, while in registry-required mode one
     that hides a registry reachable only through the git toplevel reads as absent and denies), so with NO registry entry on that chain and
-    none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
+    none at a git-resolved toplevel the guard by default denies nothing and allows every Bash call that
     passes the pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
-    unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
+    unreadable, or invalid keeps it active. OUT-OF-SCOPE NOTE: in that no-registry case a readable
+    foreground command (run_in_background false or omitted, command a string) is allowed WITH ONE NOTE
+    naming the tracked background mechanism when either of two readers finds work that may detach. The
+    first is the detector the registry scope denies on (_orch_foreground_detach_lexed): a command it reads
+    as a "detach" or as "unbalanced" (its quoting or comments cannot be read to the end) gets that
+    detector's note, naming rule trkasy and run_in_background, the "unbalanced" one saying the command
+    could not be read to its end (a later release turns it into the deny the registry scope gives).
+    Otherwise the second reader decides: a command that detaches work, by a
+    bare `&` or by a setsid (without -w), nohup or disown command (_orch_foreground_note_kind, a scan that
+    also skips outer-level here-document bodies, arithmetic and redirect operands), and one whose scan met
+    a span it would skip but cannot read with certainty (a here-document delimiter that is not a whole
+    word of letters, digits and `_ . + -`, a here-document opened while a parenthesis, `${...}` or
+    backquote substitution is open or not provably closed, a here-document the scan reads as opened
+    inside a double-quoted command substitution, a best-effort rule (the disclosed misses in
+    _orch_note_scan), a body holding a backslash-newline up to its
+    closing line, a `${...}` redirect target left unclosed, not opened by a name or holding anything
+    beyond literal characters, or a further `${` in a redirect target), or a backslash-newline line
+    continuation anywhere outside a single-quoted span, or whose scan ends inside an
+    open quote or with an opened construct still open at the end of the command (an unterminated
+    here-document, an unclosed substitution or expansion, or a trailing escape), gets that scan's note.
+    A command whose every bare `&` the first reader lifts, because the shared lexer places each in a
+    quoted here-document body, a quoted string or a comment, is no detach (as in registry scope) and
+    draws no note for that `&` or for a span the second reader cannot read, only for a setsid, nohup
+    or disown it names. A call there whose input cannot be read (a tool_input that is missing, null or not an
+    object, a command that is missing or not a string, or a run_in_background that is present but not a
+    real boolean) is allowed WITH A NOTE naming the field this guard could not read
+    (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
+    (run_in_background exactly true) and a readable foreground command neither reader flags are the
+    silent allow. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
     stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
-    leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
+    the default outcome, in which the guard denies nothing (_orch_registry_required), and so does a
+    registry discovery that cannot be
     evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
     toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
     file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000 for a
@@ -13803,8 +19989,8 @@ def orch_truncation_guard(data):
     whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
     toplevel that exists but cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6,
     with its own reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a
-    present registry does (a git toplevel that does not exist is absent: inert by default, denied as an
-    absent registry in that mode). PRE-SCOPE DENIES, checked BEFORE the
+    present registry does (a git toplevel that does not exist is absent: by default the guard then denies
+    nothing, and that mode denies it as an absent registry). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -13812,7 +19998,8 @@ def orch_truncation_guard(data):
     cannot open or examine, or an ancestor chain that changed while the walk read it:
     _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
     non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
-    are out of scope (allow; in registry-required mode that cwd is denied instead)."""
+    are out of scope (allow, with the out-of-scope note above for a foreground detach; in
+    registry-required mode that cwd is denied instead)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -13867,18 +20054,119 @@ def orch_truncation_guard(data):
         # reachable only through the git toplevel is denied below, and git success removes that deny.
         if _orch_registry_required():
             # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
-            # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+            # absent registry fails closed instead of the default, in which the guard denies
+            # nothing. Default unchanged.
             return _deny(
                 "AIQT rule trkasy (track-launched-work) (registry-required mode): "
                 "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
-                "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                "instead of the default, in which this guard denies nothing, and no "
+                ".aiqt/orchestration.local.json or "
                 ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
                 "toplevel. Commit the orchestration registry at the repository root, run from a "
                 "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
-                "restore the default scoping (inert allow with no registry).",
+                "restore the default scoping (with no registry this guard denies nothing and allows).",
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
-        return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+        # Not an orchestrated session: no registry on the chain or at a git toplevel. A call whose input this
+        # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing
+        # or not a string, or a run_in_background that is present but not a real boolean) is allowed with a
+        # note naming the field it could not read, never silently (a detach such an input carries is never
+        # scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case outside
+        # registry scope); a readable background dispatch (run_in_background exactly true) keeps the silent
+        # allow. A readable foreground command gets ONE note when either reader finds work that may detach:
+        # the detector the registry scope denies on (a bare-& detach, or quoting or comments it cannot read
+        # to the end, where a later '&' can be a hidden detach) gives its own note, and otherwise the note
+        # scan's detach, detacher word or unreadable span gives that scan's note. Where the detector lifts
+        # every bare '&' its scan reads (the shared lexer places each in a quoted here-document body, a
+        # quoted string or a comment) the command is no detach, as in registry scope, and the lift
+        # suppresses ONLY the notes its own shapes cause: the note scan runs again in lifted mode,
+        # reading the vouched here-document shapes as data, so a setsid, nohup or disown command word
+        # anywhere, a line continuation, an unclosed expansion, and every other cause outside those
+        # shapes keeps its note (the single note is the true union of both readers).
+        out_input = data.get("tool_input")
+        if not isinstance(out_input, dict):
+            kind = "missing" if "tool_input" not in data else _orch_json_kind(out_input)
+            return _orch_oos_unreadable_input_note(
+                "its tool_input is {}, not a JSON object, so neither its command nor its "
+                "run_in_background flag can be read".format(kind))
+        out_command = out_input.get("command")
+        if not isinstance(out_command, str):
+            kind = "missing" if "command" not in out_input else _orch_json_kind(out_command)
+            return _orch_oos_unreadable_input_note(
+                "its command is {}, not a string, so it cannot be scanned".format(kind))
+        out_rib = out_input.get("run_in_background", False)
+        if out_rib is True:
+            # A readable background dispatch: not a foreground call, so the foreground detach note does
+            # not apply, and outside registry scope the background capture rules do not run (disclosed).
+            return _allow()
+        if out_rib is not False:
+            return _orch_oos_unreadable_input_note(
+                "its run_in_background is {}, not a boolean, so whether this is a foreground call "
+                "cannot be read".format(_orch_json_kind(out_rib)))
+        lifts = []
+        detach_kind = _orch_foreground_detach_lexed(out_command, lifts)
+        if detach_kind == "unbalanced":
+            return _allow_note(
+                "AIQT rule trkasy (track-launched-work): this guard could not read this foreground command "
+                "to its end: its scan ends with a single or double quote still open, or meets a '#' whose "
+                "comment reading depends on context (right after a '(', ')' or backquote, or at the start of "
+                "a word inside an open parenthesis, ${...} or backquote substitution), so it cannot prove "
+                "that a later '&' is quoted or commented text rather than a bare detach that launches "
+                "asynchronous work this tool call does not track. No orchestration registry was found for "
+                "this cwd, so this release allows it with this warning; a later release denies it, as an "
+                "orchestrated session already does. If it launches work in the background, use the "
+                "platform's tracked background dispatch (run_in_background) and collect its completion. "
+                "Otherwise balance the quoting, put a blank before such a '#' outside any grouping or "
+                "substitution, or write the text to a file and pass the file.")
+        if detach_kind == "detach":
+            return _allow_note(
+                "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a bare "
+                "'&', launching asynchronous work this tool call does not track, so its result and failure "
+                "would be lost. No orchestration registry was found for this cwd, so this release allows it "
+                "with this warning; a later release denies it, as an orchestrated session already does. Use "
+                "the platform's tracked background dispatch (run_in_background) and collect its completion, "
+                "or keep the command in the foreground and wait for it. If this '&' is not a detach at all "
+                "(for example a bitwise AND in an arithmetic expansion, an '&' in the body of a here-document "
+                "whose delimiter is unquoted, or one inside a substitution in a double-quoted string), quote "
+                "the here-document delimiter (<<'EOF') where its body needs no expansion, or write the text "
+                "to a file and pass the file instead.")
+        if lifts:
+            # The detector read no detach although its raw scan did (lifts records that, so the scan is not
+            # run a second time): it lifted every bare '&' that scan reads (the shared lexer places each in
+            # a quoted here-document body, a quoted string or a comment), so the command is no detach and
+            # the lift's own shapes draw no note; but the lift
+            # vouches ONLY for those shapes, so the note scan runs again in lifted mode, reading them as
+            # data, and every note ANOTHER cause draws is kept (a setsid, nohup or disown anywhere, a
+            # line continuation or unclosed expansion after a body included): the single note is the
+            # true union, never silence bought by an unrelated lifted '&'.
+            note_kind = _orch_foreground_note_kind(out_command, lifted=True)
+        else:
+            note_kind = _orch_foreground_note_kind(out_command)
+        if note_kind is None:
+            return _allow()
+        if note_kind == "detach":
+            what = "detaches a child with a bare '&', so the work runs on after this call returns"
+        elif note_kind == "unreadable":
+            what = ("holds a here-document, a redirect target, a quote, a line continuation, an open "
+                    "construct or a '#' this guard cannot read "
+                    "with certainty (a here-document delimiter that is not one plain unquoted word, a "
+                    "here-document opened while a parenthesis, '${...}' or backquote substitution is open "
+                    "or not provably closed, a here-document opened inside a double-quoted command "
+                    "substitution, a parameter expansion left unclosed or holding quoting or "
+                    "substitution syntax, a backslash-newline line continuation outside a single-quoted "
+                    "span, which can split any token, a '#' whose comment reading depends on context, "
+                    "a here-document, substitution or escape left open at the end of the command, "
+                    "or a scan that "
+                    "ends inside an open quote), so work that detaches and runs on after this call returns "
+                    "cannot be ruled out")
+        else:
+            what = "runs {}, which {}".format(note_kind, _ORCH_DETACH_WORD_EFFECTS[note_kind])
+        return _allow_note(
+            "AIQT guardrail (note, rule trkasy): this foreground command {}; its result and failure are not "
+            "collected unless something tracks them. No orchestration registry scopes this session, so this "
+            "is a note, not a deny. To keep the work observable, use the platform's tracked background "
+            "mechanism (run_in_background) and collect its completion, or run it in the foreground and "
+            "wait. If the detach is deliberate and its result is not needed, record that choice.".format(what))
     if scope == "cannot-evaluate" and _orch_registry_required():
         # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
         # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault
@@ -13953,18 +20241,21 @@ def orch_truncation_guard(data):
                 .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
                 "AIQT guardrail: denied a foreground Bash call with no readable command string "
                 "(fail-closed).")
-        detach_kind = _orch_foreground_detach_kind(command)
+        detach_kind = _orch_foreground_detach_lexed(command)
         if detach_kind == "unbalanced":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command ends with a single or "
-                "double quote still open as this guard's scan reads it, so the scan cannot prove that a "
-                "later '&' is quoted text rather than a bare detach; it is denied rather than allowed "
-                "unread (check-fails-closed-on-unreadable). The open quote may be a real unbalanced quote, "
-                "or one the scan misreads: an apostrophe or double quote in a here-document body (scanned "
-                "as code even under a quoted delimiter) or an ANSI-C $'...' quote. Balance the quoting, or "
-                "write the text to a file and pass the file.",
-                "AIQT guardrail: denied a foreground command whose quoting this guard could not read to the "
-                "end (rule trkasy, fail-closed).")
+                "double quote still open as this guard's scan reads it, or carries a '#' whose comment "
+                "reading depends on context (right after a '(', ')' or backquote, or at the start of a "
+                "word inside an open parenthesis, ${...} or backquote substitution), so the scan cannot "
+                "prove that a later '&' is quoted or commented text rather than a bare detach; it is denied "
+                "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
+                "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
+                "here-document body (scanned as code even under a quoted delimiter) or an ANSI-C $'...' "
+                "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
+                "substitution, or write the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
+                "read to the end (rule trkasy, fail-closed).")
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -13973,9 +20264,10 @@ def orch_truncation_guard(data):
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
                 "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
-                "arithmetic expansion, or an '&' in a here-document body, which this scan reads as code "
-                "even under a quoted delimiter), write the text to a file and pass the file instead; the "
-                "background-dispatch advice applies only to a real detach.",
+                "arithmetic expansion, an '&' in the body of a here-document whose delimiter is unquoted, "
+                "or one inside a substitution in a double-quoted string), quote the here-document "
+                "delimiter (<<'EOF') where its body needs no expansion, or write the text to a file and "
+                "pass the file instead; the background-dispatch advice applies only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
@@ -13992,9 +20284,27 @@ def orch_truncation_guard(data):
     # output is captured only through a truncating filter is not observable completion"). This is a proven
     # hazard, not a merely-unprovable capture, so it DENIES-and-educates (use full durable capture, or keep
     # it foreground) rather than allow-note. Detected lexically: any head/tail stage fed by an upstream `|`
-    # producer. A parse error falls through to the unprovable allow-note below (nothing proven).
+    # producer. A '#' whose comment reading depends on context (the comment rule above _nest_track) is
+    # judged on the segments of both readings, so a '| head' that either reading reaches denies. A parse
+    # error falls through to the unprovable allow-note below (nothing proven), except at such a '#' the
+    # lexer cannot judge under both readings: that '#' is exactly where one reading ends the line and the
+    # other reads on into a possible '| head', so it denies.
     try:
         _segs = _segments(command)
+    except _UncertainHashError:
+        return _deny(
+            "AIQT rules trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness): this "
+            "background dispatch carries a '#' whose comment reading depends on context (right after a '(', "
+            "')' or backquote, or at the start of a word inside an open parenthesis, ${...} or backquote "
+            "substitution) that the shared lexer could not judge under both readings (more than four such "
+            "'#', one inside or right after a backquote substitution, or a reading that does not lex), so "
+            "this guard cannot tell whether the text after it is a comment or pipes the "
+            "producer into a truncating sink (head/tail) that would discard its output and exit status; it is "
+            "denied rather than allowed unread (check-fails-closed-on-unreadable). Put a blank before such a "
+            "'#' outside any grouping or substitution, or drop it, and capture the producer's full output to "
+            "a real file.",
+            "AIQT guardrail: denied a background dispatch carrying a '#' whose comment reading this guard "
+            "could not decide (rules trkasy/vrfdlv, fail-closed).")
     except ValueError:
         _segs = None
     if _segs:
@@ -14064,53 +20374,85 @@ def _orch_raw_unquoted_words(raw):
     the shared _read_word reader (which decides quoting from raw positions and raises on an unbalanced
     quote). A word is reported ONLY when its raw slice equals its decoded text, i.e. it carried NO quote or
     escape anywhere: argv_opaque does not flag plain quoting, so this raw-slice comparison is the sole sound
-    signal that a token was written bare. A '#' at a word boundary begins a comment (the rest is not command
-    text); a redirect operator and its one following target word are skipped so a target is not counted as a
-    word. Returns [] on any scan error, which the caller treats as 'no reserved word here', the safe
-    direction (the whole command already lexed cleanly before this is reached, so a valid segment does not
-    error)."""
+    signal that a token was written bare. A '#' at a word boundary is read with the shared comment rule
+    (above _nest_track) over a nesting stack this scan keeps for its own slice: it begins a comment (the
+    rest is not command text) when nothing is open there, and otherwise its reading depends on context, a
+    scan error, as is a '#' right after a backquote inside a word that may open a substitution (_read_word).
+    On a segment of a command with no uncertain '#' this scan reads each '#' as the lexer did. On a segment
+    of one reading of an uncertain '#' (_lex_readings) it reads a '#' at a word start with nothing open in
+    its own slice as a comment even where that reading took it as word text, so its words can differ from
+    that reading's; the poll-loop classifier judges every reading and keeps the strictest answer. A redirect
+    operator and its one following target word are skipped so a target is not counted as a word. Returns []
+    on any scan error, which the caller treats as 'no reserved word here', the safe direction (the whole
+    command already lexed before this is reached, so a valid segment does not error). A '#' inside a
+    substitution or expansion that a double-quoted word holds, whose reading depends on context
+    (_skip_quoting), is no scan error: the scan reads it as word text first and as a comment where that
+    does not scan, up to _HASH_READING_LIMIT such '#', and returns the words of the first reading that
+    scans, so a loop word beside such a double-quoted word is still counted (the lexer has already judged
+    that '#' under both readings, and the classifier reads the segments of each)."""
+    pending = [{}]
+    while pending:
+        reading = pending.pop()
+        try:
+            return _orch_raw_unquoted_scan(raw, reading)
+        except _UncertainHashError as exc:
+            if exc.backquote or exc.at is None or exc.at in reading or len(reading) >= _HASH_READING_LIMIT:
+                return []
+            pending.append(_hash_reading_with(reading, exc.at, True))
+            pending.append(_hash_reading_with(reading, exc.at, False))  # popped first: word text
+        except ValueError:
+            continue  # this reading does not scan; a later one may
+    return []
+
+
+def _orch_raw_unquoted_scan(raw, reading):
+    """One scan of _orch_raw_unquoted_words, with each '#' inside a substitution a double-quoted word holds
+    read as reading maps its index (_skip_quoting); raises ValueError (an _UncertainHashError at such a '#'
+    reading does not map) where the scan cannot read the segment."""
     words = []
     n = len(raw)
     i = 0
-    try:
-        while i < n:
-            c = raw[i]
-            if c in " \t":
+    nest = _NestStack()  # count entries so each word's "`" in nest test (see _nest_track) stays O(1)
+    while i < n:
+        c = raw[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "#":
+            if not _hash_comment_reading(nest, "break"):
+                raise _UncertainHashError("cannot evaluate a '#' whose comment reading depends on context")
+            break                       # word-boundary comment: the rest is not command text
+        if c in _METACHARS:
+            # within a segment the only metacharacter is a redirect operator ('<'/'>', or '&>' the
+            # lexer left in raw); skip the operator and one following target word so neither pollutes
+            # the word list. A separator metacharacter never appears here (it would end the segment).
+            _op, _kind, oplen = _match_operator(raw, i, n)
+            i += oplen
+            while i < n and raw[i] in " \t":
                 i += 1
-                continue
-            if c == "#":
-                break                       # word-boundary comment: the rest is not command text
-            if c in _METACHARS:
-                # within a segment the only metacharacter is a redirect operator ('<'/'>', or '&>' the
-                # lexer left in raw); skip the operator and one following target word so neither pollutes
-                # the word list. A separator metacharacter never appears here (it would end the segment).
-                _op, _kind, oplen = _match_operator(raw, i, n)
-                i += oplen
-                while i < n and raw[i] in " \t":
-                    i += 1
-                if i < n and raw[i] not in _METACHARS and raw[i] != "#":
-                    _t, _o, started, _d, _lt, i = _read_word(raw, i, n)
-                    if not started:
-                        break
-                continue
-            text, _o, started, _d, _lt, j = _read_word(raw, i, n)
-            if not started:
-                break
-            if raw[i:j] == text:            # no quote or escape anywhere in the word: written bare
-                words.append(text)
-            i = j
-    except ValueError:
-        return []
+            if i < n and raw[i] not in _METACHARS and raw[i] != "#":
+                _t, _o, started, _d, _lt, i = _read_word(raw, i, n, nest, hash_reading=reading)
+                if not started:
+                    break
+            continue
+        text, _o, started, _d, _lt, j = _read_word(raw, i, n, nest, hash_reading=reading)
+        if not started:
+            break
+        if raw[i:j] == text:            # no quote or escape anywhere in the word: written bare
+            words.append(text)
+        i = j
     return words
 
 
-def _orch_body_cmd(seg):
+def _orch_body_cmd(seg, raw_words):
     """(word, unquoted) for a loop segment's effective command word: basenamed, with a single leading loop
     reserved word (do/for/while/until) stripped as _orch_poll_body_argv does and a leading env-assignment
     prefix skipped, paired with whether that command-word TOKEN was written UNQUOTED in the raw source.
     Soundness of the sleep/probe conjuncts rests on this being the command WORD (an argument that merely
     spells 'sleep'/'gh' is not the command word, so it never fabricates a match); the raw-unquoted gate only
-    tightens it further. ('', False) when the segment resolves to no command word."""
+    tightens it further. ('', False) when the segment resolves to no command word. raw_words is
+    _orch_raw_unquoted_words(seg.raw), which the caller has already scanned, so the segment is not scanned
+    again for each conjunct."""
     argv = _orch_poll_body_argv(seg.argv)
     if not argv:
         return "", False
@@ -14118,7 +20460,7 @@ def _orch_body_cmd(seg):
     if idx >= len(argv):
         return "", False
     token = argv[idx]
-    return token.rsplit("/", 1)[-1], token in _orch_raw_unquoted_words(seg.raw)
+    return token.rsplit("/", 1)[-1], token in raw_words
 
 
 def _orch_poll_loop_at(segments, done_idx):
@@ -14151,13 +20493,13 @@ def _orch_poll_loop_at(segments, done_idx):
             return "indeterminate"          # a conditional reserved word or brace group in the loop span
     has_sleep = False
     for k in range(do_idx, done_idx + 1):
-        word, unq = _orch_body_cmd(segments[k])
+        word, unq = _orch_body_cmd(segments[k], words_by_seg[k])
         if word == "sleep" and unq:
             has_sleep = True
             break
     has_probe = False
     for k in range(header_idx, done_idx + 1):
-        word, unq = _orch_body_cmd(segments[k])
+        word, unq = _orch_body_cmd(segments[k], words_by_seg[k])
         if word in _ORCH_POLL_PROBE_CMDS and unq:
             has_probe = True
             break
@@ -14189,11 +20531,42 @@ def _orch_bg_poll_loop(command):
 
     The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
     'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&`
-    DENY-and-educate on the same event. Residuals are disclosed in the manifest."""
+    DENY-and-educate on the same event. Residuals are disclosed in the manifest.
+
+    A '#' whose comment reading depends on context (the shared lexer's comment rule) is judged under both
+    readings: each reading is classified on its own (_orch_poll_reading), since adding a reading's segments
+    to another's can turn a 'match' into 'indeterminate', and the strictest answer is kept ('match', then
+    'indeterminate', then 'none'). Where the lexer cannot judge it that way, the command's text
+    (_hash_doubt_scan) is read for the canonical shape's words: a loop header, 'done', an '&', 'sleep' and
+    a probe all present give 'match' (an over-match on such a command, which the truncation guard denies
+    anyway), else 'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
+    are written bare, so no quoting hides them from the text; the --watch and actions/runs probes it reads
+    from decoded tokens, so text holding quoting that scan does not decode (_hash_doubt_opaque) counts as
+    carrying a probe."""
     try:
-        segments = _lex_command(command)
+        readings = _lex_readings(command)
+    except _UncertainHashError:
+        scan = _hash_doubt_scan(command)
+        bare = all(word.search(scan) for word in _ORCH_POLL_DOUBT_RES)
+        probe = _hash_doubt_opaque(command) or _ORCH_POLL_DOUBT_PROBE_RE.search(scan)
+        return "match" if bare and probe else "indeterminate"
     except ValueError:
         return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
+    kinds = [_orch_poll_reading(segments) for segments in readings]
+    return next((kind for kind in ("match", "indeterminate") if kind in kinds), "none")
+
+
+# The canonical poll shape's words, each searched in a command's text when a '#' whose comment reading the
+# lexer cannot judge under both readings stops it (_orch_bg_poll_loop): a loop header, the 'done'
+# terminator, an '&' and a sleep, then the probe.
+_ORCH_POLL_DOUBT_RES = (
+    re.compile(r"\b(?:for|while|until)\b"), re.compile(r"\bdone\b"), re.compile(r"&"),
+    re.compile(r"\bsleep\b"))
+_ORCH_POLL_DOUBT_PROBE_RE = re.compile(r"\b(?:gh|curl)\b|--watch|actions/runs")
+
+
+def _orch_poll_reading(segments):
+    """_orch_bg_poll_loop's classification of one lex's segments (one reading of the command)."""
     if any(seg.sep_after in ("(", ")") for seg in segments):
         return "indeterminate"              # subshell or C-style for (( )) grouping: cannot attribute
     bare_amps = [i for i, seg in enumerate(segments) if seg.sep_after == "&"]
@@ -14223,15 +20596,25 @@ def orch_untracked_wait_loop(data):
     its pre-scope checks or its walk fail (those deny in every mode); where that walk finds
     a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
-    bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
-    or absent tool, no git toplevel, an absent registry, or a non-string/empty command; a NUL, heredoc,
+    bounded worker building a fire-and-forget poll is equally wrong. A payload with NO tool_name is
+    malformed, not another tool, and DENIES in every session (the shared missing-tool_name contract,
+    checked before the registry scope as orch_truncation_guard checks it). Fail-open (silent allow) on a
+    present non-Bash tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in
+    registry scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
+    (check-fails-closed-on-unreadable), never a clean pass. A NUL, heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
     depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
     specific untracked poll loop with a reason about the stranded poll."""
-    if data.get("tool_name") != "Bash":
-        return _allow()
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        # A missing tool_name is a malformed payload, not another tool: it is denied before the registry
+        # scope is read, as orch_truncation_guard denies it on the same event (the shared fail-closed
+        # contract).
+        return _deny_missing_tool_name("trkasy")
+    if tool_name != "Bash":
+        return _allow()                     # a present non-Bash tool is out of scope
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -14240,8 +20623,17 @@ def orch_untracked_wait_loop(data):
         return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
-    if not isinstance(command, str) or not command:
-        return _allow()                     # unreadable/empty command: out of scope, fail-open
+    if not isinstance(command, str):
+        # In registry scope a missing, non-object or non-string command is a cannot-evaluate input: the
+        # loop scan cannot run over what was not read, so it denies (check-fails-closed-on-unreadable)
+        # rather than passing clean.
+        return _deny(
+            "AIQT rule trkasy (untracked wait loop): the Bash payload carried no readable command string, "
+            "so this guard could not scan it for an untracked background wait loop; failing closed. "
+            "Re-issue the call with a string command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-closed).")
+    if not command:
+        return _allow()                     # an empty command runs nothing: no loop to scan, out of scope
     if _orch_bg_poll_loop(command) == "match":
         return _deny(
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
@@ -14410,6 +20802,10 @@ def _review_git(repo, *args, stdin=None):
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_GRAFT_FILE"] = os.devnull
     env["GIT_LITERAL_PATHSPECS"] = "1"
+    # the probe's messages are matched literally by callers (the identity probe reads git's
+    # not-a-git-repository answer), so the C locale pins them against translation; LC_ALL
+    # outranks LANG and LC_MESSAGES, and gettext ignores LANGUAGE under the C locale
+    env["LC_ALL"] = "C"
     try:
         return subprocess.run(["git", "-C", repo, "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
                                "-c", "core.untrackedCache=false", "-c", "diff.ignoreSubmodules=none",
@@ -16057,7 +22453,12 @@ _RDP_REPOSITORY_KEYS = ("core.worktree", "core.bare", "include.path", "includeif
 _RDP_GIT_READS = frozenset(("status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep",
                             "cat-file"))
 # git's global options before the subcommand: those taking the next word as their value (or, written
-# long, a value after =), and those taking none. Any other leaves the subcommand unknown.
+# long, a value after =), and those taking none. Any other leaves the subcommand unknown. The valued list is
+# narrower than _GIT_ARG_OPTS on purpose: this reader admits only the global options it has vetted, and
+# --attr-source and --shallow-file, which also take the next word, stay out, so a command carrying either ends
+# the parse with no subcommand and is refused rather than misread (--attr-source reads the attributes that
+# select diff and filter drivers from a tree, and --shallow-file names the file git reads the shallow boundary
+# from). --exec-path and --super-prefix take no separate value.
 _RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"))
 _RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
                                    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
@@ -17087,6 +23488,2446 @@ def review_dispatch_pin(data):
     return _allow()
 
 
+# --- rvwpin: review-workdir-hold (a review in flight pins its artefact) -------------------------------
+# ADOPTER-PROVIDED HOLD MARKERS: one JSON file per live review in GIT_COMMON_DIR/aiqt/review-holds/,
+# beside the hook-owned review-dispatch-binding records. The DISPATCHER writes a marker atomically
+# before the reviewer starts and removes it when the review returns or is abandoned; this hook never
+# writes one. Every linked worktree of a repository shares its common git directory, so the hook finds
+# a hold from the command's target alone, needs no orchestration registry, and is INERT (silent allow)
+# wherever no marker directory exists and the payload's cwd is absolute; there is no host-wide view of
+# holds, so a hold in a repository the command does not name stays unseen. A hookless dispatcher or an
+# adopter's resync tool runs the same
+# check as a preflight: pipe the PreToolUse payload to `aiqt_hooks.py review_workdir_hold`.
+_RWH_MARKER_MAX = 4096
+_RWH_MARKER_VERSION = 1
+_RWH_MARKER_KEYS = frozenset(("version", "workdir", "head", "dispatch_id", "created_utc", "expires_utc"))
+_RWH_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")  # a full sha1 or sha256 object id
+# A git word anywhere in the RAW text, quotes, substitutions, heredoc bodies and option values
+# included: the word git itself, the git of a git-<name> executable (git-reset), and the git
+# ending an interpreter path (/usr/bin/git). GIT_DIR= and .gitignore carry no boundary after the
+# t, so they do not match. Matching data that merely names git (a message, a path operand)
+# over-holds while a hold is live, a disclosed safe over-deny, never an under-block.
+_RWH_RAW_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+# The substitution spellings whose presence anywhere in the raw text (even quoted as data) keeps a
+# command out of the one plain-git form a live hold still allows: a command or process
+# substitution opener, a backquote, and the heredoc/here-string operator.
+_RWH_RAW_SUBST = ("$(", "`", "<<")
+# Shell words that mutate the calling shell's own state (its working directory included) in ways a
+# linear token scan cannot see, so the shell cwd is unknown from the word onward.
+_RWH_SHELL_STATE_WORDS = frozenset(("eval", "source", "."))
+# A GIT_-class assignment token (GIT_DIR=..., GIT_WORK_TREE+=..., any GIT_* name), wherever it
+# appears in a command: as a segment prefix, behind export or env, or inside a quoted script body.
+_RWH_GIT_ASSIGN_RE = re.compile(r"GIT_[A-Za-z0-9_]*\+?=")
+# Raw-text spellings that contribute hold-set candidates even where the shell structure hides the
+# operand from the token scan (a quoted `sh -c '...'` body, a heredoc body, an eval string): a -C
+# operand, a --git-dir/--work-tree value (the = and the separated form), a cd/pushd operand (after
+# any option words such as -P, -L or --, which the token scan's _rwh_cd_dest skips the same way),
+# and a GIT_-variable assignment value, each with one level of surrounding single or double quotes
+# stripped. Additive only: a match can only add a repository whose holds are consulted, never
+# remove one.
+_RWH_RAW_OPERAND = r"\"([^\"]*)\"|'([^']*)'|([^\s;&|()'\"`]+)"
+_RWH_RAW_C_RE = re.compile(r"(?:^|[\s'\"`])-C[ \t]+(?:" + _RWH_RAW_OPERAND + ")")
+_RWH_RAW_OVERRIDE_RE = re.compile(r"--(?:git-dir|work-tree)(?:=|[ \t]+)(?:" + _RWH_RAW_OPERAND + ")")
+_RWH_RAW_CD_OPERAND_RE = re.compile(
+    r"(?i)(?:^|[\s;&|(){'\"`])(?:cd|pushd)[ \t]+(?:-[-a-z@]*[ \t]+)*(?:" + _RWH_RAW_OPERAND + ")")
+_RWH_RAW_GIT_ASSIGN_RE = re.compile(r"GIT_[A-Za-z0-9_]*\+?=(?:" + _RWH_RAW_OPERAND + ")")
+# Every literal ABSOLUTE path anywhere in the raw text, wherever shell structure hides it from the
+# token scan: a path inside a quoted shell body (bash -c, sh -c, eval), a heredoc body, or any
+# other spelling the segment lexer does not surface as its own token. Additive only: each match is
+# one more hold-set candidate, never a resolution base and never a directory step. The preceding
+# character must not belong to a word ('..' stays relative, an attached short-option value such as
+# -o/abs/path is left to the token scan, and a ':'-glued spelling such as a URL or a ref:path is
+# not a filesystem operand). The leading '/' may be a RUN of slashes: the kernel reads '//x' and
+# '///x' as '/x', so a doubled-slash spelling must reach the same screens the single-slash form
+# reaches (the candidate is collapsed to one leading slash before any lookup).
+_RWH_RAW_ABS_PATH_RE = re.compile(r"(?<![\w$/.~:-])/+[\w.+,@%^~-]+(?:/[\w.+,@%^~-]+)*")
+# A QUOTED span that is one whole absolute path, spaces included: the character-class scan above
+# cannot cross a space, so a quoted operand such as "/held tree/out" inside a shell body would be
+# truncated at the space and consulted at the wrong directory. Additive only, like the scan above;
+# an UNQUOTED path containing spaces stays unreadable (a disclosed residual).
+_RWH_RAW_QUOTED_ABS_RE = re.compile(r"\"(/+[^\"\n]*)\"|'(/+[^'\n]*)'")
+# The shell words that change which variables a later segment sees (export GIT_DIR=..., unset
+# GIT_DIR); an assignment-shaped token is caught separately by _RWH_GIT_ASSIGN_RE.
+_RWH_ENV_WORDS = frozenset(("export", "unset", "declare", "typeset", "local", "readonly"))
+# The ln option spellings the hold-set scan classifies, each mapped to the letters that decide
+# where a relative link target is resolved: 's' makes the link symbolic and 'r' makes ln itself
+# resolve the target against the directory it runs from. -sr and -rs are the only short-option
+# clusters classified; any other option word (another cluster such as -sf, -t or
+# --target-directory, -T, -n, or an option this table does not name) leaves where the link lands
+# or points unmodelled, which withholds the command while a hold is live (_rwh_hold_dirs).
+_RWH_LN_OPTS = {"-s": "s", "--symbolic": "s", "-r": "r", "--relative": "r", "-sr": "sr",
+                "-rs": "sr"}
+# git symbolic-ref's complete long-option set, for the fail-closed delete/write reader: an option
+# outside it, an ambiguous abbreviation, or an unexpected value leaves the written operand
+# undetermined, which denies while a hold is live rather than guessing the operand.
+_RWH_SYMREF_LONG = ("--delete", "--quiet", "--short", "--recurse", "--no-recurse")
+# The git subcommands a live hold still lets through as the one plain read-only segment: an
+# ENUMERATED allowlist, never the complement of the mutating set, so a verb this file does not
+# model (bisect, read-tree, checkout-index, sparse-checkout, filter-branch, a new or external
+# subcommand) fails closed while a hold is live instead of passing as read-only. A listed verb
+# with mutating forms (branch, tag, config, stash, notes, worktree, symbolic-ref) still goes
+# through the mutation classifier and the dedicated ref-write readers, which recognize those
+# forms. fetch, pull, push and send-pack are NOT here: an explicit refspec reaches any ref of the
+# repository, the held branch included, and --update-head-ok moves a checked-out HEAD.
+_RWH_READ_ONLY_VERBS = frozenset((
+    "annotate", "blame", "branch", "cat-file", "check-attr", "check-ignore", "check-mailmap",
+    "check-ref-format", "cherry", "config", "count-objects", "describe", "diff", "diff-files",
+    "diff-index", "diff-tree", "for-each-ref", "grep", "help", "log", "ls-files", "ls-remote",
+    "ls-tree", "merge-base", "name-rev", "notes", "rev-list", "rev-parse", "shortlog", "show",
+    "show-branch", "show-ref", "stash", "status", "symbolic-ref", "tag", "var", "version",
+    "whatchanged", "worktree"))
+# Subcommands that can write ANY ref of the repository they bind to, from any of its worktrees
+# (an explicit refspec names the held branch; fetch and pull can carry --update-head-ok, which
+# lifts git's own checked-out-branch refusal, and send-pack is push's plumbing, limited only by
+# the receiving side's own checked-out-branch refusal, which configuration can relax): while the
+# target repository has a live hold these deny whatever worktree they run from.
+_RWH_REPO_REF_WRITERS = frozenset(("fetch", "pull", "push", "send-pack"))
+# The per-verb CLOSED sets of read-only options for the hold's read-only grammar: a dash-leading
+# token the verb's set does not name drops the read-only shortcut, so the command is judged
+# against the hold set instead (with no live hold nothing changes; while a hold is live a held or
+# uncertain target is withheld, a stated over-refusal for read spellings the sets do not model).
+# The sets name NOTHING that writes a file: --output is absent, and the only -o spellings present
+# (grep's --only-matching and ls-files' --others) report to stdout, they do not open an output
+# file. Nor does any set name an option that runs a program
+# named in the command or in configuration (-O/--open-files-in-pager, --upload-pack, --ext-diff,
+# --textconv, --show-signature, tag -v, and the --format/--pretty/--sort families wherever a
+# signature placeholder or atom could run the signing program, are absent), or edits
+# configuration. A listed option may also carry an =-attached value: appending a value to a
+# read-only option never turns it into a write. Shared building blocks first.
+_RWH_DIFF_FORMAT_OPTS = frozenset((
+    "-p", "-u", "--patch", "-s", "--no-patch", "--raw", "--stat", "--compact-summary",
+    "--numstat", "--shortstat", "--summary", "--name-only", "--name-status", "--check",
+    "--full-index", "--abbrev", "--no-abbrev", "--unified", "--inter-hunk-context",
+    "--function-context", "-W", "--color", "--no-color", "--color-words", "--word-diff",
+    "--word-diff-regex", "--color-moved", "--no-color-moved", "--color-moved-ws", "--text", "-a",
+    "--binary", "-R", "--exit-code", "--quiet", "--diff-algorithm", "--minimal", "--patience",
+    "--histogram", "--anchored", "--indent-heuristic", "--no-indent-heuristic",
+    "--ignore-space-at-eol", "--ignore-cr-at-eol", "--ignore-space-change", "-b",
+    "--ignore-all-space", "-w", "--ignore-blank-lines", "-I", "--find-renames", "-M",
+    "--find-copies", "-C", "--find-copies-harder", "--no-renames", "--irreversible-delete", "-D",
+    "--break-rewrites", "-B", "--relative", "--no-relative", "--stat-width", "--stat-name-width",
+    "--stat-count", "-z"))
+_RWH_LOG_WALK_OPTS = frozenset((
+    "-n", "--max-count", "--skip", "--since", "--until", "--after", "--before",
+    "--since-as-filter", "--author", "--committer", "--grep", "--grep-reflog", "--all-match",
+    "--invert-grep", "-i", "--regexp-ignore-case", "-E", "--extended-regexp", "-F",
+    "--fixed-strings", "-P", "--perl-regexp", "--basic-regexp", "--merges", "--no-merges",
+    "--min-parents", "--max-parents", "--no-min-parents", "--no-max-parents", "--first-parent",
+    "--exclude-first-parent-only", "--full-history", "--dense", "--sparse", "--simplify-merges",
+    "--ancestry-path", "--topo-order", "--date-order", "--author-date-order", "--reverse",
+    "--boundary", "--cherry", "--cherry-pick", "--cherry-mark", "--left-right", "--left-only",
+    "--right-only", "--not", "--all", "--branches", "--tags", "--remotes", "--glob", "--exclude",
+    "--exclude-hidden", "--single-worktree", "--date", "--relative-date", "--oneline", "--graph",
+    "--decorate", "--no-decorate", "--decorate-refs", "--decorate-refs-exclude",
+    "--abbrev-commit", "--no-abbrev-commit", "--parents", "--children", "--follow", "--no-walk",
+    "--do-walk", "-g", "--walk-reflogs", "--source", "--log-size", "--merge"))
+_RWH_BLAME_OPTS = frozenset((
+    "-p", "--porcelain", "--line-porcelain", "--incremental", "-t", "-l", "-s", "-e",
+    "--show-email", "-f", "--show-name", "-n", "--show-number", "--root", "-w", "-L", "-M", "-C",
+    "--abbrev", "--since", "--date", "--first-parent", "--reverse", "-b", "--color-lines",
+    "--color-by-age", "--minimal", "--show-stats", "--ignore-rev", "--ignore-revs-file",
+    "--contents"))
+_RWH_READ_ONLY_OPTS = {
+    "annotate": _RWH_BLAME_OPTS,
+    "blame": _RWH_BLAME_OPTS,
+    "branch": frozenset((
+        "--list", "-l", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-q",
+        "--quiet", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+        "--show-current", "--color", "--no-color", "-i", "--ignore-case", "--column",
+        "--no-column", "--abbrev", "--no-abbrev", "--omit-empty")),
+    "cat-file": frozenset((
+        "-t", "-s", "-e", "-p", "--allow-unknown-type", "--buffer", "--batch", "--batch-check",
+        "--batch-all-objects", "--unordered", "-z", "-Z")),
+    "check-attr": frozenset(("-a", "--all", "--cached", "-z", "--stdin", "--source")),
+    "check-ignore": frozenset((
+        "-q", "--quiet", "-v", "--verbose", "--stdin", "-z", "-n", "--non-matching",
+        "--no-index")),
+    "check-mailmap": frozenset(("--stdin",)),
+    "check-ref-format": frozenset((
+        "--normalize", "--allow-onelevel", "--no-allow-onelevel", "--refspec-pattern",
+        "--branch")),
+    "cherry": frozenset(("-v", "--abbrev")),
+    "config": frozenset((
+        "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--null", "-z",
+        "--name-only", "--show-origin", "--show-scope", "--type", "--bool", "--int",
+        "--bool-or-int", "--path", "--expiry-date", "--default", "--global", "--system",
+        "--local", "--worktree", "--file", "-f", "--blob", "--includes", "--no-includes",
+        "--fixed-value", "--all", "--url", "--value")),
+    "count-objects": frozenset(("-v", "--verbose", "-H", "--human-readable")),
+    "describe": frozenset((
+        "--all", "--tags", "--contains", "--abbrev", "--candidates", "--exact-match", "--long",
+        "--match", "--exclude", "--always", "--first-parent", "--debug", "--broken", "--dirty")),
+    "diff": _RWH_DIFF_FORMAT_OPTS | frozenset((
+        "--cached", "--staged", "--merge-base", "--no-index", "-0", "-1", "-2", "-3", "--base",
+        "--ours", "--theirs")),
+    "diff-files": _RWH_DIFF_FORMAT_OPTS | frozenset((
+        "-0", "-1", "-2", "-3", "--base", "--ours", "--theirs", "-c", "--cc")),
+    "diff-index": _RWH_DIFF_FORMAT_OPTS | frozenset(("--cached", "--merge-base", "-m")),
+    "diff-tree": _RWH_DIFF_FORMAT_OPTS | frozenset((
+        "-r", "-t", "--root", "--no-commit-id", "-m", "-c", "--cc", "--combined-all-paths",
+        "--always", "-v")),
+    "for-each-ref": frozenset((
+        "--count", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+        "--ignore-case", "--omit-empty", "--exclude", "--include-root-refs")),
+    "grep": frozenset((
+        "--cached", "--no-index", "--untracked", "--recurse-submodules", "-v", "--invert-match",
+        "-i", "--ignore-case", "-w", "--word-regexp", "-a", "--text", "-I", "--full-name", "-E",
+        "--extended-regexp", "-G", "--basic-regexp", "-P", "--perl-regexp", "-F",
+        "--fixed-strings", "-n", "--line-number", "--column", "-l", "--files-with-matches",
+        "--name-only", "-L", "--files-without-match", "-z", "--null", "-o", "--only-matching",
+        "-c", "--count", "--max-depth", "--max-count", "-m", "-h", "-H", "--heading", "--break",
+        "-p", "--show-function", "-W", "--function-context", "-A", "--after-context", "-B",
+        "--before-context", "-C", "--context", "-f", "-e", "--and", "--or", "--not", "-q",
+        "--quiet", "--all-match", "--threads")),
+    "help": frozenset(("-a", "--all", "-g", "--guides", "-c", "--config", "-v", "--verbose")),
+    "log": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS,
+    "ls-files": frozenset((
+        "-c", "--cached", "-d", "--deleted", "-m", "--modified", "-o", "--others", "-i",
+        "--ignored", "-s", "--stage", "-u", "--unmerged", "-k", "--killed", "-z", "-t", "-v",
+        "-f", "--exclude", "-x", "--exclude-from", "-X", "--exclude-per-directory",
+        "--exclude-standard", "--full-name", "--recurse-submodules", "--error-unmatch",
+        "--directory", "--no-empty-directory", "--eol", "--sparse", "--format", "--abbrev",
+        "--debug", "--resolve-undo")),
+    "ls-remote": frozenset((
+        "--heads", "-h", "--tags", "-t", "--refs", "-q", "--quiet", "--symref", "--get-url",
+        "--exit-code")),
+    "ls-tree": frozenset((
+        "-d", "-r", "-t", "-l", "--long", "-z", "--name-only", "--name-status", "--object-only",
+        "--full-name", "--full-tree", "--abbrev", "--format")),
+    "merge-base": frozenset((
+        "-a", "--all", "--octopus", "--independent", "--is-ancestor", "--fork-point")),
+    "name-rev": frozenset((
+        "--tags", "--refs", "--exclude", "--all", "--stdin", "--annotate-stdin", "--name-only",
+        "--no-undefined", "--always")),
+    "notes": frozenset(("--ref",)),
+    "rev-list": _RWH_LOG_WALK_OPTS | frozenset((
+        "--count", "--objects", "--no-object-names", "--object-names", "--filter",
+        "--filter-provided-objects", "--missing", "--header", "--timestamp", "--abbrev",
+        "--quiet", "--disk-usage", "--use-bitmap-index")),
+    "rev-parse": frozenset((
+        "--verify", "-q", "--quiet", "--short", "--abbrev-ref", "--symbolic",
+        "--symbolic-full-name", "--all", "--branches", "--tags", "--remotes", "--glob",
+        "--exclude", "--disambiguate", "--not", "--default", "--prefix", "--revs-only",
+        "--no-revs", "--flags", "--no-flags", "--sq", "--sq-quote", "--show-toplevel",
+        "--show-prefix", "--show-cdup", "--git-dir", "--absolute-git-dir", "--git-common-dir",
+        "--git-path", "--is-inside-git-dir", "--is-inside-work-tree", "--is-bare-repository",
+        "--is-shallow-repository", "--show-superproject-working-tree", "--show-object-format",
+        "--path-format", "--local-env-vars", "--resolve-git-dir", "--show-ref-format")),
+    "shortlog": frozenset((
+        "-n", "--numbered", "-s", "--summary", "-e", "--email", "-c", "--committer", "-w",
+        "--all", "--branches", "--tags", "--remotes", "--since", "--until", "--after",
+        "--before", "--author", "--merges", "--no-merges", "--first-parent")),
+    "show": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS,
+    "show-branch": frozenset((
+        "-a", "--all", "-r", "--remotes", "--topo-order", "--date-order", "--current",
+        "--sparse", "--more", "--list", "--independent", "--merge-base", "--no-name",
+        "--sha1-name", "--topics", "--color", "--no-color", "-g", "--reflog")),
+    "show-ref": frozenset((
+        "--head", "--heads", "--tags", "--branches", "-d", "--dereference", "-s", "--hash",
+        "--verify", "--exists", "--abbrev", "-q", "--quiet", "--exclude-existing")),
+    "stash": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS | frozenset((
+        "--include-untracked", "-u", "--only-untracked")),
+    "status": frozenset((
+        "-s", "--short", "-b", "--branch", "-sb", "--porcelain", "--long", "-v", "--verbose",
+        "-z", "--null", "-uno", "-unormal", "-uall", "--untracked-files", "--ignored",
+        "--ignore-submodules", "--no-renames", "--find-renames", "--ahead-behind",
+        "--no-ahead-behind", "--show-stash", "--column", "--no-column")),
+    "symbolic-ref": frozenset(("-q", "--quiet", "--short", "--recurse", "--no-recurse")),
+    "tag": frozenset((
+        "-l", "--list", "-n", "--contains", "--no-contains", "--merged", "--no-merged",
+        "--points-at", "--color", "--no-color", "-i", "--ignore-case", "--column", "--no-column",
+        "--omit-empty")),
+    "var": frozenset(("-l", "--list")),
+    "version": frozenset(("--build-options",)),
+    "whatchanged": _RWH_DIFF_FORMAT_OPTS | _RWH_LOG_WALK_OPTS,
+    "worktree": frozenset(("--porcelain", "-z", "-v", "--verbose")),
+}
+# The history-walking verbs also take a bare -<n> count shorthand (git log -1).
+_RWH_COUNT_VERBS = frozenset(("log", "show", "whatchanged", "shortlog", "rev-list", "stash"))
+_RWH_COUNT_RE = re.compile(r"-\d+")
+# The program-running git forms the hold rule refuses while any hold it can see is live, beyond the
+# curated model _rwh_program_word reads (every global option other than a literal -C, -c and
+# --config-env included, and _rdp_git_runs_program's options, words and subcommands). Each runs a
+# tool, helper, hook, viewer or shell text the command names or can redefine, per its git manual
+# page: mergetool and difftool run the configured or named merge and diff tool, instaweb its web
+# server and browser, web--browse a browser, hook run a hook, shell the commands in
+# git-shell-commands, daemon its --access-hook, credential the credential helpers, send-email its
+# sendmail or command options, imap-send imap.tunnel, verify-commit and verify-tag gpg.program,
+# and svn its --authors-prog; config writes the alias.* and core.* settings (a ! alias,
+# core.pager, core.editor, core.sshCommand, core.fsmonitor, core.hooksPath) a later git runs, so
+# every config form outside the read-only grammar counts. for-each-repo runs a git command in
+# EVERY repository a configuration key lists (a held one included, and an allowed command can
+# write that key first); maintenance writes that very list (register, unregister) and runs a
+# platform scheduler over it (start, stop), so a maintenance form can reach any registered
+# repository later; the connection services upload-pack, receive-pack, upload-archive and
+# http-backend each run in the repository their operand or request names, receive-pack that
+# repository's hooks among them. clone and init --template install the
+# template's hooks (clone runs its post-checkout hook at once), and help --web, --info and --man
+# (-w, -i, -m) run a viewer.
+_RWH_PROGRAM_SUBCOMMANDS = frozenset((
+    "config", "credential", "daemon", "difftool", "for-each-repo", "hook", "http-backend",
+    "imap-send", "instaweb", "maintenance", "mergetool", "receive-pack", "send-email", "shell",
+    "svn", "upload-archive", "upload-pack", "verify-commit", "verify-tag", "web--browse"))
+_RWH_PROGRAM_SUB_OPTIONS = {"clone": ("--template",), "init": ("--template",),
+                            "help": ("--web", "--info", "--man")}
+_RWH_PROGRAM_SUB_LETTERS = {"help": "wim"}
+# The file-writing path options the hold rule refuses while any hold it can see is live: each
+# writes a file or tree at an arbitrary path operand, which is not a directory move (it joins no
+# hold set and is never resolved), so from a command whose resolved target is an unrelated
+# repository it can still write into a held worktree. checkout-index --prefix redirects the
+# checkout under any prefix; the diff family's --output (diff, log, show, whatchanged, stash and
+# the diff-files/diff-index/diff-tree plumbing) writes the output to the named file; archive
+# -o/--output writes the archive; format-patch -o/--output-directory writes the patches under any
+# directory; index-pack -o writes the pack index at the named path; fast-import --export-marks and
+# --export-pack-edges write marks files, and fast-export --export-marks does too; range-diff,
+# rev-list, shortlog and reflog take the diff family's --output; bugreport and diagnose
+# -o/--output-directory write a report (and diagnose an archive) under any directory; init and
+# clone --separate-git-dir write (for init, move) a whole git directory at the operand; and
+# credential-store --file writes the named credentials file; mailsplit -o writes the split
+# messages under any
+# directory. Two entries admit write paths carried in the command's INPUT rather than in an
+# operand, which no argv scan reads: apply --unsafe-paths lets the PATCH CONTENT name paths
+# outside the target tree (git itself refuses them without the option), and fast-import
+# --allow-unsafe-features admits a STREAM's own export-marks/export-pack-edges features naming
+# any path (git refuses in-stream marks paths without it), so each is refused while a hold is
+# live. Refused whatever the operand names, a stated over-refusal mirroring the program gate.
+# A path-writing POSITIONAL operand (worktree add, clone and init directory operands, bundle
+# create, pack-objects' base name, merge-file, mailinfo) is indistinguishable from a ref or
+# pathspec without re-implementing each verb's grammar and stays the disclosed file-edit residual,
+# bounded by the held-path operand gate (_rwh_held_path_gate): any git segment whose literal
+# ABSOLUTE option value or operand resolves to or inside a held worktree is refused while that
+# hold is live, whatever the word means to its verb, and every literal absolute path any segment
+# carries also JOINS THE HOLD SET (a path that does not exist yet is consulted at its nearest
+# existing ancestor), so the hold such a path names is visible from a session outside every held
+# repository too and a file-writing spelling outside these
+# tables is fail-closed for absolute held paths; a relative or expansion-built operand outside
+# the tables stays the residual.
+_RWH_WRITE_PATH_SUB_OPTIONS = {
+    "apply": ("--unsafe-paths",),
+    "archive": ("--output",), "bugreport": ("--output-directory",),
+    "checkout-index": ("--prefix",), "clone": ("--separate-git-dir",),
+    "credential-store": ("--file",), "diagnose": ("--output-directory",), "diff": ("--output",),
+    "diff-files": ("--output",), "diff-index": ("--output",), "diff-tree": ("--output",),
+    "fast-export": ("--export-marks",),
+    "fast-import": ("--export-marks", "--export-pack-edges", "--allow-unsafe-features"),
+    "format-patch": ("--output-directory",), "index-pack": (), "init": ("--separate-git-dir",),
+    "log": ("--output",), "mailsplit": (), "range-diff": ("--output",),
+    "reflog": ("--output",), "rev-list": ("--output",), "shortlog": ("--output",),
+    "show": ("--output",), "stash": ("--output",), "whatchanged": ("--output",),
+}
+_RWH_WRITE_PATH_SUB_LETTERS = {"archive": "o", "bugreport": "o", "diagnose": "o",
+                               "format-patch": "o", "index-pack": "o", "mailsplit": "o"}
+
+
+def _rwh_real(path):
+    """os.path.realpath with failure read as unresolvable (None), so an unreadable or NUL-bearing
+    path never becomes a silently wrong identity or cache key."""
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _rwh_collapse_root(path):
+    """A run of leading slashes collapsed to one. POSIX path arithmetic (os.path.normpath,
+    os.path.join) preserves exactly two leading slashes, while the Linux kernel resolves '//x'
+    and '///x' as '/x': left uncollapsed, a doubled-slash spelling would pass a screen written
+    for the single-slash form and still land in the same directory. Applied before every screen
+    and scan that judges an absolute path lexically."""
+    if path.startswith("//"):
+        return "/" + path.lstrip("/")
+    return path
+
+
+def _rwh_process_relative(path):
+    """Whether a path's meaning depends on the process that opens it, so the hook cannot resolve
+    it on anyone's behalf: /proc/self/... and /proc/<pid>/... name the OPENING process's own view
+    (/proc/self/cwd is git's working directory after its own -C chdir, never this hook's), and
+    /dev/fd/... with the /dev/std* aliases name its open descriptors. Judged on the LITERAL
+    components, never on realpath and never on a fully collapsed normpath: resolving
+    /proc/self/cwd here would substitute this process's answer for git's, and collapsing '..'
+    textually erases a traversal the kernel resolves through the magic link FIRST
+    ('/proc/self/cwd/../../../x' normalises to '/x' while the kernel walks through the opening
+    process's cwd), so the walk below reads the components in order and fires as soon as any
+    lexical prefix lands on /proc, /dev/fd or a /dev/std* alias; a run of leading slashes is
+    collapsed first ('//proc' and '/proc' name the same kernel object). A '..' pops one ordinary
+    component, which can over-fire on a spelling such as '/proc/..' (the kernel reads it as '/'),
+    a safe over-hold. Every structural candidate (an operand, an option value, a -C, cd
+    or pushd target, a --git-dir or --work-tree value, a GIT_ assignment, a link operand) that is
+    process-relative withholds the command outside the read-only grammar (it counts as held and
+    its holds cannot be read); one seen only in the raw-text widening is named as the cause of
+    the withhold while a hold is live."""
+    path = _rwh_collapse_root(path)
+    if not path.startswith("/"):
+        return False
+    stack = []
+    for comp in path.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if stack:
+                stack.pop()
+            continue
+        stack.append(comp)
+        if stack == ["proc"] or stack == ["dev", "fd"] or \
+                (len(stack) == 2 and stack[0] == "dev" and
+                 stack[1] in ("stdin", "stdout", "stderr")):
+            return True
+    return False
+
+
+def _rwh_hold_candidate(path):
+    """The directory whose repository the hold set consults for one literal absolute candidate
+    path: the path RESOLVED PHYSICALLY first (os.path.realpath, so a '..' component and every
+    symlink are applied the way the kernel would apply them, never stripped textually: a textual
+    walk of '<base>/missing/../held' would consult <base> while the kernel lands in <base>/held),
+    then the resolved path itself when it names an existing directory, otherwise its NEAREST
+    EXISTING directory ancestor. A candidate that does not exist yet, or that names a file, still
+    lands in some repository on disk, and reading it as "no repository" would hide that
+    repository's holds: a command can create the directory first and then mutate through it, and a
+    write operand names a file the command creates, so the enclosing repository's markers must
+    still be read. A path realpath cannot resolve, or whose existence cannot be read at all (a
+    permission or I/O error, a symlink loop), is returned unresolved, so the identity probe
+    inspects it and its failure fails closed. A symlink that already points THROUGH a
+    process-relative magic link is resolved in this process, a disclosed residual (the caller
+    screens the candidate text itself for process-relative spellings before this walk)."""
+    path = _rwh_collapse_root(path)
+    real = _rwh_real(path)
+    cur = real if real is not None else path
+    while True:
+        try:
+            if stat.S_ISDIR(os.stat(cur).st_mode):
+                return cur
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except (OSError, ValueError):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return cur
+        cur = parent
+
+
+def _rwh_not_a_repo_reply(stderr):
+    """Whether the probe's C-locale stderr carries git's specific not-a-git-repository answer at
+    the START of one of its own lines. A substring match anywhere in stderr would also fire on a
+    PATH the message echoes (a dubious-ownership fatal naming a directory whose name holds those
+    words), reading a failed probe as "not a repository" and hiding any live hold there; anchoring
+    the match to the start of a line keeps only git's own answer inert."""
+    return any(line.startswith(b"fatal: not a git repository") for line in stderr.splitlines())
+
+
+def _rwh_inside(child, ancestor):
+    """Whether the physically resolved path child lies STRICTLY inside the directory ancestor
+    (both already resolved by _rwh_real, so this is a pure string test with a component
+    boundary): a worktree nested under another worktree sits inside the enclosing tree on disk,
+    where a whole-tree mutation of the enclosing tree (git clean -ffdx removes a nested worktree
+    the way the denied worktree-remove would) can delete or rewrite it. The caller passes the
+    target repository's TOP LEVEL as ancestor, never the -C directory alone: a whole-tree
+    mutation run from a subdirectory still sweeps the whole worktree (git clean -ffdx with a :/
+    or .. pathspec reaches it), so the deeper directory proves nothing."""
+    if child == ancestor:
+        return False
+    prefix = ancestor if ancestor.endswith(os.sep) else ancestor + os.sep
+    return child.startswith(prefix)
+
+
+def _rwh_read_only_form(tokens):
+    """Whether one git segment is the CLOSED LITERAL READ-ONLY GRAMMAR a live hold still lets
+    through: no leading assignment or wrapper of any kind (the first token is the literal word
+    git; a leading GIT_CONFIG_*, GIT_EXTERNAL_DIFF or any other assignment can redefine what the
+    verb runs, so every assignment drops the pass), no git global option at all except a literal
+    -C directory (-c/--config-env, --git-dir/--work-tree, --exec-path, -P/--no-pager and every
+    other global spelling drop it), a subcommand on the enumerated read-only allowlist in a
+    non-mutating form outside the dedicated ref-write readers, and only options the verb's closed
+    per-verb read-only set names (judged up to the first option boundary, after which every token
+    is an operand). Anything else is judged against the hold set: with no live hold it still
+    passes; while a hold is live a held or uncertain target is withheld, a stated over-refusal
+    for read spellings the grammar does not model."""
+    if not tokens or tokens[0] != "git":
+        return False
+    i, n = 1, len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        if tokens[i] != "-C" or i + 1 >= n:
+            return False
+        value = tokens[i + 1]
+        if value == "" or _rwh_opaque_path(value):
+            return False
+        i += 2
+    if i >= n:
+        return False
+    sub = tokens[i]
+    args = tokens[i + 1:]
+    if sub not in _RWH_READ_ONLY_VERBS or _rwh_special(sub, args) or _git_is_mutating(sub, args):
+        return False
+    allowed = _RWH_READ_ONLY_OPTS.get(sub)
+    if allowed is None:
+        return False  # a verb with no modelled option set fails closed
+    pre, _post, _had = _split_pre_post(args)
+    for token in pre:
+        if not token.startswith("-") or token == "-":
+            continue  # an operand: a ref, a path, stdin, or an action word such as 'list'
+        if token.split("=", 1)[0] in allowed:
+            continue
+        if sub in _RWH_COUNT_VERBS and _RWH_COUNT_RE.fullmatch(token):
+            continue
+        return False
+    return True
+
+
+# The identity probe's cannot-evaluate: _review_git could not answer at all (git could not be
+# run, timed out, or the decision's deadline passed), git exited nonzero or on a signal with any
+# answer OTHER than its specific not-a-git-repository one (a dubious-ownership fatal, an
+# unreadable tree, a kill), or git exited 0 with a reply that is not the expected two path lines
+# (empty, one line, extra lines or a missing final newline, or an echoed option). Distinct from
+# None (the directory does not exist, or git RAN and answered that it is in no repository), so a
+# probe failure is never
+# read as "not a repository", which would hide a live hold there and let a mutation through;
+# every caller fails closed on it instead.
+_RWH_VIEW_ERROR = "probe-error"
+
+
+def _rwh_view(directory, views):
+    """The git identity of the worktree holding directory, cached per check: (absolute_git_dir,
+    common_dir), each fully resolved; None when no repository can be rooted there (the resolved
+    path names no directory at all, as a missing target or a missing configured worktree can, or
+    git RAN and gave its specific not-a-git-repository answer, matched at the start of one of the
+    probe's own C-locale stderr lines, never as a substring a path could echo); or
+    _RWH_VIEW_ERROR when the probe
+    could not answer (_review_git returned None, its documented cannot-evaluate: git could not be
+    run, timed out, or the decision's deadline passed), answered with ANY other failure (a
+    nonzero exit such as a dubious-ownership fatal, or a negative code from a signal), or exited
+    0 with a reply that is not EXACTLY the expected two newline-terminated path lines, the first
+    absolute (empty, one line, extra lines, a missing final newline, a dash-leading echo
+    of the option as a git too old to know --git-common-dir prints, a relative FIRST line, which
+    the documented --absolute-git-dir answer never is and which would otherwise be converted into
+    an invented identity whose missing marker directory then reads as clean, while the common-dir
+    line may be relative and is resolved against the candidate, or paths the filesystem
+    cannot resolve); every caller fails closed on _RWH_VIEW_ERROR, never reading it as "not
+    a repository". A directory path realpath cannot even process (a NUL byte, an OS error) is the
+    same cannot-evaluate: whatever repository it names cannot be examined, so it too is never read
+    as "no repository". Worktree identity is compared by git's absolute git directory, never by path
+    string, so a symlinked alias of a held worktree resolves to the same identity and a sibling path
+    that merely shares a prefix does not. The cache key is the PHYSICALLY resolved path: a lexical
+    key would collapse 'link/..' to the link's parent while git traverses the link, handing back a
+    cached identity for a directory the command never binds to."""
+    key = _rwh_real(directory)
+    if key is None:
+        # the path cannot be resolved at all, so the repository it names, and its holds, cannot
+        # be examined: the probe error, never "no repository" (which would hide a live hold)
+        return _RWH_VIEW_ERROR
+    if key in views:
+        return views[key]
+    # a path that names no directory roots no repository, so it stays the inert None (a target
+    # probe can name a path that does not exist; every HOLD-SET candidate was already mapped to
+    # its nearest existing directory ancestor before it arrives here, so a hold is never hidden
+    # behind a path a command creates first); a path that cannot be
+    # statted at all (a permission or I/O error) is left to the probe, whose failure fails closed
+    is_dir = True
+    try:
+        is_dir = stat.S_ISDIR(os.stat(key).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        is_dir = False
+    except (OSError, ValueError):
+        pass
+    if not is_dir:
+        views[key] = None
+        return None
+    p = _review_git(directory, "rev-parse", "--absolute-git-dir", "--git-common-dir")
+    if p is None:
+        view = _RWH_VIEW_ERROR
+    elif p.returncode == 128 and _rwh_not_a_repo_reply(p.stderr):
+        # git RAN and answered that the directory is in no repository: the inert answer; only
+        # this specific reply, at the start of one of stderr's own lines, reads as no repository
+        view = None
+    elif p.returncode != 0:
+        # any other nonzero exit (a dubious-ownership or other fatal), or a negative code from a
+        # signal: the holds there are exactly what cannot be read, so this is the probe error
+        view = _RWH_VIEW_ERROR
+    else:
+        lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+        # EXACTLY the two path lines, each newline-terminated and nothing after them, the FIRST
+        # ABSOLUTE (--absolute-git-dir documents an absolute answer; --git-common-dir may answer
+        # a relative path such as '.git', resolved against the candidate below): a reply carrying
+        # extra lines, a missing final newline, a dash-leading echo or a relative first line is
+        # not the documented answer, and reading any of it as an identity can point marker lookup
+        # at a directory with no markers (a relative first line joined onto the candidate builds
+        # an invented identity whose absent marker directory reads as clean)
+        if len(lines) == 3 and lines[2] == "" and lines[0] and lines[1] and \
+                os.path.isabs(lines[0]) and \
+                not lines[0].startswith("-") and not lines[1].startswith("-"):
+            try:
+                view = (os.path.realpath(os.path.join(directory, lines[0])),
+                        os.path.realpath(os.path.join(directory, lines[1])))
+            except (OSError, ValueError):
+                view = _RWH_VIEW_ERROR
+        else:
+            # an exit-0 reply that is not exactly the expected two lines (empty, one line, extra
+            # lines, a missing final newline, an echoed
+            # option, or a relative line) is unreadable, never "not a repository"
+            view = _RWH_VIEW_ERROR
+    views[key] = view
+    return view
+
+
+def _rwh_toplevel(directory):
+    """The physically resolved top level of the worktree enclosing directory, or None when git
+    cannot report one (a bare repository, an unreadable tree), which the caller fails closed
+    while a hold is live: the enclosing-tree test must run against the whole worktree a mutation
+    can sweep, never against a possibly deeper -C directory alone."""
+    p = _review_git(directory, "rev-parse", "--show-toplevel")
+    if p is None or p.returncode != 0:
+        return None
+    text = p.stdout.decode("utf-8", "surrogateescape")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if not text or text.startswith("-"):
+        return None
+    return _rwh_real(os.path.join(directory, text))
+
+
+def _rwh_head(workdir):
+    """The full object id of the worktree's current HEAD, or None when it cannot be read."""
+    p = _review_git(workdir, "rev-parse", "--verify", "HEAD")
+    if p is None or p.returncode != 0:
+        return None
+    value = p.stdout.decode("utf-8", "surrogateescape").strip()
+    return value if _RWH_OBJECT_ID_RE.fullmatch(value) else None
+
+
+def _rwh_head_chain(workdir):
+    """Every ref name in the worktree's symbolic HEAD chain, nearest first: HEAD's direct target,
+    then each symbolic ref it points through, to the terminal branch. Writing or deleting ANY of
+    them moves or breaks the worktree's HEAD, so all are protected, not only the terminal one a
+    recursive query reports. Walked one level at a time with --no-recurse; on a git too old to know
+    --no-recurse, the recursive answer (the terminal branch alone) is the fallback, a disclosed
+    partial cover. [] when HEAD is detached; None when the chain cannot be read (git unavailable or
+    a fatal probe code), which the caller fails closed, never reads as an empty chain that would let
+    a write of the held branch through. Bounded: a longer or cyclic chain is git misuse, and
+    stopping early only under-extends a list every caller reads additively."""
+    chain = []
+    ref = "HEAD"
+    for _ in range(16):
+        p = _review_git(workdir, "symbolic-ref", "--no-recurse", ref)
+        if p is None:
+            return None
+        if p.returncode != 0:
+            if not chain:
+                p = _review_git(workdir, "symbolic-ref", "-q", ref)
+                if p is None:
+                    return None
+                if p.returncode == 0:
+                    value = p.stdout.decode("utf-8", "surrogateescape").strip()
+                    if value:
+                        chain.append(value)
+                elif p.returncode != 1:
+                    # -q answers 1 for a detached or absent HEAD; any other code is a git failure,
+                    # so the chain is unknown and the caller fails closed rather than read it empty
+                    return None
+            break
+        value = p.stdout.decode("utf-8", "surrogateescape").strip()
+        if not value or value in chain:
+            break
+        chain.append(value)
+        ref = value
+    return chain
+
+
+def _rwh_read_marker(path):
+    """(marker, None) for a well-formed version-1 review-hold marker owned by this user, read without
+    following a symbolic link and without blocking, at most _RWH_MARKER_MAX bytes; (None, why)
+    otherwise. The fields, exactly: version, workdir (the held worktree's absolute top level), head
+    (the full object id at dispatch), dispatch_id, created_utc and expires_utc (ISO-8601 UTC; the
+    required horizon after which the marker is ignored, so a crashed dispatcher cannot pin a worktree
+    forever; no maximum lifetime is enforced, the dispatcher chooses the horizon)."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (OSError, ValueError) as exc:
+        return (None, "cannot be opened ({})".format(exc))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return (None, "is not a regular file")
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and st.st_uid != geteuid():
+            return (None, "is not owned by this user")
+        blob = _rdp_read_fd(fd, _RWH_MARKER_MAX + 1)
+    except OSError as exc:
+        return (None, "cannot be read ({})".format(exc))
+    finally:
+        os.close(fd)
+    if len(blob) > _RWH_MARKER_MAX:
+        return (None, "is over {} bytes".format(_RWH_MARKER_MAX))
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except ValueError as exc:
+        return (None, "is not JSON ({})".format(exc))
+    # type as well as value: bool True and float 1.0 also compare equal to the integer version 1
+    if not isinstance(doc, dict) or set(doc) != _RWH_MARKER_KEYS or \
+            type(doc["version"]) is not int or doc["version"] != _RWH_MARKER_VERSION:
+        return (None, "is not a version-{} review-hold marker (fields, exactly: {})".format(
+            _RWH_MARKER_VERSION, ", ".join(sorted(_RWH_MARKER_KEYS))))
+    workdir = doc["workdir"]
+    if not isinstance(workdir, str) or not os.path.isabs(workdir) or "\x00" in workdir:
+        return (None, "has no absolute workdir path")
+    if not isinstance(doc["head"], str) or not _RWH_OBJECT_ID_RE.fullmatch(doc["head"]):
+        return (None, "has no full lowercase object id as its head")
+    if not isinstance(doc["dispatch_id"], str) or not doc["dispatch_id"].strip():
+        return (None, "has no dispatch_id")
+    if _orch_parse_utc(doc["created_utc"]) is None or _orch_parse_utc(doc["expires_utc"]) is None:
+        return (None, "has an unreadable created_utc or expires_utc timestamp")
+    return (doc, None)
+
+
+def _rwh_holds_gone(holds_dir):
+    """Whether a marker-directory listing that answered FileNotFoundError reports GENUINE absence:
+    True only where every component of the hook-owned chain that exists at all (review-holds, then
+    its aiqt parent) is a real directory whose child is simply missing. listdir follows a
+    directory symlink, so a DANGLING review-holds symlink, or a dangling or wrong-type aiqt
+    component on the way to it, raises the same FileNotFoundError as genuine absence while an
+    entry still EXISTS there: that is existing malformed marker state, never absence, and reading
+    it as absent would silently drop every hold behind it. An entry that exists but cannot be
+    examined fails closed the same way (False)."""
+    for path in (holds_dir, os.path.dirname(holds_dir)):
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return False
+        try:
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                return True  # a real directory whose named child is absent: genuine absence
+        except (OSError, ValueError):
+            pass
+        return False  # the entry exists but does not lead to a directory: dangling or wrong type
+    return True
+
+
+def _rwh_holds(common, cache, notes):
+    """The review holds of the repository whose common git directory is common, read once per check:
+    ("absent", []) with GENUINELY no marker directory (the inert path for adopters who write no
+    markers; a dangling review-holds or aiqt symlink raises the same lookup error but still exists,
+    so it reads as malformed state, never absence),
+    ("ok", live) with the well-formed unexpired markers as (marker, path) pairs, or ("bad", detail)
+    when the directory or an entry in it cannot be read as a marker, which withholds git commands
+    outside the read-only grammar. An expired marker is ignored with a note; a live marker whose recorded head differs
+    from the held worktree's current HEAD adds the drift note (the in-flight review is invalidated;
+    re-dispatch per rvwpin.4) without denying, which also catches a move made outside the session,
+    after the fact."""
+    if common in cache:
+        return cache[common]
+    holds_dir = os.path.join(common, "aiqt", "review-holds")
+    result = None
+    try:
+        entries = sorted(os.listdir(holds_dir))
+    except FileNotFoundError:
+        if _rwh_holds_gone(holds_dir):
+            result = ("absent", [])
+        else:
+            result = ("bad", "the marker-directory path {} exists but does not lead to a "
+                             "directory (a dangling or unreadable component)".format(holds_dir))
+    except NotADirectoryError:
+        # the path exists but a component of it is not a directory: existing invalid state, never
+        # genuine absence, so mutating git commands are withheld until an operator repairs it
+        result = ("bad", "the marker-directory path {} exists but is not a directory".format(holds_dir))
+    except OSError as exc:
+        result = ("bad", "the marker directory {} cannot be listed ({})".format(holds_dir, exc))
+    if result is None:
+        now = _orch_now()
+        live = []
+        for name in entries:
+            path = os.path.join(holds_dir, name)
+            marker, why = _rwh_read_marker(path)
+            if marker is None:
+                result = ("bad", "the review-hold marker {} {}".format(path, why))
+                break
+            if _orch_parse_utc(marker["expires_utc"]) <= now:
+                notes.append(
+                    "AIQT guardrail (rule rvwpin): ignored the expired review-hold marker {} (dispatch "
+                    "{}, expired {}), so a crashed dispatcher cannot pin {} forever; remove the stale "
+                    "marker.".format(path, marker["dispatch_id"], marker["expires_utc"],
+                                     marker["workdir"]))
+                continue
+            current = _rwh_head(marker["workdir"])
+            if current != marker["head"]:
+                notes.append(
+                    "AIQT guardrail (rule rvwpin): the review hold {} pins {} at {}, but that "
+                    "worktree's HEAD {} now: the in-flight review is invalidated; re-dispatch it "
+                    "against the new state once it has settled (rvwpin.4). This note does not "
+                    "block.".format(marker["dispatch_id"], marker["workdir"], marker["head"][:12],
+                                    "is " + current[:12] if current is not None else "cannot be read"))
+            live.append((marker, path))
+        if result is None:
+            result = ("ok", live)
+    cache[common] = result
+    return result
+
+
+def _rwh_opaque_path(value):
+    """True when a decoded path word cannot be resolved lexically: an expansion or substitution the
+    shell builds at run time (a parameter or command substitution, a glob or brace pattern the shell
+    expands to paths the literal text does not show), or a leading tilde. The shared lexer decodes
+    quotes, so a quoted literal '~', '$' or '*' in a directory name is over-read as opaque, a safe
+    over-hold while a hold is live."""
+    return ("$" in value or "`" in value or value.startswith("~")
+            or any(ch in value for ch in "*?[{"))
+
+
+def _rwh_cd_dest(eff):
+    """The literal destination operand of a cd/pushd segment, or None when there is none to read
+    (a bare cd to $HOME, the OLDPWD '-' shortcut, a stack rotation, an expansion, glob or tilde).
+    Used only to ADD the destination's repository to the hold set a later unresolvable mutation
+    consults; whether the cd succeeds, is skipped, or lands elsewhere (CDPATH) never makes a later
+    target more certain, because any directory change at all already makes it uncertain."""
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    dest = None
+    while i < n:
+        token = eff[i]
+        if token == "--":
+            dest = eff[i + 1] if i + 1 < n else None
+            break
+        if token.startswith("-") or token.startswith("+"):
+            i += 1
+            continue
+        dest = token
+        break
+    if dest is None or dest == "" or dest == "-" or _rwh_opaque_path(dest):
+        return None
+    return dest
+
+
+def _rwh_segment_target(eff, eff_cwd):
+    """The directory a git segment binds to: ("dir", absolute_directory) with the directory resolved
+    physically (os.path.realpath), or ("opaque", None) when it cannot be resolved lexically (a -C
+    value an expansion builds, a --git-dir/--work-tree override, a -c/--config-env configuration
+    override, whose combinations this hook does not model, or a relative resolution from an unknown
+    shell cwd). Successive -C values accumulate the way git applies them, and an empty -C value is
+    git's no-op."""
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    cur = eff_cwd
+    while i < n:
+        token = eff[i]
+        if not token.startswith("-"):
+            break
+        if token in ("--git-dir", "--work-tree") or \
+                token.startswith("--git-dir=") or token.startswith("--work-tree="):
+            return ("opaque", None)
+        if token in ("-c", "--config-env") or token.startswith("--config-env="):
+            # a command-line configuration override can move the repository the command acts on
+            # (core.worktree, core.bare, or configuration included through it), so the lexical
+            # target no longer proves which worktree the mutation binds to: fail closed rather
+            # than model each override spelling
+            return ("opaque", None)
+        if token == "-C":
+            value = eff[i + 1] if i + 1 < n else None
+            if value is None:
+                return ("opaque", None)
+            if value != "":
+                if _rwh_opaque_path(value):
+                    return ("opaque", None)
+                cur = _rwh_collapse_root(value) if os.path.isabs(value) else (
+                    os.path.join(cur, value) if cur is not None else None)
+                if cur is None or _rwh_process_relative(cur):
+                    # a process-relative step (/proc/self/..., /dev/fd/...) binds git to a
+                    # directory only git's own process can resolve; realpath here would
+                    # substitute this hook's answer for git's, so the target is unresolvable.
+                    # The decision layer already withholds every structural process-relative
+                    # sighting outright before it resolves a target, so no known spelling
+                    # reaches this branch; it stays so this resolver is sound on its own,
+                    # whatever its caller screened first (defence in depth, not dead weight)
+                    return ("opaque", None)
+            i += 2
+            continue
+        if "=" not in token and token in _GIT_ARG_OPTS:
+            i += 2
+        else:
+            i += 1
+    if cur is None:
+        return ("opaque", None)
+    cur = _rwh_real(cur)
+    return ("dir", cur) if cur is not None else ("opaque", None)
+
+
+def _rwh_worktree_path(args):
+    """(op, path): a git worktree subcommand and its first path operand, each None when absent."""
+    operands = [a for a in args if not a.startswith("-")]
+    return (operands[0] if operands else None,
+            operands[1] if len(operands) > 1 else None)
+
+
+def _rwh_update_ref_parse(args):
+    """(name, deref) for a git update-ref argv: the ref it writes or deletes, and whether git
+    dereferences a symbolic ref to the ref its chain points at (the default; --no-deref writes or
+    deletes the named ref itself). name is None when the written ref cannot be read, which the
+    callers fail closed while a hold is live: a --stdin batch, a long option outside update-ref's
+    modelled set (--no-deref, --create-reflog), a short cluster carrying a character outside d/m,
+    or no operand. FAIL-CLOSED on options: m consumes its reason attached (the rest of its
+    cluster) or separated (the next argv token), so a clustered -dm or -md never leaves the
+    reason read as the written ref. Over-reading only over-holds, never under-blocks."""
+    deref = True
+    unknown = False
+    operands = []
+    i, n = 0, len(args)
+    while i < n:
+        token = args[i]
+        if token == "--":
+            operands.extend(args[i + 1:])
+            break
+        if token == "--no-deref":
+            deref = False
+            i += 1
+            continue
+        if token == "--create-reflog":
+            i += 1
+            continue
+        if token.startswith("--"):
+            unknown = True  # --stdin batches; any other long spelling leaves the operand unread
+            i += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            cluster = token[1:]
+            j, m = 0, len(cluster)
+            while j < m:
+                ch = cluster[j]
+                if ch == "m":
+                    if j + 1 == m:
+                        i += 1  # a separated reason: the next token is the -m value, not a ref
+                    break       # an attached reason is the rest of the cluster, not options
+                if ch != "d":
+                    unknown = True
+                j += 1
+            i += 1
+            continue
+        operands.append(token)
+        i += 1
+    if unknown or not operands:
+        return (None, deref)
+    return (operands[0], deref)
+
+
+def _rwh_ref_chain(workdir, name):
+    """Every ref the ref called name points through symbolically in the repository workdir binds
+    to, nearest first (name itself excluded): [] for a direct or absent ref, None when git cannot
+    be asked, which the caller fails closed. A dereferencing update-ref of ANY ref in that chain
+    writes the ref the chain ends at, so a different symbolic ref that converges on the held
+    branch moves the held HEAD without naming it. Walked one level at a time with --no-recurse;
+    on a git too old to know --no-recurse, the recursive answer (the terminal ref alone) is the
+    fallback, which still catches a converging chain. Bounded like _rwh_head_chain: a longer or
+    cyclic chain is git misuse, and stopping early only under-extends an additively read list."""
+    chain = []
+    ref = name
+    for _ in range(16):
+        p = _review_git(workdir, "symbolic-ref", "--no-recurse", ref)
+        if p is None:
+            return None
+        if p.returncode != 0:
+            if not chain:
+                p = _review_git(workdir, "symbolic-ref", "-q", ref)
+                if p is None:
+                    return None
+                if p.returncode == 0:
+                    value = p.stdout.decode("utf-8", "surrogateescape").strip()
+                    if value and value != name:
+                        chain.append(value)
+                elif p.returncode != 1:
+                    # -q answers 1 for a direct or absent ref; any other code is a git failure,
+                    # so whether the ref is symbolic is unknown and the caller fails closed
+                    return None
+            break
+        value = p.stdout.decode("utf-8", "surrogateescape").strip()
+        if not value or value == name or value in chain:
+            break
+        chain.append(value)
+        ref = value
+    return chain
+
+
+def _rwh_bad_text(detail):
+    return ("AIQT rule rvwpin (fail-closed): the review-hold state cannot be read: {}; which worktrees "
+            "a live review pins is unknown, so this git command is withheld until an operator repairs "
+            "or removes the marker directory. Commands in the enumerated read-only form, and non-git "
+            "commands, are unaffected.".format(detail))
+
+
+def _rwh_cwd_text(cwd):
+    return ("AIQT rule rvwpin (fail-closed): the session cwd {!r} is missing, relative or carries a "
+            "NUL byte, or names no directory that exists, so the session's repository and its review "
+            "holds cannot be read and a git "
+            "target with no absolute -C cannot be resolved; this Bash call (a git command outside "
+            "the enumerated read-only form, or an absent command) is withheld. Commands in the "
+            "read-only form, and non-git commands, are unaffected; send the call with an absolute "
+            "cwd naming an existing directory.".format(cwd))
+
+
+def _rwh_probe_text(directory):
+    return ("AIQT rule rvwpin (fail-closed): the git identity of {!r} cannot be probed (git could "
+            "not be run, timed out, or ran past the decision deadline, exited with a failure or "
+            "signal other than its specific not-a-git-repository answer, or replied unreadably), "
+            "so whether a repository there carries a live review hold cannot be read; this "
+            "git command outside the enumerated read-only form is withheld rather than read as "
+            "outside every repository. Commands in the read-only form, and non-git commands, are "
+            "unaffected; retry when git can answer there.".format(directory))
+
+
+def _rwh_config_probe_text(directory):
+    return ("AIQT rule rvwpin (fail-closed): the core.worktree configuration of {!r} cannot be "
+            "probed (git answered its lookup with neither the set nor the unset reply, or with an "
+            "ambiguous one), so a configured worktree, and its repository's review holds, may "
+            "exist unread; this git command outside the enumerated read-only form is withheld. "
+            "Commands in the read-only form, and non-git commands, are unaffected; retry when git "
+            "can answer there.".format(directory))
+
+
+def _rwh_config_procrel_text(directory, value):
+    return ("AIQT rule rvwpin (fail-closed): the repository at {!r} configures core.worktree to "
+            "the process-relative path {!r} (a /proc or /dev/fd spelling), whose meaning depends "
+            "on the process that opens it, so the worktree a mutation there writes, and its "
+            "review holds, cannot be resolved by this hook; it counts as held, and this git "
+            "command outside the enumerated read-only form is withheld. Commands in the read-only "
+            "form, and non-git commands, are unaffected; configure a literal absolute "
+            "core.worktree there, or unset it.".format(directory, value))
+
+
+def _rwh_deny_text(marker, path):
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): this command can modify the "
+            "worktree {} that a live review hold pins (dispatch {}, held at {}, marker {}), or is "
+            "outside the enumerated read-only form a live hold lets through. A review's findings "
+            "are meaningful only against the state it observed, so the held worktree is not modified "
+            "until the review returns or is abandoned. Make the change on a separate worktree or "
+            "revision and re-dispatch the review against the new state once it has settled (rvwpin.4); "
+            "the dispatcher removes the marker when the review ends.".format(
+                marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
+
+
+def _rwh_enclosing_text(marker, path):
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): the worktree this command's "
+            "target belongs to encloses the worktree {} on disk, and a live review hold pins the "
+            "enclosed worktree (dispatch {}, held "
+            "at {}, marker {}); a whole-tree mutation of an enclosing tree (git clean -ffdx removes "
+            "a nested worktree the way the denied worktree-remove would, from a subdirectory too) "
+            "can delete or rewrite the "
+            "held directory. Make the change on a separate worktree or revision and re-dispatch the "
+            "review against the new state once it has settled (rvwpin.4); the dispatcher removes "
+            "the marker when the review ends.".format(
+                marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
+
+
+def _rwh_ref_writer_text(sub, marker, path):
+    return ("AIQT rule rvwpin (review-in-flight-pins-its-artefact): git '{}' can write any ref of "
+            "the repository it targets (an explicit refspec reaches the held branch, and git's own "
+            "refusal to update a checked-out branch can be lifted by an option such as "
+            "--update-head-ok or relaxed by the receiving side's configuration), and that "
+            "repository has a live review hold (dispatch {}, worktree {} held at {}, marker {}). "
+            "Run it from a "
+            "separate clone, or end the hold first; the dispatcher removes the marker when the "
+            "review ends.".format(sub, marker["dispatch_id"], marker["workdir"],
+                                  marker["head"][:12], path))
+
+
+def _rwh_repo_hold_text(marker, path):
+    return ("AIQT rule rvwpin: this git command binds to a worktree of a repository with a live "
+            "review hold (dispatch {}, worktree {} held at {}, marker {}), and it is outside the "
+            "enumerated read-only form. A command bound to one worktree of a held repository can "
+            "still reach the held worktree through shared refs, shared configuration or a program "
+            "an option runs from the target's tree, whether or not the raw text names the held "
+            "path, so every such command is withheld, a stated over-refusal for the forms that "
+            "cannot reach it. Run one plain read-only git command, make the change in a repository "
+            "the hold does not pin, or end the hold first; the dispatcher removes the marker when "
+            "the review ends.".format(marker["dispatch_id"], marker["workdir"],
+                                      marker["head"][:12], path))
+
+
+def _rwh_program_text(word, marker, path):
+    return ("AIQT rule rvwpin: this git command carries {!r}, a form that runs a program or shell "
+            "text (or a leading assignment or global option that can name one), and a review hold "
+            "is live (dispatch {}, worktree {} held at {}, marker {}). Where such a program runs, "
+            "and which worktree it reaches, is not resolved, so while any hold this rule can see "
+            "is live every such form is refused, whatever its target: an unrelated rebase -x is "
+            "refused too, a stated over-refusal. Drop the form, or end the hold first; the "
+            "dispatcher removes the marker when the review ends.".format(
+                word, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
+
+
+def _rwh_write_text(word, marker, path):
+    return ("AIQT rule rvwpin: this git command carries {!r}, an option that writes a file or tree "
+            "at an arbitrary path operand or admits arbitrary write paths from the input it reads, "
+            "and a review hold is live (dispatch {}, worktree {} held "
+            "at {}, marker {}). Such a path is not a directory move, so where it lands is not "
+            "resolved, and from an unrelated target it can still write into the held worktree; "
+            "while any hold this rule can see is live every such option is refused, whatever its "
+            "operand names, a stated over-refusal. Drop the option, or end the hold first; the "
+            "dispatcher removes the marker when the review ends.".format(
+                word, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
+
+
+def _rwh_held_path_text(word, marker, path):
+    return ("AIQT rule rvwpin: this git command carries {!r}, whose literal path resolves to or "
+            "inside the worktree {} that a live review hold pins (dispatch {}, held at {}, marker "
+            "{}). Whatever that word means to its verb, a path into the held worktree can name a "
+            "file the command creates or rewrites there, so it is refused while the hold is live, "
+            "a stated over-refusal for the spellings that only read. Name a path outside the held "
+            "worktree, or end the hold first; the dispatcher removes the marker when the review "
+            "ends.".format(word, marker["workdir"], marker["dispatch_id"], marker["head"][:12],
+                           path))
+
+
+def _rwh_program_word(eff):
+    """The first word of one plain git segment that can make it run a program, or any global
+    option other than a literal -C directory; None when it carries none this model knows. The
+    global scan is CLOSED (only -C passes: -p/--paginate runs the pager and an unmodelled global
+    can re-point or re-define what the verb runs, so any other dash-leading global is returned,
+    fail closed); the subcommand's words are judged by the curated program-option model
+    (_rdp_git_runs_program: --upload-pack, rebase -x, grep -O, submodule foreach, bisect run,
+    filter-branch, signing and signature-format spellings, a TRANSPORT::ADDRESS URL, --help's
+    viewer, with option values consumed first), an enumeration read from git's own option sets,
+    so a program spelling outside it is a disclosed residual, not a certified absence."""
+    i = _command_word_index(eff) + 1
+    n = len(eff)
+    while i < n and eff[i].startswith("-"):
+        if eff[i] != "-C" or i + 1 >= n:
+            return eff[i]
+        i += 2
+    if i >= n:
+        return None
+    return _rdp_git_runs_program(["git"] + list(eff[i:]))
+
+
+def _rwh_program_gate(segments):
+    """The first word, in any segment whose command word is git (bare wrappers peeled), of a form
+    that runs a program or shell text: a leading assignment (it can name a program git or the
+    program git starts runs, GIT_EDITOR, GIT_SSH_COMMAND, GIT_CONFIG_* or EDITOR and PAGER, so
+    every one counts), the curated model (_rwh_program_word), a subcommand of
+    _RWH_PROGRAM_SUBCOMMANDS, or an option of _RWH_PROGRAM_SUB_OPTIONS or
+    _RWH_PROGRAM_SUB_LETTERS; None when no such segment carries one. The caller refuses the command
+    while any hold it can see is live, WITHOUT resolving where the program runs. A segment whose
+    command word is not git is left to the caller's one-plain-git rule, which withholds it while a
+    hold is live, and a form outside these lists (an alias or a git-<name> program on PATH, a hook
+    or program the configuration already names) is the disclosed indirect-git residual."""
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        idx = _command_word_index(eff)
+        if idx >= len(eff) or eff[idx].rsplit("/", 1)[-1] != "git":
+            continue
+        if _command_word_index(tokens) > 0:
+            return tokens[0].split("=", 1)[0] + "="
+        word = _rwh_program_word(eff)
+        if word is not None:
+            return word
+        sub, args = _git_subcommand_rest(eff)
+        if sub in _RWH_PROGRAM_SUBCOMMANDS:
+            return sub
+        options = _RWH_PROGRAM_SUB_OPTIONS.get(sub, ())
+        letters = _RWH_PROGRAM_SUB_LETTERS.get(sub, "")
+        for arg in args:
+            if _rdp_long_option(arg.split("=", 1)[0], options):
+                return arg
+            if letters and len(arg) > 1 and arg.startswith("-") and not arg.startswith("--") and \
+                    any(ch in letters for ch in arg[1:]):
+                return arg
+    return None
+
+
+def _rwh_write_gate(segments):
+    """The first option word, in any segment whose command word is git (bare wrappers peeled), of a
+    file-writing path option of _RWH_WRITE_PATH_SUB_OPTIONS or _RWH_WRITE_PATH_SUB_LETTERS; None
+    when no such segment carries one. The caller refuses the command while any hold it can see is
+    live, WITHOUT resolving where the operand lands: the value is a path operand, not a directory
+    move, so it joins no hold set, and it can write into a held worktree from a segment whose
+    resolved target is an unrelated unheld repository. Like the program gate, the scan is a closed
+    enumeration judged on every token after the subcommand (a same-spelled word after -- is
+    over-refused, stated); a path-writing positional operand (worktree add, clone and init
+    directory operands, bundle create, pack-objects, merge-file, mailinfo) and a shell redirection
+    stay the disclosed file-edit residual."""
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        idx = _command_word_index(eff)
+        if idx >= len(eff) or eff[idx].rsplit("/", 1)[-1] != "git":
+            continue
+        sub, args = _git_subcommand_rest(eff)
+        if sub not in _RWH_WRITE_PATH_SUB_OPTIONS:
+            continue
+        options = _RWH_WRITE_PATH_SUB_OPTIONS[sub]
+        letters = _RWH_WRITE_PATH_SUB_LETTERS.get(sub, "")
+        for arg in args:
+            if options and _rdp_long_option(arg.split("=", 1)[0], options):
+                return arg
+            if letters and len(arg) > 1 and arg.startswith("-") and not arg.startswith("--") and \
+                    any(ch in letters for ch in arg[1:]):
+                return arg
+    return None
+
+
+def _rwh_held_path_gate(segments, live):
+    """(word, marker, path, direct) for the first token, in any segment whose command word is git
+    (bare wrappers peeled), whose literal ABSOLUTE path value (the token itself, the payload of a
+    dash-leading --option=value token, or an attached short-option value such as -o/abs/path)
+    resolves physically to a held worktree or strictly inside
+    one; None when no such token exists or no hold is live. The caller refuses the command while
+    the hold is live, WHATEVER the token means to its verb: a file-writing option outside the
+    enumerated tables, or a positional write operand, can land a write at that path, and telling
+    it from a read spelling would mean re-implementing each verb's grammar, so every absolute
+    held-path word is refused, a stated over-refusal for the spellings that only read (reads in
+    the closed read-only grammar passed before this gate and are unaffected). direct is True when
+    the matching token is the operand of a -C directory move: that command binds INSIDE the held
+    worktree, the core held-worktree mutation, which the caller reports with the direct hold
+    reason rather than this gate's write-path over-refusal. Bounded by literal
+    text: a RELATIVE operand resolves against a directory this gate cannot fix, and an operand
+    only an expansion resolves (_rwh_opaque_path) names no path here, so both stay the disclosed
+    file-edit residual. A marker worktree path the filesystem cannot resolve is skipped here, as
+    it is by the later held-real enclosure test; no reachable marker carries one today, because
+    the marker reader admits only an absolute NUL-free workdir and realpath fails only on an OS
+    error or an embedded NUL."""
+    targets = []
+    for marker, path in live:
+        held_real = _rwh_real(marker["workdir"])
+        if held_real is not None:
+            targets.append((held_real, marker, path))
+    if not targets:
+        return None
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        idx = _command_word_index(eff)
+        if idx >= len(eff) or eff[idx].rsplit("/", 1)[-1] != "git":
+            continue
+        prev = None
+        for token in eff[idx + 1:]:
+            if token.startswith("-"):
+                if "=" in token:
+                    value = token.split("=", 1)[1]
+                elif not token.startswith("--") and len(token) > 2:
+                    value = token[2:]  # an attached short-option value, -o/abs/path
+                else:
+                    value = ""
+            else:
+                value = token
+            if not os.path.isabs(value) or _rwh_opaque_path(value):
+                prev = token
+                continue
+            real = _rwh_real(value)
+            if real is None:
+                prev = token
+                continue
+            for held_real, marker, path in targets:
+                if real == held_real or _rwh_inside(real, held_real):
+                    return (token, marker, path, prev == "-C")
+            prev = token
+    return None
+
+
+def _rwh_wt_suffix(workdir, operand):
+    """Whether a worktree operand matches git's name shorthand for workdir: git also accepts a
+    worktree named by the last components of its path when they are unique among the registered
+    worktrees. A non-unique name is an error to git itself, so reading any match as the held
+    worktree only over-holds, never under-blocks."""
+    want = [p for p in operand.split("/") if p and p != "."]
+    if not want or ".." in want:
+        return False
+    have = [p for p in workdir.split("/") if p]
+    return have[-len(want):] == want
+
+
+def _rwh_worktree_hit(args, base, live, views):
+    """A deny for a `git worktree remove` or `git worktree move` whose path operand equals a held
+    worktree's path or matches git's shorthand of naming a worktree by the last components of its
+    path (checked BEFORE any filesystem resolution: git prefers the registered-worktree name over an
+    ordinary directory that happens to carry the same name, so resolving first would hand the
+    decision to the wrong object), or whose operand resolves to a held worktree, reachable from any
+    worktree of the repository; ("unverifiable", ...) when that operand cannot be resolved to any
+    worktree while a hold is live (fail closed, never a silent allow); None otherwise."""
+    op, wt_path = _rwh_worktree_path(args)
+    if op not in ("remove", "move") or not live:
+        return None
+    if wt_path is not None:
+        for marker, path in live:
+            if wt_path == marker["workdir"] or _rwh_wt_suffix(marker["workdir"], wt_path):
+                return ("deny", _rwh_deny_text(marker, path))
+        if not _rwh_opaque_path(wt_path):
+            resolved = wt_path if os.path.isabs(wt_path) else os.path.join(base, wt_path)
+            wt_view = _rwh_view(resolved, views)
+            if isinstance(wt_view, tuple):
+                for marker, path in live:
+                    held_view = _rwh_view(marker["workdir"], views)
+                    if isinstance(held_view, tuple) and held_view[0] == wt_view[0]:
+                        return ("deny", _rwh_deny_text(marker, path))
+                return None  # the operand resolves to a worktree no live hold pins
+    return ("unverifiable", "AIQT rule rvwpin: the worktree this git 'worktree {}' names cannot be "
+            "resolved while a review hold is live; name it with a literal absolute path, or end the "
+            "hold first.".format(op))
+
+
+def _rwh_held_head_refs(marker, views):
+    """The ref spellings that write the held worktree's HEAD from ANY worktree of the repository:
+    git's cross-worktree paths, worktrees/<id>/HEAD for a linked worktree (id is the basename of its
+    git directory) and main-worktree/HEAD for a held main worktree; () when the held worktree's
+    identity cannot be read."""
+    held_view = _rwh_view(marker["workdir"], views)
+    if not isinstance(held_view, tuple):
+        return ()
+    gitdir, common = held_view
+    if gitdir == common:
+        return ("main-worktree/HEAD",)
+    return ("worktrees/" + os.path.basename(gitdir) + "/HEAD",)
+
+
+def _rwh_chain_hit(name, marker, path, views):
+    """A deny when writing or deleting the ref called name moves a held worktree's HEAD: its
+    cross-worktree HEAD paths, or any ref in its symbolic HEAD chain (the checked-out branch and
+    every symbolic ref between HEAD and the terminal branch), by full or short name; None
+    otherwise."""
+    if name in _rwh_held_head_refs(marker, views):
+        return ("deny", _rwh_deny_text(marker, path))
+    chain = _rwh_head_chain(marker["workdir"])
+    if chain is None:
+        return ("unverifiable", "AIQT rule rvwpin: the symbolic HEAD chain of the held worktree {} "
+                "cannot be resolved while a review hold is live, so whether this ref write moves the "
+                "held HEAD cannot be ruled out; retry once the repository answers, or end the hold "
+                "first.".format(marker["workdir"]))
+    for ref in chain:
+        if name in (ref, ref.removeprefix("refs/heads/")):
+            return ("deny", _rwh_deny_text(marker, path))
+    return None
+
+
+def _rwh_update_ref_hit(args, target, live, views):
+    """A deny for a `git update-ref` whose written or deleted ref, or any ref that ref points
+    through symbolically when git dereferences it (the default; --no-deref writes the named ref
+    itself), is a held worktree's HEAD through git's cross-worktree ref paths or any ref in the
+    held symbolic HEAD chain, any of which moves the held HEAD without entering the worktree; the
+    written ref's own chain is resolved in the repository the command binds to (target), so a
+    different symbolic ref that converges on the held branch is caught too. ("unverifiable", ...)
+    for a batch, an argv whose written ref cannot be read, or a chain git cannot be asked about,
+    while a hold is live; None otherwise."""
+    if not live:
+        return None
+    name, deref = _rwh_update_ref_parse(args)
+    if name is None:
+        return ("unverifiable", "AIQT rule rvwpin: the refs this git 'update-ref' writes cannot be "
+                "read from its argv while a review hold is live; name one ref per plain call, or end "
+                "the hold first.")
+    names = [name]
+    if deref:
+        chain = _rwh_ref_chain(target, name)
+        if chain is None:
+            return ("unverifiable", "AIQT rule rvwpin: the ref this git 'update-ref' dereferences "
+                    "cannot be resolved while a review hold is live; retry once the repository "
+                    "answers, or end the hold first.")
+        names.extend(chain)
+    for marker, path in live:
+        for ref_name in names:
+            hit = _rwh_chain_hit(ref_name, marker, path, views)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _rwh_symref_write(args):
+    """(writes, name) for a git symbolic-ref argv: whether it is a write (a delete in ANY accepted
+    spelling: --delete, an unambiguous long abbreviation such as --del, or a short cluster carrying
+    d such as -qd; or a name followed by a target ref) and the ref name it writes, None when that
+    name cannot be read. The read forms (one name and no delete flag, or no operand) are not writes.
+    FAIL-CLOSED on options: m consumes its reason attached (the rest of its cluster) or separated
+    (the next argv token), so a clustered -qdm or a -qm before -d never leaves the reason read as
+    the written ref; an option outside symbolic-ref's set, an ambiguous or unknown long
+    abbreviation, a value on a long option, or a cluster character outside q/d/m leaves the written
+    operand UNDETERMINED, reported as a write with no readable name, which the callers fail closed
+    while a hold is live. Over-reading only over-holds, never under-blocks."""
+    delete = False
+    unknown = False
+    operands = []
+    i, n = 0, len(args)
+    while i < n:
+        token = args[i]
+        if token == "--":
+            operands.extend(args[i + 1:])
+            break
+        if token == "-m":
+            i += 2
+            continue
+        if token.startswith("--"):
+            matches = [w for w in _RWH_SYMREF_LONG if w.startswith(token)]
+            if len(matches) != 1:
+                unknown = True
+            elif matches[0] == "--delete":
+                delete = True
+            i += 1
+            continue
+        if token.startswith("-") and len(token) > 1:
+            cluster = token[1:]
+            j, m = 0, len(cluster)
+            while j < m:
+                ch = cluster[j]
+                if ch == "m":
+                    if j + 1 == m:
+                        i += 1  # a separated reason: the next token is the -m value, not a ref
+                    break       # an attached reason is the rest of the cluster, not options
+                if ch == "d":
+                    delete = True
+                elif ch != "q":
+                    unknown = True
+                j += 1
+            i += 1
+            continue
+        operands.append(token)
+        i += 1
+    if unknown:
+        return (True, None)
+    if delete:
+        return (True, operands[0] if operands else None)
+    if len(operands) >= 2:
+        return (True, operands[0])
+    return (False, None)
+
+
+def _rwh_symbolic_ref_hit(args, t_gitdir, live, views):
+    """A deny for a `git symbolic-ref` write or delete that moves or breaks a held worktree's HEAD
+    (HEAD in the held worktree itself, its cross-worktree worktrees/<id>/HEAD and main-worktree/HEAD
+    paths, or any ref in its symbolic HEAD chain, the checked-out branch included);
+    ("unverifiable", ...) for a write whose ref name cannot be read while a hold is live; None for
+    the read forms and for writes to unrelated refs."""
+    writes, name = _rwh_symref_write(args)
+    if not writes or not live:
+        return None
+    if name is None:
+        return ("unverifiable", "AIQT rule rvwpin: the ref this git 'symbolic-ref' writes cannot be "
+                "read from its argv while a review hold is live; name the ref explicitly, or end the "
+                "hold first.")
+    for marker, path in live:
+        if name == "HEAD":
+            held_view = _rwh_view(marker["workdir"], views)
+            if isinstance(held_view, tuple) and held_view[0] == t_gitdir:
+                return ("deny", _rwh_deny_text(marker, path))
+        hit = _rwh_chain_hit(name, marker, path, views)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _rwh_special(sub, args):
+    """Whether a git subcommand needs the dedicated worktree/ref-write checks even where the general
+    classifier reads it as read-only: a mutating worktree form, update-ref, or a symbolic-ref
+    write."""
+    return sub == "update-ref" or (sub == "worktree" and _git_is_mutating(sub, args)) or \
+        (sub == "symbolic-ref" and _rwh_symref_write(args)[0])
+
+
+def _rwh_git_env_touched(segments):
+    """True when any segment assigns, exports or unsets a GIT_ variable anywhere in the command (an
+    inline VAR= prefix, an assignment behind export or a wrapper such as env, or an export/unset-
+    class word naming a GIT_ variable), so some git in the command may act on a repository no
+    lexical target shows. Scans every token, not only the segment prefix: an assignment exported by
+    an earlier segment changes what a later git reads."""
+    for tokens, _sep in segments:
+        for token in tokens:
+            if _RWH_GIT_ASSIGN_RE.match(token):
+                return True
+        if _command_word(tokens) in _RWH_ENV_WORDS and any(
+                t.startswith("GIT_") for t in tokens[_command_word_index(tokens) + 1:]):
+            return True
+    return False
+
+
+def _rwh_rel_bases(bases, cwd):
+    """Every directory a RELATIVE raw-text operand is resolved against: each literal directory the
+    command walks to (the token-scan -C/cd accumulation plus every absolute raw-text step before
+    the operand in the text), each TEXTUAL ancestor of each of those directories, and the session
+    cwd with its textual ancestors. A best-effort widening of the hold set, NOT a model of where a
+    program runs: a program runs from a directory git chooses (rebase -x from the physical top
+    level, which a symlinked -C hides from these textual ancestors; submodule foreach from each
+    submodule, below the walked directory), and a relative step is never a base for the operand
+    after it, so a hold reached only that way stays out of the hold set. A program-running form is
+    refused by _rwh_program_gate while any hold the set shows is live, whatever these bases find.
+    Additive only: a wider base set can only ADD repositories whose holds are read, never remove
+    one, so the over-resolution never loosens the decision."""
+    out = []
+    for origin in list(bases) + ([cwd] if cwd else []):
+        cur = origin
+        while cur and cur not in out:
+            out.append(cur)
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+    return out
+
+
+def _rwh_hold_dirs(command, segments, cwd):
+    """The directories whose repositories the hold rule consults: the session cwd, every literal -C
+    operand (successive operands accumulated the way git applies them), every literal --git-dir or
+    --work-tree value (the = and the separated form), every literal cd/pushd operand, every
+    literal path assigned to a GIT_ variable anywhere in the command, the raw text included (with
+    one level of surrounding quotes stripped, so a quoted `sh -c '...'` body, a heredoc body or an
+    eval string still contributes), every OTHER literal ABSOLUTE path any segment's tokens carry
+    (a bare operand, the payload after the first = of any token, and an attached short-option
+    value), every operand of an ln segment (the name of a link the command creates resolved
+    against the directory the segment runs from; a relative TARGET of a plain symbolic link
+    (-s without -r) resolved against the LINK'S OWN directory, where the kernel resolves it, and
+    that of a hard link or a -r/--relative link against the directory the segment runs from,
+    where ln opens it; under an option word _RWH_LN_OPTS does not classify, those readings taken
+    at once for every operand count (each operand before the last read as a target at the
+    directory the segment runs from, at the last operand and at its parent; a -t or
+    --target-directory value, never paired with its option, is never a target base), the link
+    recorded even over an existing directory, and the command withheld while a hold is live; and
+    the
+    plain two-operand link recorded so a later candidate stepping through it is also consulted
+    where the link will point), every literal
+    ABSOLUTE path anywhere in the raw text (_RWH_RAW_ABS_PATH_RE, so a held path inside a quoted
+    shell body or heredoc body still surfaces its hold, a run of leading slashes collapsed first),
+    every QUOTED span that is one whole absolute path (_RWH_RAW_QUOTED_ABS_RE, so a quoted path
+    containing spaces is read whole rather than truncated at the space),
+    plus every GIT_-class path in the hook's
+    own environment. Every candidate is resolved PHYSICALLY first and a missing one consulted at
+    its NEAREST EXISTING directory ancestor
+    (_rwh_hold_candidate, realpath first, so '..' and symlink components are applied as the
+    kernel would): a write operand names a file the command creates, and a -C or cd
+    operand can name a directory the command itself creates first, so reading such a path as "no
+    repository" would hide the holds of the repository it lands in; a path whose existence cannot
+    be read is probed itself and the probe failure fails closed, and a PROCESS-RELATIVE path
+    (/proc/self/..., /proc/<pid>/..., /dev/fd/...) cannot be resolved here at all: a structural
+    sighting withholds the command outright and a raw-text-only sighting withholds while a hold
+    is live (the proc_strict and proc_live results). The operand widening is additive
+    only (a write path is not a directory move and never becomes a resolution base), so an
+    over-read can only ADD repositories whose holds are read.
+    Token-scan relative operands resolve against the last literal directory the command walked to
+    (best effort); a RELATIVE raw-text operand resolves against whatever directory runs it, which
+    this scan cannot fix, so it is resolved against EVERY literal directory the command walks to
+    (the session cwd, each accumulated -C step, each cd destination and each ABSOLUTE raw-text
+    step before it in the text, an option value's steps included, the resolved target among them)
+    and every textual ANCESTOR of each (_rwh_rel_bases), each landing repository joining the hold
+    set. That is a best-effort widening, not a model of where a program runs: a hold reached only
+    through a symlinked -C, a submodule foreach program, or two relative steps in a row can stay
+    out of the hold set. Additive only: each candidate can only ADD
+    a repository whose holds are read, so an over-read never loosens the decision; a spelling this
+    scan cannot read ($, a backquote, a glob or brace character, a leading ~) leaves the candidate
+    out, the disclosed allow residual of a hold set built from literal text. Returns (dirs,
+    raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved, link_held): dirs is the whole
+    candidate set; raw_dirs is the subset the RAW-text step
+    patterns added (the holds the command's text names directly, as against the session cwd or the
+    ambient environment), which the caller reads to tell a hold a directory step outside the
+    resolved target reaches from a hold it only learned about through the session; raw_relative is
+    True when a raw-text operand was relative, which the caller withholds while a hold is live (the
+    multi-base resolution only widens the hold set, it cannot prove where the operand lands);
+    proc_strict and proc_live carry the first process-relative path a structural candidate and the
+    raw-text widening saw (None otherwise): the caller withholds a structural sighting outright,
+    and names a raw-text sighting as the cause while a hold is live; link_unresolved is True when
+    an ln operand could not be resolved, which the caller withholds while a hold is live (the
+    created link's destination is unknown); link_held is the first ln option word _RWH_LN_OPTS
+    does not classify (None otherwise), which the caller withholds while a hold is live (where
+    the link lands or points is not modelled); with every hold the set shows clear, the
+    decision is unchanged."""
+    dirs = []
+    raw_dirs = []
+    raw_relative = False
+    proc_strict = None
+    proc_live = None
+    link_unresolved = False
+    link_held = None
+    bases = []
+    seen = set()
+    links = []  # (link path, resolved target) for each two-operand link this command creates
+
+    def add(value, rel_base, structural=True):
+        nonlocal proc_strict, proc_live
+        if not value or _rwh_opaque_path(value):
+            return None
+        if not os.path.isabs(value):
+            if rel_base is None:
+                return None
+            value = os.path.join(rel_base, value)
+        # a run of leading slashes collapses to one before every screen below: the kernel reads
+        # '//x' as '/x', so an uncollapsed spelling would dodge a screen written for '/x'
+        value = _rwh_collapse_root(value)
+        if _rwh_process_relative(value):
+            # the path's meaning depends on the process that opens it, so the hook cannot
+            # resolve it or read the holds where it lands: a structural candidate (an operand,
+            # option value, -C, cd, override, GIT_ assignment or link operand) withholds the
+            # command outright; a sighting only the raw-text widening made names the cause
+            # while a hold is live
+            if structural:
+                if proc_strict is None:
+                    proc_strict = value
+            elif proc_live is None:
+                proc_live = value
+            return None
+        if value not in seen:
+            seen.add(value)
+            # a candidate is resolved physically and a missing one consulted at its nearest
+            # existing ancestor (_rwh_hold_candidate), so a create-then-mutate directory, a '..'
+            # or symlinked spelling, or a write-operand file still reads the markers of the
+            # repository it lands in; the returned value stays the lexical path, which the -C
+            # chain and the raw-step accounting read
+            dirs.append(_rwh_hold_candidate(value))
+            # a candidate that steps THROUGH a link an earlier segment of this same command
+            # creates lands where that link points, not at the link's own (not yet existing)
+            # path: the rewritten path is consulted too, so create-link-then-step still reads
+            # the markers of the repository the step lands in (a link toward a held worktree's
+            # PARENT included, whose own path shows no repository); one rewrite level only, in
+            # text order, so a chain of created links, or a loop running a later segment first,
+            # stays a disclosed residual. The match is on the TEXT (leading slashes collapsed,
+            # nothing else normalised), so a spelling of the link path through '.', '..' or
+            # another link is not rewritten; a two-operand link is recorded under its own name
+            # only (a modelled one only when that name does not already resolve to a
+            # directory), so a link created INSIDE an existing directory is not followed; a
+            # candidate already seen earlier in the command is not
+            # rewritten; and a rewritten path that is process-relative is dropped, not refused.
+            # Each is a disclosed residual of this one-level text rewrite.
+            for name, target in links:
+                if value == name or value.startswith(name + os.sep):
+                    stepped = target + value[len(name):]
+                    if stepped not in seen and not _rwh_process_relative(stepped):
+                        seen.add(stepped)
+                        dirs.append(_rwh_hold_candidate(stepped))
+        return value
+
+    add(cwd, None)
+    chain = cwd
+    for tokens, _sep in segments:
+        c_chain = chain if chain is not None else cwd
+        i, n = 0, len(tokens)
+        while i < n:
+            token = tokens[i]
+            if _RWH_GIT_ASSIGN_RE.match(token):
+                add(token.split("=", 1)[1], c_chain)
+            elif token == "-C" and i + 1 < n:
+                value = tokens[i + 1]
+                if value != "":  # an empty -C value is git's no-op
+                    resolved = add(value, c_chain)
+                    # successive -C operands accumulate: the next relative one resolves here
+                    c_chain = resolved if resolved is not None else None
+                    if resolved is not None and resolved not in bases:
+                        bases.append(resolved)
+                i += 1
+            elif token in ("--git-dir", "--work-tree") and i + 1 < n:
+                add(tokens[i + 1], c_chain)
+                i += 1
+            elif token.startswith("--git-dir=") or token.startswith("--work-tree="):
+                add(token.split("=", 1)[1], c_chain)
+            else:
+                # any other literal ABSOLUTE path the token carries joins the hold set too: a bare
+                # operand, the payload after the first = of any token, or an attached short-option
+                # value. A write operand is not a directory move, but the repository it lands in
+                # must still be consulted, or an absolute write path into a held worktree would
+                # never read that hold from a session outside every held repository.
+                if not token.startswith("-") and os.path.isabs(token):
+                    add(token, None)
+                if "=" in token:
+                    payload = token.split("=", 1)[1]
+                    if os.path.isabs(payload):
+                        add(payload, None)
+                elif token.startswith("-") and not token.startswith("--") and len(token) > 2 \
+                        and os.path.isabs(token[2:]):
+                    add(token[2:], None)
+            i += 1
+        eff = _expbnd_effective_tokens(tokens)
+        word = _command_word(eff)
+        if word == "ln":
+            # a link this command creates re-points a later directory step at the link's TARGET,
+            # so every ln operand joins the hold set. The LINK NAME (the last operand of the
+            # plain form) is a filesystem path of the shell's, resolved against the directory
+            # the segment runs from. A relative TARGET is resolved where ln's form resolves it:
+            # a plain symbolic link (-s without -r) stores the text, which the KERNEL resolves
+            # against the directory that holds the link (the link name itself when that names
+            # an existing directory, since the link is then created inside it, otherwise the
+            # link name's parent); a hard link (no -s) and a -r/--relative link are opened by
+            # ln itself against the directory the segment runs from. Only the option words of
+            # _RWH_LN_OPTS are modelled: any other (a short-option cluster other than -sr and
+            # -rs, -t or --target-directory, -T, an option word the table does not name) leaves
+            # where the link lands or points unmodelled, so the caller withholds the command
+            # while a hold is live; its operands still join the hold set under the modelled
+            # readings at once (a -t or --target-directory value excepted, never a target
+            # base), and with every hold the set shows clear the decision is
+            # unchanged. An operand that cannot be resolved (relative with the needed base
+            # unknown, or expansion-built) leaves the created link's destination unknown, which
+            # the caller withholds while a hold is live. The plain two-operand link is also
+            # recorded so a later candidate stepping through it is consulted where it will point.
+            rest = eff[_command_word_index(eff) + 1:]
+            operands = [o for o in rest if o and not o.startswith("-")]
+            letters = ""
+            unmodelled = None
+            for opt in rest:
+                if opt.startswith("-"):
+                    if opt not in _RWH_LN_OPTS:
+                        unmodelled = opt
+                        break
+                    letters += _RWH_LN_OPTS[opt]
+            if unmodelled is not None:
+                # where the link lands or points is not modelled, so the readings the modelled
+                # forms make are taken at once, additive only, whatever the operand count: each
+                # operand at the directory the segment runs from, and each operand before the
+                # last (a target) also at the last operand (the links' directory when it is or
+                # may be a directory) and at its parent; the two-operand link is recorded for
+                # the rewrite even when its name resolves to an existing directory (ln's -n and
+                # -T read a link name that points to a directory as the name itself, not as a
+                # directory to enter), so a hold any of those readings reaches is seen and
+                # withholds while it is live. A -t or --target-directory value, the links'
+                # directory in that form, is not paired with its option, so it is never a
+                # target base: a disclosed residual
+                for operand in operands:
+                    add(operand, c_chain)
+                if len(operands) > 1:
+                    dest_abs = add(operands[-1], c_chain)
+                    if dest_abs is not None:
+                        for operand in operands[:-1]:
+                            for target_base in (c_chain, dest_abs, os.path.dirname(dest_abs)):
+                                target = add(operand, target_base)
+                                if target is not None and len(operands) == 2:
+                                    links.append((dest_abs, target))
+                if link_held is None:
+                    link_held = unmodelled
+            else:
+                dest_abs = None
+                dest_is_dir = False
+                if len(operands) > 1:
+                    dest_abs = add(operands[-1], c_chain)
+                    if dest_abs is None:
+                        link_unresolved = True
+                    else:
+                        try:
+                            dest_is_dir = stat.S_ISDIR(os.stat(dest_abs).st_mode)
+                        except (OSError, ValueError):
+                            dest_is_dir = False
+                if "s" not in letters or "r" in letters:
+                    # a hard link, or a -r link: ln opens the target from the directory the
+                    # segment runs from, which the accumulated chain approximates
+                    target_base = c_chain
+                elif dest_abs is not None:
+                    target_base = dest_abs if dest_is_dir else os.path.dirname(dest_abs)
+                else:
+                    # the one-operand form creates the link in the shell cwd, which the
+                    # accumulated chain approximates
+                    target_base = c_chain if len(operands) == 1 else None
+                for operand in (operands[:-1] if len(operands) > 1 else operands):
+                    target = add(operand, target_base)
+                    if target is None:
+                        link_unresolved = True
+                    elif dest_abs is not None and not dest_is_dir and len(operands) == 2:
+                        links.append((dest_abs, target))
+        if word in _CD_BUILTINS:
+            dest = _rwh_cd_dest(eff)
+            if dest is not None and (os.path.isabs(dest) or chain is not None):
+                resolved = dest if os.path.isabs(dest) else os.path.join(chain, dest)
+                add(resolved, None)
+                chain = resolved
+                if resolved not in bases:
+                    bases.append(resolved)
+            else:
+                chain = None
+        elif word == "popd" or word in _RWH_SHELL_STATE_WORDS:
+            chain = None
+    raw_steps = []
+    for pattern in (_RWH_RAW_C_RE, _RWH_RAW_OVERRIDE_RE, _RWH_RAW_CD_OPERAND_RE,
+                    _RWH_RAW_GIT_ASSIGN_RE):
+        for match in pattern.finditer(command):
+            operand = next(g for g in match.groups() if g is not None)
+            raw_steps.append((match.start(), operand))
+    # raw-text steps are read in TEXT ORDER, so an absolute step (a cd, -C, override or GIT_
+    # assignment inside an option value included) becomes a resolution base for every relative
+    # operand after it in the text; text order is not run order (a shell function or loop can
+    # run a later step first), so this only widens the hold set
+    for _start, operand in sorted(raw_steps):
+        # a relative raw-text operand resolves against whatever directory runs it, which for an
+        # option value or a step the one-plain-git form does not model is a directory of git's
+        # choosing, not the session cwd: this scan does not resolve it, so it is tried against
+        # every directory the command walks to and every textual ancestor of each, as well as
+        # the session cwd (_rwh_rel_bases), each landing repository joining the hold set, and the
+        # flag still makes the caller withhold while a hold is live (the widened set shows more
+        # holds; it proves nothing about where the operand lands)
+        if operand and not _rwh_opaque_path(operand):
+            if os.path.isabs(operand):
+                if operand not in bases:
+                    bases.append(operand)
+            else:
+                raw_relative = True
+                for rel_base in _rwh_rel_bases(bases, cwd):
+                    stepped = add(operand, rel_base)
+                    if stepped is not None:
+                        raw_dirs.append(stepped)
+        resolved = add(operand, cwd)
+        if resolved is not None:
+            raw_dirs.append(resolved)
+    # every literal ABSOLUTE path anywhere in the raw text joins the hold set too (additive only:
+    # one more candidate, never a resolution base and never a directory step): the token scan
+    # cannot see a path inside a quoted shell body (bash -c, sh -c, eval) or a heredoc body, and
+    # without this widening a held path named only there would leave its hold invisible from a
+    # session outside every held repository
+    for match in _RWH_RAW_ABS_PATH_RE.finditer(command):
+        add(match.group(0), None, structural=False)
+    # a QUOTED span that is one whole absolute path joins the hold set too, spaces included: the
+    # character-class scan above stops at a space, which would consult a quoted operand such as
+    # "/held tree/out" at the wrong directory; additive only, like the scan above, and an
+    # UNQUOTED path containing spaces stays a disclosed residual
+    for match in _RWH_RAW_QUOTED_ABS_RE.finditer(command):
+        add(next(g for g in match.groups() if g is not None), None, structural=False)
+    for key in _RDP_AMBIENT_GIT:
+        add(os.environ.get(key), None)
+    return dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved, link_held
+
+
+def _rwh_set_state(dirs, views, holds, cw_cache, notes):
+    """The merged hold state of every repository the candidate directories resolve to, each
+    EXPANDED through its configured core.worktree (a repository-file core.worktree moves the files
+    a mutation writes, so the configured worktree's repository is consulted even though no command
+    operand names it, behind a wrapper or an override included): ("bad", detail) when any marker
+    state there is unreadable or malformed, ("error", message) when any candidate's identity
+    probe could not answer, its core.worktree lookup could not answer, or its configured worktree
+    is process-relative and so unresolvable here (_rwh_view's cannot-evaluate: whether a hold is live there cannot be
+    read, so the caller fails closed, never reading the failure as "not a repository", and the
+    message names the SPECIFIC cause, since a refusal naming the identity probe for a
+    configuration failure sends the operator to the wrong repair; a bad
+    marker state still wins, being the more specific refusal), ("live", live_holds) when any has a
+    live hold (live_holds
+    is every such (marker, path) across the set, deduplicated by marker path, so a caller can judge
+    each one), ("clear", None) otherwise. A candidate that git ANSWERS is in no repository
+    contributes nothing. Every named candidate is consulted; only the expansion chain is bounded, so a
+    configuration cycle or an absurd chain ends (under-extending only what the chain added, never a
+    named candidate)."""
+    live = []
+    live_paths = set()
+    error = None
+    queue = list(dirs)
+    seen = set()
+    extra = 64
+    i = 0
+    while i < len(queue):
+        directory = queue[i]
+        i += 1
+        if directory in seen:
+            continue
+        seen.add(directory)
+        view = _rwh_view(directory, views)
+        if view is _RWH_VIEW_ERROR:
+            if error is None:
+                error = _rwh_probe_text(directory)
+            continue
+        if view is None:
+            continue
+        state, payload = _rwh_holds(view[1], holds, notes)
+        if state == "bad":
+            return ("bad", payload)
+        if state == "ok" and payload:
+            for marker, path in payload:
+                if path not in live_paths:
+                    live_paths.add(path)
+                    live.append((marker, path))
+        known, config_wt = _rwh_core_worktree(directory, cw_cache)
+        if not known:
+            # the core.worktree lookup could not answer, or answered ambiguously: a configured
+            # worktree, and the holds of its repository, may exist unread, so the failed lookup
+            # is the same cannot-evaluate as a failed identity probe, never a clean expansion,
+            # and the refusal names the configuration lookup, not the identity probe
+            if error is None:
+                error = _rwh_config_probe_text(directory)
+        elif config_wt is not None and extra > 0:
+            extra -= 1
+            # core.worktree is read relative to the git directory; a configured worktree that
+            # does not exist yet is consulted at its nearest existing ancestor, like every other
+            # hold-set candidate, and one whose meaning depends on the process that opens it
+            # cannot be resolved here at all, the same cannot-evaluate, named as the
+            # configuration cause rather than as an identity-probe failure
+            resolved_wt = config_wt if os.path.isabs(config_wt) \
+                else os.path.join(view[0], config_wt)
+            if _rwh_process_relative(resolved_wt):
+                if error is None:
+                    error = _rwh_config_procrel_text(directory, config_wt)
+            else:
+                queue.append(_rwh_hold_candidate(resolved_wt))
+    if error is not None:
+        # an unanswerable probe may hide a live hold, so it outranks live and clear: a "live"
+        # answer built on a partial view could still end in the caller's unrelated-target allow;
+        # the payload is the cause-specific refusal message
+        return ("error", error)
+    return ("live", live) if live else ("clear", None)
+
+
+def _rwh_core_worktree(directory, cache):
+    """(known, value) for the core.worktree configuration git reads at directory: (True, None) when
+    provably unset, (True, value) when set, (False, None) when git cannot say OR the reply is
+    ambiguous, which every caller fails closed on: hold-set discovery reads the failed lookup as
+    the probe error (a configured worktree, and its repository's holds, may exist unread), and the
+    certain-target pass reads it as set. A set value is kept BYTE-EXACT apart from the one
+    trailing newline git's --get reply ends with: trimming other whitespace would move a
+    configured path whose name carries it onto a DIFFERENT directory, whose repository's holds
+    would then be read in place of the real destination's. Ambiguous replies, each read as
+    cannot-say rather than guessed: an exit-0 reply that is empty or not newline-terminated (not
+    git's documented answer), an exit-0 value that is empty once its final newline is removed (a
+    core.worktree set to the empty string, whose meaning this hook does not model), and an exit-1
+    reply carrying output (git's unset answer prints nothing, so output there contradicts it). A
+    set core.worktree moves the files a mutation writes away from the
+    directory git was pointed at, so a lexical target no longer proves which worktree is mutated."""
+    if directory in cache:
+        return cache[directory]
+    p = _review_git(directory, "config", "--get", "core.worktree")
+    if p is None:
+        result = (False, None)
+    elif p.returncode == 0:
+        text = p.stdout.decode("utf-8", "surrogateescape")
+        if text.endswith("\n"):
+            text = text[:-1]
+        else:
+            text = ""  # not git's newline-terminated reply: ambiguous, never a usable value
+        # exit 0 answers "set": an empty or unreadable value is ambiguous, never provably unset
+        result = (True, text) if text else (False, None)
+    elif p.returncode == 1 and not p.stdout:
+        result = (True, None)  # git's specific unset answer, which carries no output
+    else:
+        result = (False, None)
+    cache[directory] = result
+    return result
+
+
+def _rwh_decide(data):
+    """The review-workdir-hold decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable",
+    message). INERT where no review-hold marker directory exists and the payload carries an absolute
+    cwd: the only state read is the markers of the repositories the command names, so adopters who
+    write no markers see nothing. A cwd that is missing, relative, carries a NUL byte or names no
+    directory that exists hides the
+    session repository, so every git-word command outside the read-only grammar, and an absent
+    command, fails closed as UNVERIFIABLE whatever the markers say; a candidate directory whose
+    git identity probe cannot answer (_review_git's None: git could not be run, timed out or ran
+    past the decision deadline; any nonzero or signal exit other than git's specific
+    not-a-git-repository answer; or an exit-0 reply that is not the expected two lines) fails
+    closed the same way, never
+    read as "not a repository" (which would hide a live hold there), while git's specific answer
+    that a directory is in no repository, matched at the start of one of the probe's own C-locale
+    stderr lines, stays the inert allow; a hold-set candidate is resolved PHYSICALLY first
+    (realpath, so '..' and symlink components are applied as the kernel would) and one that
+    names no existing directory is
+    consulted at its NEAREST EXISTING ancestor, so a path a command creates first, or a write
+    operand's file path, still reads the markers of the repository it lands in, and a
+    PROCESS-RELATIVE structural candidate (/proc/self/..., /proc/<pid>/..., /dev/fd/...) cannot
+    be resolved at all and withholds the command outright. The rule is
+    ONE-PLAIN-GIT-or-fail-closed, judged from the RAW text, so shell grammar is never modelled case
+    by case. A command whose raw text carries no git word (git as a word, the git of a git-<name>
+    executable, the git ending an interpreter path) consults nothing beyond the session repository.
+    A command that carries one is judged against its HOLD SET: the repositories of the session cwd,
+    of every literal path the raw text names after -C, --git-dir, --work-tree (= and separated
+    forms), cd, pushd or a GIT_ assignment (quotes stripped; quoted bodies, heredocs and option
+    values included), of every other literal ABSOLUTE path any segment's tokens carry (a bare
+    operand, an option-value payload after = or attached to a short option), of every ln
+    operand (the name of a link the command creates resolved against the directory the segment
+    runs from; a relative target of a plain symbolic link resolved against the LINK'S OWN
+    directory, where the kernel resolves it, and that of a hard link or a -r link against the
+    directory the segment runs from, where ln opens it; the plain two-operand link recorded so a
+    later candidate stepping through it is consulted where the link will point; an ln option
+    word outside _RWH_LN_OPTS withholds the command while a hold is live, and leaves the
+    decision unchanged when every hold the set shows is clear), and of every literal ABSOLUTE
+    path anywhere in the raw
+    text (a quoted shell body or heredoc body included; a quoted span that is one whole absolute
+    path read whole, spaces included; a run of leading slashes collapsed first), a candidate
+    resolved physically and one
+    that names no existing directory consulted at its nearest existing ancestor, each expanded
+    through its configured core.worktree (a lookup that cannot answer, an ambiguous reply, and a
+    process-relative configured worktree each fail
+    closed, the refusal naming the configuration cause). While ANY repository in
+    that set has a live hold, a git segment carrying a form that runs a program or shell text
+    (_rwh_program_gate: a leading assignment, any global option other than a literal -C, the
+    curated program-option model, and the subcommands and options of _RWH_PROGRAM_SUBCOMMANDS,
+    _RWH_PROGRAM_SUB_OPTIONS and _RWH_PROGRAM_SUB_LETTERS) DENIES with a plain reason, whatever
+    its target and without resolving where the program runs (an unrelated rebase -x is refused
+    too, a stated over-refusal); a git segment carrying a file-writing path option
+    (_rwh_write_gate: checkout-index --prefix, the diff family's --output, archive and
+    format-patch output options, the input-path admissions apply --unsafe-paths and fast-import
+    --allow-unsafe-features, and the rest of _RWH_WRITE_PATH_SUB_OPTIONS and
+    _RWH_WRITE_PATH_SUB_LETTERS) DENIES the same way, whatever the operand names, since such a
+    path is not a directory move and where it lands is not resolved; a git segment carrying a
+    literal ABSOLUTE option value or operand that resolves to or inside a held worktree
+    (_rwh_held_path_gate) DENIES too, whatever the word means to its verb (a -C operand into the
+    held worktree gets the direct hold reason; every other hit the gate's stated over-refusal),
+    closing the
+    file-writing spellings outside the enumerated tables for absolute held paths (a relative or
+    expansion-built operand stays the disclosed file-edit residual); otherwise the command
+    DENIES as UNVERIFIABLE unless it is ONE plain git
+    segment: exactly one segment, no wrapper or reserved word before git (a bare
+    command/exec/builtin/env/sudo prefix is peeled by the shared peel, as everywhere in this file),
+    the command word the literal word git, and no $(, backquote or heredoc operator anywhere in the
+    raw text. That one plain segment passes only when it is the CLOSED LITERAL READ-ONLY GRAMMAR
+    (_rwh_read_only_form: no leading assignment or wrapper of any kind, the literal word git
+    first, no global option at all except a literal -C directory, a verb on the ENUMERATED
+    read-only allowlist (_RWH_READ_ONLY_VERBS) in a non-mutating form, and only options from the
+    verb's closed per-verb read-only set, so an option that writes a file (--output), runs a
+    program (-O, --upload-pack) or is simply unmodelled drops the pass; read-only git so judged is
+    never withheld by a hold, and a verb outside the allowlist, read-tree or bisect included, is
+    treated as mutating), or
+    when its target is CERTAIN, resolves outside every held worktree, and belongs to a repository
+    with NO live hold, and the raw text carries no directory step its target does not account
+    for (whatever that step names: an option value runs from a directory this rule cannot fix, a
+    stated over-refusal for the steps that cannot reach a hold) and no
+    relative -C, --git-dir, --work-tree, cd or GIT_-assignment operand: only literal -C moves
+    resolved physically, no
+    --git-dir/--work-tree or -c/--config-env override, no GIT_ variable assigned, exported or unset
+    in the command, none of the _RDP_AMBIENT_GIT names (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
+    GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_QUARANTINE_PATH,
+    GIT_NAMESPACE, GIT_REPLACE_REF_BASE, GIT_GRAFT_FILE, GIT_SHALLOW_FILE; exactly that list, a
+    disclosed limit for other inherited variables such as GIT_CONFIG_*) set in the hook's own
+    environment, and the resolved repository's configuration setting no core.worktree. A certain
+    target that IS a held worktree, or whose repository TOP LEVEL (rev-parse --show-toplevel,
+    never the -C directory alone; a top level git cannot report fails closed) ENCLOSES one on
+    disk (a whole-tree mutation of an enclosing tree can delete a nested held worktree, from a
+    subdirectory too), denies outright; a certain target in a worktree of a HELD repository is
+    withheld for every form outside the read-only grammar, whether or not the raw text names the
+    held path (a sibling worktree shares the repository's refs, objects and configuration, and a
+    program-running option reaches the held worktree without naming it, a stated over-refusal for
+    the sibling forms that cannot reach it); a RELATIVE raw-text operand after -C, --git-dir,
+    --work-tree, cd or a GIT_ assignment is resolved against the session cwd AND every directory
+    the command walks to (the target and every absolute raw-text step before it in the text
+    included) AND every textual ancestor of each, each landing repository joining the hold set (a
+    best-effort widening, not a model of where a program runs: a hold reached only through a
+    symlinked -C, a submodule foreach program or two relative steps in a row can stay out of the
+    set), and is withheld while any hold is live; `git fetch`, `git pull`, `git push` and `git send-pack`
+    targeting a repository with a live hold deny from any of its worktrees
+    (an explicit refspec reaches the held branch, and --update-head-ok lifts git's own
+    checked-out-branch refusal); `git worktree remove/move` of a held worktree (by name shorthand
+    or path, before resolution) and `git update-ref` or `git symbolic-ref` writes of the held
+    HEAD, its cross-worktree paths or any ref in its symbolic chain deny from any worktree of the
+    repository, with update-ref's written ref resolved through its own symbolic chain in the
+    target repository unless --no-deref is given (a converging chain moves the held HEAD without
+    naming it), and an update-ref or symbolic-ref option cluster whose written operand cannot be
+    determined, or a chain git cannot be asked about, is fail-closed. An unreadable or malformed
+    marker state in any consulted
+    repository denies git-word commands other than the one read-only form; an expired marker is
+    ignored with a note; a live marker whose recorded head differs from its worktree's HEAD notes
+    the drift without denying."""
+    cwd = data.get("cwd")
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    views, holds, cw_cache, notes = {}, {}, {}, []
+    # the NUL test runs before isdir, which raises on an embedded NUL; a nonexistent absolute cwd
+    # is the same fail-closed case (git cannot be asked anything there, so neither can its holds)
+    cwd_ok = isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd and \
+        os.path.isdir(cwd)
+    sview = _rwh_view(cwd, views) if cwd_ok else None
+    s_state, s_payload = _rwh_holds(sview[1], holds, notes) if isinstance(sview, tuple) \
+        else ("absent", [])
+    s_live = s_payload if s_state == "ok" else []
+    if not isinstance(command, str) or not command:
+        if s_state == "bad":
+            return ("deny", _rwh_bad_text(s_payload))
+        if s_live:
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable while "
+                    "a review hold is live, so a mutation of the held worktree cannot be ruled out.")
+        if not cwd_ok:
+            return ("unverifiable", _rwh_cwd_text(cwd))
+        if sview is _RWH_VIEW_ERROR:
+            # the session repository's identity probe could not answer, so its holds are unread:
+            # an absent command fails closed exactly as it does for an unreadable cwd
+            return ("unverifiable", _rwh_probe_text(cwd))
+        return ("allow", None)
+    if _RWH_RAW_GIT_WORD_RE.search(command) is None:
+        # no git word anywhere in the raw text: nothing here runs git by a spelling this rule
+        # models (a git reached through an opaque program name is the disclosed indirect-git
+        # residual), so only the session notes (drift, expiry) travel
+        return ("note", " ".join(notes)) if notes else ("allow", None)
+    try:
+        segments = _segments(command, skip_empty=True)
+    except ValueError:
+        segments = None
+    simple = None  # the ONE plain git segment's effective tokens, where the command is exactly that
+    if segments is not None and len(segments) == 1 and \
+            not any(mark in command for mark in _RWH_RAW_SUBST):
+        eff = _expbnd_effective_tokens(segments[0][0])
+        idx = _command_word_index(eff)
+        if idx < len(eff) and eff[idx] == "git":
+            simple = eff
+    if simple is not None and _rwh_read_only_form(segments[0][0]):
+        # the CLOSED LITERAL READ-ONLY GRAMMAR (the literal word git first with no leading
+        # assignment or wrapper, a literal -C directory as the only global option, an ENUMERATED
+        # read-only subcommand in a non-mutating form, and only options from its closed per-verb
+        # read-only set) is never withheld by a hold, bad marker state included; everything else
+        # (a leading assignment, any other global option, an unmodelled verb such as read-tree or
+        # checkout-index however read-only it looks, or a verb option outside the closed set,
+        # --output, -O and --upload-pack included) falls through and is judged against the hold
+        # set
+        return ("note", " ".join(notes)) if notes else ("allow", None)
+    if not cwd_ok:
+        # a missing, relative or NUL-bearing cwd hides the session repository and its holds, and
+        # leaves a target with no -C unresolved: fail closed for every git-word command outside
+        # the read-only grammar, in the standalone preflight as in the composed hook
+        return ("unverifiable", _rwh_cwd_text(cwd))
+    dirs, raw_dirs, raw_relative, proc_strict, proc_live, link_unresolved, link_held = \
+        _rwh_hold_dirs(command, segments if segments is not None else [],
+                       cwd if cwd_ok else None)
+    set_state, set_payload = _rwh_set_state(dirs, views, holds, cw_cache, notes)
+    bad_detail = s_payload if s_state == "bad" else (set_payload if set_state == "bad" else None)
+    if bad_detail is not None:
+        return ("deny", _rwh_bad_text(bad_detail))
+    if set_state == "error":
+        # a candidate directory's identity probe or core.worktree lookup could not answer, or a
+        # configured worktree is process-relative: whether a repository there carries a live hold
+        # cannot be read, so the failure is never read as "not a repository" (which would hide
+        # the hold and allow the mutation); every git-word command outside the read-only grammar
+        # fails closed, with the payload already naming the specific cause
+        return ("unverifiable", set_payload)
+    if proc_strict is not None:
+        # an operand, option value, directory step, override, GIT_ assignment or link operand
+        # names a process-relative path: its meaning depends on the process that opens it
+        # (/proc/self/cwd is git's view after its own -C chdir, never this hook's), so the hook
+        # can neither resolve it nor read the holds of the repository it lands in; it counts as
+        # held and the command is withheld outright
+        return ("unverifiable", "AIQT rule rvwpin: this git command names the process-relative "
+                "path {} (a /proc or /dev/fd spelling), whose meaning depends on the process "
+                "that opens it, so the repository it lands in and its review holds cannot be "
+                "read; name the directory it resolves to with a literal absolute "
+                "path.".format(proc_strict))
+    if not s_live and set_state != "live":
+        return ("note", " ".join(notes)) if notes else ("allow", None)
+    if link_held is not None:
+        # a live hold is reachable and an ln segment carries an option word the hold-set scan
+        # does not classify: where the link lands, or what its target resolves against, is not
+        # modelled, so whether a later step through it reaches the held worktree cannot be
+        # ruled out. Only while a hold is live: with every hold the set shows clear (its ln
+        # operands consulted best-effort), the decision is the inert allow above
+        return ("unverifiable", "AIQT rule rvwpin: this command creates a link (ln) with the "
+                "option {!r}, which this rule does not model (only -s, -r, -sr, -rs, --symbolic "
+                "and --relative are modelled), while a review hold is live, so whether a later "
+                "step through that link reaches the held worktree cannot be ruled out; create "
+                "the link in a separate command first, spell it with only those options, or end "
+                "the hold first.".format(link_held))
+    gate_live = (list(set_payload) if set_state == "live" else []) + list(s_live)
+    word = _rwh_program_gate(segments) if segments is not None else None
+    if word is not None:
+        # a hold is live and the command carries a program-running form: refused whatever its
+        # target, without resolving where the program runs (an unreadable command falls through
+        # to the one-plain-git rule below, which withholds it)
+        marker, path = gate_live[0]
+        return ("deny", _rwh_program_text(word, marker, path))
+    word = _rwh_write_gate(segments) if segments is not None else None
+    if word is not None:
+        # a hold is live and the command carries a file-writing path option: its operand is not a
+        # directory move, so where it lands is not resolved, and from an unrelated target it can
+        # still write into the held worktree; refused whatever the operand names
+        marker, path = gate_live[0]
+        return ("deny", _rwh_write_text(word, marker, path))
+    held_hit = _rwh_held_path_gate(segments, gate_live) if segments is not None else None
+    if held_hit is not None:
+        # a hold is live and a git segment carries a literal absolute path that resolves to or
+        # inside a held worktree: whatever that word means to its verb, a file-writing spelling
+        # outside the enumerated option tables (or a positional write operand) can land a write
+        # there, so it is refused without modelling the verb's grammar
+        word, marker, path, direct = held_hit
+        if direct:
+            # the -C operand binds the command inside the held worktree itself: the core
+            # held-worktree mutation gets the direct hold reason, not the write-path over-refusal
+            return ("deny", _rwh_deny_text(marker, path))
+        return ("deny", _rwh_held_path_text(word, marker, path))
+    if proc_live is not None:
+        # a live hold is reachable and the raw text carries a process-relative path outside any
+        # structural position (inside a shell body or other raw text): where it lands only the
+        # opening process knows, so whether it reaches a held worktree cannot be ruled out
+        return ("unverifiable", "AIQT rule rvwpin: this command's raw text carries the "
+                "process-relative path {} (a /proc or /dev/fd spelling) while a review hold is "
+                "live, and where it lands only the process that opens it knows, so a write into "
+                "the held worktree cannot be ruled out; name the directory it resolves to with a "
+                "literal absolute path, or end the hold first.".format(proc_live))
+    if link_unresolved:
+        # a live hold is reachable and the command creates a link whose operand this scan could
+        # not resolve: the link can point a later step anywhere, the held worktree included
+        return ("unverifiable", "AIQT rule rvwpin: this command creates a link (ln) whose operand "
+                "cannot be resolved from its literal text while a review hold is live, so a later "
+                "step through that link reaching the held worktree cannot be ruled out; use "
+                "literal absolute ln operands, or end the hold first.")
+    if raw_relative:
+        # a live hold is reachable and the raw text carries a relative path after -C, --git-dir,
+        # --work-tree, cd or a GIT_ assignment: the directory that runs it (an option value runs
+        # from the target's tree, not the session cwd) is unknown here, so whether it resolves onto
+        # a held worktree cannot be ruled out; withhold rather than trust the session-cwd resolution
+        return ("unverifiable", "AIQT rule rvwpin: this git command's raw text carries a relative "
+                "path after -C, --git-dir, --work-tree, cd or a GIT_ assignment (in an option value "
+                "or a step its one-plain-git form does not model), which resolves against a "
+                "directory this rule cannot fix, so while a review hold is live whether it reaches a "
+                "held worktree cannot be ruled out; use an absolute path, or end the hold first.")
+    # a live hold in a repository this command can reach: only the one plain git segment whose
+    # target is certain and resolves outside every held worktree may still pass
+    if simple is not None and not _rwh_git_env_touched(segments) and \
+            not any(k in os.environ for k in _RDP_AMBIENT_GIT):
+        sub, args = _git_subcommand_rest(simple)
+        kind, target = _rwh_segment_target(simple, cwd if cwd_ok else None)
+        if sub is not None and kind == "dir":
+            tview = _rwh_view(target, views)
+            # a target probe error cannot arrive here as a distinct case: the target is always a
+            # candidate directory of the hold set (the session cwd or an accumulated literal -C),
+            # the identity cache is keyed by the same resolved path, and _rwh_set_state already
+            # returned the fail-closed error for any candidate whose probe could not answer; a
+            # non-tuple view falls through to the final withhold below, so even a view this
+            # reasoning missed stays fail closed
+            if isinstance(tview, tuple):
+                known, config_wt = _rwh_core_worktree(target, cw_cache)
+                if known and config_wt is None:
+                    t_gitdir, t_common = tview
+                    t_state, t_payload = _rwh_holds(t_common, holds, notes)
+                    if t_state == "bad":
+                        return ("deny", _rwh_bad_text(t_payload))
+                    t_live = t_payload if t_state == "ok" else []
+                    hit = None
+                    if sub == "worktree":
+                        hit = _rwh_worktree_hit(args, target, t_live, views)
+                    elif sub == "update-ref":
+                        hit = _rwh_update_ref_hit(args, target, t_live, views)
+                    elif sub == "symbolic-ref":
+                        hit = _rwh_symbolic_ref_hit(args, t_gitdir, t_live, views)
+                    if hit is not None:
+                        return hit
+                    if not _rwh_read_only_form(segments[0][0]):
+                        if sub in _RWH_REPO_REF_WRITERS and t_live:
+                            marker, path = t_live[0]
+                            return ("deny", _rwh_ref_writer_text(sub, marker, path))
+                        # EVERY live hold the command can reach is judged here, built as the union
+                        # of the whole hold set, the session repository's holds and the target
+                        # repository's holds, deduplicated by marker path (the opaque-path residual
+                        # drops the session cwd from the hold set, so its holds would otherwise be
+                        # lost when the set is clear). The target itself and a tree the target
+                        # encloses are reached by the one-plain-git command and deny. Every
+                        # remaining hold is judged fail closed by how a git command bound to the
+                        # target can still reach it: a hold anywhere in the TARGET'S OWN repository
+                        # withholds every command outside the read-only grammar (a sibling worktree
+                        # shares the repository's refs, objects and configuration, and a
+                        # program-running option reaches it without naming its path, shapes this
+                        # rule does not model case by case); a hold in an UNRELATED repository,
+                        # reached only through the session or the raw text, withholds the command
+                        # when the raw text walks to ANY directory the resolved target does not
+                        # account for, whatever that step names (an option value runs from a
+                        # directory this rule cannot fix, a stated over-refusal for the steps
+                        # that cannot reach a hold). A program-running form never gets here: the
+                        # program gate above refused it. Only a segment with none of those passes:
+                        # a plain mutation certain to run inside an unheld unrelated repository, so
+                        # a session in a review-held repository can still commit in an unrelated
+                        # one.
+                        reach, seen_reach = [], set()
+                        for marker, path in ((set_payload or []) if set_state == "live" else []) \
+                                + list(s_live) + list(t_live):
+                            if path not in seen_reach:
+                                seen_reach.add(path)
+                                reach.append((marker, path))
+                        top = False  # the target's top level, resolved once, on first need
+                        for marker, path in reach:
+                            held_view = _rwh_view(marker["workdir"], views)
+                            if held_view is _RWH_VIEW_ERROR:
+                                # the held worktree's own identity probe could not answer, so the
+                                # target cannot be shown distinct from it: fail closed
+                                return ("unverifiable", _rwh_probe_text(marker["workdir"]))
+                            if isinstance(held_view, tuple) and held_view[0] == t_gitdir:
+                                return ("deny", _rwh_deny_text(marker, path))
+                            held_real = _rwh_real(marker["workdir"])
+                            if held_real is None:
+                                continue
+                            if top is False:
+                                # the enclosing test runs against the target repository's top
+                                # level, never the -C directory alone: a whole-tree mutation run
+                                # from a subdirectory (git clean -ffdx with a :/ or .. pathspec)
+                                # still sweeps the whole worktree
+                                top = _rwh_toplevel(target)
+                            if top is None:
+                                return ("unverifiable", "AIQT rule rvwpin: the top level of the "
+                                        "worktree this git command targets cannot be resolved "
+                                        "while a review hold is live, so a mutation enclosing a "
+                                        "held worktree cannot be ruled out; run it with a "
+                                        "readable non-bare target, or end the hold first.")
+                            if _rwh_inside(held_real, top):
+                                return ("deny", _rwh_enclosing_text(marker, path))
+                        if t_live:
+                            marker, path = t_live[0]
+                            return ("unverifiable", _rwh_repo_hold_text(marker, path))
+                        steps = [d for d in raw_dirs if _rwh_real(d) != target]
+                        if steps:
+                            return ("unverifiable", "AIQT rule rvwpin: this git command's text "
+                                    "carries a directory step ({}) that its resolved target does "
+                                    "not account for (a -C, --git-dir, --work-tree, cd or GIT_ "
+                                    "operand in an option value or a step its one-plain-git form "
+                                    "does not model), while a review hold is live in a repository "
+                                    "the session or the command's text reaches. A step in an "
+                                    "option value is applied from a directory this rule cannot "
+                                    "fix, so whether the command modifies a held worktree cannot "
+                                    "be ruled out, whatever the step names, a stated "
+                                    "over-refusal; run one plain 'git -C /absolute/path "
+                                    "<subcommand>' naming no other directory, or end the hold "
+                                    "first.".format(steps[0]))
+                        # the shape that still passes: a segment bound to a certain target in an
+                        # unrelated unheld repository, carrying no program-running option and
+                        # walking to no directory beyond that target. A program git runs from the
+                        # TARGET'S OWN configuration (a hook, core.editor, core.fsmonitor, a
+                        # configured pager) can still reach a held worktree from there; that is
+                        # the disclosed indirect-git residual (git configured to run programs),
+                        # not a shape this rule certifies as unable to reach the hold.
+                    return ("note", " ".join(notes)) if notes else ("allow", None)
+    return ("unverifiable", "AIQT rule rvwpin: this command names git while a review hold is live "
+            "in a repository it can reach, and it is not one plain git segment whose read-only "
+            "form or certain target this rule can resolve; run one plain 'git -C /absolute/path "
+            "<subcommand>' with no wrapper, reserved word, substitution, heredoc or directory "
+            "change, or end the hold first.")
+
+
+def review_workdir_hold(data):
+    """rvwpin, PreToolUse Bash: once a review is dispatched against a worktree, that worktree is not
+    modified until the review returns or is abandoned. The hold is an adopter-written marker file in
+    GIT_COMMON_DIR/aiqt/review-holds/ naming the held worktree, its head at dispatch, a dispatch id
+    and a required expiry; the dispatcher writes it before the reviewer starts and removes it when the
+    review ends. INERT (silent allow) where no marker directory exists and the payload carries an
+    absolute cwd; a cwd that is missing, relative, carries a NUL byte or names no directory that
+    exists fails closed (UNVERIFIABLE)
+    for every git-word command outside the read-only grammar and for an absent command, in the
+    standalone preflight as in the composed hook, and so does any consulted directory whose git
+    identity probe cannot answer (git could not be run, timed out, ran past the decision deadline,
+    exited nonzero or on a signal with anything but its specific not-a-git-repository answer, or
+    replied unreadably on exit 0): the probe failure is never read as "not a repository", which
+    would
+    hide a live hold, while git's specific answer that a
+    directory is in no repository, matched at the start of one of the probe's own C-locale stderr
+    lines, stays the inert
+    allow, and a hold-set candidate is resolved PHYSICALLY first (realpath, so '..' and symlink
+    components are applied as the kernel would) and one that names no existing directory is
+    consulted at its nearest
+    existing ancestor, so a directory the command itself creates first, and a write operand's
+    file path, still read the markers of the repository each lands in; a structural candidate
+    that is PROCESS-RELATIVE (/proc/self/..., /proc/<pid>/..., /dev/fd/..., judged on the literal
+    components with a run of leading slashes collapsed first, so '//proc' and a '..' spelling
+    that a textual collapse would erase are read as the kernel reads them) cannot be resolved
+    by this hook at all (its meaning depends on the process that opens it) and withholds the
+    command outright, a core.worktree lookup that cannot answer or answers ambiguously, and a
+    configured worktree that is process-relative, fail closed the same way with the refusal
+    naming the configuration cause (a set value is kept byte-exact apart from its final newline,
+    so a configured path carrying whitespace is consulted where git writes), an identity reply
+    whose first line is not absolute is the probe error, a candidate path realpath cannot even
+    process is the probe error too, never "no repository",
+    and a marker-directory path that exists but does not lead to a directory (a
+    dangling review-holds or aiqt symlink) is malformed state, never absence. The rule is ONE-PLAIN-GIT-
+    or-fail-closed over the RAW command text: while any repository in the command's hold set (the
+    session cwd, every literal -C, --git-dir, --work-tree, cd, pushd or GIT_-assignment path
+    anywhere in the raw text, quotes stripped, every other literal ABSOLUTE path any
+    segment's tokens carry, a bare operand, an = payload or an attached short-option value
+    included, every ln operand of a link the command creates (the link name resolved against the
+    directory the segment runs from, a relative target of a plain symbolic link against the
+    link's own directory as the kernel resolves it and that of a hard link or a -r link against
+    the directory the segment runs from as ln opens it, the plain two-operand link recorded so a
+    later candidate stepping through it is consulted where the link will point, an unresolved
+    operand withheld while a hold is live, and an option word other than -s, -r, -sr, -rs,
+    --symbolic or --relative, a -t, -T or -sf included, withheld while a hold is live and
+    inert when none is), and every literal ABSOLUTE path
+    anywhere in the raw text, a quoted shell body or heredoc body included, a quoted span that is
+    one whole absolute path read whole with its spaces, and a run of leading slashes collapsed,
+    each expanded through its configured core.worktree)
+    has a live hold, a git segment carrying a form that runs a program or shell text (a leading
+    assignment, any global option other than a literal -C, rebase -x, submodule foreach, bisect
+    run, filter-branch, --upload-pack and the rest of the curated model, mergetool, difftool, a
+    config write, clone --template, for-each-repo and maintenance (each runs git over the
+    repositories a configuration key lists, or writes that list and schedules runs over it), the
+    connection services upload-pack, receive-pack, upload-archive and http-backend (each runs in
+    the repository its operand or request names) and the other _RWH_PROGRAM_* forms) DENIES with a
+    plain reason
+    whatever its target, without resolving where the program runs (an unrelated rebase -x is
+    refused too, a stated over-refusal), a git segment carrying a file-writing path option
+    (checkout-index --prefix, the --output of the diff and log families, range-diff, rev-list,
+    shortlog and reflog, archive -o/--output, format-patch, bugreport and diagnose
+    -o/--output-directory, index-pack -o, the marks exports of fast-import and fast-export,
+    init and clone --separate-git-dir, credential-store --file, mailsplit -o, and the input-path
+    admissions apply --unsafe-paths and fast-import --allow-unsafe-features, whose write paths
+    travel in the patch or stream content no argv scan reads) DENIES the
+    same way whatever the operand names (such a path is not a directory move, so where it lands is
+    not resolved, and from an unrelated target it can still write into the held worktree, a stated
+    over-refusal), a git segment carrying a literal ABSOLUTE option value or operand that
+    resolves to or inside a held worktree DENIES too, whatever the word means to its verb (the
+    held-path gate, closing the file-writing spellings outside the enumerated tables for absolute
+    held paths, a -C operand into the held worktree reported with the direct hold reason; a
+    relative or expansion-built operand stays the file-edit residual), and
+    ANY other command whose raw text carries a git word (git, a git-<name> executable,
+    a path ending in /git), inside quotes, substitutions, heredoc bodies or option values included,
+    denies with an UNVERIFIABLE: prefix, EXCEPT one plain git segment (no second segment, wrapper
+    or reserved word; no $(, backquote or heredoc operator anywhere) that is the CLOSED LITERAL
+    READ-ONLY GRAMMAR: no leading assignment of any kind, the literal word git first, no global
+    option at all except a literal -C directory, a subcommand on the ENUMERATED read-only
+    allowlist in a non-mutating form (a verb outside the allowlist, read-tree, checkout-index,
+    bisect or sparse-checkout included, is treated as mutating), and only options from the verb's
+    closed per-verb read-only set, which names nothing that writes a file (--output), runs a
+    program named in the command or in configuration (-O, --upload-pack, --ext-diff, --textconv,
+    the --format/--pretty/--sort families) or edits configuration (git config edit included); or
+    whose CERTAIN
+    literal target resolves outside every held worktree (by git's absolute git directory with
+    physically resolved paths, never by path string), does not enclose one on disk, belongs to a
+    repository with NO live hold, and carries no
+    relative -C/--git-dir/--work-tree/cd/GIT_-assignment operand anywhere in the raw text, and no
+    directory step its target does not account for (whatever the step names: a step in an option
+    value is applied from a directory this rule cannot fix, a stated over-refusal). A certain
+    target that is a held worktree, or whose repository top level (rev-parse --show-toplevel,
+    never the -C directory alone; a top level git cannot report fails closed) encloses one (a
+    whole-tree mutation of an enclosing tree can delete a nested held worktree, from a
+    subdirectory of the enclosing tree too), DENIES-and-educates (make the change on a
+    separate revision, rvwpin.4); a certain target in ANY worktree of a held repository is
+    withheld for every form outside the read-only grammar, whether or not the raw text names the
+    held path (a sibling worktree shares the repository's refs, objects and configuration, and a
+    program-running option reaches the held worktree without naming it), a stated over-refusal
+    for the sibling forms that cannot reach it; `git fetch`, `git pull`, `git push` and `git send-pack`
+    targeting a repository
+    with a live hold deny from any of its worktrees (an explicit refspec reaches the held branch,
+    and --update-head-ok lifts git's own checked-out-branch refusal); a `git worktree remove/move`
+    of the held worktree (by git's last-components name shorthand or exact path before any
+    resolution, or by resolved identity)
+    and a `git update-ref` or `git symbolic-ref` write of its HEAD, its cross-worktree
+    worktrees/<id>/HEAD and main-worktree/HEAD paths, or any ref in its symbolic HEAD chain (the
+    checked-out branch included, deletions in any accepted spelling; update-ref's written ref is
+    resolved through its own symbolic chain unless --no-deref is given, so a converging chain is
+    caught; an option cluster whose written operand cannot be determined, or a chain git cannot
+    be asked about, is fail-closed) deny from any worktree of the repository.
+    An unreadable or malformed marker state denies git-word commands other than the one plain
+    read-only form; an expired marker is ignored with a note; and a drifted head (the held worktree
+    moved outside the session) is surfaced with a note, never a deny. NO-ASK posture: block or note
+    only; one plain read-only git and non-git commands pass (a dry-run spelling of a mutating verb,
+    such as 'git clean -n', is read as mutating; a wrapped or quoted read-only git, a read with a
+    leading assignment or a global option other than a literal -C, and a read option outside the
+    closed per-verb set each deny while a hold is live, stated safe over-denies). A crash reaches
+    main's PreToolUse fail-closed exit 2.
+    THIS HOOK IS A BEST-EFFORT GUARD; judge it against this stated claim. The shapes it is known
+    NOT to catch (those found so far, not a proof that nothing else escapes), from a session
+    outside every held repository whose command text names no held path: a path
+    the shell builds at RUN TIME (a parameter or command substitution, a glob or brace pattern, a
+    tilde, a CDPATH-resolved cd), since the hold set is built from literal text only; a link
+    created by a LATER command or by another tool, and a chain of two links or two relative steps
+    created by one command (the created-link rewrite is one level, in text order); a step through
+    a link the same command creates that the rewrite does not match, because the match is on the
+    text: the link path spelled another way ('.', '..' or another link in it), a link created
+    INSIDE a directory that already exists (a link is recorded under its own name only), or a
+    step whose path the command already named earlier; a step
+    through a created link whose rewritten path is process-relative, which is dropped from the
+    hold set rather than refused (a link to / followed by a -C through <link>/proc/self/cwd); a
+    relative target of a plain symbolic link (no -r) made with ln -t or --target-directory,
+    which the kernel resolves against the option's directory, a base the hold set never reads
+    because the option is not paired with its value (the unmodelled-option withhold fires only
+    when some other reading shows a live hold); a held path
+    carried only in CONTENT (a patch, stream, file or stdin the command reads), which no argv or
+    raw-text scan sees, so the input-path admissions are refused only while some hold is visible;
+    an UNQUOTED path containing spaces in raw text (only a quoted span is read whole); a relative
+    path inside a quoted body that no -C or cd spelling introduces, an attached short-option
+    value that appears only inside a quoted body, and the fragment a quote-spliced operand
+    leaves; a pre-existing symlink that points through a process-relative magic link, resolved by
+    this hook's own process; git reached through an opaque program name (an alias, a function, a
+    wrapper script) or through configuration (hooks, core.fsmonitor, diff.external, a pager);
+    movers outside this hook (another session or terminal without it, a non-Bash tool, cron),
+    caught only after the fact by the drift note unless the adopter's tool runs the preflight;
+    file edits inside a held worktree by non-git means (Write/Edit tools, sed -i, cp, a shell
+    redirection), a separate write-scope follow-on; and marker accuracy, which is the adopter's
+    (the marker directory stays writable by the assistant, the suite-level limit already
+    disclosed). Each of these is a residual by design of a hold set built from literal command
+    text; no further widening rounds are planned against them.
+    Hookless dispatchers and resync tools run it as a preflight: `aiqt_hooks.py review_workdir_hold`
+    with the payload on stdin."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: review_workdir_hold wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("rvwpin")
+    if tool != "Bash":
+        return _allow()
+    kind, message = _rwh_decide(data)
+    if kind in ("deny", "unverifiable"):
+        prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
+        return _deny("{}{}".format(prefix, message),
+                     "AIQT guardrail: {}a live review hold pins its worktree (rule rvwpin); make the "
+                     "change on a separate revision, or end the hold when the review returns.".format(prefix))
+    if kind == "note":
+        return _allow_note(message)
+    return _allow()
+
+
 def orch_prompt_stamp(data):
     """tstamp/estsep, UserPromptSubmit (recorder, never blocks): stamp genuine human input from the
     clock, classify a prompt matching a registered wake as timer-originated, and inject the measured
@@ -17113,6 +25954,10 @@ def orch_prompt_stamp(data):
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
+        # the ask pair resets on genuine human input exactly as the schedule pair does: the human has
+        # spoken, so earlier ask denials never carry relief (or a stale basis) into the next question
+        ts["ask_denials"] = 0
+        ts.pop("ask_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
             if scope == "cannot":
@@ -17190,7 +26035,8 @@ def _orch_guard_scope_report(root):
                  "a Bash call from the repository root is DENIED: %s"
                  % (env, _ORCH_STRICT_SCOPE_FINDINGS[scope])], True)
     if scope == "none":
-        return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
+        return (["truncation guard: denies nothing for a Bash call from the repository root, apart from a "
+                 "note on a foreground command that may detach work (no registry on its "
                  "ancestor chain or at its git toplevel; with registry-required mode enabled, %s set to a "
                  "value other than an off value, such as 1, it denies instead)" % env], False)
     if scope in _ORCH_STRICT_SCOPE_FINDINGS:
@@ -21857,6 +30703,7 @@ HANDLERS = {
     "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "review_dispatch_pin": review_dispatch_pin,
+    "review_workdir_hold": review_workdir_hold,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
@@ -21896,6 +30743,7 @@ HANDLER_EVENT = {
     "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "review_dispatch_pin": PRETOOL,
+    "review_workdir_hold": PRETOOL,
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,

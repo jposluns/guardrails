@@ -8,10 +8,11 @@ Quality gates job, which aggregates the others, sets up none). With check-latest
 setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release,
 while the maintainers' host runs one fixed distribution patch release, so a change can pass every local
 suite and fail only in CI on a patch-release difference. The host-patch jobs (HOST_JOBS) run the suites a
-newer patch release most often breaks on the host's own patch release, beside the '3.14' jobs of
-quality.yml, which stay required and unchanged. A passing local suite on the host patch then predicts a
-required CI leg, and a failure only on a '3.14' leg is diagnostic evidence of a patch-release difference,
-not proof that the change is innocent. This gate keeps the workflow's top level and each host-patch job
+newer patch release most often breaks on the host's own patch release; they are the only CI run of the
+OPF tooling self-test and of the combined, malformed and system git-fixture-env suites, and only the
+git-fixture-env-core suite also runs on '3.14', in its canary job. A passing local suite on the host
+patch then predicts a required CI leg, and a failure only on the '3.14' canary is diagnostic evidence of a
+patch-release difference, not proof that the change is innocent. This gate keeps the workflow's top level and each host-patch job
 whole and the statements of that patch release in agreement.
 
 Legs, in order:
@@ -23,13 +24,17 @@ Legs, in order:
                convert.
   jobs         .github/workflows/quality.yml carries each HOST_JOBS job, and its top level and each such
                job are whole (JOB_RULES):
-                 workflow-keys  the workflow carries no top-level key but name, on, permissions and jobs
-                                (TOP_KEYS): a top-level defaults: or env: changes how every run step of
-                                every job executes (defaults: run: shell: true {0} makes each step exit 0
-                                without running its command);
-                 job-keys       the job carries no key but name, runs-on and steps (an if:,
-                                continue-on-error:, env:, defaults:, container: or strategy: can skip, mask,
-                                move or change what it runs);
+                 workflow-keys  the workflow carries no top-level key but name, on, permissions,
+                                concurrency and jobs (TOP_KEYS): a top-level defaults: or env: changes how
+                                every run step of every job executes (defaults: run: shell: true {0} makes
+                                each step exit 0 without running its command); and it carries a
+                                concurrency: block, exactly CONCURRENCY_BLOCK once blank and comment lines
+                                are dropped (without it a superseded pull request run is never cancelled;
+                                another group or cancel-in-progress can cancel a push-to-main run);
+                 job-keys       the job carries no key but name, runs-on and steps, and carries the one if:
+                                line HEAVY_JOB_IF_LINE exactly as written (without it the job runs on every
+                                pull request; any other if:, a continue-on-error:, env:, defaults:,
+                                container: or strategy: can skip, mask, move or change what it runs);
                  runner         runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest lists a
                                 patch release's Linux builds by Ubuntu version, so the job names its image;
                  checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
@@ -61,10 +66,11 @@ Legs, in order:
                                 (_suite_shaped), run exactly the job's HOST_SUITES tuple, in that
                                 order, none omitted, repeated or added, each an executable step after
                                 the setup-python step, so after the Python host pin step
-                                (opf-host-patch: the OPF tooling self-test; git-fixture-env-host-patch:
-                                the four git-fixture-env suites the '3.14' jobs run as separate lanes,
-                                core, config-combined, config-malformed and config-system, in that
-                                order);
+                                (opf-host-patch: the OPF tooling self-test; each of
+                                git-fixture-env-core-host-patch, git-fixture-env-config-combined-host-patch,
+                                git-fixture-env-config-malformed-host-patch and
+                                git-fixture-env-config-system-host-patch: one git-fixture-env suite each,
+                                so the four run as parallel jobs);
                  outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
                                 jobs runs this gate with --jobs-only (JOBS_ONLY_RUN) as its own run:
                                 command, judged by command tokens, never by exact text. EVERY job
@@ -147,7 +153,10 @@ Legs, in order:
                                 so the judge's job stays env-free); each env: and judge-step-key
                                 diagnostic names the recorded line of its key and says whether the
                                 carrying step is the counted judge or an unresolved judge-shaped
-                                step. Because every outside job is read whole, a line of any of them
+                                step; and no job that carries a counted or judge-shaped step carries
+                                a job-level if: (the pinned heavy-job line among them, which would skip
+                                the judge on every pull request but a merge-train-* one). Because every
+                                outside job is read whole, a line of any of them
                                 the extended model cannot read (a job property at an unexpected
                                 indent, a quoted or explicit key, a flow mapping, a block opener
                                 carrying an indentation indicator, an anchor or an alias among them),
@@ -190,7 +199,9 @@ Legs, in order:
                                 gate unread, and tools/check_ci_parity.py is the holder there
                                 (measured at this commit: a run: splicing a variable into this gate's
                                 path is exit 2 there, dynamic-target).
-               So a top-level key outside TOP_KEYS, another runner or checkout, an env: on a
+               So a top-level key outside TOP_KEYS, a missing concurrency: block or one other than
+               CONCURRENCY_BLOCK, a missing job-level if: on a host-patch job or one other than
+               HEAVY_JOB_IF_LINE, any if: on the judge's job, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
                omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
@@ -338,8 +349,8 @@ jobs' own Python host pin steps report each in CI while those steps still run, a
 tools/run_all_checks.sh reports each in every local run. What stays CI-blind is an edit that leaves no CI run of
 the jobs leg at all. A top-level defaults: or env: silences, in CI, every run step of every job, the judge
 step included, so CI cannot report it; this gate (workflow-keys) and check_ci_parity refuse it where they
-run outside that workflow, in tools/run_all_checks.sh. An edit that silences every step of both host-patch
-jobs (a job-level env:, a BASH_ENV value, in each) and with it silences or removes the judge (a
+run outside that workflow, in tools/run_all_checks.sh. An edit that silences every step of every host-patch
+job (a job-level env:, a BASH_ENV value, in each) and with it silences or removes the judge (a
 job-level env: on the registry job, which sits inside check_ci_parity's disclosed environment-value
 residual, which that gate's docstring owns; an env: on any step of the registry job, the judge step itself
 or an earlier step whose GITHUB_ENV write reaches it; or removing the judge step
@@ -361,16 +372,20 @@ inside the HOST_JOBS jobs of quality.yml and only when it equals this source, an
 python-version in any workflow to the floor exactly. GitHub's runtime is not modelled: when the runner image
 retires or the host patch has no build for it, setup-python fails the job, closed and never on another patch
 release. On 2026-10-12 the setup-python versions manifest (actions/python-versions) listed Linux x64 builds of
-3.14.4 for Ubuntu 22.04 and 24.04 only, so the move off ubuntu-24.04 is one reviewed change of RUNNER, both
-runs-on lines and, if needed, the host patch. The interpreter leg judges only the interpreter that runs this
+3.14.4 for Ubuntu 22.04 and 24.04 only, so the move off ubuntu-24.04 is one reviewed change of RUNNER, every
+host-patch runs-on line and, if needed, the host patch. The interpreter leg judges only the interpreter that runs this
 gate; in CI it runs only in the HOST_JOBS jobs. Equal patch releases are not equal builds: a distribution
 build's downstream patches and the system libraries an interpreter links (OpenSSL, SQLite, expat, zlib and
 others) can differ between the host and the runner, and this gate does not compare them. It does not check
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
-source and both host-patch pins in one reviewed change, and until then every local run fails on the
-interpreter leg. CI cost: the two jobs run the OPF tooling self-test and the four git-fixture-env suites a
-second time in every run of the workflow, and an edit to a pull request's title or body starts a run (the workflow
-runs on edited).
+source and every host-patch pin in one reviewed change, and until then every local run fails on the
+interpreter leg. CI cost: the five jobs carry the pinned heavy-job if:, so they run the OPF tooling self-test
+and the four git-fixture-env suites in every run on a push or on a merge-train-* pull request of this
+repository and in no other pull request run, the only CI run of each but the git-fixture-env-core suite, whose
+'3.14' canary job runs it too, the four suites as four parallel jobs (so the host leg's wall time is its
+longest job, not the sum of the four), and an edit to a pull request's title or body starts
+no Quality run (the workflow does not run on edited). This gate compares the concurrency: block and the if: line
+as text; whether GitHub evaluates them as their text says is not observed here.
 
 Run this gate isolated: python3 -I -B tools/check_python_host_pin.py
 """
@@ -403,16 +418,20 @@ SOURCE_REL = ".aiqt/python-host.toml"
 SOURCE_KEYS = {"format-version", "python-host-patch"}
 WORKFLOW_REL = ".github/workflows/quality.yml"
 # The host-patch jobs of WORKFLOW_REL, each with the ordered tuple of suites it exists to run (the run: text
-# of one executable step each, in this order): git-fixture-env-host-patch runs the four git-fixture-env
-# suites the '3.14' jobs run as separate lanes, in their order. tools/check_python_floor.py accepts a
-# host-patch pin only inside these jobs; its HOST_JOBS names the same jobs, which the self-test holds.
+# of one executable step each, in this order): each git-fixture-env-*-host-patch job runs one
+# git-fixture-env suite, so the four run as parallel jobs, listed here core first, then combined,
+# malformed and system. tools/check_python_floor.py accepts a host-patch pin only inside
+# these jobs; its HOST_JOBS names the same jobs, which the self-test holds.
 HOST_SUITES = {
     "opf-host-patch": ("python3 -I -B opf/tools/opf.py --self-test",),
-    "git-fixture-env-host-patch": (
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core",
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined",
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system"),
+    "git-fixture-env-core-host-patch": (
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core",),
+    "git-fixture-env-config-combined-host-patch": (
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined",),
+    "git-fixture-env-config-malformed-host-patch": (
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",),
+    "git-fixture-env-config-system-host-patch": (
+        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system",),
 }
 HOST_JOBS = tuple(HOST_SUITES)
 # Every suite run HOST_SUITES names, and the file names of the suite runners they run: a host-patch step
@@ -429,7 +448,7 @@ GATE_PATH = "tools/check_python_host_pin.py"
 GATE_RUN = "python3 -I -B " + GATE_PATH
 # The child-status probe (opf/tools/_child_status.py). In each host-patch job the probe step runs right
 # after the Python host pin step: tools/check_child_status_coverage.py accepts the gate ahead of its probe
-# in those two jobs only, so the gate-step rule holds the gate as the step right after setup-python with no
+# in those jobs only, so the gate-step rule holds the gate as the step right after setup-python with no
 # step between. The committed-line controls and the order vectors read this text.
 PROBE_RUN = "python3 -I -B opf/tools/_child_status.py"
 # The runner image of each host-patch job. The setup-python versions manifest lists a patch release's Linux
@@ -437,9 +456,26 @@ PROBE_RUN = "python3 -I -B opf/tools/_child_status.py"
 # would fail the jobs once it moves to an image the host patch has no build for.
 RUNNER = "ubuntu-24.04"
 # The top-level keys the workflow may carry: a defaults: or env: block changes how every run step of every
-# job executes.
-TOP_KEYS = ("name", "on", "permissions", "jobs")
+# job executes. concurrency: is required, and accepted only as CONCURRENCY_BLOCK, line for line once blank
+# and comment lines are dropped: a pull request run's group is its pull request number with cancel-in-progress on, and
+# every other run's group is its own run id with cancel-in-progress off, so no push-to-main run of a
+# host-patch job is ever cancelled. tools/check_ci_parity.py pins the same block; the self-test holds the
+# two copies equal.
+TOP_KEYS = ("name", "on", "permissions", "concurrency", "jobs")
+CONCURRENCY_BLOCK = (
+    "concurrency:",
+    "  group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', "
+    "github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+)
+# The keys a host-patch job may carry, and the one job-level if: line it must also carry, exactly as written
+# (a trailing comment included): it runs the job on a push and on a pull request whose head is a
+# merge-train-* branch of this repository. tools/check_ci_parity.py pins the same line (HEAVY_JOB_IF_LINE
+# there); the self-test holds the two copies equal. No job that carries the --jobs-only judge carries an
+# if: at all (outside-judge), so the jobs leg still runs outside these jobs on every event.
 JOB_KEYS = {"name", "runs-on", "steps"}
+HEAVY_JOB_IF_LINE = ("    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && "
+                     "github.event.pull_request.head.repo.full_name == github.repository)")
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
 # under the gate and the suite.
 CHECKOUT_USES = "actions/checkout@v4"
@@ -502,8 +538,8 @@ JOBS_ONLY_STEM = "--jobs-o"
 # set refuses each of them by the character it must spell. An eval needs no refused character, so
 # the grammar does not refuse one spelled only in safe characters: its line is read by the deletion
 # read like any other. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). The committed host-patch jobs carry eight run: lines with
-# seven distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
+# (_run_line_tokens runs before this scan). The committed host-patch jobs carry sixteen run: lines with
+# eight distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
 # passes this grammar unchanged. A line the grammar admits is still cannot-evaluate (exit 2, the
 # assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
 # shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
@@ -1141,10 +1177,16 @@ def _host_job_findings(job, tree, want):
     where = "{}: the host-patch job {}".format(WORKFLOW_REL, job)
     found = []
     if "job-keys" in JOB_RULES:
+        if "if" not in tree:
+            found.append("{} carries no if:; the pinned if: line HEAVY_JOB_IF_LINE is required, so the job runs "
+                         "only on a push and on a merge-train-* pull request of this repository".format(where))
         for key in tree:
+            if key == "if" and getattr(tree[key], "written", None) == HEAVY_JOB_IF_LINE:
+                continue
             if key not in JOB_KEYS:
                 found.append("{} carries {}:, which can skip, mask, move or change what it runs (a host-patch "
-                             "job carries only name, runs-on and steps)".format(where, key))
+                             "job carries only name, runs-on, steps and the pinned if: line "
+                             "HEAVY_JOB_IF_LINE)".format(where, key))
     if "runner" in JOB_RULES and tree.get("runs-on") != RUNNER:
         found.append("{} runs on {!r}, not {!r}: the setup-python versions manifest lists the host patch's "
                      "Linux builds by Ubuntu version, so the job names its image".format(
@@ -1440,6 +1482,11 @@ def _judge_findings(host_judges, other_lines, other_raw, headers):
             found.append("{}:{}: the job {} carries {} and sets a job-level env:, which in CI can "
                          "silence every step of that job, the carrying step included".format(
                              WORKFLOW_REL, tree.lines["env"], job, job_step_kind))
+        if "if" in tree:
+            found.append("{}:{}: the job {} carries {} and a job-level if:, which can skip every step of "
+                         "that job, the carrying step included (the pinned heavy-job line among them, which "
+                         "skips it on every pull request but a merge-train-* one); the judge's job carries "
+                         "no if:".format(WORKFLOW_REL, tree.lines["if"], job, job_step_kind))
         for position, step in enumerate(tree["steps"]):
             if not isinstance(step, dict):
                 continue
@@ -1500,6 +1547,8 @@ def job_findings(root, patch):
     entries = {job: [] for job in HOST_JOBS}
     host_judges, other_lines, other_raw, headers = [], {}, {}, {}
     seen, tops, in_jobs, job = set(), {}, False, None
+    # The lines of the top-level concurrency: block, its key line first, blank and comment lines dropped.
+    concurrency, in_concurrency = None, False
     for number, line in enumerate(_read_text(root / WORKFLOW_REL).split("\n"), 1):
         line = line[:-1] if line.endswith("\r") else line
         for char, label in LINE_BREAKS.items():
@@ -1522,7 +1571,13 @@ def job_findings(root, patch):
                 raise CannotEvaluate("{}:{}: the top-level key {} repeats line {}; this line model cannot "
                                      "tell which YAML keeps".format(WORKFLOW_REL, number, key, tops[key]))
             tops[key] = number
+            in_concurrency = key == "concurrency"
+            if in_concurrency:
+                concurrency = [line]
             in_jobs, job = line.split("#", 1)[0].rstrip(" \t") == "jobs:", None
+            continue
+        if in_concurrency and not comment:
+            concurrency.append(line)
             continue
         if in_jobs and not comment:
             header = JOB_RE.fullmatch(line)
@@ -1564,6 +1619,14 @@ def job_findings(root, patch):
                 findings.append("{}:{}: carries the top-level key {}:, which can change how every run step "
                                 "of every job executes (a defaults: or env: block among them); the workflow "
                                 "carries only {}".format(WORKFLOW_REL, number, key, ", ".join(TOP_KEYS)))
+        if concurrency is None:
+            findings.append("{}: carries no top-level concurrency: block; the pinned block (CONCURRENCY_BLOCK) "
+                            "is required, so a newer run of a pull request cancels its superseded "
+                            "run".format(WORKFLOW_REL))
+        elif tuple(concurrency) != CONCURRENCY_BLOCK:
+            findings.append("{}:{}: carries a top-level concurrency: block that departs from the pinned block "
+                            "(CONCURRENCY_BLOCK): another group or cancel-in-progress can cancel a push-to-main "
+                            "run of a host-patch job".format(WORKFLOW_REL, tops["concurrency"]))
     if "outside-judge" in JOB_RULES:
         findings.extend(_judge_findings(host_judges, other_lines, other_raw, headers))
     for name in HOST_JOBS:
@@ -1628,7 +1691,11 @@ REVERT_CALLS = (("jobs", "job_findings(root, patch)"),
                 ("interpreter", "interpreter_findings(patch, version)"))
 HOST = (3, 14, 4, "final")
 SOURCE_TEXT = "format-version = 1\npython-host-patch = \"3.14.4\"\n"
-OPF, GFE = HOST_JOBS
+# The OPF host-patch job, then the four git-fixture-env host-patch jobs in HOST_SUITES order (GFE, the
+# core suite's job, stands for any one of them), and their four suite runs in that order.
+OPF, GFE_JOBS = HOST_JOBS[0], HOST_JOBS[1:]
+GFE = GFE_JOBS[0]
+GFE_RUNS = tuple(run for job in GFE_JOBS for run in HOST_SUITES[job])
 PIN = "python-version: '3.14.4'"
 FLOOR_JOB = ("  floor:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
              "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
@@ -1642,7 +1709,8 @@ JUDGE_STEP = ("      - name: Python host pin (jobs leg, outside the host-patch j
 REGISTRY_JOB = ("  registry:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
                 "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
                 + JUDGE_STEP)
-HEAD = "name: Quality\n\non: push\n\npermissions:\n  contents: read\n\njobs:\n"
+HEAD = ("name: Quality\n\non: push\n\npermissions:\n  contents: read\n\n" + "\n".join(CONCURRENCY_BLOCK)
+        + "\n\njobs:\n")
 
 
 def check(name, got, want):
@@ -1732,7 +1800,7 @@ def _workflow_lanes(text):
     run: and a with: input named run among them, a literal block's body lines included) is tokenized
     separately with shlex (POSIX); a line shlex cannot tokenize is CannotEvaluate. A line is a lane
     candidate when any of its tokens contains --suite or the stem of the suite runner HOST_SUITES runs
-    in git-fixture-env-host-patch (check_selftest_execution: its file path, its module form
+    in the git-fixture-env host-patch jobs (check_selftest_execution: its file path, its module form
     tools.check_selftest_execution and a command string handed to another shell among them). A
     candidate is kept as a lane only when its tokens are exactly that runner's command (python3 -I -B
     tools/check_selftest_execution.py), --suite and a literal suite name containing git-fixture-env (the
@@ -1749,8 +1817,8 @@ def _workflow_lanes(text):
     supplied by a ${{ }} expression, which the jobs leg refuses in any run: outside HOST_JOBS, or by
     variables whose values spell neither name whole, a wrapper script, or a command string handed to
     another shell that splits both names with quotes, among them)."""
-    runner = shlex.split(HOST_SUITES[GFE][0])[:-2]
-    stems = {os.path.basename(token)[:-len(".py")] for run in HOST_SUITES[GFE] for token in shlex.split(run)
+    runner = shlex.split(GFE_RUNS[0])[:-2]
+    stems = {os.path.basename(token)[:-len(".py")] for run in GFE_RUNS for token in shlex.split(run)
              if token.endswith(".py")}
     suite_name = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -1856,9 +1924,10 @@ def _lane_reading(reader, refusal, text):
 
 
 def _host_job(job):
-    """A whole host-patch job, laid out as quality.yml lays it out."""
-    return ("  {0}:\n    name: {0}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
-            "        with:\n          fetch-depth: 0\n          fetch-tags: true\n\n".format(job, RUNNER)
+    """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: line included."""
+    return ("  {0}:\n    name: {0}\n{2}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
+            "        with:\n          fetch-depth: 0\n          fetch-tags: true\n\n".format(
+                job, RUNNER, HEAVY_JOB_IF_LINE)
             + SETUP_STEP + GATE_STEP + _suite_step(job))
 
 
@@ -2024,13 +2093,20 @@ def _job_cases():
     JOB_RULES rule whose removal lets it pass, or None where no one rule decides it:
     jobs/second-pin-line-finding and jobs/job-env-pin-finding are each refused by two overlapping rules,
     jobs/jobs-only-moved-and-host-jobs-env-finding and jobs/jobs-only-step-env-and-host-jobs-env-finding
-    are each refused by both the outside-judge and job-keys rules, and pins/host-job-missing-finding is
-    refused by the unconditional missing-job check in job_findings, which no JOB_RULES rule
-    controls; a None case runs no rule-removal copy, so it is red through its exit code and finding
-    marker alone)."""
+    are each refused by both the outside-judge and job-keys rules, jobs/workflow-without-lane-settings-finding
+    is refused by both the workflow-keys and job-keys rules, and pins/host-job-missing-finding and the
+    three pins/config-*-host-job-missing-finding cases are refused by the unconditional missing-job
+    check in job_findings, which no JOB_RULES rule controls; a None case runs no rule-removal copy, so
+    it is red through its exit code and finding marker alone)."""
+    # These cases name the four git-fixture-env host-patch jobs by position, each running one suite: any
+    # other HOST_SUITES shape is a harness error naming that shape, never a traceback.
+    if len(GFE_JOBS) != 4 or any(len(HOST_SUITES[job]) != 1 for job in GFE_JOBS):
+        raise CannotEvaluate("the jobs-leg cases expect four git-fixture-env host-patch jobs of one suite "
+                             "each after {}; HOST_SUITES holds {}".format(
+                                 OPF, {job: len(HOST_SUITES[job]) for job in GFE_JOBS}))
     suite = {job: _suite_step(job) for job in HOST_JOBS}
-    # The four git-fixture-env suite steps, each a whole step text, in HOST_SUITES order.
-    lanes = ["      - name: Suite" + text for text in suite[GFE].split("      - name: Suite")[1:]]
+    # The suite step of each git-fixture-env host-patch job, a whole step text, in GFE_JOBS order.
+    lanes = [suite[job] for job in GFE_JOBS]
     floor_suite = "python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest"
     retired_suite = "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest"
     gate_name = "      - name: Python host pin\n"
@@ -2039,17 +2115,28 @@ def _job_cases():
     checkout_uses = "      - uses: actions/checkout@v4\n"
     fetch_tags = "          fetch-tags: true\n"
     runs = "    runs-on: "
+    pinned_if = HEAVY_JOB_IF_LINE + "\n"
+    block = "\n".join(CONCURRENCY_BLOCK) + "\n"
     second = "  second:\n    runs-on: ubuntu-latest\n    steps:\n"
     decoy = ("  decoy:\n    runs-on: ubuntu-latest\n    steps:\n"
              "      - name: Decoy judge\n        run: " + JOBS_ONLY_RUN + "\n        if: false\n")
     probe = ("      - name: Child exit status observable (after the host pin gate)\n" + SHELL_LINE
              + "        run: " + PROBE_RUN + "\n\n")
+    # A job-level env: (BASH_ENV) placed in every host-patch job, which in CI silences every step of them.
+    every_env = tuple((job, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs) for job in HOST_JOBS)
     return (
         ("pins/host-job-missing-finding", (), (GFE,), "carries no job " + GFE, None),
+        # Each git-fixture-env lane's host-patch job is required on its own: omitting any one is a finding.
+        ("pins/config-combined-host-job-missing-finding", (), (GFE_JOBS[1],), "carries no job " + GFE_JOBS[1],
+         None),
+        ("pins/config-malformed-host-job-missing-finding", (), (GFE_JOBS[2],), "carries no job " + GFE_JOBS[2],
+         None),
+        ("pins/config-system-host-job-missing-finding", (), (GFE_JOBS[3],), "carries no job " + GFE_JOBS[3],
+         None),
         ("pins/newer-patch-finding", ((OPF, PIN, "python-version: '3.14.8'"),), (),
          "python-version '3.14.8' in the host-patch job opf-host-patch differs", "pin"),
         ("pins/floor-pin-in-host-job-finding", ((GFE, PIN, "python-version: '3.14'"),), (),
-         "python-version '3.14' in the host-patch job git-fixture-env-host-patch differs", "pin"),
+         "python-version '3.14' in the host-patch job " + GFE + " differs", "pin"),
         ("pins/host-job-without-pin-finding", ((OPF, "        with:\n          " + PIN + "\n", ""),), (),
          "opf-host-patch carries 0 python-version pins", "setup"),
         ("pins/host-job-two-pins-finding", ((OPF, SETUP_STEP, SETUP_STEP + SETUP_STEP),), (),
@@ -2108,21 +2195,29 @@ def _job_cases():
         ("jobs/suite-step-continue-on-error-finding",
          ((OPF, suite_name, suite_name + "        continue-on-error: true\n"),), (),
          "opf-host-patch does not run its suite", "suite-step"),
-        # The git-fixture-env job runs the four split suites, each its own step, in HOST_SUITES order:
-        # omitting, reordering, repeating or adding a suite step (a renamed, retired or respelled suite
-        # of a suite runner, or another job's suite, among them) is each a finding.
-        ("jobs/git-fixture-env-suite-omitted-finding", ((GFE, lanes[2], ""),), (),
-         "it omits " + HOST_SUITES[GFE][2], "suite-step"),
-        ("jobs/git-fixture-env-suites-reordered-finding", ((GFE, lanes[0] + lanes[1], lanes[1] + lanes[0]),),
-         (), "it runs them in another order", "suite-step"),
+        # Each git-fixture-env host-patch job runs the one suite of its lane as its own step, so the four
+        # run as parallel jobs: omitting that suite, two lanes' suites swapped between their jobs, one job
+        # running all four suites as the single serial job before the split did, and repeating or adding
+        # a suite step (a renamed, retired or respelled suite of a suite runner, or another job's suite,
+        # among them) are each a finding.
+        ("jobs/git-fixture-env-suite-omitted-finding", ((GFE_JOBS[2], lanes[2], ""),), (),
+         "it omits " + HOST_SUITES[GFE_JOBS[2]][0], "suite-step"),
+        ("jobs/git-fixture-env-lane-suites-swapped-finding",
+         ((GFE_JOBS[0], HOST_SUITES[GFE_JOBS[0]][0], HOST_SUITES[GFE_JOBS[1]][0]),
+          (GFE_JOBS[1], HOST_SUITES[GFE_JOBS[1]][0], HOST_SUITES[GFE_JOBS[0]][0])), (),
+         "it omits " + HOST_SUITES[GFE_JOBS[0]][0] + "; adds " + HOST_SUITES[GFE_JOBS[1]][0], "suite-step"),
+        ("jobs/git-fixture-env-lane-job-serial-suites-finding",
+         ((GFE, lanes[0], "".join("      - name: Lane {}\n".format(number) + SHELL_LINE + "        run: " + run
+                                  + "\n" for number, run in enumerate(GFE_RUNS, 1))),), (),
+         "adds " + GFE_RUNS[1], "suite-step"),
         ("jobs/git-fixture-env-suite-repeated-finding",
-         ((GFE, lanes[3], lanes[3] + lanes[0].replace("name: Suite\n", "name: Suite again\n")),), (),
+         ((GFE, lanes[0], lanes[0] + lanes[0].replace("name: Suite\n", "name: Suite again\n")),), (),
          "repeats " + HOST_SUITES[GFE][0], "suite-step"),
         ("jobs/git-fixture-env-suite-added-finding",
-         ((GFE, lanes[3], lanes[3] + "      - name: Floor suite\n" + SHELL_LINE + "        run: " + floor_suite
-           + "\n"),), (), "adds " + floor_suite, "suite-step"),
+         ((GFE_JOBS[3], lanes[3], lanes[3] + "      - name: Floor suite\n" + SHELL_LINE + "        run: "
+           + floor_suite + "\n"),), (), "adds " + floor_suite, "suite-step"),
         ("jobs/git-fixture-env-retired-suite-added-finding",
-         ((GFE, lanes[3], lanes[3] + "      - name: Retired suite\n" + SHELL_LINE + "        run: "
+         ((GFE_JOBS[3], lanes[3], lanes[3] + "      - name: Retired suite\n" + SHELL_LINE + "        run: "
            + retired_suite + "\n"),), (), "adds " + retired_suite, "suite-step"),
         ("jobs/git-fixture-env-suite-respelled-finding",
          ((GFE, "run: " + HOST_SUITES[GFE][0], "run: " + HOST_SUITES[GFE][0].replace("tools/", "./tools/")),),
@@ -2130,8 +2225,20 @@ def _job_cases():
         ("jobs/opf-other-job-suite-added-finding",
          ((OPF, suite[OPF], suite[OPF] + lanes[0].replace("name: Suite\n", "name: Extra suite\n")),), (),
          "adds " + HOST_SUITES[GFE][0], "suite-step"),
-        ("jobs/job-if-finding", ((OPF, runs, "    if: false\n" + runs),), (),
+        ("jobs/job-if-finding", ((OPF, pinned_if, "    if: false\n"),), (),
          "opf-host-patch carries if:", "job-keys"),
+        # HEAVY_JOB_IF_LINE is the one if: a host-patch job carries: a widened condition (the
+        # same-repository check dropped) and the pinned line respelled with a trailing comment are each
+        # refused by job-keys, and so is the line removed (the job would run on every pull request).
+        ("jobs/job-if-widened-finding",
+         ((OPF, pinned_if, "    if: github.event_name == 'push' || startsWith(github.head_ref, 'merge-train-')\n"),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        ("jobs/job-if-pinned-line-commented-finding", ((GFE, pinned_if, HEAVY_JOB_IF_LINE + "  # heavy\n"),),
+         (), GFE + " carries if:", "job-keys"),
+        ("jobs/job-if-missing-finding", ((OPF, pinned_if, ""),), (),
+         "opf-host-patch carries no if:", "job-keys"),
+        ("jobs/git-fixture-env-job-if-missing-finding", ((GFE, pinned_if, ""),), (),
+         GFE + " carries no if:", "job-keys"),
         ("jobs/job-continue-on-error-finding", ((GFE, runs, "    continue-on-error: true\n" + runs),), (),
          GFE + " carries continue-on-error:", "job-keys"),
         ("jobs/job-container-finding", ((OPF, runs, "    container: python:3.14.8\n" + runs),), (),
@@ -2152,6 +2259,22 @@ def _job_cases():
          "carries the top-level key defaults:", "workflow-keys"),
         ("jobs/workflow-env-finding", ((None, "jobs:\n", "env:\n  FOO: bar\n\njobs:\n"),), (),
          "carries the top-level key env:", "workflow-keys"),
+        # The concurrency: block is CONCURRENCY_BLOCK exactly: a group keyed by the ref (which groups a
+        # push-to-main run with the next one) and cancel-in-progress: true are each refused, and so is
+        # the block removed (no superseded pull request run would be cancelled).
+        ("jobs/workflow-concurrency-group-mutated-finding",
+         ((None, CONCURRENCY_BLOCK[1] + "\n", "  group: quality-${{ github.ref }}\n"),), (),
+         "departs from the pinned block", "workflow-keys"),
+        ("jobs/workflow-concurrency-cancel-in-progress-true-finding",
+         ((None, CONCURRENCY_BLOCK[2] + "\n", "  cancel-in-progress: true\n"),), (),
+         "departs from the pinned block", "workflow-keys"),
+        ("jobs/workflow-concurrency-missing-finding", ((None, block, ""),), (),
+         "carries no top-level concurrency: block", "workflow-keys"),
+        # quality.yml as it was before the lane settings: no concurrency: block and no if: on any
+        # host-patch job. Both workflow-keys and job-keys refuse it.
+        ("jobs/workflow-without-lane-settings-finding",
+         ((None, block, ""),) + tuple((job, pinned_if, "") for job in HOST_JOBS), (),
+         "carries no top-level concurrency: block", None),
         ("jobs/job-defaults-finding",
          ((OPF, runs, "    defaults:\n      run:\n        shell: echo {0}\n" + runs),), (),
          "opf-host-patch carries defaults:", "job-keys"),
@@ -2167,12 +2290,9 @@ def _job_cases():
            + " --self-test\n        env:\n"
            + "          BASH_ENV: $(printf REVIEW_PROBE=1 >> \"$GITHUB_ENV\")\n\n"),), (),
          GFE + " sets env: on step 4", "step-env"),
-        # A job-level env: (BASH_ENV) in BOTH host-patch jobs, which in CI silences every step of those
+        # A job-level env: (BASH_ENV) in EVERY host-patch job, which in CI silences every step of those
         # jobs, this gate's own steps included; job-keys keeps refusing it.
-        ("jobs/job-env-bash-env-both-jobs-finding",
-         ((OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
-          (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
-         "carries env:", "job-keys"),
+        ("jobs/job-env-bash-env-every-host-job-finding", every_env, (), "carries env:", "job-keys"),
         # The outside judge: relocating the --jobs-only step into a host-patch job, removing it (or its
         # whole job), doubling it, and an env: on the step or on the job that carries it are each refused
         # by the outside-judge rule.
@@ -2194,6 +2314,11 @@ def _job_cases():
         ("jobs/jobs-only-job-env-finding",
          (("registry", "    runs-on: ", "    env:\n      BASH_ENV: '$(: > \"$0\")'\n    runs-on: "),), (),
          "sets a job-level env:", "outside-judge"),
+        # The pinned heavy-job if: on the judge's job would skip the judge on every pull request but a
+        # merge-train-* one, so any if: there is refused.
+        ("jobs/jobs-only-job-if-finding",
+         (("registry", "    runs-on: ", HEAVY_JOB_IF_LINE + "\n    runs-on: "),), (),
+         "carries the --jobs-only judge step and a job-level if:", "outside-judge"),
         # A command-shaped value that is not a step's own run: property never counts as the judge (a
         # with: input of the registry checkout step, and a job-level run:), and an env: on an earlier
         # step of the judge's job (whose GITHUB_ENV write reaches the judge step) is a finding.
@@ -2210,21 +2335,17 @@ def _job_cases():
          (("registry", "      - uses: actions/setup-python@v5\n",
            "      - uses: actions/setup-python@v5\n        env:\n          BASH_ENV: '$(: > \"$0\")'\n"),),
          (), "sets env: on step 2", "outside-judge"),
-        # The relocation above with a job-level env: (BASH_ENV) in both host-patch jobs, and an env: on
+        # The relocation above with a job-level env: (BASH_ENV) in every host-patch job, and an env: on
         # the judge step with the same host-job env:; the outside-judge and job-keys rules both refuse
         # each.
         ("jobs/jobs-only-moved-and-host-jobs-env-finding",
          (("registry", JUDGE_STEP, ""),
           (OPF, suite[OPF], suite[OPF] + "\n      - name: Python host pin jobs leg\n        run: "
-           + JOBS_ONLY_RUN + "\n"),
-          (OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
-          (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
+           + JOBS_ONLY_RUN + "\n")) + every_env, (),
          "names --jobs-only inside the host-patch job", None),
         ("jobs/jobs-only-step-env-and-host-jobs-env-finding",
          (("registry", JUDGE_STEP,
-           JUDGE_STEP + "        env:\n          BASH_ENV: '$(: > \"$0\")'\n"),
-          (OPF, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs),
-          (GFE, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs)), (),
+           JUDGE_STEP + "        env:\n          BASH_ENV: '$(: > \"$0\")'\n"),) + every_env, (),
          "the step that carries the --jobs-only judge sets env:", None),
         # The canonical registry judge KEPT, and a second judge added in a spelling the job model reads
         # (a quoted run: value, a tab before the value): each parses to the judge command, so the
@@ -2456,7 +2577,7 @@ def _self_test_cases(base):
         check(check_id, evaluate(_fixture(base, workflow=_workflow(((OPF, PIN, "python-version: " + pin),))),
                                  HOST)[0], 0)
     # The committed order: the gate step right after the setup-python step and the child-status probe step
-    # right after the gate, in both host-patch jobs, as quality.yml carries it. The probe step is an extra
+    # right after the gate, in every host-patch job, as quality.yml carries it. The probe step is an extra
     # step this gate does not hold, so the tree passes; a copy whose gate-step rule reads the step after
     # that one instead (a gate that wants a step between setup-python and itself) refuses this order and
     # accepts the probe ahead of the gate, so each order is red under exactly one of the two.
@@ -2465,14 +2586,23 @@ def _self_test_cases(base):
     gate_line = "    gate = steps[after] if after < " + "len(steps) else {}\n"
     shifted_gate = _mutant(base, "python_host_pin_gate_shifted", _read_text(Path(__file__).resolve()),
                            ((gate_line, "    after += 1\n" + gate_line),))
-    ordered = _fixture(base, workflow=_workflow(((OPF, GATE_STEP, GATE_STEP + probe),
-                                                 (GFE, GATE_STEP, GATE_STEP + probe))))
-    swapped = _fixture(base, workflow=_workflow(((OPF, GATE_STEP, probe + GATE_STEP),
-                                                 (GFE, GATE_STEP, probe + GATE_STEP))))
+    ordered = _fixture(base, workflow=_workflow(tuple((job, GATE_STEP, GATE_STEP + probe) for job in HOST_JOBS)))
+    swapped = _fixture(base, workflow=_workflow(tuple((job, GATE_STEP, probe + GATE_STEP) for job in HOST_JOBS)))
     check("jobs/gate-then-probe-passes",
           (evaluate(ordered, HOST)[0], shifted_gate.evaluate(ordered, HOST)[0]), (0, 1))
     check("jobs/probe-ahead-of-gate-mutant-red",
           (evaluate(swapped, HOST)[0], shifted_gate.evaluate(swapped, HOST)[0]), (1, 0))
+    # The pinned concurrency: block (a whole-line comment inside it dropped) and the pinned if: line on
+    # every host-patch job pass; the clean fixture carries each. Before the lane change each was a
+    # workflow-keys or job-keys finding.
+    check("jobs/workflow-concurrency-pinned-passes", (
+        "\n".join(CONCURRENCY_BLOCK) + "\n" in _workflow(), evaluate(_fixture(base), HOST)[0]), (True, 0))
+    check("jobs/workflow-concurrency-comment-line-passes", evaluate(_fixture(base, workflow=_workflow(((
+        None, CONCURRENCY_BLOCK[0] + "\n", CONCURRENCY_BLOCK[0] + "\n  # superseded pull request runs\n"),))),
+        HOST)[0], 0)
+    check("jobs/host-jobs-pinned-if-passes", (
+        all(HEAVY_JOB_IF_LINE + "\n" in _host_job(job) for job in HOST_JOBS), evaluate(_fixture(base), HOST)[0]),
+        (True, 0))
     check("jobs/extra-step-after-gate-passes", evaluate(_fixture(base, workflow=_workflow(((
         OPF, GATE_STEP, GATE_STEP + "      - name: Python host pin self-test\n        run: " + GATE_RUN
         + " --self-test\n\n"),))), HOST)[0], 0)
@@ -3049,21 +3179,21 @@ def _self_test_cases(base):
     check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
 
     # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
-    # module constants: its host-patch jobs carry ten run: lines with eight distinct texts (the
+    # module constants: its five host-patch jobs carry sixteen run: lines with eight distinct texts (the
     # child-status probe line and the gate line in each job, the gate self-test line, the OPF suite line
-    # and the four git-fixture-env suite lines), and each of them passes the closed grammar and the
-    # assignment refusal unchanged. Each check holds its texts: how many committed lines carry each, and
-    # what each refusal returns for it.
+    # and the four git-fixture-env suite lines, one in each git-fixture-env job), and each of them passes
+    # the closed grammar and the assignment refusal unchanged. Each check holds its texts: how many
+    # committed lines carry each, and what each refusal returns for it.
     committed = _committed_host_runs()
     for check_id, texts, count in (
-            ("jobs/host-job-committed-probe-line-grammar-passes", (PROBE_RUN,), 2),
-            ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 2),
+            ("jobs/host-job-committed-probe-line-grammar-passes", (PROBE_RUN,), 5),
+            ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 5),
             ("jobs/host-job-committed-selftest-line-grammar-passes", (GATE_RUN + " --self-test",), 1),
             ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
-            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", HOST_SUITES[GFE], 1)):
+            ("jobs/host-job-committed-gfe-suite-line-grammar-passes", GFE_RUNS, 1)):
         check(check_id, [(committed.count(text), _refused_run_char(text), _leading_assignment(text))
                          for text in texts], [(count, None, None)] * len(texts))
-    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (10, 8))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (16, 8))
 
     # The step shape (RUN_KEYS, STEP_SHELL_LINE): the Python host pin step, each suite step and the
     # --jobs-only judge step carry exactly name, run and shell, the shell: written as the exact line
@@ -3437,7 +3567,7 @@ def _self_test_cases(base):
 
     # The --jobs-only leg (the CI step of the registry job, outside the host-patch jobs): it skips
     # the interpreter leg, so it can run on the floor pin, and it still runs the jobs leg, so a
-    # job-level env: placed in both host-patch jobs (which in CI silences every step of those jobs,
+    # job-level env: placed in every host-patch job (which in CI silences every step of those jobs,
     # this gate's own steps included) is refused from outside them. Red on revert: a jobs_only that no
     # longer skips the interpreter leg fails the first check, and one that no longer runs the jobs leg
     # fails the second.
@@ -3445,8 +3575,8 @@ def _self_test_cases(base):
           (evaluate(_fixture(base), (3, 14, 8, "final"), jobs_only=True)[0],
            evaluate(_fixture(base), (3, 14, 8, "final"))[0]), (0, 1))
     env_edit = "    env:\n      BASH_ENV: '$(: > \"$0\")'\n    runs-on: "
-    root = _fixture(base, workflow=_workflow(((OPF, "    runs-on: ", env_edit),
-                                              (GFE, "    runs-on: ", env_edit))))
+    every_env = tuple((job, "    runs-on: ", env_edit) for job in HOST_JOBS)
+    root = _fixture(base, workflow=_workflow(every_env))
     code, lines = evaluate(root, HOST, jobs_only=True)
     check("jobs/jobs-only-still-refuses-host-job-env", (code, _has(lines, "carries env:")), (1, True))
 
@@ -3457,8 +3587,7 @@ def _self_test_cases(base):
     # without evaluating passes the damaged tree the intact main refuses.
     cli = _copy(base, "python_host_pin_cli", source)
     clean = _fixture(base)
-    damaged = _fixture(base, workflow=_workflow(((OPF, "    runs-on: ", env_edit),
-                                                 (GFE, "    runs-on: ", env_edit))))
+    damaged = _fixture(base, workflow=_workflow(every_env))
     cli.ROOT, cli.sys = clean, _FakeSys((3, 14, 8, "final", 0))
     check("cli/jobs-only-skips-interpreter-leg", (cli.main(["--jobs-only"]), cli.main([])), (0, 1))
     cli.ROOT = damaged
@@ -3487,12 +3616,38 @@ def _self_test_cases(base):
         FAILURES.append("real/source: {}".format(exc))
     if real is not None:
         check("real/tree-passes-at-its-host-patch", evaluate(ROOT, real)[0], 0)
-    # The git-fixture-env host-patch suites are the '3.14' lanes of the committed workflow, in its order
-    # (_workflow_lanes): each lane's command, its shlex tokens joined by single spaces, and the pin lines
-    # of the job that carries it. A run: line or value the reader cannot read is cannot-evaluate (exit 2).
-    lanes = (HOST_SUITES[GFE], (("python-version: '3.14'",),) * len(HOST_SUITES[GFE]))
+    # The four git-fixture-env suites run as four host-patch jobs, one suite each. serial_mutant is a copy
+    # of this gate whose HOST_SUITES regroups them into the single serial job the four replaced
+    # (git-fixture-env-host-patch, running the four suites in order). A workflow of that serial shape is
+    # a finding here (each lane's job is missing, and the serial job, now outside the host-patch jobs,
+    # runs this gate as an unresolved judge-shaped command) and passes the copy; the split fixture and the
+    # committed workflow pass here and are each refused by the copy, so each vector is red on revert.
+    serial = "git-fixture-env-host-patch"
+    serial_mutant = _mutant(base, "python_host_pin_serial_host_job_mutant", source, ((
+        "HOST_JOBS = " + "tuple(HOST_SUITES)",
+        "HOST_SUITES = " + repr({OPF: HOST_SUITES[OPF], serial: GFE_RUNS})
+        + "\nHOST_JOBS = " + "tuple(HOST_SUITES)"),))
+    root = _fixture(base, workflow=serial_mutant._workflow())
+    code, lines = evaluate(root, HOST)
+    check("jobs/serial-git-fixture-env-host-job-finding",
+          (code, all(_has(lines, "carries no job " + job) for job in GFE_JOBS),
+           _has(lines, "an unresolved judge-shaped command in the job " + serial),
+           serial_mutant.evaluate(root, HOST)[0]), (1, True, True, 0))
+    code, lines = serial_mutant.evaluate(_fixture(base), HOST)
+    check("jobs/split-git-fixture-env-host-jobs-serial-mutant-red",
+          (evaluate(_fixture(base), HOST)[0], code, _has(lines, "carries no job " + serial)), (0, 1, True))
+    if real is not None:
+        code, lines = serial_mutant.evaluate(ROOT, real)
+        check("real/tree-serial-host-job-mutant-red", (code, _has(lines, "carries no job " + serial)), (1, True))
+    # The committed workflow runs one git-fixture-env suite on '3.14', the core suite, in its
+    # git-fixture-env-core canary job; the combined, malformed and system suites run in CI only in their
+    # host-patch jobs (_workflow_lanes: each lane's command, its shlex tokens joined by single spaces, and
+    # the pin lines of the job that carries it). A '3.14' copy of another suite put back, or the canary
+    # removed, is red here; a run: line or value the reader cannot read is cannot-evaluate (exit 2). The
+    # lanes/ vectors below read their own four-lane fixture, not the committed workflow.
+    lanes = (GFE_RUNS, (("python-version: '3.14'",),) * len(GFE_RUNS))
     check("real/git-fixture-env-host-suites-are-the-lanes", _workflow_lanes(_read_text(ROOT / WORKFLOW_REL)),
-          lanes)
+          (GFE_RUNS[:1], (("python-version: '3.14'",),)))
     # Each lanes/ vector adds one job beside the four literal lanes and pairs the intact reader with a copy
     # of this gate (_mutant) whose reader drops one rule: "refusal" leaves a candidate line that is not an
     # exact form unread; "literal" selects run: lines by literal text again (--suite and git-fixture-env
@@ -3520,10 +3675,10 @@ def _self_test_cases(base):
     lane_jobs = "".join(
         "  lane-{}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-python@v5\n"
         "        with:\n          python-version: '3.14'\n      - name: Suite\n"
-        "        run: {}\n".format(number, run) for number, run in enumerate(HOST_SUITES[GFE], 1))
+        "        run: {}\n".format(number, run) for number, run in enumerate(GFE_RUNS, 1))
     runner = "python3 -I -B tools/check_selftest_execution.py"
-    widened = (HOST_SUITES[GFE] + (runner + " --suite git-fixture-env-extra",),
-               (("python-version: '3.14'",),) * (len(HOST_SUITES[GFE]) + 1))
+    widened = (GFE_RUNS + (runner + " --suite git-fixture-env-extra",),
+               (("python-version: '3.14'",),) * (len(GFE_RUNS) + 1))
     refused = (2, True)
     for check_id, copy, matrix, env, run, want, want_copy in (
             # Lines naming the runner or --suite whose suite comes from a matrix value or an expansion.
@@ -3571,6 +3726,12 @@ def _self_test_cases(base):
           (tuple(floor.HOST_JOBS), floor.HOST_WORKFLOW_REL, floor.HOST_SOURCE_REL,
            floor.HOST_PATCH_RE.pattern, floor.LINE_BREAKS),
           (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE.pattern, LINE_BREAKS))
+    # The CI parity gate pins the same concurrency: block and heavy-job if: line, and counts every host-patch
+    # job among the jobs that may carry that line: its copies must be these.
+    parity = _copy(base, "ci_parity_lane_pins", _read_text(ROOT / "tools" / "check_ci_parity.py"))
+    check("real/ci-parity-lane-pins-agree",
+          (parity.CONCURRENCY_BLOCK, parity.HEAVY_JOB_IF_LINE, set(HOST_JOBS) <= parity.HEAVY_JOBS),
+          (CONCURRENCY_BLOCK, HEAVY_JOB_IF_LINE, True))
     _red_on_revert(base)
 
 

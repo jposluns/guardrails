@@ -742,16 +742,29 @@ def _manifest_entries(path, key, fields):
     return entries
 
 
+# The enforcement register's summary rows whose rules are linked to at least one SHIPPED gate or hook
+# (the page's "Today N of the M rules are linked to at least one shipped gate or hook"): the gate-linked
+# and hook-linked display labels gen_enforcement_register renders, each with and without its ", partial"
+# suffix. Preview only (every linked control is a preview-channel hook an adopter installs by hand, not
+# part of the plugin), Pending and No control are not counted. Every one of these rows is REQUIRED: a
+# renamed or missing row fails closed (exit 2), never a silently smaller sum.
+_LINKED_SUMMARY_LABELS = tuple(label + suffix
+                               for label in ("Gate-linked (class a)", "Gate-linked (class c only)",
+                                             "Hook-linked")
+                               for suffix in ("", ", partial"))
+
+
 def expected_counts(root, manifests):
     """Recompute the landing page's counts from the surfaces that define them, fail-closed on a missing or
     malformed one: rules = the .md files directly under .aiqt/core/rules/ (the corpus layout gen_rules
     validates), gates = the [[gate]] entries of .aiqt/core/gates/manifest.toml whose platform is "ci"
     (the page's predicate: CI gates), hooks (with the blocking/warning split from `default`) = the
     [[hook]] entries of .aiqt/core/hooks/manifest.toml whose platform is "claude-code", frameworks = the
-    loaded standards manifests, and enforced = the enforcement register's summary row (ENFORCEMENT.md is
-    generated and drift-gated against its sources by gen_enforcement_register). Both manifests are
-    structure-validated by _manifest_entries before anything is counted, and an entry of another
-    platform is excluded from the count, never silently counted toward the page's claim."""
+    loaded standards manifests, and enforced = the sum of the enforcement register's linked summary rows
+    (_LINKED_SUMMARY_LABELS; ENFORCEMENT.md is generated and drift-gated against its sources by
+    gen_enforcement_register). Both manifests are structure-validated by _manifest_entries before
+    anything is counted, and an entry of another platform is excluded from the count, never silently
+    counted toward the page's claim."""
     rules_dir = root / ".aiqt" / "core" / "rules"
     if not rules_dir.is_dir():
         raise OSError("required surface missing: {}".format(rules_dir))
@@ -769,12 +782,16 @@ def expected_counts(root, manifests):
         raise OSError("hooks manifest: {} claude-code hook(s) carry a default other than block or warn, "
                       "so the page's blocking/warning split cannot sum to the hook total it prints "
                       "beside it".format(len(hooks) - blocking - warning))
-    enforced = re.search(r"(?m)^\| Enforced \| (\d+) \|", _read(root / "ENFORCEMENT.md"))
-    if not enforced:
-        raise OSError("ENFORCEMENT.md: no '| Enforced | N |' summary row")
+    register = _read(root / "ENFORCEMENT.md")
+    enforced = 0
+    for label in _LINKED_SUMMARY_LABELS:
+        row = re.search(r"(?m)^\| " + re.escape(label) + r" \| (\d+) \|", register)
+        if not row:
+            raise OSError("ENFORCEMENT.md: no '| {} | N |' summary row".format(label))
+        enforced += int(row.group(1))
     return {"rules": rules, "gates": len(gates), "hooks": len(hooks),
             "blocking": blocking, "warning": warning,
-            "frameworks": len(manifests), "enforced": int(enforced.group(1))}
+            "frameworks": len(manifests), "enforced": enforced}
 
 
 def check_readme_counts(root, manifests, findings):
@@ -1074,7 +1091,7 @@ def check_budget_note(root, findings):
 def run(root):
     findings = []
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         if not manifests:
             print("error: no manifests under .aiqt/standards/; fail-closed", file=sys.stderr)
             return 2
@@ -1256,7 +1273,10 @@ def main():
 #      non-string default on ANY platform, an excluded one included) or an all-wrong-platform manifest
 #      -> exit 2, a claude-code hook whose default is outside the blocking/warning split -> exit 2,
 #      and a partially-off-platform gates manifest -> finding (the filtered count disagrees with the
-#      page); where the refusal's provenance carries the claim, its diagnostic is asserted too (21b),
+#      page); the enforced figure summed over the register's linked rows: a partial linked row counts
+#      (exit 0), a Preview only row does not (finding), and a missing linked row or a bare Enforced
+#      row -> exit 2 naming the row; where the refusal's provenance carries the claim, its diagnostic
+#      is asserted too (21b),
 #  22. the shipped-path declaration leg: removing any declared row, a release path under no declared
 #      prefix, a declared prefix matching no release path, and a fully overshadowed declared prefix
 #      (asserted by its own diagnostic) -> finding; a nested prefix pair stays clean (the longest
@@ -1404,7 +1424,10 @@ _HOOKS_TOML = (
 
 _ENFORCEMENT_MD = (
     "# Fixture Enforcement Register\n\n## Summary\n\n| Status | Rules |\n|---|---:|\n"
-    "| Enforced | 1 |\n| Preview only | 0 |\n| Pending | 0 |\n| None | 2 |\n"
+    "| Gate-linked (class a) | 1 |\n| Gate-linked (class a), partial | 0 |\n"
+    "| Gate-linked (class c only) | 0 |\n| Gate-linked (class c only), partial | 0 |\n"
+    "| Hook-linked | 0 |\n| Hook-linked, partial | 0 |\n| Preview only | 0 |\n"
+    "| Preview only, partial | 0 |\n| Pending | 0 |\n| No control | 2 |\n"
 )
 
 # The instruction-budget fixtures for the budget-note leg: the committed ratchet and the pinned
@@ -1986,7 +2009,7 @@ def self_test_main():
         os.chmod(unreadable_std, 0)
         if os.access(unreadable_std, os.R_OK):
             saved_load = module.load_manifests
-            def _deny_load(path, _real=saved_load):
+            def _deny_load(path, *, root, _real=saved_load):
                 raise PermissionError(13, "injected permission denied", str(path))
             module.load_manifests = _deny_load
             try:
@@ -2400,6 +2423,30 @@ def self_test_main():
         if run_quiet(halfgate) != 1:
             failures.append("a partially off-platform gates manifest expected exit 1 (the filtered "
                             "count disagrees with the page)")
+        # The enforced figure is the sum of the register's linked summary rows: the one linked rule
+        # moved to the hook-linked partial row still counts (exit 0); moved to Preview only it is no
+        # longer linked to a shipped control (exit 1, the page's 1 disagrees); a missing linked row and
+        # a register carrying only a bare Enforced row each fail closed (exit 2, naming the row).
+        linked = "| Gate-linked (class a) | 1 |\n"
+        for tag, register, want, needle in (
+                ("enfpartial", _ENFORCEMENT_MD.replace(linked, "| Gate-linked (class a) | 0 |\n").replace(
+                    "| Hook-linked, partial | 0 |", "| Hook-linked, partial | 1 |"), 0, None),
+                ("enfpreview", _ENFORCEMENT_MD.replace(linked, "| Gate-linked (class a) | 0 |\n").replace(
+                    "| Preview only | 0 |", "| Preview only | 1 |"), 1, None),
+                ("enfnorow", _ENFORCEMENT_MD.replace("| Hook-linked, partial | 0 |\n", ""), 2,
+                 "no '| Hook-linked, partial | N |' summary row"),
+                ("enfbare", "## Summary\n\n| Status | Rules |\n|---|---:|\n| Enforced | 1 |\n", 2,
+                 "no '| Gate-linked (class a) | N |' summary row")):
+            if register == _ENFORCEMENT_MD:
+                failures.append("self-test setup: the {} register mutation changed nothing".format(tag))
+                continue
+            tree = tmp / tag
+            _write_fixture(tree)
+            (tree / "ENFORCEMENT.md").write_text(register, encoding="utf-8")
+            code, err = run_err(tree)
+            if code != want or (needle is not None and needle not in err):
+                failures.append("the {} register expected exit {}{} (got {!r})".format(
+                    tag, want, "" if needle is None else " naming " + needle, code))
 
         # 21b. malformed hooks and gates manifests fail closed (exit 2), with the refusing diagnostic
         #      asserted where the claim depends on WHICH validation refused. Measured mutant matrix

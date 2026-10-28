@@ -28,7 +28,7 @@ with exit 2). This gate holds where it runs:
      value, a trailing comment, a tab in the indentation) is a finding, never a pass. Inside it, every value
      that names Python sits in a step with a run: key, after its job's one setup-python step and the probe
      step right after that; the probe step is exactly PROBE_STEP (its name, shell: bash and run, and no
-     other key, so no if: and no continue-on-error). In the two host-patch jobs (HOST_PATCH_JOBS) of the
+     other key, so no if: and no continue-on-error). In the five host-patch jobs (HOST_PATCH_JOBS) of the
      one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
      between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
      after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
@@ -200,14 +200,15 @@ WORKFLOWS_REL = ".github/workflows"
 # The probe step, exactly: these keys in this order with these values, and no other key.
 PROBE_STEP = (("name", "Child exit status observable (before any gate)"), ("shell", "bash"),
               ("run", "python3 -I -B " + CANONICAL_REL))
-# The two host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
+# The five host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
 # tools/check_python_host_pin.py holds that step as the one right after each of these jobs' setup-python
 # step, so in these jobs of HOST_PATCH_WORKFLOW only, exactly that step may stand between setup-python and
 # the probe, and the probe step right after it is HOST_PROBE_STEP, the probe with the name that placement
-# makes true. The exception is keyed on the workflow path and the job id together, so a job with either id
-# in any other workflow gets the plain reading; the exactness of both steps is the bound.
+# makes true. The exception is keyed on the workflow path and the job id together, so a job with any of these
+# ids in any other workflow gets the plain reading; the exactness of both steps is the bound.
 HOST_PATCH_WORKFLOW = WORKFLOWS_REL + "/quality.yml"
-HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
+HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
+                   "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
 HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
 HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin gate)"), ("shell", "bash"),
@@ -277,15 +278,18 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
     "opf/tools/_opf_adopt_apply.py",
+    "opf/tools/_opf_adopt_complete.py",
     "opf/tools/_opf_adopt_discover.py",
     "opf/tools/_opf_adopt_hook.py",
     "opf/tools/_opf_adopt_observe.py",
     "opf/tools/_opf_adopt_plan.py",
+    "opf/tools/_opf_adopt_state.py",
     "opf/tools/_opf_changelog.py",
     "opf/tools/_opf_check.py",
     "opf/tools/_opf_emit.py",
     "opf/tools/_opf_fuzz.py",
     "opf/tools/_opf_import_batch.py",
+    "opf/tools/_opf_import_complete.py",
     "opf/tools/_opf_init.py",
     "opf/tools/_opf_init_operation.py",
     "opf/tools/_opf_init_substrate.py",
@@ -309,7 +313,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/check_opf_init_qa.py",
     "opf/tools/check_opf_prompt_pack.py",
     "opf/tools/check_opf_record.py",
-    "opf/tools/check_opf_upgrade.py",
     "opf/tools/selftest_commonmark_conformance.py",
     "tools/_qa_adapter.py",
     "tools/aei_backlog_md.py",
@@ -326,6 +329,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_entry_guard.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
+    "tools/check_gitleaks_pin.py",
     "tools/check_hooks_preview.py",
     "tools/check_instruction_budget.py",
     "tools/check_internal_names.py",
@@ -334,6 +338,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_mappings.py",
     "tools/check_mistakes_register.py",
     "tools/check_msg_leaks.py",
+    "tools/check_must_deliver.py",
     "tools/check_newtab.py",
     "tools/check_no_dashes.py",
     "tools/check_opf_standalone_closure.py",
@@ -1309,7 +1314,7 @@ def _inputs():
         "host-pin-before-probe": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step + host_probe
                                  + gate + launch,
         "host-pin-other-job": "jobs:\n  lone:\n" + head + setup + pin_step + host_probe + gate + launch,
-        "host-pin-git-job": "jobs:\n  git-fixture-env-host-patch:\n" + head + setup + pin_step + host_probe
+        "host-pin-git-job": "jobs:\n  git-fixture-env-core-host-patch:\n" + head + setup + pin_step + host_probe
                             + gate + launch,
         "host-pin-prefix": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step
                            + "        timeout-minutes: 5\n" + host_probe + gate + launch,
@@ -1516,7 +1521,7 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-opf-job-other-workflow", lambda: workflow("host-pin-before-probe")
          == [not_probe_in("w", "opf-host-patch")]),
         ("launchers/workflow-host-pin-git-job-other-workflow", lambda: workflow("host-pin-git-job")
-         == [not_probe_in("w", "git-fixture-env-host-patch")]),
+         == [not_probe_in("w", "git-fixture-env-core-host-patch")]),
         ("launchers/workflow-host-pin-prefix-step", lambda: quality_workflow("host-pin-prefix")
          == [not_probe_in(m.HOST_PATCH_WORKFLOW, "opf-host-patch")]),
         ("launchers/workflow-host-pin-old-probe-name", lambda: quality_workflow("host-pin-old-probe")

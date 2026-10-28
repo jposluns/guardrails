@@ -39,7 +39,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 from check_reference_facts import expected_counts  # noqa: E402
 
@@ -183,8 +183,13 @@ def build_landing(root, manifests):
 
 
 def run(root, check):
+    # The directory probe reconcile runs (target_dir_present), for both pages before anything is read: an
+    # .aiqt/standards/ that is there but cannot be read as a directory inside the repository exits 2 here, so
+    # neither its README nor the manifests beside it are read through it.
+    for rel in (README_REL, LANDING_REL):
+        target_dir_present(root / rel, root)
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         roster_text = build(root, manifests)
         landing_text = build_landing(root, manifests)
     except (ManifestError, OSError, ValueError, KeyError) as exc:
@@ -192,11 +197,11 @@ def run(root, check):
               file=sys.stderr)
         return 2
     drifted = False
-    if reconcile(root / README_REL, roster_text, check):
+    if reconcile(root / README_REL, roster_text, check, root):
         print("drift: .aiqt/standards/README.md roster is out of date; run tools/gen_reference_facts.py",
               file=sys.stderr)
         drifted = True
-    if reconcile(root / LANDING_REL, landing_text, check):
+    if reconcile(root / LANDING_REL, landing_text, check, root):
         print("drift: README.md landing-count blocks are out of date; run tools/gen_reference_facts.py",
               file=sys.stderr)
         drifted = True
@@ -297,7 +302,12 @@ _HOOKS_TOML = (
     '[[hook]]\nid = "h7"\nplatform = "claude-code"\ndefault = "warn"\n'
     '[[hook]]\nid = "h8"\nplatform = "other"\ndefault = "block"\n'
 )
-_ENFORCEMENT = "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 1 |\n"
+_ENFORCEMENT = (
+    "# Register\n\n| Status | Count |\n| --- | --- |\n"
+    "| Gate-linked (class a) | 1 |\n| Gate-linked (class a), partial | 0 |\n"
+    "| Gate-linked (class c only) | 0 |\n| Gate-linked (class c only), partial | 0 |\n"
+    "| Hook-linked | 0 |\n| Hook-linked, partial | 0 |\n"
+)
 
 # Every rendered landing figure, asserted as a LITERAL expectation (never built with the live
 # templates or renderers, which a regression under test would share): the whole proof line, then one
@@ -471,7 +481,10 @@ def self_test_main():
         (gatemove / ".aiqt" / "standards" / "gamma.toml").write_text(
             _MANIFEST.format(k="gamma", name="Gamma Framework", ed="3.0"), encoding="utf-8")
         (gatemove / "ENFORCEMENT.md").write_text(
-            "# Register\n\n| Status | Count |\n| --- | --- |\n| Enforced | 2 |\n", encoding="utf-8")
+            "# Register\n\n| Status | Count |\n| --- | --- |\n"
+            "| Gate-linked (class a) | 1 |\n| Gate-linked (class a), partial | 0 |\n"
+            "| Gate-linked (class c only) | 0 |\n| Gate-linked (class c only), partial | 0 |\n"
+            "| Hook-linked | 1 |\n| Hook-linked, partial | 0 |\n", encoding="utf-8")
         if run_quiet(gatemove, check=True) != 1:
             failures.append("all-counts move expected exit 1 (every rendered figure must move)")
         if run_quiet(gatemove, check=False) != 0:
@@ -615,6 +628,14 @@ def self_test_main():
                                 "rendered".format(label))
             if run_quiet(disjoint, check=True) != 0:
                 failures.append("{} disjoint landing blocks expected exit 0 on --check".format(label))
+
+        # .aiqt/ above the roster README symlinked outside the root fails closed (exit 2) in --check and write
+        # mode with the README there untouched and never read: the README there has no ROSTER markers, and each
+        # run prints the link refusal, not the marker error; symlinked inside the root, it is read and the
+        # README rewritten.
+        failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _write_fixture(base, two, _README), run,
+                                            ".aiqt", README_REL,
+                                            unread=lambda p: p.write_text("no markers\n", encoding="utf-8")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -636,7 +657,8 @@ def self_test_main():
           "failed run writing nothing to either README) or misorder (on both generate and --check, "
           "again writing nothing), duplicated ROSTER blocks "
           "(on both generate and --check), an empty standards dir, a missing ENFORCEMENT.md, and an "
-          "invalid-UTF-8 README all fail closed (exit 2)")
+          "invalid-UTF-8 README all fail closed (exit 2); an .aiqt/ symlinked outside the root fails closed "
+          "(exit 2) with the README there untouched and never read, and one inside the root is followed")
     return 0
 
 
