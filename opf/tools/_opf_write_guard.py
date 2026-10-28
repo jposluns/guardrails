@@ -1401,13 +1401,23 @@ def release_lease(root_fd, machine_rel, expected_payload, verb):
     through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers. A close of the parent
     directory that fails after the removal was made durable propagates as itself (the close rule), carrying
     lease_removed = True and a note saying so, so a caller never reports that removed lease as one that
-    stays."""
+    stays. A durability fsync of the parent that fails after the ownership-verified unlink propagates as
+    itself, carrying lease_unlinked = True and a note saying so, so a caller reports that lease as removed
+    with its durability unknown, never as one that stays."""
     journal = _opf_store._journal
     lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
     pfd, name = journal._open_parent(root_fd, lease_rel)
     try:
         unlink_owned_lease(pfd, name, lease_rel, expected_payload, verb)
-        os.fsync(pfd)
+        try:
+            os.fsync(pfd)
+        except OSError as exc:
+            # the ownership-verified unlink succeeded, so the lease is gone: only whether that removal is
+            # durable is unknown
+            exc.lease_unlinked = True
+            exc.add_note("the {} lease {} was removed as this run's own before this durability fsync failed; it "
+                         "is absent, and whether its removal is durable is unknown".format(verb, lease_rel))
+            raise
     finally:
         try:
             _opf_store._close_fd_exc_safe(pfd)
@@ -1630,43 +1640,59 @@ def acquire_lease_for_recovery(root_fd, machine_rel, verb, command=None):
     Ordinary (non-recovery) acquisition keeps the unexamined present-is-held refusal, so a lone leftover
     with no interrupted journal behind it stays the operator's reconciliation step, matching the homes-2
     refusal of a lone lease with no paired active record. `command`, when given, is the command line every
-    remedy here re-runs (rerun_command): a reconciliation run by another command than `verb`'s own."""
+    remedy here re-runs (rerun_command): a reconciliation run by another command than `verb`'s own. The
+    examination runs outside the handler of that refusal, so a close of its directory that fails after the
+    retried claim returned propagates as itself (the close rule), never read as that handled refusal in
+    flight and swallowed; it carries lease_created = True, the release report as released_report, and a
+    note naming the lease that claim LEFT in place."""
     journal = _opf_store._journal
     try:
         return acquire_lease(root_fd, machine_rel, verb, **_named(command)), None
-    except LeaseHeldError as held:
-        lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
-        pfd, name = journal._open_parent(root_fd, lease_rel)
+    except LeaseHeldError as exc:
+        held = exc
+    lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
+    pfd, name = journal._open_parent(root_fd, lease_rel)
+    try:
         try:
-            try:
-                _exclusive_examination(pfd, lease_rel, verb, **_named(command))
-            except WriteGuardError as exc:
-                raise _lock_refusal(exc, held) from exc
-            raw = read_lease_payload(pfd, name)
-            examined = _examined_leftover_holder(raw, verb) if raw is not None else None
-            if examined is None or not _lease_holder_confirmed_dead(examined[1]):
-                raise held
-            holder = examined[0]
-            try:
-                unlink_owned_lease(pfd, name, lease_rel, raw, verb)
-            except WriteGuardError as exc:
-                raise WriteGuardError(
-                    "the leftover {} lease {} of confirmed-dead holder {!r} could not be released by this "
-                    "reconciliation ({}); nothing was removed beyond what that release itself reports, and "
-                    "no lease this reconciliation cannot prove is that examined leftover is ever removed "
-                    "(never-seize, spec 5.7)".format(verb, lease_rel, holder, exc)) from exc
-            released = ("the leftover single-writer lease {} of confirmed-dead holder {!r} was released "
-                        "through this reconciliation (spec 5.7: a lease is never seized from a live "
-                        "holder, and a leftover lease from a dead run is released only through this "
-                        "reconciliation)".format(lease_rel, holder))
-            try:
-                return (_claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released,
-                                             **_named(command)), released)
-            except BaseException as exc:
-                exc.released_report = released     # the caller records it as it records a success's report
-                raise
-        finally:
+            _exclusive_examination(pfd, lease_rel, verb, **_named(command))
+        except WriteGuardError as exc:
+            raise _lock_refusal(exc, held) from exc
+        raw = read_lease_payload(pfd, name)
+        examined = _examined_leftover_holder(raw, verb) if raw is not None else None
+        if examined is None or not _lease_holder_confirmed_dead(examined[1]):
+            raise held
+        holder = examined[0]
+        try:
+            unlink_owned_lease(pfd, name, lease_rel, raw, verb)
+        except WriteGuardError as exc:
+            raise WriteGuardError(
+                "the leftover {} lease {} of confirmed-dead holder {!r} could not be released by this "
+                "reconciliation ({}); nothing was removed beyond what that release itself reports, and "
+                "no lease this reconciliation cannot prove is that examined leftover is ever removed "
+                "(never-seize, spec 5.7)".format(verb, lease_rel, holder, exc)) from exc
+        released = ("the leftover single-writer lease {} of confirmed-dead holder {!r} was released "
+                    "through this reconciliation (spec 5.7: a lease is never seized from a live "
+                    "holder, and a leftover lease from a dead run is released only through this "
+                    "reconciliation)".format(lease_rel, holder))
+        try:
+            return (_claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released,
+                                         **_named(command)), released)
+        except BaseException as exc:
+            exc.released_report = released     # the caller records it as it records a success's report
+            raise
+    finally:
+        try:
             _opf_store._close_fd_exc_safe(pfd)
+        except OSError as exc:
+            # raised only with nothing in flight here, so only after the retried claim returned: the lease it
+            # wrote in full is LEFT in place like acquire_lease's own, and the leftover's release travels with it
+            exc.lease_created = True
+            exc.released_report = released
+            exc.add_note("the {} lease {} claimed after the leftover's release was written in full before this "
+                         "close failed; it is LEFT in place and is never seized (spec 5.7): once no opf run is "
+                         "live, release it as your own reconciliation step. Before that claim, {}.".format(
+                             verb, lease_rel, released))
+            raise
 
 
 # --- self-test: plain vectors for the lease refusal and release messages (spec 5.7) ---------------------

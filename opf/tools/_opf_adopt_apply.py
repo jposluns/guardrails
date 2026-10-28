@@ -1795,6 +1795,11 @@ def _reconcile_lease_targets(root_fd, shell, touched):
 # (_opf_write_guard._LEASE_HOLDER_RE), so a dead reconcile's leftover parses there too.
 RECONCILE_LEASE_VERB = "adopt-reconcile"
 
+# What a refusal raised before any recovery write says of the locks and leases this run took: one may stay
+# (a lease a claim left, one whose release faulted), so it is never said that every one is released.
+_RELEASED_UNLESS_NAMED = ("every lock and lease it took is released, except one this message names as one "
+                          "that STAYS")
+
 # The held classification each recover() outcome leaves (_reconcile_run's agreement check).
 _RECOVERY_LEAVES = {"nothing-opened": ("nothing-opened",), "terminal": ("complete", "rolled-back"),
                     "rolled-forward": ("complete",), "rolled-back": ("rolled-back",)}
@@ -1814,10 +1819,14 @@ def _take_reconcile_leases(root_fd, targets, taken, released=None):
     recovery write, the order the adoption apply takes them: the apply and init-store take the adoption
     journal lock, then the store lease. A lease another writer holds, or one that cannot be taken, refuses
     as RECONCILE_STORE_LEASE_HELD before any recovery write, and a claim that failed after its create
-    (lease_created: its payload write, or its directory close once the lease was written in full) names the
-    lease it left in place, never counted among the leases released; a refusal after a leftover was
-    released names that release (reconcile_report appends to the refusal each report `released` holds that
-    the refusal does not already name). The recovery claim names `opf adopt reconcile` as the command its
+    (lease_created) names the lease it left in place as one that STAYS, never counted among the leases
+    released: a failed payload write in this refusal, and a directory close that failed once the lease was
+    written in full in a note on that close error, which propagates as itself (the close rule) and which
+    _reconcile_run refuses as RECONCILE_STORE_LEASE_HELD with every note it carries; a refusal after a
+    leftover was released names that release (reconcile_report appends to the refusal each report
+    `released` holds that the refusal does not already name). No refusal says every lock and lease it took
+    is released: each is released except one the message names as one that STAYS (reconcile_report names a
+    lease whose release faulted). The recovery claim names `opf adopt reconcile` as the command its
     remedies re-run."""
     import _opf_check
     import _opf_write_guard
@@ -1841,19 +1850,20 @@ def _take_reconcile_leases(root_fd, targets, taken, released=None):
                 payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, verb)
         except _opf_write_guard.LeaseHeldError as exc:
             raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "{} This reconcile refused before any recovery "
-                                   "write, and releases every lock and lease it took (fail-closed)".format(exc))
+                                   "write; {} (fail-closed)".format(exc, _RELEASED_UNLESS_NAMED))
         except (_opf_write_guard.WriteGuardError, _journal.JournalError, OSError) as exc:
-            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             # a claim that failed after its create (lease_created) left that lease in place, never released
             left = getattr(exc, "lease_created", False) is True
+            stays = ("the lease {}/{} its claim created STAYS: once no opf run is live, release it as your own "
+                     "reconciliation step (spec 5.7)".format(machine_rel, _opf_check.LEASE_NAME))
+            if left and _journal._fd_release_raised(exc):
+                exc.add_note(stays)    # the close error below is raised as itself, the lease it left named on it
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "cannot take the store lease {}/{} ({}); a "
                                    "lease that cannot be taken is treated as held (spec 5.7). This reconcile "
-                                   "refused before any recovery write, and releases every {}lock and lease it "
-                                   "took{} (fail-closed)".format(
-                                       machine_rel, _opf_check.LEASE_NAME, exc, "other " if left else "",
-                                       "; the lease {}/{} its claim created STAYS: once no opf run is live, "
-                                       "release it as your own reconciliation step (spec 5.7)".format(
-                                           machine_rel, _opf_check.LEASE_NAME) if left else ""))
+                                   "refused before any recovery write; {}{} (fail-closed)".format(
+                                       machine_rel, _opf_check.LEASE_NAME, exc, _RELEASED_UNLESS_NAMED,
+                                       "; " + stays if left else ""))
         taken.append((machine_rel, payload, verb))
 
 
@@ -1862,9 +1872,10 @@ def _release_reconcile_leases(root_fd, taken):
     writers' ownership-verified release (_opf_write_guard.release_lease: a lease is removed only while it
     still holds the exact bytes this run wrote, never one another writer holds). Returns one clause per
     lease whose release faulted: one that could not be released STAYS, for the operator's own
-    reconciliation (spec 5.7), and one whose directory close failed after its ownership-verified removal
-    (lease_removed) is named as released; an ordinary failure is returned, never raised, so it never hides
-    the outcome or refusal it accompanies."""
+    reconciliation (spec 5.7), one whose directory close failed after its ownership-verified removal
+    (lease_removed) is named as released, and one whose durability fsync failed after that removal
+    (lease_unlinked) is named as removed, its durability unknown; an ordinary failure is returned, never
+    raised, so it never hides the outcome or refusal it accompanies."""
     import _opf_check
     import _opf_write_guard
     failures = []
@@ -1876,6 +1887,10 @@ def _release_reconcile_leases(root_fd, taken):
             if getattr(exc, "lease_removed", False) is True:
                 failures.append("{}/{} was released, but closing its directory then failed ({})".format(
                     machine_rel, _opf_check.LEASE_NAME, exc))
+            elif getattr(exc, "lease_unlinked", False) is True:
+                failures.append("{}/{} was removed as this run's own, but making that removal durable then "
+                                "failed ({}): it is absent, and whether its removal is durable is "
+                                "unknown".format(machine_rel, _opf_check.LEASE_NAME, exc))
             else:
                 failures.append("{}/{} could not be released ({}) and STAYS".format(
                     machine_rel, _opf_check.LEASE_NAME, exc))
@@ -1928,18 +1943,23 @@ def reconcile_report(product_root, released=None):
     RECONCILE_STORE_LEASE_HELD (a pointer other than the in-root one init-store publishes, or a present
     lease other than a dead adoption apply's leftover, observed before the lock, or a lease another writer
     claimed, or that cannot be claimed, under it, a leftover whose holder is not confirmed dead
-    included), RECONCILE_REVERSAL_UNPROVEN (an init-store reversal not proven to remove only the operation's own
+    included, and a fault taking the leases under the journal's exclusion, a claim's failed directory close
+    among them, rendered with every note it carries), RECONCILE_REVERSAL_UNPROVEN (an init-store reversal
+    not proven to remove only the operation's own
     publication) and RECONCILE_PRELOCK_FAULT (any other fault before this call held the journal lock and
     began recovering: the owner-liveness test, an init-store preverify or stale-state read that faults,
     the stale-lock arbitration's own refusals, an acquire_lock OSError). A lock or lease this call took is
-    released, and the message names what stays: a lock acquire_lock created that could not be released
-    (_failed_lock_state), the stale-lock arbitration file lock.break this call created, a lease the claim
-    left. RECONCILE_FAILED: the recovery faulted AFTER it began, or a transaction directory was replaced
-    during it, so it may be PARTIAL: what it already restored or published stays as the journal records
-    it, the transaction stays open, and a later reconcile resumes it. RECONCILE_LEASE_RELEASE_FAILED:
-    releasing a store lease this call took faulted after the recovery finished: one that could not be
-    released stays, and one whose directory close failed after its ownership-verified removal is named as
-    released, each beside what the recovery did and any leftover this call released.
+    released unless the message names it as one that stays: a lock acquire_lock created that could not be
+    released (_failed_lock_state), the stale-lock arbitration file lock.break this call created, a lease
+    the claim left (its payload write failed after its create, or its directory close failed once it was
+    written in full), a lease whose release faulted. RECONCILE_FAILED: the recovery faulted AFTER it began, or a transaction directory was
+    replaced during it, so it may be PARTIAL: what it already restored or published stays as the journal
+    records it, the transaction stays open, and a later reconcile resumes it.
+    RECONCILE_LEASE_RELEASE_FAILED: releasing a store lease this call took faulted after the recovery
+    finished: one that could not be released stays, one whose directory close failed after its
+    ownership-verified removal is named as released, and one whose durability fsync failed after that
+    removal is named as removed with its durability unknown, each beside what the recovery did and any
+    leftover this call released.
 
     The journal is listed strictly and HELD (the journal_state posture): a stray or wrong-type entry (a
     file, FIFO or socket, a symlinked entry, a non-regular or multiply-linked lock or lock.break) refuses
@@ -2000,9 +2020,10 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
     """reconcile_report's body beneath its product-root descriptor; returns (outcomes, lock_taken). `taken`
     and `broke` are the caller's, so the caller releases the store leases this run took after the journal
     lock's release, whatever this raises. `stage` is what a JournalError or OSError maps to: classify
-    (RECONCILE_UNCLASSIFIABLE), prelock (RECONCILE_PRELOCK_FAULT) and recovering (RECONCILE_FAILED), the
-    last set only once the journal exclusion is held and the leases are taken, right before the first
-    recovery write."""
+    (RECONCILE_UNCLASSIFIABLE), prelock (RECONCILE_PRELOCK_FAULT), claim (RECONCILE_STORE_LEASE_HELD, set
+    once the journal exclusion is held, as the store leases are taken: a claim's close error, rendered with
+    its notes, which name a lease the claim left) and recovering (RECONCILE_FAILED), the last set only once
+    the leases are taken, right before the first recovery write."""
     journal_root = _journal_root(product_root)
     arb_rel = JOURNAL_REL + "/lock.break"
     outcomes = []
@@ -2112,6 +2133,7 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                 stale = {t.name: _journal.classify_state(jr_fd, t, txn_fd=tfd) for t, tfd in txns}
 
                 def claim():
+                    stage[0] = "claim"
                     _take_reconcile_leases(root_fd, targets, taken, released)
                     broke.append(True)
                     stage[0] = "recovering"
@@ -2139,6 +2161,7 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
             held.append(True)
             try:
                 if not broke:
+                    stage[0] = "claim"
                     _take_reconcile_leases(root_fd, targets, taken, released)
                 stage[0] = "recovering"
                 for txn, tfd in txns:
@@ -2181,6 +2204,15 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                                    "fault before this run held the journal lock and began recovering ({}); no "
                                    "recovery write was made, and every transaction is as found{} "
                                    "(fail-closed)".format(JOURNAL_REL, exc, arbitration_said()))
+        if stage[0] == "claim":
+            # a claim's close error, raised as itself with the journal's exclusion held (the journal lock, or the
+            # stale-lock arbitration): rendered with its notes, which name a lease that claim left in place
+            raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the adoption journal {} cannot be reconciled: "
+                                   "taking the store lease(s) faulted with the journal's exclusion held, before "
+                                   "any recovery write ({}); a lease that cannot be taken is treated as held (spec "
+                                   "5.7). This reconcile made no recovery write, every transaction is as found, "
+                                   "and {}{} (fail-closed)".format(JOURNAL_REL, _journal._msg_said(exc),
+                                                                   _RELEASED_UNLESS_NAMED, arbitration_said()))
         raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery faulted after it began ({}): "
                                "the recovery may be PARTIAL (what it already restored or published stays as "
                                "the journal records it, and the transaction stays open); {}; a later `opf adopt "
@@ -2367,8 +2399,10 @@ def _release_store_lease(root_fd, lease):
     """Release the lease _take_store_lease returned, through the store writers' ownership-verified release
     (_opf_write_guard.release_lease) at homes 1 or the capability's identity-bound release at homes 2.
     Returns None, or the clause naming the lease that stays, or, when the close of its directory failed
-    after the ownership-verified removal (lease_removed), the clause naming it released and that close;
-    an ordinary failure is returned, never raised, so it never hides the outcome it accompanies."""
+    after the ownership-verified removal (lease_removed), the clause naming it released and that close,
+    or, when the durability fsync failed after that removal (lease_unlinked), the clause naming it removed
+    with its durability unknown; an ordinary failure is returned, never raised, so it never hides the
+    outcome it accompanies."""
     import _opf_oplock
     import _opf_write_guard
     homes, machine_rel, lease_rel, guard = lease
@@ -2382,6 +2416,10 @@ def _release_store_lease(root_fd, lease):
             return ("the single-writer lease {} this run took was released (removed as this run's own, the "
                     "removal made durable), but closing its directory then failed ({})".format(
                         lease_rel, _journal._msg_said(exc)))
+        if homes < 2 and getattr(exc, "lease_unlinked", False) is True:
+            return ("the single-writer lease {} this run took was removed as this run's own, but making that "
+                    "removal durable then failed ({}): it is absent, and whether its removal is durable is "
+                    "unknown".format(lease_rel, _journal._msg_said(exc)))
         return ("the single-writer lease {} this run took could not be released ({}); it STAYS: once no opf "
                 "run is live, release it as your own reconciliation step (spec 5.7)".format(
                     lease_rel, _journal._msg_said(exc)))
@@ -2394,6 +2432,27 @@ _MID_MERGE_MARKERS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-m
 _CONFLICT_MARKER_RE = re.compile(rb"^(?:<{7}|\|{7}|>{7})(?:[ \t][^\n]*)?\r?$|^={7}\r?$", re.MULTILINE)
 
 
+def _git_directory_shaped(gitdir):
+    """Whether the directory `gitdir` has git's own shape, which git requires before it reads a directory as
+    a git directory: HEAD, with objects and refs in it, or in the directory its commondir names (relative to
+    it, or absolute; its line ending dropped), as a linked worktree's gitdir has. A commondir naming no such
+    directory, or empty, is not that shape (git refuses such a gitdir). A commondir that cannot be read
+    raises (JournalError, OSError or UnicodeDecodeError), never reads as shaped."""
+    if not os.path.lexists(os.path.join(gitdir, "HEAD")):
+        return False
+    common = gitdir
+    if os.path.lexists(os.path.join(gitdir, "commondir")):
+        gfd = os.open(gitdir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            line = _journal._read_contained(gfd, "commondir", cap=4096)[0].decode("utf-8").rstrip("\r\n")
+        finally:
+            store._close_fd_exc_safe(gfd)
+        if not line or "\x00" in line:
+            return False
+        common = os.path.join(gitdir, line)
+    return all(os.path.isdir(os.path.join(common, part)) for part in ("objects", "refs"))
+
+
 def _store_clean_or_refuse(root_fd, res):
     """The default in-repo store's clean-state check, run with the lease held and before anything composes
     (spec 5.7: there the contract reduces to the lease plus "the store paths in the working tree carry no
@@ -2402,10 +2461,12 @@ def _store_clean_or_refuse(root_fd, res):
     directory a `.git` file's gitdir line names) carries none of _MID_MERGE_MARKERS. No conflict markers:
     no regular file beneath the machine store carries a conflict-hunk line. Git is never run and nothing is
     written, so an untracked store a first adoption just scaffolded is admitted (the plan's digests already
-    bind the live bytes each op reads). What cannot be read refuses (fail-closed), and so does a gitdir
-    the `.git` file names that is absent, not a directory, or a directory that is not a git directory
-    (no HEAD with objects and refs, or with a linked worktree's commondir), and a gitdir line carrying a
-    NUL byte (no marker could be observed there). Disclosed: a product
+    bind the live bytes each op reads). What cannot be read refuses (fail-closed), and so does a `.git`
+    directory that carries no marker but is not a git directory (_git_directory_shaped: an empty one among
+    them, which git ignores, reading a repository above instead), a gitdir the `.git` file names that is
+    absent, not a directory, or a directory that is not a git directory (a commondir naming no directory
+    with objects and refs among them, which git refuses), and a gitdir line carrying a NUL byte (no marker
+    could be observed there). Disclosed: a product
     root below its repository's top level has no `.git` of its own, so only the conflict-marker leg
     applies there."""
     rel = ".git"
@@ -2419,6 +2480,14 @@ def _store_clean_or_refuse(root_fd, res):
                     raise AdoptApplyError("the store's repository is mid-merge ({} is present): the default "
                                           "in-repo store is written only from a clean state (spec "
                                           "5.7)".format(rel))
+            # a .git directory without git's shape (an empty one) is one git ignores, reading a repository
+            # above instead: no marker missing here says anything about that repository
+            rel = ".git"
+            if not _git_directory_shaped(os.path.join(str(res.store_root), rel)):
+                raise AdoptApplyError("the product root's .git is a directory but not a git directory (no HEAD "
+                                      "with objects and refs, or with a commondir naming a directory that has "
+                                      "them), so whether the store's repository is mid-merge cannot be "
+                                      "evaluated (spec 5.7)")
         elif st is not None:
             raw = _journal._read_contained(root_fd, rel, cap=4096)[0]
             line = raw.decode("utf-8").strip()
@@ -2441,15 +2510,13 @@ def _store_clean_or_refuse(root_fd, res):
                 raise AdoptApplyError("the product root's .git file names the gitdir {}, which is {}, so whether "
                                       "the store's repository is mid-merge cannot be evaluated (spec "
                                       "5.7)".format(gitdir, "absent" if named is None else "not a directory"))
-            # nor does a directory without git's own shape (HEAD, with objects and refs or a linked
-            # worktree's commondir): no marker found there says anything about the repository
-            if not (os.path.lexists(os.path.join(gitdir, "HEAD"))
-                    and (os.path.lexists(os.path.join(gitdir, "commondir"))
-                         or all(os.path.isdir(os.path.join(gitdir, part)) for part in ("objects", "refs")))):
+            # nor does a directory without git's own shape (_git_directory_shaped): no marker found there says
+            # anything about the repository
+            if not _git_directory_shaped(gitdir):
                 raise AdoptApplyError("the product root's .git file names the gitdir {}, which is a directory but "
-                                      "not a git directory (no HEAD with objects and refs, or with a commondir), "
-                                      "so whether the store's repository is mid-merge cannot be evaluated (spec "
-                                      "5.7)".format(gitdir))
+                                      "not a git directory (no HEAD with objects and refs, or with a commondir "
+                                      "naming a directory that has them), so whether the store's repository is "
+                                      "mid-merge cannot be evaluated (spec 5.7)".format(gitdir))
         for name in _MID_MERGE_MARKERS if gitdir is not None else ():
             rel = os.path.join(gitdir, name)
             try:
@@ -8030,6 +8097,26 @@ def _self_test_checks():
             return unpatched(fd)
         return faulty_close, fired
 
+    def dir_fsync_fault(root, when):
+        """(an os.fsync stand-in, the list it marks once it fires): the first fsync of the root's `.working/toml`
+        directory descriptor once when() holds raises EIO instead. Built before the patch, so every other
+        fsync goes through the real os.fsync."""
+        machine = os.stat(root / ".working/toml")
+        unpatched = os.fsync
+        fired = []
+
+        def faulty_fsync(fd):
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                st = None
+            if (not fired and st is not None and (st.st_dev, st.st_ino) == (machine.st_dev, machine.st_ino)
+                    and when()):
+                fired.append(True)
+                raise OSError(errno.EIO, "INJECTED-MACHINE-DIR-FSYNC-EIO")
+            return unpatched(fd)
+        return faulty_fsync, fired
+
     def own_lease(root):
         """True while the store lease is present and names THIS process as its holder."""
         path = root / lease_rel
@@ -8071,6 +8158,32 @@ def _self_test_checks():
         check("lease-join-release-dir-close-fault-named-released",
               fired == [True] and isinstance(landed, AdoptCommittedLockError) and lease_rel in str(landed)
               and "was released" in str(landed) and "INJECTED-MACHINE-DIR-CLOSE-EIO" in str(landed)
+              and "STAYS" not in str(landed) and txn_state(root, rid) == "complete"
+              and not (root / lease_rel).exists() and lock_free(root), repr(landed))
+
+    # a release whose durability fsync fails AFTER the ownership-verified removal names the lease as removed, its
+    # durability unknown, beside the commit, never as one that STAYS (red when the release's lease_unlinked
+    # branch is dropped)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = resolved_root(temp)
+        removed = []
+        real_unlink_owned = _opf_write_guard.unlink_owned_lease
+
+        def unlink_seen(*args, **kwargs):
+            real_unlink_owned(*args, **kwargs)
+            removed.append(True)
+        faulty_fsync, fired = dir_fsync_fault(root, lambda: removed != [])
+        landed = None
+        with mock.patch.object(_opf_write_guard, "unlink_owned_lease", unlink_seen), \
+                mock.patch.object(os, "fsync", faulty_fsync):
+            try:
+                run_adopt_transaction(root, rid, create_x)
+            except AdoptApplyError as exc:
+                landed = exc
+        check("lease-join-release-fsync-fault-named-removed",
+              fired == [True] and isinstance(landed, AdoptCommittedLockError)
+              and lease_rel + " this run took was removed as this run's own" in str(landed)
+              and "durable is unknown" in str(landed) and "INJECTED-MACHINE-DIR-FSYNC-EIO" in str(landed)
               and "STAYS" not in str(landed) and txn_state(root, rid) == "complete"
               and not (root / lease_rel).exists() and lock_free(root), repr(landed))
 
@@ -8229,10 +8342,10 @@ def _self_test_checks():
         if form != "dir":
             (root / ".git").write_text("gitdir: {}\n".format(gitdir if form == "abs" else "linked-gitdir"),
                                        encoding="utf-8")
-            # git's own shape, so the named directory reads as a git directory (one without it refuses)
-            (gitdir / "HEAD").write_bytes(b"ref: refs/heads/main\n")
-            (gitdir / "objects").mkdir()
-            (gitdir / "refs").mkdir()
+        # git's own shape, so the directory reads as a git directory (one without it refuses)
+        (gitdir / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+        (gitdir / "objects").mkdir()
+        (gitdir / "refs").mkdir()
         if marker is not None and marker.startswith("rebase-"):
             (gitdir / marker).mkdir()
         elif marker is not None:
@@ -8303,6 +8416,37 @@ def _self_test_checks():
           all(kept and "not a git directory" in said for said, kept in shape_seen[:2]), shape_seen)
     check("lease-join-gitdir-nul-refuses-named",
           shape_seen[2][1] and "NUL byte" in shape_seen[2][0], shape_seen)
+
+    # a `.git` directory without git's shape (an empty one, which git ignores, reading a repository above) and a
+    # gitdir whose commondir names no directory with objects and refs (which git refuses as not a repository)
+    # each refuse with nothing written and the lease released (red when either is read as clean); a gitdir whose
+    # relative commondir names a directory that has them, a linked worktree's layout, is admitted
+    def commondir_gitdir(root, common):
+        gitdir = root / "linked-gitdir"
+        gitdir.mkdir()
+        (gitdir / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+        (gitdir / "commondir").write_bytes(common.encode("utf-8") + b"\n")
+        (root / ".git").write_text("gitdir: linked-gitdir\n", encoding="utf-8")
+    unshaped_seen = []
+    for plant in (lambda root: (root / ".git").mkdir(), lambda root: commondir_gitdir(root, "../no-such-common")):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = resolved_root(temp)
+            plant(root)
+            before = snapshot(root)
+            _txn, raised = outcome_of(run_adopt_transaction, root, rid, create_x)
+            unshaped_seen.append((repr(raised), isinstance(raised, AdoptApplyError)
+                                  and "not a git directory" in str(raised) and str(raised).endswith(_NOTHING_WRITTEN)
+                                  and snapshot(root) == before and not (root / lease_rel).exists()
+                                  and lock_free(root)))
+    check("lease-join-empty-git-dir-refuses", unshaped_seen[0][1], unshaped_seen)
+    check("lease-join-gitdir-dangling-commondir-refuses", unshaped_seen[1][1], unshaped_seen)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = resolved_root(temp)
+        commondir_gitdir(root, "../common")
+        (root / "common" / "objects").mkdir(parents=True)
+        (root / "common" / "refs").mkdir()
+        _got, shaped = beneath_root(root, _store_clean_or_refuse)
+    check("lease-join-gitdir-commondir-admits", shaped is None, shaped)
     real_read_contained = _journal._read_contained
 
     def store_read_fails(root_fd, rel, *args, **kwargs):
@@ -12838,6 +12982,111 @@ def _self_test_checks():
               and said.count("confirmed-dead") == 1 and len(released) == 1 and "confirmed-dead" in released[0]
               and own_lease(root) and txn_state(root, rid) == "open" and lock_free(root), (said, released))
 
+    # an ordinary claim (the apply's lease already released by the operator) writes its lease in full and then
+    # meets a failing close of its directory, the journal lock already held: the refusal is store-lease-held,
+    # names that lease as one that STAYS, keeps acquire_lease's note, and never calls the fault one before the
+    # journal lock (red when the claim's note on the close error, or the rendering of its notes, is dropped)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        apply_lease = (root / lease_rel).exists()
+        if apply_lease:
+            (root / lease_rel).unlink()
+        faulty_close, fired = dir_close_fault(root, lambda: own_lease(root))
+        released = []
+        with mock.patch.object(os, "close", faulty_close):
+            _outcomes, claimed = outcome_of(reconcile_report, root, released)
+        said = str(claimed)
+        check("reconcile-claim-dir-close-fault-lease-named",
+              apply_lease and fired == [True] and isinstance(claimed, ReconcileRefusal)
+              and claimed.finding == RECONCILE_STORE_LEASE_HELD and "INJECTED-MACHINE-DIR-CLOSE-EIO" in said
+              and lease_rel + " its claim created STAYS" in said and "LEFT in place" in said
+              and "before this run held the journal lock" not in said and "releases every" not in said
+              and released == [] and own_lease(root) and txn_state(root, rid) == "open" and lock_free(root), said)
+
+    # a later target's claim refuses and releasing the lease the first claim took then faults: the refusal names
+    # that lease as one that STAYS and never says every lock and lease this run took is released (red when the
+    # claim refusal promises every release again)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        apply_lease = (root / lease_rel).exists()
+        if apply_lease:
+            (root / lease_rel).unlink()
+        (root / ".working/zzz").mkdir()
+        real_claim = _opf_write_guard.acquire_lease
+
+        def peer_claims_later(root_fd, machine_rel, verb, **kwargs):
+            if machine_rel == ".working/zzz":
+                raise _opf_write_guard.LeaseHeldError("INJECTED-PEER-CLAIM of .working/zzz/lease.toml")
+            return real_claim(root_fd, machine_rel, verb, **kwargs)
+        with mock.patch.object(_opf_write_guard, "acquire_lease", peer_claims_later), \
+                mock.patch.object(_opf_write_guard, "release_lease",
+                                  release_raises(_opf_write_guard.WriteGuardError("INJECTED-RELEASE-FAULT"))):
+            _outcomes, refused = outcome_of(reconcile_report, root)
+        said = str(refused)
+        check("reconcile-refusal-with-lease-staying-never-says-every-release",
+              apply_lease and isinstance(refused, ReconcileRefusal) and refused.finding == RECONCILE_STORE_LEASE_HELD
+              and "INJECTED-PEER-CLAIM" in said and lease_rel + " could not be released (INJECTED-RELEASE-FAULT) "
+              "and STAYS" in said and "releases every" not in said and own_lease(root)
+              and txn_state(root, rid) == "open" and lock_free(root), said)
+
+    # releasing the lease this reconcile took after the recovery finished: a directory close that fails after the
+    # ownership-verified removal names it as released (red when the release's lease_removed branch is dropped),
+    # and a durability fsync that fails after that removal names it as removed with its durability unknown (red
+    # when the lease_unlinked branch is dropped), neither as one that could not be released
+    for label, words, fault, patched in (("reconcile-release-dir-close-fault-named-released",
+                                          " was released, but closing its directory then failed", dir_close_fault,
+                                          lambda faulty: mock.patch.object(os, "close", faulty)),
+                                         ("reconcile-release-fsync-fault-named-removed",
+                                          " was removed as this run's own, but making that removal durable then "
+                                          "failed", dir_fsync_fault,
+                                          lambda faulty: mock.patch.object(os, "fsync", faulty))):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, _before = interrupted_mid(temp)
+            removed = []
+            real_unlink_owned = _opf_write_guard.unlink_owned_lease
+
+            def unlink_seen(*args, **kwargs):
+                real_unlink_owned(*args, **kwargs)
+                removed.append(True)
+            faulty, fired = fault(root, lambda: removed != [])
+            with mock.patch.object(_opf_write_guard, "unlink_owned_lease", unlink_seen), patched(faulty):
+                _outcomes, faulted = outcome_of(reconcile_report, root)
+            said = str(faulted)
+            check(label, fired == [True] and isinstance(faulted, ReconcileRefusal)
+                  and faulted.finding == RECONCILE_LEASE_RELEASE_FAILED and "INJECTED-MACHINE-DIR-" in said
+                  and lease_rel + words in said and "could not be released" not in said
+                  and txn_state(root, rid) == "rolled-back" and not (root / lease_rel).exists() and lock_free(root),
+                  said)
+
+    # the recovery re-claim returns, and only then the close of the examined lease's directory fails: that close
+    # error surfaces, never read as the handled held-lease refusal in flight and swallowed, so reconcile refuses
+    # before any recovery write, naming the lease the re-claim left and the leftover's release once (red when
+    # that close is nested in the held-lease handler again)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        dead = dead_pid()
+        if dead is not None and (root / lease_rel).exists():
+            (root / lease_rel).write_bytes(holder_dead((root / lease_rel).read_bytes(), dead))
+        reclaimed = []
+        real_claim = _opf_write_guard.acquire_lease
+
+        def claim_seen(*args, **kwargs):
+            payload = real_claim(*args, **kwargs)
+            reclaimed.append(True)
+            return payload
+        faulty_close, fired = dir_close_fault(root, lambda: reclaimed != [])
+        released = []
+        with mock.patch.object(_opf_write_guard, "acquire_lease", claim_seen), \
+                mock.patch.object(os, "close", faulty_close):
+            _outcomes, surfaced = outcome_of(reconcile_report, root, released)
+        said = str(surfaced)
+        check("reconcile-recovery-examination-close-fault-surfaces",
+              dead is not None and fired == [True] and isinstance(surfaced, ReconcileRefusal)
+              and surfaced.finding == RECONCILE_STORE_LEASE_HELD and "INJECTED-MACHINE-DIR-CLOSE-EIO" in said
+              and lease_rel + " its claim created STAYS" in said and said.count("confirmed-dead") == 1
+              and len(released) == 1 and own_lease(root) and txn_state(root, rid) == "open" and lock_free(root),
+              (said, released))
+
     # a holder on ANOTHER host reads possibly-live whatever its pid, so its apply lease is never released by
     # reconcile: the refusal is named and the lease byte-identical (red when the host binding is dropped)
     import socket
@@ -15112,8 +15361,12 @@ def _self_test_checks():
                                          "./ci/consumer.toml", "CI/consumer.toml"))]
     flips += [("entry-in-control-{}".format(i), (lambda e: lambda f: chain(f, [e]))(e), "control area", None,
                None, {e: b"x\n"}) for i, e in enumerate(control)]
+    # a `.git` destination is planted in a directory with git's own shape, so the clean-state check admits that
+    # directory and the protected-destination rule is the one that refuses
+    git_shape = {".git/HEAD": b"ref: refs/heads/main\n", ".git/objects/.keep": b"", ".git/refs/.keep": b""}
     flips += [("entry-protected-{}".format(i), (lambda e: lambda f: chain(f, [e]))(e), "protected destination",
-               None, None, {e: b"x\n"}) for i, e in enumerate(protected)]
+               None, None, dict({e: b"x\n"}, **(git_shape if e.startswith(".git/") else {})))
+              for i, e in enumerate(protected)]
     # entry-in-control-1..5 also meet protected_destination, whose message names the control area too (a
     # redundant pair, disclosed at _reserved_store_path); entry-in-control-0, this run's own archive, is the
     # control-area check's alone.
