@@ -2882,6 +2882,8 @@ expected-check-ids = [
   "behaviour/audit-reports-multiprocessing-launch",
   "revert/audit-fork-exec-unrecorded-red",
   "control/audit-sees-every-launch",
+  "control/audit-streams-teardown-launch",
+  "revert/audit-stream-removed-red",
   "revert/audit-report-at-return-red",
   "revert/audit-subinterpreter-unrecorded-red",
   "live/real-tree-passes",

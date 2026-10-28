@@ -537,10 +537,14 @@ def main():
 # it carries no guard call, and its vectors launch no child (that gate's self-test runs it under a
 # process-creation audit hook that records the _posixsubprocess.fork_exec event too, so the multiprocessing
 # launches are recorded, and records an import of _interpreters as a launch, as the hook cannot see a
-# subinterpreter's own launches; the report prints at exit, after the exit handlers and thread joins, and the
-# self-test fails on any launch recorded; a launch made below Python, through ctypes or a native extension, a
-# subinterpreter made other than through _interpreters, and a launch from a daemon thread after the report
-# prints are not recorded).
+# subinterpreter's own launches; the hook writes each launch to the output as it happens, the report prints at
+# exit, after the exit handlers and thread joins, and the self-test fails on a launch in either, so a launch from
+# a finalizer as the modules are torn down, after the report, fails it too; the audit records accidental launches
+# by the audited self-test until the interpreter clears its audit hooks late in teardown (a finalizer that runs
+# after that, as one reached only from the codec search registry does, is not seen), and code that deliberately
+# evades an in-process hook (clearing or forging its record, unregistering or reordering its handlers, os._exit
+# after forging, ctypes or a native extension, a subinterpreter not made through _interpreters) is outside what
+# it can see).
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
