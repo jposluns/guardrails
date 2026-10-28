@@ -3830,7 +3830,7 @@ _DEADLINE_SHAPES = {
                                                           + ")" * (n // 3 - 3), "run_in_background": True}),
     # A double-quoted run of command substitutions each holding a case statement, whose pattern ')' the shared
     # lexer's skip ends each substitution at, so only bash_absolute_paths' second reading (_AbspthReader) reads
-    # them as bash does; the *_after form ends with one whose case body truncates a relative file, which that
+    # them as modelled; the *_after form ends with one whose case body truncates a relative file, which that
     # reading must deny within the bound.
     "dq_case_substs": lambda n, base: ("Bash", {"command": 'echo "' + _repeat(
         "$(case a in a) true;; esac)", n - 6, '"')}),
@@ -23462,7 +23462,7 @@ def _main_isolated(monitor):
              "cat <<<y; echo `echo a \\\\\\\\\\> out.txt`", "deny")
         # The commands bash runs where the full lex does not read them as commands (_abspth_read_truncation): a
         # command substitution a double-quoted string holds, which the lex skips whole, is read as commands; an
-        # unquoted backquote substitution's text is read as bash reads it, its backslash pairs taken out first;
+        # unquoted backquote substitution's text is read as modelled, its backslash pairs taken out first;
         # and where bash ends a here-document opened in a substitution at a line such as 'EOF)' or at a
         # backquote, the text from there on is read as commands. bash 5.3.9 writes out.txt for every deny below
         # except ap-c100l, which pins a disclosed over-deny, and every deny row below allowed before this reading
@@ -23568,11 +23568,11 @@ def _main_isolated(monitor):
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n))", "deny")
         bcmd("(ap-c100m) an unquoted here-document body in a double-quoted '$(...)' is read for its substitutions "
              "only, so its '->' and a backquoted 'c' allow", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "allow")
-        # The second reading reads the command as bash's parser does (_AbspthReader): a substitution ends at the
-        # ')' or '}' its grammar closes it with, and a here-document body inside '$(...)' or '${ cmd; }' ends early
-        # at a line that STARTS with the delimiter and holds that closer later on. bash 5.3.9 writes out.txt for
-        # every deny below, and every one allowed before this reading; each allow is a shape bash writes no
-        # relative file in.
+        # The second reading reads the command as it models bash's parser (_AbspthReader; its known misses are
+        # disclosed in the residue): a substitution ends at the ')' or '}' its grammar closes it with, and a
+        # here-document body inside '$(...)' or '${ cmd; }' ends early at a line that STARTS with the delimiter
+        # and holds that closer later on. bash 5.3.9 writes out.txt for every deny below, and every one allowed
+        # before this reading; each allow is a shape bash writes no relative file in.
         for _rd_label, _rd_cmd in (
                 ("a case pattern's ')' in a double-quoted '$(...)'", 'echo "$(case a in a) echo a > out.txt;; esac)"'),
                 ("a case pattern's ')' in an assigned double-quoted '$(...)'",

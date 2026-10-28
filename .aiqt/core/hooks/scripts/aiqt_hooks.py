@@ -4952,7 +4952,8 @@ _ABSPTH_COMMAND_WORDS = frozenset(("if", "then", "else", "elif", "fi", "while", 
 class _AbspthUnsure(Exception):
     """Raised by _AbspthReader where it cannot tell how bash reads the text from index at on: a construct it does
     not model, an unterminated quote or substitution, a token bash rejects as a syntax error, or a bound passed.
-    The caller reads the command from there with _abspth_unread_truncation, the fail-closed reading."""
+    The caller reads the command from there with _abspth_unread_truncation, the fail-closed reading, except in
+    the second known miss, where the raw scan resumes past the operator."""
 
     def __init__(self, at):
         Exception.__init__(self, at)
@@ -4969,10 +4970,14 @@ class _AbspthFound(Exception):
 
 
 class _AbspthReader:
-    """bash_absolute_paths' second reading of a command, for the deny tier: it reads the text as bash 5.3's parser
-    reads it, and finds each truncating redirect ('>', '>|', '&>', or '>&' to a file) bash would perform anywhere
-    in it, at the top level or in any command, process or '${ cmd; }' substitution, a double-quoted one
-    included. The shared lexer reads none of these the way bash does where it matters here: it skips a
+    """bash_absolute_paths' second reading of a command, for the deny tier: it reads the text as it models bash
+    5.3's parser reading it, and finds each truncating redirect ('>', '>|', '&>', or '>&' to a file) that model
+    has bash perform anywhere in it, at the top level or in any command, process or '${ cmd; }' substitution, a
+    double-quoted one included. The model has three known misses, where bash truncates and this reading does not
+    yet find it (_abspth_read_truncation lists them too): a command substitution inside single quotes in an
+    arithmetic context; a truncating redirect whose target word the reader cannot read, where the raw scan
+    resumes past the operator; and a quote glued to the '}' that closes a double-quoted '${ cmd; }' or
+    '${| cmd; }'. The shared lexer reads none of these the way bash does where it matters here: it skips a
     double-quoted substitution whole, ending it at the first ')' or '}' (a case pattern's ')' or a here-document
     body line holding one included), reads an unquoted backquote substitution's text with top-level backslash
     rules, and ends a here-document body only at its exact delimiter line.
@@ -5209,8 +5214,8 @@ class _AbspthReader:
             i = j
 
     def word(self, i, n):
-        """The index just past the one word starting at text[i], read as bash reads an unquoted word, each
-        substitution in it read as commands (_AbspthReader.dollar, _AbspthReader.backquote)."""
+        """The index just past the one word starting at text[i], read as modelled on bash reading an unquoted
+        word, each substitution in it read as commands (_AbspthReader.dollar, _AbspthReader.backquote)."""
         text = self.text
         while i < n:
             c = text[i]
@@ -5252,10 +5257,10 @@ class _AbspthReader:
         raise _AbspthUnsure(start)
 
     def quoted(self, i, n, dq):
-        """Read text[i:n] as bash expands the text of a double-quoted string (dq True) or of a here-document body
-        under an unquoted delimiter (dq False): each substitution in it is read as commands, and one that does
-        not end before n raises _AbspthUnsure. A backquote substitution's '\\"' stays escaped in a body, where
-        reading it as a quote could hide a redirect."""
+        """Read text[i:n] as modelled on bash expanding the text of a double-quoted string (dq True) or of a
+        here-document body under an unquoted delimiter (dq False): each substitution in it is read as commands,
+        and one that does not end before n raises _AbspthUnsure. A backquote substitution's '\\"' stays escaped
+        in a body, where reading it as a quote could hide a redirect."""
         text = self.text
         while i < n:
             c = text[i]
