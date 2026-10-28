@@ -16087,9 +16087,10 @@ def _main_isolated(monitor):
             gdeny_names("({}) a quote-assembled git before a roster verb and a run-time word denies".format(_gw_lbl),
                         _gw_cmd, "a de-quoted reading of the command names git ('git'), and a later ")
         # A git written as such elsewhere in the piece (an operand, a message, an option value, in either case) hides
-        # no quote-assembled git: that walk reads the piece with every git the closed literal grammar reads masked
-        # out (_gate_runtime_masked_git), since the grammar judges each, and each assembled git starts a walk, one
-        # after a git whose subcommand is off the roster included. With O=-nv, L=--no-verify and HOME=-nv bash runs
+        # no quote-assembled git: that walk reads the piece with every standalone git masked out, a git glued to a
+        # '-' left intact (_gate_runtime_masked_git), since the closed literal grammar judges each standalone git as
+        # written, and each assembled git starts a walk, one after a git whose subcommand is off the roster included.
+        # With O=-nv, L=--no-verify and HOME=-nv bash runs
         # each as a hook-skipping git commit, am or push (g'i't commit ~ -m git runs git commit -nv -m git). Each
         # allowed before.
         for _gw_lbl, _gw_cmd in (
@@ -16257,7 +16258,7 @@ def _main_isolated(monitor):
         # piece of the split a here-document body changes only where it holds such a character, and for the text
         # from a piece holding an ANSI-C escaped quote or a case word, before the last piece, to the end: a reading
         # only removes characters or decodes an ANSI-C escape, which needs a '$', so a piece with none has no
-        # run-time word to start at. The readings of a piece with every git written as such masked out are built
+        # run-time word to start at. The readings of a piece with every standalone git masked out are built
         # only where masking changed it and it still holds a quote, a backslash or a 'git' a reading can join.
         _gw_built = []
         _gw_real_readings = aiqt_hooks._gate_bash_readings
@@ -16327,14 +16328,14 @@ def _main_isolated(monitor):
             rdexpect("(gw-rt-split-spans-{}) a doubt piece of either split is read to the end".format(_gw_lbl),
                      (lambda text: (text.index("$G"), len(text)) in _gw_ss(text)[1]) if _gw_ss is not None else None,
                      _gw_text, True)
-        # The mask of every git the closed literal grammar reads as a command word ('git' at a word boundary in
-        # either case, a path's last part and a '.git' ending included, never one glued to a letter), and a 'git'
-        # glued to a '-' left intact (an option name like --git-dir; masking it to --xxx-dir would drop the
+        # The mask of every standalone git ('git' in either case with no word character and no '-' on either side,
+        # a path's last part and a '.git' ending included), a 'git' glued to a '-' left intact though the closed
+        # literal grammar scans it too (an option name like --git-dir; masking it to --xxx-dir would drop the
         # arg-consuming option skip), and the walk from each git a reading of the masked piece names: its
         # subcommand found as _git_sub_and_args finds it (an option value skipped, a leading assignment that names
         # git read as an assignment), a later git read after an off-roster one, and a roster verb with no word
         # built at run time after it giving none.
-        rdexpect("(gw-rt-masked-git) every git read as a command word is masked, --git-dir kept",
+        rdexpect("(gw-rt-masked-git) every standalone git is masked, --git-dir kept",
                  getattr(aiqt_hooks, "_gate_runtime_masked_git", None),
                  "g'i't commit $O git GIT /usr/bin/git x.git -Sgit gitx --git-dir .git",
                  "g'i't commit $O xxx xxx /usr/bin/xxx x.xxx -Sgit gitx --git-dir .xxx")
@@ -16346,15 +16347,19 @@ def _main_isolated(monitor):
                                                                   "which may expand to a hook-skip spelling for it")),
                 ("gopt", ["git", "-C", "git", "-c", "a=b", "push", "x", "$L"],
                  ("git", "push", "the word '$L', built at run time, which may expand to a hook-skip spelling for it")),
-                ("gopt-masked", ["git", "--git-dir", ".xxx", "commit", "$O"],
-                 ("git", "commit", "the word '$O', built at run time, which may expand to a hook-skip spelling for "
-                  "it")),
                 ("off", ["git", "-C", "git", "log", "commit", "$O"], None),
                 ("assign", ["X=/a/git", "commit", "$O"], None),
                 ("no-runtime", ["git", "commit", "-m", "x"], None),
                 ("none", ["xxx", "commit", "$O"], None)):
             rdexpect("(gw-rt-assembled-{}) the walk from each assembled git".format(_gw_lbl), _gw_ar, _gw_words,
                      _gw_want)
+        # The same walk over the de-quoted reading of a MASKED piece, so a mask that rewrote --git-dir to
+        # --xxx-dir (the walk then takes the value .xxx for the subcommand and finds nothing) fails here.
+        _gw_mg = getattr(aiqt_hooks, "_gate_runtime_masked_git", None)
+        rdexpect("(gw-rt-assembled-gopt-masked) the walk from each assembled git",
+                 (lambda text: _gw_ar(aiqt_hooks._gate_dequoted_words(_gw_mg(text))))
+                 if _gw_ar is not None and _gw_mg is not None else None, "g'i't --git-dir .git commit $O",
+                 ("git", "commit", "the word '$O', built at run time, which may expand to a hook-skip spelling for it"))
         # The here-document mask: every masked character in a body, an unquoted and a quoted delimiter, the
         # delimiter line exactly (a trailing blank, a longer word and, without '<<-', a leading tab do not end the
         # body; with '<<-' leading tabs are stripped), two operators on one line, a here-string, a body that never
@@ -16450,8 +16455,8 @@ def _main_isolated(monitor):
                  "across its pieces"),
                 ("gw-res-runtime-literal", "and each git that a de-quoted reading assembles and the closed literal "
                  "grammar does not read as written"),
-                ("gw-res-runtime-literal-masked", "read with every git the grammar reads as a command word masked "
-                 "out of the piece"),
+                ("gw-res-runtime-literal-masked", "read with every standalone git (no letter, digit, underscore or - "
+                 "on either side) masked out of the piece"),
                 ("gw-res-runtime-literal-overdeny", "any quote-assembled git starts a walk, an operand included"),
                 ("gw-res-runtime-attached-overdeny", "git log -Sgit commit $x denies"),
                 ("gw-res-runtime-tilde-overdeny", "a tilde word counts whatever it expands to"),
