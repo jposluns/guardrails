@@ -12,9 +12,12 @@
 # are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
 # which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
 # against this manifest yet.
+# The import/examples/<type>.batch.toml members are inert post-adoption import examples, one per baseline
+# record type: each is a canonical opf.record.import-batch/v1 batch that the gate also parses and checks
+# (validate_examples). No writer consumes them in this release; `opf record import --batch` does not exist.
 format = "opf.prompt-pack/v1"
-version = "0.5.7"
-digest = "sha256:2c8297a685ec79c71a26c7a29db0448940e14b89752b27d85579798f62397213"
+version = "0.6.0"
+digest = "sha256:2655ef7d216b83e1d6318bb885555778435ccf09bafc8b01c7a651e5f6cd5473"
 
 [[members]]
 path = "adopt/SKILL.md"
@@ -26,4 +29,52 @@ sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "4873258d90455500c449324c09287c531ec5fec5e889510fda0c4c0eef858970"
+sha256 = "dedb38ce8aecb7ed597fdad4bc700ca590c85bc7ff8beca18f51fe25a5785c33"
+
+[[members]]
+path = "import/examples/autonomous_decision.batch.toml"
+sha256 = "f9b4090b5ce365f354bef4d1b4ce8d24ee720076a88b8760b72e750f5a6919a8"
+
+[[members]]
+path = "import/examples/backlog_item.batch.toml"
+sha256 = "59ef7819c063b08a08954e9e66f02f37262e7f36c13143ecdff552e87c82dc10"
+
+[[members]]
+path = "import/examples/block.batch.toml"
+sha256 = "3a1e1c540e60dee903ce90b95e29a3e9affc0e9dd8b578c002b586753ef63bda"
+
+[[members]]
+path = "import/examples/contribution.batch.toml"
+sha256 = "5b31bbdbc4ea1e903a0181cb1142d30a836dc462eca5023b25ca7da649bd9837"
+
+[[members]]
+path = "import/examples/done.batch.toml"
+sha256 = "71f92138c13640264878449e588d83ef2ebf795497ed0558df7cdb2e11724427"
+
+[[members]]
+path = "import/examples/finding.batch.toml"
+sha256 = "487e50731714b452662903ec8c18171773c7a04cb78b66455613db3a2efb5365"
+
+[[members]]
+path = "import/examples/handoff.batch.toml"
+sha256 = "78ccdfd80576a3410614b975d152a8dfee9227e2bca3f44fc3e748b04b5f725d"
+
+[[members]]
+path = "import/examples/maintainer_decision.batch.toml"
+sha256 = "401dcefafb92d38c7cd5f481bd382792a14cae7a04f1eb74393162b50b5a3876"
+
+[[members]]
+path = "import/examples/pending_decision.batch.toml"
+sha256 = "73ed4d85a1283303c6f7f424ed1241c39fb93f2841d58cf892b54fc01a4967a7"
+
+[[members]]
+path = "import/examples/preference_pattern.batch.toml"
+sha256 = "797c81474312618183e5ffbeecfad868ec8de58da5f040930bd06361ceb4a049"
+
+[[members]]
+path = "import/examples/reference.batch.toml"
+sha256 = "dc015fc0e3f2521a33ff3eaff74319da04b78aa077ce4e6709234a26baa6c0ce"
+
+[[members]]
+path = "import/examples/worklog.batch.toml"
+sha256 = "d73988b74fb317acf23ca8f017086faacead2946d8f4b42e20e082256d7f2401"

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e7f05cddaf2aa5726b4624a892f7c85b1b6507d9b4f8893a05a8c40950380b84"
+tree-sha256 = "a9ed4247e22edd1fa0a793f0558d290d4aa15a0f26c83a2cdc38439a205be854"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 481516
-sha256 = "797cd6fc4349fea5e669a4c014718e45b7fd14442ee4a092fb8cc97784bdf03d"
+bytes = 482862
+sha256 = "3ab61549c88ae49197dd040e3b2c704bb1f691d3582320fcc431492729208729"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2271,8 +2271,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 43392
-sha256 = "1e730a67441df48bf624304c1d485dd29d1c80e54e3887cd915ae33c37c155d7"
+bytes = 44199
+sha256 = "e34d23d9989d404870691dd372137c30da4f67d6db7ea1c45113b9420cc22c55"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2537,12 +2537,72 @@ sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
 [[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
 bytes = 116006
-sha256 = "4873258d90455500c449324c09287c531ec5fec5e889510fda0c4c0eef858970"
+sha256 = "dedb38ce8aecb7ed597fdad4bc700ca590c85bc7ff8beca18f51fe25a5785c33"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/autonomous_decision.batch.toml"
+bytes = 424
+sha256 = "f9b4090b5ce365f354bef4d1b4ce8d24ee720076a88b8760b72e750f5a6919a8"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/backlog_item.batch.toml"
+bytes = 370
+sha256 = "59ef7819c063b08a08954e9e66f02f37262e7f36c13143ecdff552e87c82dc10"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/block.batch.toml"
+bytes = 348
+sha256 = "3a1e1c540e60dee903ce90b95e29a3e9affc0e9dd8b578c002b586753ef63bda"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/contribution.batch.toml"
+bytes = 706
+sha256 = "5b31bbdbc4ea1e903a0181cb1142d30a836dc462eca5023b25ca7da649bd9837"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/done.batch.toml"
+bytes = 366
+sha256 = "71f92138c13640264878449e588d83ef2ebf795497ed0558df7cdb2e11724427"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/finding.batch.toml"
+bytes = 445
+sha256 = "487e50731714b452662903ec8c18171773c7a04cb78b66455613db3a2efb5365"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/handoff.batch.toml"
+bytes = 488
+sha256 = "78ccdfd80576a3410614b975d152a8dfee9227e2bca3f44fc3e748b04b5f725d"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/maintainer_decision.batch.toml"
+bytes = 401
+sha256 = "401dcefafb92d38c7cd5f481bd382792a14cae7a04f1eb74393162b50b5a3876"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/pending_decision.batch.toml"
+bytes = 458
+sha256 = "73ed4d85a1283303c6f7f424ed1241c39fb93f2841d58cf892b54fc01a4967a7"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/preference_pattern.batch.toml"
+bytes = 512
+sha256 = "797c81474312618183e5ffbeecfad868ec8de58da5f040930bd06361ceb4a049"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/reference.batch.toml"
+bytes = 408
+sha256 = "dc015fc0e3f2521a33ff3eaff74319da04b78aa077ce4e6709234a26baa6c0ce"
+
+[[sources]]
+path = "opf/prompt-pack/import/examples/worklog.batch.toml"
+bytes = 421
+sha256 = "d73988b74fb317acf23ca8f017086faacead2946d8f4b42e20e082256d7f2401"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
-bytes = 1816
-sha256 = "ab1619d41ecd16d75ab8efe89ffa4acc4b7da5fa9b88e4e94cd3430e9d139b91"
+bytes = 3782
+sha256 = "bc88abac791d3ce281f81c252d3e989802e69645eb17842a2367e59ca96a744f"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -2746,8 +2806,8 @@ sha256 = "225d9d5f7c15f5794a3772cd1333665829c1d34849a9708d994915fdeadc4349"
 
 [[sources]]
 path = "opf/tools/_opf_import_batch.py"
-bytes = 110603
-sha256 = "4bdd0e0ee2fdae74c18e9fc3bdbdf46e40c260b44f3af3b54ab31619dd4f572e"
+bytes = 110700
+sha256 = "a7c9bbe6a6145fc5de1a77bed4954b4e758b57702b430ef70b414d65dc2ec945"
 
 [[sources]]
 path = "opf/tools/_opf_import_complete.py"
@@ -3046,8 +3106,8 @@ sha256 = "abb63c72d7f706ebf20ebaa8cd497c81279a28a3a6e8b232d2f2bc9acff96536"
 
 [[sources]]
 path = "opf/tools/check_opf_prompt_pack.py"
-bytes = 29444
-sha256 = "b089b183c86fb696cb9b967efd7409c925204a1b2860c22ad9914e3b1c54db7e"
+bytes = 42144
+sha256 = "e2ec17093c959fa4a91698fd897312155ad686e7ffc459ed627f8a3bf8b7176f"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
@@ -3846,8 +3906,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 27584
-sha256 = "73cc217f993f0a5c0671428b81707d5569ce0ccf0194620698dca61ceef1e92a"
+bytes = 27738
+sha256 = "868d2cb763e0074506e95517fbc2288ea2874fde0393152c55427cdc0d051f9f"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
