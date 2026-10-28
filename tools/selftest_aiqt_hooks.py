@@ -3828,6 +3828,14 @@ _DEADLINE_SHAPES = {
                                                + ")" * (n // 3 - 3)}),
     "nest_cmdsubst_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
                                                           + ")" * (n // 3 - 3), "run_in_background": True}),
+    # A double-quoted run of command substitutions each holding a case statement, whose pattern ')' the shared
+    # lexer's skip ends each substitution at, so only bash_absolute_paths' second reading (_AbspthReader) reads
+    # them as bash does; the *_after form ends with one whose case body truncates a relative file, which that
+    # reading must deny within the bound.
+    "dq_case_substs": lambda n, base: ("Bash", {"command": 'echo "' + _repeat(
+        "$(case a in a) true;; esac)", n - 6, '"')}),
+    "dq_case_substs_after": lambda n, base: ("Bash", {"command": 'echo "' + _repeat(
+        "$(case a in a) true;; esac)", n - 6, '$(case a in a) echo a > out.txt;; esac)"')}),
     "diff_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git diff")}),
     "push_force_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git push --force origin main")}),
     "noverify_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git commit --no-verify -m x")}),
@@ -3928,7 +3936,8 @@ def _deadline_hash_decision(name, shape, size):
     return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
-    "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens"),
+    "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
+                            "dq_case_substs_after"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
@@ -3961,6 +3970,7 @@ _DEADLINE_PLAIN_CASES = {
 }
 # The (handler, shape) cases whose hazard must still be denied, each within its bound.
 _DEADLINE_DENY_CASES = frozenset((
+    ("bash_absolute_paths", "dq_case_substs_after"),
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"),
@@ -23450,14 +23460,14 @@ def _main_isolated(monitor):
              "cat <<<y; echo a \\\\\\> out.txt", "allow")
         bcmd("(ap-c97p) five backslashes before '>' in one backquote substitution DENY (disclosed over-deny)",
              "cat <<<y; echo `echo a \\\\\\\\\\> out.txt`", "deny")
-        # Text the full lex reads but not as the commands bash runs there (_abspth_placed_truncation): a command
-        # substitution a double-quoted string holds, which the lex skips whole, is read as a command of its own;
-        # an unquoted backquote substitution's text is read as bash reads it, its backslash pairs taken out
-        # first; and where bash ends a here-document opened in a substitution at a line such as 'EOF)' or at a
-        # backquote, the text from that line on is read by the unread-text scan. bash 5.3.9 writes out.txt for
-        # every deny below except ap-c100l and ap-c100m, which pin disclosed over-denies, and every deny row below
-        # allowed before this reading (fails when reverted). Each allow is an absolute target inside the same
-        # construct, or a shape bash runs no redirect in, that keeps its allow.
+        # The commands bash runs where the full lex does not read them as commands (_abspth_read_truncation): a
+        # command substitution a double-quoted string holds, which the lex skips whole, is read as commands; an
+        # unquoted backquote substitution's text is read as bash reads it, its backslash pairs taken out first;
+        # and where bash ends a here-document opened in a substitution at a line such as 'EOF)' or at a
+        # backquote, the text from there on is read as commands. bash 5.3.9 writes out.txt for every deny below
+        # except ap-c100l, which pins a disclosed over-deny, and every deny row below allowed before this reading
+        # (fails when reverted). Each allow is an absolute target inside the same construct, or a shape bash runs
+        # no redirect in, that keeps its allow.
         bcmd("(ap-c98) a relative '>' in a '$(...)' inside double quotes DENIES",
              'echo "$(echo a > out.txt)"', "deny")
         bcmd("(ap-c98b) a relative '>' in a backquote substitution inside double quotes DENIES",
@@ -23556,8 +23566,85 @@ def _main_isolated(monitor):
              "x=$(cat <<'EOF'\nhi\nEOF;\necho y > out.txt\nEOF\n)", "allow")
         bcmd("(ap-c100l) a nested body ended at 'EOF)' where bash then fails on a syntax error DENIES (disclosed "
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n))", "deny")
-        bcmd("(ap-c100m) an unquoted here-document body holding a backquote in a double-quoted '$(...)' is read "
-             "and DENIES (disclosed over-deny)", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "deny")
+        bcmd("(ap-c100m) an unquoted here-document body in a double-quoted '$(...)' is read for its substitutions "
+             "only, so its '->' and a backquoted 'c' allow", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "allow")
+        # The second reading reads the command as bash's parser does (_AbspthReader): a substitution ends at the
+        # ')' or '}' its grammar closes it with, and a here-document body inside '$(...)' or '${ cmd; }' ends early
+        # at a line that STARTS with the delimiter and holds that closer later on. bash 5.3.9 writes out.txt for
+        # every deny below, and every one allowed before this reading; each allow is a shape bash writes no
+        # relative file in.
+        for _rd_label, _rd_cmd in (
+                ("a case pattern's ')' in a double-quoted '$(...)'", 'echo "$(case a in a) echo a > out.txt;; esac)"'),
+                ("a case pattern's ')' in an assigned double-quoted '$(...)'",
+                 'x="$(case $HOME in */*) echo a > out.txt;; esac)"'),
+                ("a case pattern's ')' in a '$(...)' inside a double-quoted '${...}'",
+                 'echo "${u:-$(case a in a) echo a > out.txt;; esac)}"'),
+                ("a case closed by 'esac' with no ';;' in a double-quoted '$(...)'",
+                 'echo "$(case a in a) echo a > out.txt; esac)"'),
+                ("a redirect after 'esac' in a double-quoted '$(...)'",
+                 'echo "$(echo a; case a in a) echo b;; esac > out.txt)"'),
+                ("a quoted body line ')' in a double-quoted '$(...)'", "echo \"$(cat <<'E'\n)\nE\necho a > out.txt)\""),
+                ("an unquoted body line holding ')' in a double-quoted '$(...)'",
+                 'echo "$(cat <<E\nnote: x)\nE\necho a > out.txt\n)"'),
+                ("a '}' argument in a double-quoted '${ cmd; }'", 'echo "${ echo }; echo a > out.txt; }"'),
+                ("a '}' after a word in a double-quoted '${ cmd; }'", 'echo "${ echo a }; echo b > out.txt; }"'),
+                ("a '}' after an assignment in a double-quoted '${ cmd; }'", 'echo "${ x=1 }; echo a > out.txt; }"'),
+                ("a body inside '$(...)' ended at 'EOFX)'", "x=$(cat <<'EOF'\nhi\nEOFX)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at 'EOF X)'", "x=$(cat <<'EOF'\nhi\nEOF X)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at 'EOFabc)'", "x=$(cat <<'EOF'\nhi\nEOFabc)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at 'EOFabc def)'",
+                 "x=$(cat <<'EOF'\nhi\nEOFabc def)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at 'EOFEOF)'", "x=$(cat <<'EOF'\nhi\nEOFEOF)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at an escaped ')'",
+                 "x=$(cat <<'EOF'\nhi\nEOF\\)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at a quoted ')'", "x=$(cat <<'EOF'\nhi\nEOF')'\necho y > out.txt\nEOF\n)"),
+                ("a body inside '$(...)' ended at a ')' in a comment",
+                 "x=$(cat <<'EOF'\nhi\nEOF # )\necho y > out.txt\nEOF\n)"),
+                ("a '<<-' body inside '$(...)' ended at a tab and 'EOFX)'",
+                 "x=$(cat <<-'EOF'\nhi\n\tEOFX)\necho y > out.txt\nEOF\n)"),
+                ("a body inside a second '$(...)' ended at 'EOFX)'",
+                 "y=$(echo q); x=$(cat <<'EOF'\nhi\nEOFX)\necho y > out.txt\nEOF\n)"),
+                ("a body inside '${ cmd; }' ended at 'EOF}'", "x=${ cat <<'EOF'\nhi\nEOF}\necho y > out.txt\nEOF\n}"),
+                ("a body inside '${ cmd; }' ended at 'EOF }'", "x=${ cat <<'EOF'\nhi\nEOF }\necho y > out.txt\nEOF\n}"),
+                ("a body inside '${ cmd; }' ended at 'EOFX}'", "x=${ cat <<'EOF'\nhi\nEOFX}\necho y > out.txt\nEOF\n}"),
+                ("a body inside '${| cmd; }' ended at 'EOF}'", "x=${| cat <<'EOF'\nhi\nEOF}\necho y > out.txt\nEOF\n}"),
+                ("a body inside '<(...)' ended at 'EOF)'", "cat <(cat <<'EOF'\nEOF)\necho a > out.txt\n)"),
+                ("two backslashes before '>>' in a backquote substitution after a here-string",
+                 "cat <<<y; echo `echo a \\\\>> out.txt`"),
+                ("two backslashes before '>>' in a backquote substitution (full lex)",
+                 "echo `echo a \\\\>> out.txt`")):
+            bcmd("(ap-c103) {} DENIES".format(_rd_label), _rd_cmd, "deny")
+        for _rd_label, _rd_cmd in (
+                ("a single-quoted substitution in a case body inside a double-quoted '$(...)' prints",
+                 "echo \"$(case a in a) echo '$(echo a > out.txt)';; esac)\""),
+                ("a body line 'EOF)' in a top-level subshell is body", "(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n)"),
+                ("a body line 'EOF)' in a '{ ... }' group is body", "{ cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n}"),
+                ("a body line 'EOF)' in a backquote substitution's text is body",
+                 "x=$(echo `cat <<'EOF'\nEOF)\necho a > out.txt\nEOF\n`)"),
+                ("a body line 'EOF)' in a double-quoted '${ cmd; }' is body",
+                 "echo \"${ cat <<'EOF'\nEOF)\necho a > out.txt\nEOF\n}\""),
+                ("a body ended at 'EOF}' in a double-quoted '${ cmd; }' leaves the rest quoted",
+                 "echo \"${ cat <<'EOF'\nEOF}\necho a > out.txt\nEOF\n}\""),
+                ("a '}' glued to a word closes a double-quoted '${ cmd; }'", 'echo "${ echo b; }x; echo a > out.txt; }"'),
+                ("a '>' inside '[[ ... ]]' in a double-quoted '$(...)' compares",
+                 'echo "$([[ a > b ]] && echo y)"'),
+                ("an absolute target after a case in a double-quoted '$(...)'",
+                 'echo "$(case a in a) echo a > {}/out.txt;; esac)"'.format(rp)),
+                ("an absolute target after a '}' argument in a double-quoted '${ cmd; }'",
+                 'echo "${{ echo }}; echo a > {}/out.txt; }}"'.format(rp)),
+                ("an absolute target after a body inside '$(...)' ended at 'EOFX)'",
+                 "x=$(cat <<'EOF'\nhi\nEOFX)\necho y > {}/out.txt\nEOF\n)".format(rp)),
+                ("an absolute target after a body inside '${ cmd; }' ended at 'EOF}'",
+                 "x=${{ cat <<'EOF'\nhi\nEOF}}\necho y > {}/out.txt\nEOF\n}}".format(rp)),
+                ("an absolute target in an unquoted '${ cmd; }' inside a double-quoted '$(...)'",
+                 'echo "$(echo ${{ echo a > {}/out.txt; }})"'.format(rp)),
+                ("an append after a body inside '$(...)' ended at 'EOFX)'",
+                 "x=$(cat <<'EOF'\nhi\nEOFX)\necho y >> out.txt\nEOF\n)")):
+            bcmd("(ap-c104) {} allows".format(_rd_label), _rd_cmd, "allow")
+        bcmd("(ap-c104b) four backslashes before '>>' in one backquote substitution after a here-string DENY "
+             "(disclosed over-deny of the unread-text scan)", "cat <<<y; echo `echo a \\\\\\\\>> out.txt`", "deny")
+        bcmd("(ap-c104c) a nested body ended at 'EOFX)' where bash then fails on a syntax error DENIES (disclosed "
+             "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOFX)\necho y > out.txt\nEOF\n))", "deny")
         # the deny names the target and asks for an absolute one.
         _pt_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": 'echo "$(echo a > out.txt)"'}})
@@ -23566,12 +23653,11 @@ def _main_isolated(monitor):
                 or "ABSOLUTE" not in _pt_reason):
             failures.append("(ap-c101) the substitution-text deny must say the target could not be read as "
                             "absolute, name 'out.txt' and ask for an ABSOLUTE target; got {!r}".format(_pt_reason))
-        # the lexer records each unquoted backquote, and a body whose end it cannot prove as "body", not "code".
+        # the lexer records a body whose end it cannot prove as "body", not "code".
         with aiqt_hooks._LexPlaces() as _pt_spans:
             aiqt_hooks._lex_reading("echo `a`; x=$(cat <<'E'\nb\nE\n)", False, {})
-        if sorted(_pt_spans) != [(5, 6, "backquote"), (7, 8, "backquote"), (24, 28, "body")]:
-            failures.append("(ap-c102) the lexer must record two backquote places and a body place; got {!r}"
-                            .format(sorted(_pt_spans)))
+        if sorted(_pt_spans) != [(24, 28, "body")]:
+            failures.append("(ap-c102) the lexer must record one body place; got {!r}".format(sorted(_pt_spans)))
         # the deny names the unread construct, the target and the remedy.
         _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": "cat <<<y > out.txt"}})
