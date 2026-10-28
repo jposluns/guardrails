@@ -1092,15 +1092,7 @@ def build_source_payloads(*, operation_id, binding, head, first_adoption, invent
         counters_seed = dict(seed.counters)
     try:
         model = _opf_init._manifest_model(homes2=homes2)
-        documents = {
-            "manifest.toml": _bootstrap_manifest(homes2),
-            "counters.toml": _opf_init.build_counters(seed=counters_seed, manifest=model),
-            "version.toml": _opf_init.build_version(),
-            "worklog.toml": _opf_init.build_worklog(),
-        }
-        for tname in _opf_init.INDEX_TYPES:
-            documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
-        documents.update(_opf_init.imported_leaf_documents(model))
+        documents = _opf_init.bootstrap_documents(model, seed=counters_seed)
     except _opf_init.InitError as exc:
         raise InitOperationError("a bootstrap builder refused: {}".format(exc))
     payloads = {"{}/{}".format(_MACHINE_HOME, n): t.encode("utf-8") for n, t in documents.items()}

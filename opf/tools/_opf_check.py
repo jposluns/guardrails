@@ -3895,6 +3895,16 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     # _opf_adopt_state reader. Without the adoption home it is NOT_ADOPTING after one lstat and every line
     # below grades exactly as before. Homes 2 registers its evidence roots wholesale above.
     adoption = None if homes2 else _adoption_state(root_fd, machine_rel, in_repo, rep)
+    if homes2:
+        # Homes 2 keeps adoption evidence in its own home (spec 4.2), and its grading on base 2.0.0
+        # has not landed: the evidence-root skip above would pass that home unread, so a store
+        # holding an entry of that name cannot be evaluated. The no-follow listing of the evidence
+        # root finds a directory or a file of that name; any other entry type refuses the listing.
+        imported_dirs, imported_files = _list_dir(root_fd, _opf_store.IMPORTED_REL, rep)
+        if "adoption" in (imported_dirs or []) + (imported_files or []):
+            rep.cant("C-CONTAINMENT: the adoption home .working/imported/adoption/ exists, and "
+                     "adoption grading on base 2.0.0 is not yet implemented (spec 4.2; lands with "
+                     "the adoption-journal move)")
     adopting = adoption is not None and adoption.adopting
     frozen = adoption.frozen if adopting else {}
     adoption_dirs = frozenset()
@@ -5129,6 +5139,7 @@ def self_test():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _opf_release import compute_span_digest, release_cut
     from _opf_store import resolve_store
+    import _opf_init
 
     try:
         _journal.require_containment()
@@ -5219,9 +5230,10 @@ def self_test():
                 ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
                 ("autonomous_decision", "AD"), ("block", "BL"), ("contribution", "CN"),
                 ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
+        # The base declaration comes from the production builder (_opf_init._manifest_model), so the
+        # fixture follows the tooling's constants rather than restating them.
         m = {
-            "opf": {"standard": "opf", "spec_version": SUPPORTED_SPEC_VERSION, "layout": layout,
-                           "posture": "required", "import_status": "none"},
+            "opf": dict(_opf_init._manifest_model()["opf"], layout=layout),
             "store": {"sync_target": ""},
             "types": types,
             "vendors": {"registered": []},
@@ -5278,7 +5290,7 @@ def self_test():
     clean_version, clean_changelog = version_two_release()
 
     def clean_machine():
-        return {
+        m = {
             "manifest.toml": base_manifest(),
             "counters.toml": counters(),
             "backlog_item.index.toml": idx([bi(1, "done"), bi(2, "open")]),
@@ -5299,6 +5311,13 @@ def self_test():
                                                              "destination": "archive/2026/worklog.toml"}]},
             "archive/2026/worklog.toml": {"schema": 1, "entry": [wl(1), wl(2)]},
         }
+        # The builders' imported-series documents for this manifest (spec 4.2/8.2): its empty imported
+        # leaves and zero imported counter rows, none while its imported series is inactive.
+        m.update(_opf_init.imported_leaf_documents(m["manifest.toml"]))
+        m["counters.toml"]["counters"].update(
+            {IMPORTED_PREFIX + ns: 0
+             for ns in _opf_init.imported_counter_namespaces(m["manifest.toml"]) or ()})
+        return m
 
     def clean_product():
         return {"VERSION": "1.1.0\n", "CHANGELOG.md": clean_changelog}
@@ -6240,6 +6259,30 @@ def self_test():
             check("containment-homes2-gitignore-content-not-graded",
                   _is2_gi_run is not None and not _is2_gi_run.findings
                   and _is2_gi_run.checks.get("C-CONTAINMENT") == "PASS" and pending_only(_is2_gi_run))
+            # Homes 2 keeps adoption evidence at .working/imported/adoption/ (spec 4.2), and its
+            # grading on base 2.0.0 has not landed, so a store holding that home, even empty, is
+            # C-CONTAINMENT CANNOT-EVALUATE (red when the branch is removed: the evidence-root skip
+            # passes the home unread and the store reads VALID). The same store without the home
+            # passes C-CONTAINMENT and stays VALID (red when the branch fires on the store alone).
+            _is2_ad_root = build(copy.deepcopy(_is2_act))
+            (_is2_ad_root / WORKING_DIRNAME / "imported" / "adoption").mkdir(parents=True)
+            _is2_ad_res = resolve_store(_is2_ad_root)
+            _is2_ad_run = (validate_store(_is2_ad_res, observations=_is2_prior())
+                           if _is2_ad_res.status == RESOLVED else None)
+            check("containment-homes2-adopting-cannot-evaluate",
+                  _is2_ad_run is not None and _is2_ad_run.status == CANNOT_EVALUATE
+                  and not _is2_ad_run.findings
+                  and _is2_ad_run.checks.get("C-CONTAINMENT") == "CANNOT-EVALUATE"
+                  and any(m == "C-CONTAINMENT: the adoption home .working/imported/adoption/ exists, "
+                               "and adoption grading on base 2.0.0 is not yet implemented (spec 4.2; "
+                               "lands with the adoption-journal move)"
+                          for m in _is2_ad_run.cannot_evaluate))
+            _is2_noad_run = run(copy.deepcopy(_is2_act), obs=_is2_prior())
+            check("containment-homes2-no-adoption-home-pass",
+                  _is2_noad_run is not None and not _is2_noad_run.findings
+                  and _is2_noad_run.checks.get("C-CONTAINMENT") == "PASS"
+                  and _is2_noad_run.status == (CANNOT_EVALUATE if _imp_pending else VALID)
+                  and pending_only(_is2_noad_run))
             # The roster of an activated 2.0.0 store is the homes-2 roster plus the four imported
             # checks (spec 4.2 / 8.3), in that order, and the report carries exactly it: the three not
             # yet landed are CANNOT-EVALUATE by reconciliation, never silently absent (red when the

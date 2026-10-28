@@ -277,6 +277,8 @@ def _self_test_isolated():
     import _opf_release   # noqa: E402  span coverage digests for the version ledger
     import _opf_changelog  # noqa: E402  freeze digests for the changelog gates
     import _opf_views     # noqa: E402  the U4 view planner (the drifted-view fixture populates through it)
+    import _opf_init      # noqa: E402  the production base declaration and imported-series documents
+    import _opf_schema    # noqa: E402  the imported counter-row prefix
 
     git = shutil.which("git")
     git = os.path.abspath(git) if git else None
@@ -338,10 +340,10 @@ def _self_test_isolated():
             ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
             ("autonomous_decision", "AD"), ("block", "BL"),
             ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
+        # The base declaration comes from the production builder (_opf_init._manifest_model), so the
+        # fixture follows the tooling's constants rather than restating them.
         return {
-            "opf": {"standard": "opf", "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
-                           "layout": "inline",
-                           "posture": "required", "import_status": "none"},
+            "opf": dict(_opf_init._manifest_model()["opf"]),
             "store": {"sync_target": ""},
             "types": types,
             "vendors": {"registered": []},
@@ -378,7 +380,7 @@ def _self_test_isolated():
                     {"covers": "1.1.0", "status": "published", "digest": _digs["1.1.0"]},
                     {"covers": "unreleased", "status": "working"}]}
 
-    def clean_machine(done_title="t"):
+    def handwritten_machine(done_title):
         return {
             "manifest.toml": base_manifest(),
             "counters.toml": counters(),
@@ -400,6 +402,16 @@ def _self_test_isolated():
                                                              "destination": "archive/2026/worklog.toml"}]},
             "archive/2026/worklog.toml": {"schema": 1, "entry": [wl(1), wl(2)]},
         }
+
+    def clean_machine(done_title="t"):
+        # The builders' imported-series documents for this manifest (spec 4.2/8.2): its empty imported
+        # leaves and zero imported counter rows, none while its imported series is inactive.
+        m = handwritten_machine(done_title)
+        m.update(_opf_init.imported_leaf_documents(m["manifest.toml"]))
+        m["counters.toml"]["counters"].update(
+            {_opf_schema.IMPORTED_PREFIX + ns: 0
+             for ns in _opf_init.imported_counter_namespaces(m["manifest.toml"]) or ()})
+        return m
 
     def _write_machine(root, machine):
         mdir = Path(root) / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR

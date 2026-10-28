@@ -16956,6 +16956,37 @@ def _init_unignored(git, repo, root, paths):
         raise RuntimeError(refusal[1])
 
 
+def _init_homes_gitignore_inspect(root, payload):
+    """Generation 2 only: the read-only .working/.gitignore installation inspection the init
+    operation runs before it writes (_opf_init_operation._inspect_homes_gitignore; spec 4.2: the
+    effective ignore rules and the index are inspected first). Plain init is create-only, so any hold
+    refuses, naming each, and so does an inspection that does not plan exactly `payload` for an
+    absent file. A state the inspection cannot evaluate refuses too, never read as clear."""
+    try:
+        planned, holds, prestate = _opf_write_guard.inspect_homes_gitignore(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RuntimeError("the .working/.gitignore inspection cannot evaluate: {}".format(exc))
+    if holds:
+        raise RuntimeError("the .working/.gitignore installation is held: {}".format(
+            "; ".join(holds)))
+    if prestate is not None or planned != payload:
+        raise RuntimeError("the .working/.gitignore inspection did not plan the bootstrap block "
+                           "for an absent file; init is create-only")
+
+
+def _init_homes_gitignore_verify(root):
+    """Generation 2 only: the post-write effectiveness re-check of the installed managed block
+    (_opf_write_guard.verify_homes_gitignore_effective, spec 4.2), run while the init mutex is
+    held. Any finding refuses, naming each; a state the check cannot evaluate refuses too."""
+    try:
+        findings = _opf_write_guard.verify_homes_gitignore_effective(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RuntimeError("the .working/.gitignore verification cannot evaluate: {}".format(exc))
+    if findings:
+        raise RuntimeError("the installed .working/.gitignore is not effective: {}".format(
+            "; ".join(findings)))
+
+
 def _init_glob_escape(text):
     """Escape git wildmatch metacharacters so a repo-relative prefix is matched LITERALLY inside
     a :(glob) pathspec: a store root whose directory is literally named "[x]" or "*" must not
@@ -18260,11 +18291,12 @@ def _init_main(rest):
     (_opf_oplock.acquire_init_operation: the anchor the coupled init and adoption take for this
     root, spec 9), whose operation-lock home is the one place init writes under the git directory,
     and re-run the absence checks under it with the preflight's wording: the root deliverables,
-    every planned destination, the local pointer, the index, the ignore check and the history
-    scan. The store directories are then created, the spec 5.7 lease (.working/toml/lease.toml
-    beside its active record) is attached, the payloads are published, and the lease is detached
-    before the final observation, which runs with the mutex still held; the mutex is released
-    before the success report. --recover passes explicit recovery to the acquisition, which
+    every planned destination, the local pointer, the index, the ignore check, the generation-2
+    .working/.gitignore inspection and the history scan. The store directories are then created,
+    the spec 5.7 lease (.working/toml/lease.toml beside its active record) is attached, the payloads
+    are published, and the lease is detached before the final observation, which runs with the
+    mutex still held, as does a generation-2 run's post-write .gitignore effectiveness check; the
+    mutex is released before the success report. --recover passes explicit recovery to the acquisition, which
     clears a dead run's leftover records only once their holder is confirmed dead. Publication is
     create-only and deliberately not transactional: a later failure reports observed planned
     paths and leaves them for review. A failure releases whatever is still held in a finally
@@ -18414,18 +18446,16 @@ def _init_main(rest):
         stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
-        documents = [
-            (_opf_store.MANIFEST_NAME, _opf_init.build_manifest()),
-            (_opf_check.COUNTERS_NAME, _opf_init.build_counters()),
-            (_opf_check.VERSION_NAME, _opf_init.build_version()),
-            (_opf_check.WORKLOG_NAME, _opf_init.build_worklog()),
-        ]
-        documents.extend(
-            (name + _opf_check.INDEX_SUFFIX, _opf_init.build_index(name))
-            for name in _opf_init.INDEX_TYPES)
-        payloads = {
-            machine + "/" + name: text.encode("utf-8") for name, text in documents
-        }
+        # The one bootstrap builder the init operation also uses, over the manifest model of the
+        # homes generation this tooling activates. A generation-2 model adds .working/.gitignore as
+        # the FIRST payload, so its ignore rules exist before any store file (spec 4.2).
+        model = _opf_init._manifest_model(homes2=_opf_store.SUPPORTED_HOMES >= 2)
+        gitignore = None
+        if _opf_store.homes_generation(model) == 2:
+            gitignore = working + "/.gitignore"
+            payloads[gitignore] = _opf_store.render_homes_gitignore().encode("utf-8")
+        for name, text in _opf_init.bootstrap_documents(model).items():
+            payloads[machine + "/" + name] = text.encode("utf-8")
         payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
             {"store": {"target": "dir:."}}).encode("utf-8")
         payloads["CHANGELOG.md"] = b"# Changelog\n"
@@ -18445,6 +18475,9 @@ def _init_main(rest):
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
+        if gitignore is not None:
+            stage = "inspecting-the-homes-gitignore"
+            _init_homes_gitignore_inspect(root, payloads[gitignore])
         stage = "checking-git-history-for-a-prior-store"
         _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
@@ -18471,6 +18504,9 @@ def _init_main(rest):
                 raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
             _init_untracked(git, repo, root, index_paths)
             _init_unignored(git, repo, root, set(directories) | set(payloads))
+            if gitignore is not None:
+                stage = "inspecting-the-homes-gitignore"
+                _init_homes_gitignore_inspect(root, payloads[gitignore])
             stage = "checking-git-history-for-a-prior-store"
             _init_no_prior_store(git, repo, root)
             _init_same_root(root, root_fd)
@@ -18519,6 +18555,9 @@ def _init_main(rest):
                 raise RuntimeError("local pointer appeared during publication")
             _init_same_root(root, root_fd)
             _init_untracked(git, repo, root, index_paths)
+            if gitignore is not None:
+                stage = "verifying-the-homes-gitignore"
+                _init_homes_gitignore_verify(root)
             stage = "releasing-the-init-operation-mutex"
             _opf_oplock.release_init_holder(back)
         finally:
@@ -19211,7 +19250,10 @@ def _cmd_adopt(rest):
     recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
     never read as a passing operation. plan, approve and apply each refuse over a non-clean adoption
     journal (an open transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything
-    else is read; `reconcile` is how that journal is made clean again.
+    else is read; `reconcile` is how that journal is made clean again. On base 2.0.0
+    (_opf_adopt_apply.adoption_journal_fenced; never at this build's SUPPORTED_HOMES 1) that journal,
+    a homes-1 location under .aiqt, is not read: apply and reconcile refuse with exit 2 before any
+    .aiqt access, and plan, approve and status run without the journal.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19451,7 +19493,9 @@ def _cmd_adopt(rest):
     if sub == "plan":
         import datetime
         try:
-            _opf_adopt_apply.require_clean_journal(root_abs)
+            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced).
+            if not _opf_adopt_apply.adoption_journal_fenced():
+                _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
             res = _opf_adopt_plan.plan(
@@ -19480,7 +19524,10 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
-            _opf_adopt_apply.require_clean_journal(root_abs)
+            # On base 2.0.0 the .aiqt adoption journal is not read here, and run_apply refuses
+            # (adoption_journal_fenced), so apply reaches no .aiqt path.
+            if not _opf_adopt_apply.adoption_journal_fenced():
+                _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
             if sub == "approve":
@@ -19558,7 +19605,9 @@ def _cmd_adopt(rest):
             finally:
                 if dfd is not None:
                     _opf_store._close_fd_exc_safe(dfd)
-            owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
+            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced).
+            owner, opened = ((None, []) if adopt.adoption_journal_fenced()
+                             else adopt.journal_state(root_fd, adopt._journal_root(root_abs)))
         finally:
             _opf_store._close_fd_exc_safe(root_fd)
         journal_rel = adopt.JOURNAL_REL
@@ -20237,10 +20286,10 @@ def _cli_self_test():
                     store = os.path.join(ibase, "store")
                     machine = os.path.join(store, ".working", "toml")
                     os.makedirs(machine)
-                    manifest = "\n".join([
-                        "[opf]", 'standard = "opf"',
-                        'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
-                        'layout = "inline"', 'posture = "required"', 'import_status = "none"',
+                    # The [opf] base table comes from the production builder, so the fixture follows
+                    # the tooling's constants rather than restating them.
+                    import _opf_init
+                    manifest = _opf_init.base_table_text(_opf_init._manifest_model()) + "\n".join([
                         "", "[store]", 'sync_target = ""',
                         "", "[modules]", "governance = true",
                         "", "[types.backlog_item]", 'namespace = "BI"',
@@ -20551,6 +20600,42 @@ def _cli_self_test():
                                     "finding)".format(rc))
                 if tree_snapshot(debris) != before:
                     failures.append("adopt status (journal debris) mutated the product root")
+
+                # On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced, SUPPORTED_HOMES raised to 2
+                # inside the vector and restored in a finally) the .aiqt adoption journal is not read, so
+                # the same debris is invisible: status is clean (red when status still reads the
+                # journal: exit 1 and the journal finding), plan goes on to its worksheet (red when plan
+                # still reads the journal: the reconcile-first refusal), and reconcile and apply (the
+                # worksheet and artefact reads stubbed, so apply reaches the engine) refuse with the
+                # fence. The debris stays byte-identical.
+                from unittest import mock
+                this = sys.modules[__name__]
+                missing = os.path.join(abase, "no-such-worksheet.toml")
+                fenced = {}
+                saved_homes = _opf_store.SUPPORTED_HOMES
+                try:
+                    _opf_store.SUPPORTED_HOMES = 2
+                    fenced["status"] = run_adopt(["adopt", "status", "--root", debris])
+                    fenced["plan"] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", debris])
+                    fenced["reconcile"] = run_adopt(["adopt", "reconcile", "--root", debris])
+                    with mock.patch.object(this, "_adopt_read_inputs", lambda _path: {}), \
+                            mock.patch.object(this, "_adopt_read_bounded", lambda *_args: b""):
+                        fenced["apply"] = run_adopt(["adopt", "apply", "--inputs", missing, "--plan", missing,
+                                                     "--approval", missing, "--root", debris])
+                finally:
+                    _opf_store.SUPPORTED_HOMES = saved_homes
+                fence = "cannot evaluate: " + _opf_adopt_apply.ADOPTION_FENCE
+                for sub, want, needle, refused in (
+                        ("status", EXIT_OK, "no adoption run exists", "interrupted transaction"),
+                        ("plan", EXIT_MALFORMED, "--inputs worksheet", "reconcile"),
+                        ("reconcile", EXIT_MALFORMED, fence, "nothing to reconcile"),
+                        ("apply", EXIT_MALFORMED, fence, "reconcile")):
+                    rc, out = fenced[sub]
+                    if rc != want or needle not in out or refused in out:
+                        failures.append("adopt {} over journal debris on base 2.0.0: rc={!r} (expected {} + "
+                                        "{!r}, without {!r}): {!r}".format(sub, rc, want, needle, refused, out))
+                if tree_snapshot(debris) != before:
+                    failures.append("adopt on base 2.0.0 (journal debris) mutated the product root")
 
                 # status reads both homes through the ENGINE (K9a fix 1), each vector red on the K9a head:
                 # a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal
@@ -21980,14 +22065,12 @@ def _retained_close_offpath_self_test():
         views_block = "".join(
             _opf_views._view(name, kind, list(sources))
             for name, (kind, sources, _renderer) in _opf_views.NAMED_VIEWS.items())
+        # The [opf] base table comes from the production builder, so the fixture follows the tooling's
+        # constants rather than restating them.
+        import _opf_init
         manifest = (
-            "[opf]\n"
-            'standard = "opf"\n'
-            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-            'layout = "inline"\n'
-            'posture = "required"\n'
-            'import_status = "none"\n'
-            "\n[store]\n"
+            _opf_init.base_table_text(_opf_init._manifest_model())
+            + "\n[store]\n"
             'sync_target = ""\n'
             "\n[modules]\ngovernance = true\noperational_policy = true\nconcurrent_operation = true\n\n"
             + types_block + "\n[vendors]\nregistered = []\n\n" + views_block)

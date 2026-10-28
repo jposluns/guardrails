@@ -187,22 +187,22 @@ _ROUTE_ALLOWED_REFS = dict(
     _init_main=frozenset([
         "BaseException", "EXIT_MALFORMED", "EXIT_OK", "Exception", "Path",
         "RuntimeError",
-        "_opf_check.COUNTERS_NAME", "_opf_check.INDEX_SUFFIX",
-        "_opf_check.VERSION_NAME", "_opf_check.WORKLOG_NAME",
         "_opf_emit.emit_checked", "_opf_emit.emit_checked().encode",
-        "_opf_init.INDEX_TYPES", "_opf_init.build_counters",
-        "_opf_init.build_index", "_opf_init.build_manifest",
-        "_opf_init.build_version", "_opf_init.build_worklog",
+        "_opf_init._manifest_model", "_opf_init.bootstrap_documents",
+        "_opf_init.bootstrap_documents().items",
         "_opf_oplock.OpLockError", "_opf_oplock.acquire_init_operation",
         "_opf_oplock.attach_init_lease", "_opf_oplock.detach_init_lease",
         "_opf_oplock.release_init_holder", "_opf_oplock.release_operation",
         "_opf_store.DEFAULT_MACHINE_SUBDIR", "_opf_store.LOCAL_POINTER_REL",
-        "_opf_store.MANIFEST_NAME", "_opf_store.NOT_ADOPTED",
-        "_opf_store.POINTER_REL", "_opf_store.RESOLVED",
+        "_opf_store.NOT_ADOPTED", "_opf_store.POINTER_REL",
+        "_opf_store.RESOLVED", "_opf_store.SUPPORTED_HOMES",
         "_opf_store.WORKING_DIRNAME", "_opf_store._close_fd_exc_safe",
         "_opf_store._journal", "_opf_store._journal._close_fd_quietly",
-        "_opf_store._open_dir_nofollow", "_opf_store.resolve_store", "all",
-        "any", "ascii", "cap._released", "dict", "documents.extend",
+        "_opf_store._open_dir_nofollow", "_opf_store.homes_generation",
+        "_opf_store.render_homes_gitignore",
+        "_opf_store.render_homes_gitignore().encode",
+        "_opf_store.resolve_store", "all",
+        "any", "ascii", "cap._released", "dict",
         "exc.restore_lines", "held._released", "held._spent",
         "journal._check_rel", "journal._lstat_at", "journal._lstat_contained",
         "journal._open_parent", "journal.require_containment", "json.dumps",
@@ -227,6 +227,16 @@ _ROUTE_ALLOWED_REFS = dict(
         "result.err", "result.out", "result.rc", "str", "str-literal.format",
     ]),
     _init_glob_escape=frozenset([
+        "str-literal.join",
+    ]),
+    _init_homes_gitignore_inspect=frozenset([
+        "RuntimeError", "_opf_write_guard.WriteGuardError",
+        "_opf_write_guard.inspect_homes_gitignore", "str-literal.format",
+        "str-literal.join",
+    ]),
+    _init_homes_gitignore_verify=frozenset([
+        "RuntimeError", "_opf_write_guard.WriteGuardError",
+        "_opf_write_guard.verify_homes_gitignore_effective", "str-literal.format",
         "str-literal.join",
     ]),
     _init_history_rels=frozenset([
@@ -895,6 +905,181 @@ def _init_route_violations(source):
                             "literal-only-bound name".format(
                                 name, sub.lineno, sub.func.id))
     return violations
+
+
+def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
+    """Plain `opf init` on homes generation 2 (spec 4.2), driven in process with both tooling gates
+    raised inside each vector (SUPPORTED_HOMES 2, SUPPORTED_SPEC_VERSION at IMPORTED_SPEC_VERSION) and
+    restored in a finally. The homes .gitignore inspection refuses the fixture's GIT_CONFIG_GLOBAL and
+    GIT_CONFIG_SYSTEM overrides, so those two are unset around each raised vector. The last vector
+    pins the shipped constants: the payload names, their order and their bytes are the ones the
+    individual D1 builders produced before the shared bootstrap builder."""
+    import tomllib
+    from unittest import mock
+    import _opf_check
+    import _opf_init
+    import _opf_init_operation
+    import _opf_observe
+    import _opf_store
+    import _opf_write_guard
+    import opf
+
+    working = _opf_store.WORKING_DIRNAME
+    machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
+    gitignore = working + "/.gitignore"
+
+    @contextlib.contextmanager
+    def gen2():
+        saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+        env = {k: os.environ.pop(k, None) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+        _opf_store.SUPPORTED_HOMES = 2
+        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+        try:
+            yield
+        finally:
+            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
+            for key, value in env.items():
+                if value is not None:
+                    os.environ[key] = value
+
+    def created_paths(output):
+        rows = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+        return next((row.get("paths") for row in rows if row.get("event") == "created"), None)
+
+    def drive(root, patches=()):
+        def driven():
+            with contextlib.ExitStack() as stack:
+                for target, attr, value in patches:
+                    stack.enter_context(mock.patch.object(target, attr, value))
+                return opf._cmd_init(["--root", str(root)])
+        return fd_capture(driven)
+
+    # One generation-2 run, its creates traced. The created set is the init operation's bootstrap
+    # roster for the same model plus CHANGELOG.md (red when the shared builder drops the imported
+    # leaves: the roster still names them), and .working/.gitignore is the FIRST create, so its
+    # ignore rules exist before any store file (red when it is moved to the end of the payloads).
+    real_create = opf._init_create
+    creates = []
+
+    def tracing_create(root_fd, relpath, data):
+        creates.append(relpath)
+        return real_create(root_fd, relpath, data)
+
+    root = make_git("gen2-cli")
+    with gen2():
+        model = _opf_init._manifest_model(homes2=True)
+        roster = set(_opf_init_operation.bootstrap_source_roster(model))
+        rc, output = drive(root, ((opf, "_init_create", tracing_create),))
+    paths = created_paths(output)
+    leaves = {machine + "/" + name
+              for name in _opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES)}
+    check("init-cli-gen2-roster",
+          rc == EXIT_OK and paths is not None and len(paths) == len(set(paths))
+          and leaves | {gitignore} <= roster
+          and set(paths) == roster | {"CHANGELOG.md"})
+    check("init-cli-gen2-gitignore-first",
+          rc == EXIT_OK and creates[:1] == [gitignore]
+          and machine + "/" + _opf_store.MANIFEST_NAME in creates[1:])
+
+    # The same store, committed, then rendered and committed again (the order init's own hint
+    # gives), grades VALID under the raised gates with the homes-2 roster plus the four imported
+    # checks (red when the counters lose the model's imported rows: C-COUNTERS then finds each
+    # missing imported counter row).
+    verdict = None
+    if rc == EXIT_OK:
+        with gen2():
+            git_call(root, ["add", "-A"])
+            git_call(root, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"])
+            render_rc, _render_output = fd_capture(
+                lambda: opf.main(["render", "--write", "--root", str(root)]))
+            if render_rc == EXIT_OK:
+                # Render refuses an unsound store and writes nothing; only views it wrote commit.
+                git_call(root, ["add", "-A"])
+                git_call(root, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "render"])
+            resolution = _opf_store.resolve_store(root)
+            observations, _notes = _opf_observe.gather(resolution)
+            verdict = _opf_check.validate_store(resolution, observations=observations)
+            roster_checks = list(_opf_check.required_checks(2, True))
+            counters = tomllib.loads(
+                (root / machine / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))
+    check("init-cli-gen2-doctor-valid",
+          verdict is not None and render_rc == EXIT_OK and verdict.status == _opf_store.VALID
+          and not verdict.findings and not verdict.cannot_evaluate
+          and list(verdict.checks) == roster_checks
+          and all(v == "PASS" for v in verdict.checks.values())
+          and counters["counters"].get("imported:BI") == 0)
+
+    # A hold the inspection names refuses in the preflight: nothing created and the init mutex
+    # never taken (red when the preflight inspection is removed: the run then succeeds, or, with
+    # only the re-inspection under the mutex left, refuses after taking the mutex).
+    def held(_root, _verb):
+        return (_opf_store.render_homes_gitignore().encode("utf-8"), ["synthetic-hold"], None)
+
+    root = make_git("gen2-cli-held")
+    before = _snapshot(root)
+    with gen2():
+        rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", held),))
+    check("init-cli-gen2-hold-refused",
+          rc == EXIT_ERROR and _snapshot(root) == before
+          and not (root / ".git" / "opf-oplock").exists()
+          and inert("the .working/.gitignore installation is held: synthetic-hold") in output
+          and "preflight refused; no publication attempted." in output)
+
+    # The re-inspection under the held mutex: a hold that appears only there refuses with
+    # nothing published (red when the re-inspection is removed: the run then succeeds).
+    real_inspect = _opf_write_guard.inspect_homes_gitignore
+    calls = []
+
+    def held_second(store_root, verb):
+        calls.append(verb)
+        if len(calls) == 1:
+            return real_inspect(store_root, verb)
+        return held(store_root, verb)
+
+    root = make_git("gen2-cli-held-under-mutex")
+    before = _snapshot(root)
+    with gen2():
+        rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", held_second),))
+    check("init-cli-gen2-hold-refused-under-mutex",
+          rc == EXIT_ERROR and len(calls) == 2 and _snapshot(root) == before
+          and (root / ".git" / "opf-oplock").exists()
+          and inert("the .working/.gitignore installation is held: synthetic-hold") in output
+          and "preflight refused; no publication attempted." in output)
+
+    # The post-write effectiveness re-check runs while the mutex is held: a finding refuses with
+    # the partial-publication disclosure (red when the verification is removed: exit 0).
+    def ineffective(_root, _verb):
+        return ["synthetic-finding"]
+
+    root = make_git("gen2-cli-ineffective")
+    with gen2():
+        rc, output = drive(root, ((_opf_write_guard, "verify_homes_gitignore_effective",
+                                   ineffective),))
+    check("init-cli-gen2-verify-refused",
+          rc == EXIT_ERROR
+          and inert("the installed .working/.gitignore is not effective: synthetic-finding") in output
+          and "publication may be partial" in output
+          and (root / gitignore).is_file())
+
+    # The shipped constants: the created paths, in order, and their bytes are exactly the ones the
+    # D1 builders produce one by one, with no .gitignore and no imported leaf (red on any default
+    # change: an added, dropped, reordered or re-encoded payload).
+    expected = [(_opf_store.MANIFEST_NAME, _opf_init.build_manifest()),
+                (_opf_check.COUNTERS_NAME, _opf_init.build_counters()),
+                (_opf_check.VERSION_NAME, _opf_init.build_version()),
+                (_opf_check.WORKLOG_NAME, _opf_init.build_worklog())]
+    expected += [(name + _opf_check.INDEX_SUFFIX, _opf_init.build_index(name))
+                 for name in _opf_init.INDEX_TYPES]
+    expected = [(machine + "/" + name, text.encode("utf-8")) for name, text in expected]
+    expected += [(_opf_store.POINTER_REL, b'[store]\ntarget = "dir:."\n'),
+                 ("CHANGELOG.md", b"# Changelog\n")]
+    root = make_git("gen2-cli-default")
+    rc, output = drive(root)
+    paths = created_paths(output)
+    check("init-cli-default-unchanged",
+          rc == EXIT_OK and paths == [path for path, _data in expected]
+          and all((root / path).read_bytes() == data for path, data in expected)
+          and not (root / gitignore).exists())
 
 
 def _suite(invoke):
@@ -3258,9 +3443,10 @@ def _suite_isolated(invoke):
                 # outputs in the returned capture; a reversion to the sys-level
                 # redirect_stdout / redirect_stderr capture misses every one of
                 # them and fails here. Each in-process driver (call,
-                # drive_cmd_init, drive_module_init) returns fd_capture directly,
-                # pinned by the source count below, so this potency holds for
-                # every driver's capture path; drive_cmd_init and
+                # drive_cmd_init, drive_module_init, and the drive of
+                # _gen2_cli_vectors, which is handed this fd_capture) returns
+                # fd_capture directly, pinned by the source count below, so this
+                # potency holds for every driver's capture path; drive_cmd_init and
                 # drive_module_init are additionally driven with raw-descriptor
                 # probes of their own below.
                 def fd_probe_runner():
@@ -3278,9 +3464,9 @@ def _suite_isolated(invoke):
                 this_source = (Path(__file__).resolve()
                                .read_text(encoding="utf-8"))
                 capture_needle = "return fd_" + "capture("
-                check("capture: each of the three in-process drivers returns "
+                check("capture: each of the four in-process drivers returns "
                       "fd_capture directly",
-                      this_source.count(capture_needle) == 3)
+                      this_source.count(capture_needle) == 4)
 
                 def fd_probe_scan(git_arg, repo_arg, root_arg):
                     os.write(1, b"QA-DRIVE-FD1\n")
@@ -7043,6 +7229,10 @@ def _suite_isolated(invoke):
                 check("observe _show_toml on an absent blob omits the prior with a note",
                       lazy_data is None and any("seed" in n and ("absent" in n or "unreadable" in n)
                                                 for n in lazy_notes))
+
+                # Plain init on homes generation 2, under the raised tooling gates
+                # (_gen2_cli_vectors), and its shipped-constant payloads pinned.
+                _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert)
             finally:
                 os.environ.clear()
                 os.environ.update(saved_env)
