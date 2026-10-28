@@ -864,6 +864,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_init.py"
+function = "_gen2_cli_vectors"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_init.py"
 function = "_suite_isolated.valid_sources"
 form = "call"
 count = 2
