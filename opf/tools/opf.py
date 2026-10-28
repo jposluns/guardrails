@@ -19253,9 +19253,9 @@ def _cmd_adopt(rest):
     else is read; `reconcile` is how that journal is made clean again. On base 2.0.0
     (_opf_adopt_apply.adoption_journal_fenced; never at this build's SUPPORTED_HOMES 1) that journal,
     a homes-1 location under .aiqt, is not read: apply refuses with exit 2 before it reads its inputs
-    and reconcile before any .aiqt access; plan and status report its unknown state as cannot-evaluate
-    (exit 2, _opf_adopt_apply.JOURNAL_UNREAD) before they read any file; approve runs without the
-    journal.
+    and reconcile before any .aiqt access; plan, approve and status report its unknown state as
+    cannot-evaluate (exit 2, _opf_adopt_apply.JOURNAL_UNREAD) before they read any file, so approve
+    issues no approval there.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19528,12 +19528,13 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
-            # On base 2.0.0 (adoption_journal_fenced) apply refuses with the fence before it reads its
-            # inputs, so nothing was read or written, and approve does not read the .aiqt adoption journal.
-            if sub == "apply" and _opf_adopt_apply.adoption_journal_fenced():
-                raise _opf_adopt_apply.AdoptApplyError(_opf_adopt_apply.ADOPTION_FENCE)
-            if not _opf_adopt_apply.adoption_journal_fenced():
-                _opf_adopt_apply.require_clean_journal(root_abs)
+            # On base 2.0.0 (adoption_journal_fenced) apply refuses with the fence and approve is
+            # cannot-evaluate over the unread .aiqt adoption journal, each before it reads its inputs, so
+            # nothing was read or written and no approval issues over a journal state that is unknown.
+            if _opf_adopt_apply.adoption_journal_fenced():
+                raise _opf_adopt_apply.AdoptApplyError(
+                    _opf_adopt_apply.ADOPTION_FENCE if sub == "apply" else _opf_adopt_apply.JOURNAL_UNREAD)
+            _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
             if sub == "approve":
@@ -20581,6 +20582,11 @@ def _cli_self_test():
                     # an empty (nothing-opened) journal entry, which the engine classifies as clean.
                     unopened = os.path.join(abase, "unopened")
                     os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
+                    # a malformed evidence home (a symlink at the reserved home), which status refuses as
+                    # not a directory when it reads that home.
+                    badhome = os.path.join(abase, "badhome")
+                    os.makedirs(os.path.dirname(os.path.join(badhome, evidence_rel)))
+                    os.symlink(clean, os.path.join(badhome, evidence_rel))
                 except (OSError, journal.JournalError, _opf_adopt_apply.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the adopt fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -20614,28 +20620,34 @@ def _cli_self_test():
                 # its state is unknown: status and plan are cannot-evaluate over the debris and over the
                 # clean root alike (red when status reports clean, exit 0 and the no-adoption-run message,
                 # or plan goes on to its worksheet; red when either still reads the journal: the journal
-                # finding or the reconcile-first refusal). reconcile and apply refuse with the fence, apply
-                # before it reads its inputs (the worksheet and artefact reads are recorded: red when apply
-                # reads any of them first). Both roots stay byte-identical.
+                # finding or the reconcile-first refusal). Status refuses before it reads the evidence home
+                # too (red when it reports the malformed home's not-a-directory instead). reconcile and
+                # apply refuse with the fence, and approve is cannot-evaluate, apply and approve before they
+                # read their inputs (the worksheet and artefact reads are recorded: red when either reads
+                # any of them first, or approve prints an approval). Every root stays byte-identical.
                 from unittest import mock
                 this = sys.modules[__name__]
                 missing = os.path.join(abase, "no-such-worksheet.toml")
                 fenced = {}
                 read = []
                 clean_before = tree_snapshot(clean)
+                badhome_before = tree_snapshot(badhome)
                 saved_homes = _opf_store.SUPPORTED_HOMES
                 try:
                     _opf_store.SUPPORTED_HOMES = 2
                     for where, at in (("journal debris", debris), ("a clean root", clean)):
                         fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
                         fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
+                    fenced["status", "a malformed evidence home"] = run_adopt(
+                        ["adopt", "status", "--root", badhome])
                     fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
-                    with mock.patch.object(this, "_adopt_read_inputs", lambda path: read.append(path) or {}), \
-                            mock.patch.object(this, "_adopt_read_bounded",
-                                              lambda path, *_args: read.append(path) or b""):
-                        fenced["apply", "journal debris"] = run_adopt(
-                            ["adopt", "apply", "--inputs", missing, "--plan", missing, "--approval", missing,
-                             "--root", debris])
+                    for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
+                        with mock.patch.object(this, "_adopt_read_inputs",
+                                               lambda path, sub=sub: read.append((sub, path)) or {}), \
+                                mock.patch.object(this, "_adopt_read_bounded",
+                                                  lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
+                            fenced[sub, "journal debris"] = run_adopt(
+                                ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
                 finally:
                     _opf_store.SUPPORTED_HOMES = saved_homes
                 unread = "cannot evaluate: " + _opf_adopt_apply.JOURNAL_UNREAD
@@ -20645,16 +20657,20 @@ def _cli_self_test():
                         ("status", "a clean root", EXIT_MALFORMED, unread, "no adoption run exists"),
                         ("plan", "journal debris", EXIT_MALFORMED, unread, "reconcile"),
                         ("plan", "a clean root", EXIT_MALFORMED, unread, "--inputs worksheet"),
+                        ("status", "a malformed evidence home", EXIT_MALFORMED, unread, "is not a directory"),
                         ("reconcile", "journal debris", EXIT_MALFORMED, fence, "nothing to reconcile"),
-                        ("apply", "journal debris", EXIT_MALFORMED, fence, "reconcile")):
+                        ("apply", "journal debris", EXIT_MALFORMED, fence, "reconcile"),
+                        ("approve", "journal debris", EXIT_MALFORMED, unread, "approved_at")):
                     rc, out = fenced[sub, where]
                     if rc != want or needle not in out or refused in out:
                         failures.append("adopt {} over {} on base 2.0.0: rc={!r} (expected {} + {!r}, without "
                                         "{!r}): {!r}".format(sub, where, rc, want, needle, refused, out))
                 if read:
-                    failures.append("adopt apply on base 2.0.0 read {!r} before its fence refused".format(read))
-                if tree_snapshot(debris) != before or tree_snapshot(clean) != clean_before:
-                    failures.append("adopt on base 2.0.0 mutated a product root (journal debris or clean)")
+                    failures.append("adopt on base 2.0.0 read {!r} before its fence refused".format(read))
+                if (tree_snapshot(debris) != before or tree_snapshot(clean) != clean_before
+                        or tree_snapshot(badhome) != badhome_before):
+                    failures.append("adopt on base 2.0.0 mutated a product root (journal debris, clean or the "
+                                    "malformed evidence home)")
 
                 # status reads both homes through the ENGINE (K9a fix 1), each vector red on the K9a head:
                 # a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal

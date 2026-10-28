@@ -402,8 +402,8 @@ OPERATION = "adopt-apply"
 JOURNAL_REL = ".aiqt/adopt/journal"
 # The refusal of apply and reconcile on base 2.0.0 (adoption_journal_fenced).
 ADOPTION_FENCE = "adoption on base 2.0.0 lands with the adoption-journal move; nothing was read or written"
-# The cannot-evaluate of plan and status on base 2.0.0 (adoption_journal_fenced): the journal is not read
-# there, so its state is unknown, never clean.
+# The cannot-evaluate of plan, approve and status on base 2.0.0 (adoption_journal_fenced): the journal is
+# not read there, so its state is unknown, never clean.
 JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: the .aiqt adoption journal is not "
                   "read, and its homes-2 home lands with the adoption-journal move")
 # The only plan format apply may take (spec 14.1), the schema's own marker.
@@ -6275,11 +6275,14 @@ def capture_approval(product_root, plan_bytes, worksheet, actor, now):
     return the canonical
     approval bytes, in the receipt's APPROVAL_REQUIRED shape, binding the plan's plan_digest and
     inventory_digest. `now` is the clock instant of the approval. The adopter holds those bytes until apply,
-    which persists them with the plan in the run's evidence bundle; nothing is written here."""
+    which persists them with the plan in the run's evidence bundle; nothing is written here. On base 2.0.0
+    (adoption_journal_fenced) the adoption journal is not read, so it refuses with JOURNAL_UNREAD before any
+    of this: no approval issues over a journal state that is unknown."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(JOURNAL_UNREAD)
     plan_doc = frozen_plan(plan_bytes)
-    if not adoption_journal_fenced():
-        require_clean_journal(product_root)
-        _require_unapplied(product_root, plan_doc["run_id"])
+    require_clean_journal(product_root)
+    _require_unapplied(product_root, plan_doc["run_id"])
     rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     if (type(now) is not datetime.datetime or type(now.tzinfo) is not datetime.timezone
             or now.utcoffset() != datetime.timedelta(0)):
@@ -15053,8 +15056,8 @@ def _self_test_fence(check):
     """The base 2.0.0 adoption fence (adoption_journal_fenced), with SUPPORTED_HOMES raised to 2 inside each
     vector and restored in a finally. Every engine step a fenced call must not reach is replaced by a
     recorder that refuses under its own name, so a step reached is named, never run. apply and reconcile
-    refuse with ADOPTION_FENCE before any of them and leave no .aiqt entry; approve skips the clean-journal
-    gate and the replay admission; at the shipped constants each of those steps is still reached."""
+    refuse with ADOPTION_FENCE before any of them and leave no .aiqt entry; approve refuses with
+    JOURNAL_UNREAD before any of them; at the shipped constants each of those steps is still reached."""
     import tempfile
     from unittest import mock
     this = sys.modules[__name__]
@@ -15112,13 +15115,13 @@ def _self_test_fence(check):
 
         def approve():
             return capture_approval(temp, b"", {}, "fixture", None)
-        approve_steps = ("require_clean_journal", "_require_unapplied", "rederive_or_refuse")
+        approve_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "rederive_or_refuse")
+        said, reached = raised(lambda: recorded(approve_steps, approve))
+        check("adopt-approve-no-journal-read-homes2",
+              said == JOURNAL_UNREAD and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
         with mock.patch.object(this, "frozen_plan", lambda _bytes: dict(run_id="fixture-run")):
-            said, reached = raised(lambda: recorded(approve_steps, approve))
-            check("adopt-approve-no-journal-read-homes2",
-                  said == "reached rederive_or_refuse" and reached == ["rederive_or_refuse"],
-                  observed="{!r} reached {}".format(said, reached))
-            said, reached = recorded(approve_steps, approve)
+            said, reached = recorded(approve_steps[1:], approve)
             check("adopt-approve-journal-read-at-shipped-constants",
                   said == "reached require_clean_journal" and reached == ["require_clean_journal"],
                   observed="{!r} reached {}".format(said, reached))
