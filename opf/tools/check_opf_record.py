@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T115)
+  check_opf_record.py --self-test                    the fixture suite (T1-T116)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -673,6 +673,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       one holding it at active, refuses exit 2 at the committed-row check read again under the held lease,
       every byte untouched, no reservation and no transaction (flip: the held re-check dropped, so the
       repair publishes over a prior commit that does not hold the item and records exit 0)
+  T116 a recovery claim that released a dead run's leftover lease and claimed anew, whose lease directory
+      close then fails, refuses exit 2 naming that error, the lease the claim left in place as one that
+      STAYS and the leftover's release, the journal left as found (flip: the claim's close error reaches
+      the unexpected-error backstop, whose repr drops those notes)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -7231,6 +7235,62 @@ def flip_t77():
     return patch.object(guard, "_claim_after_release", narrow)
 
 
+# --- T116: a recovery claim whose lease directory close fails names the lease it left and the release -----
+
+def t116_claim_close_fault_named(fx):
+    """The recovery claim releases the killed run's leftover lease and claims anew, and only then the close
+    of the lease directory fails (EIO after the close released the number): the record verb refuses with
+    exit 2 naming that error, the lease the claim LEFT in place as one that STAYS, and the leftover's
+    release, never through the unexpected-error backstop, whose repr drops those notes; the journal is left
+    as found."""
+    root = _t74_interrupted(fx, "t116-dir-close")
+    states = journal_states(root)
+    machine = os.stat(Path(root) / MACH)
+    real_claim, real_close = guard.acquire_lease, os.close
+    reclaimed, fired = [], []
+
+    def claim_seen(*args, **kwargs):
+        payload = real_claim(*args, **kwargs)
+        reclaimed.append(True)
+        return payload
+
+    def faulty_close(fd):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            st = None
+        if not fired and reclaimed and st is not None and (st.st_dev, st.st_ino) == (machine.st_dev, machine.st_ino):
+            fired.append(True)
+            real_close(fd)
+            raise _injected("t116-dir-close", OSError(errno.EIO, "T116 injected: the lease directory close fails"))
+        return real_close(fd)
+    with patch.object(guard, "acquire_lease", claim_seen), patch.object(os, "close", faulty_close):
+        result = record_cli(fx.env, root, CREATE)
+    refused(result, "whose claim failed after it wrote the lease {} in full".format(LEASE))
+    err = result[2]
+    assert fired == [True], "T116 the lease directory close fault fired once"
+    assert "T116 injected" in err and "{} in full".format(LEASE) in err and "STAYS" in err, (
+        "T116 the refusal names the close error and the lease the claim left", err[-1600:])
+    assert T77_REPORT in err and "confirmed-dead holder" in err, (
+        "T116 the refusal carries the leftover's release", err[-1600:])
+    assert "unexpected error" not in err, ("T116 never the unexpected-error backstop", err[-1600:])
+    assert ":{}\"".format(os.getpid()).encode("utf-8") in read(root, LEASE), (
+        "T116 the lease the claim wrote is left in place")
+    assert journal_states(root) == states, "T116 the journal is left as found"
+
+
+def flip_t116():
+    """The claim before this fix: a WriteGuardError alone refuses as a RecordError, so the close error of
+    the lease directory reaches the record verb's unexpected-error backstop, which prints its repr without
+    its notes."""
+    def narrow(ctx, pending):
+        try:
+            return guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, record.VERB)
+        except guard.WriteGuardError as exc:
+            raise record.RecordError("{} {}".format(pending, exc))
+    return patch.object(record, "_claim_for_recovery", narrow)
+
+
 # --- T84: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
 
 def t84_recursion_lease_refused_as_held(fx):
@@ -8595,6 +8655,7 @@ _SUBSTRING_BACKSTOPS = {
     flip_t69_release: ("RuntimeError('fd release witness')",),
     flip_t69_token: ("MemoryError('synthetic token allocation failure')",),
     flip_t77: ("OSError({}, ".format(errno.EMFILE),),
+    flip_t116: ("OSError({}, 'T116 injected".format(errno.EIO),),
     flip_t84: ("RecursionError('maximum recursion depth exceeded')",),
     flip_t85_derive_record: ("ValueError('synthetic underivable record home')",),
     _t86_declared_flip: ("NameError('t86 broken flip fixture')",),
@@ -9542,6 +9603,7 @@ _DECLARED_INJECTIONS = {
     "t69-release": (lambda: RuntimeError("fd release witness"),),
     "t69-token": (lambda: MemoryError("synthetic token allocation failure"),),
     "t77-emfile": (lambda: OSError(errno.EMFILE, "T77 injected: EMFILE on the retried claim"),),
+    "t116-dir-close": (lambda: OSError(errno.EIO, "T116 injected: the lease directory close fails"),),
     "t84-recursion": (lambda: RecursionError("maximum recursion depth exceeded"),),
     "t85-record-underivable": (lambda: ValueError("synthetic underivable record home"),),
     "t86-declared": (lambda: NameError("t86 broken flip fixture"),),
@@ -9555,8 +9617,8 @@ _DECLARED_INJECTIONS = {
 # an expected label and is the shared backstop envelope around exactly a repr the parent computed for that
 # injection before the child ran (_oop_declared, _bound_injection_oop; under the T87 flip
 # _discriminate_in_process: the in-process _injected, _EmissionStderr, _note_backstops and _bound_injection);
-# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85 are
-# each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
+# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85, and
+# T116's, are each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
 # and the injection together (T69's two tests share one reverted _publish, so each has a flip of its own that
 # expects its own test's injection, and so has the record kind's underivable leg of T85), except
 # t22-t81-string-claims, which T22 and T81 record at the one site their shared string-claims flip lets a
@@ -9584,6 +9646,7 @@ _INTENDED_BACKSTOPS = {
     flip_t69_release: ("t69-release",),
     flip_t69_token: ("t69-token",),
     flip_t77: ("t77-emfile",),
+    flip_t116: ("t116-dir-close",),
     flip_t84: ("t84-recursion",),
     flip_t85_derive_record: ("t85-record-underivable",),
     _t86_declared_flip: ("t86-declared",),
@@ -11004,6 +11067,7 @@ TESTS = (
     ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
     ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
+    ("T116-recovery-claim-close-fault-named", t116_claim_close_fault_named, flip_t116),
 )
 
 

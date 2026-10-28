@@ -1833,8 +1833,8 @@ def _take_reconcile_leases(root_fd, targets, taken, released=None):
     leftover was released names that release (reconcile_report appends to the refusal each report
     `released` holds that the refusal does not already name). No refusal says every lock and lease it took
     is released: each is released except one the message names as one that STAYS (reconcile_report names a
-    lease whose release faulted). The recovery claim names `opf adopt reconcile` as the command its
-    remedies re-run."""
+    lease whose release faulted, _reconcile_run the journal lock whose release faulted). The recovery claim
+    names `opf adopt reconcile` as the command its remedies re-run."""
     import _opf_check
     import _opf_write_guard
     for machine_rel, recover in targets:
@@ -1959,9 +1959,11 @@ def reconcile_report(product_root, released=None):
     released unless the message names it as one that stays: a lock acquire_lock created that could not be
     released (_failed_lock_state), the stale-lock arbitration file lock.break this call created, a lease
     the claim left (its payload write failed after its create, or its directory close failed once it was
-    written in full), a lease whose release faulted. RECONCILE_FAILED: the recovery faulted AFTER it began, or a transaction directory was
-    replaced during it, so it may be PARTIAL: what it already restored or published stays as the journal
-    records it, the transaction stays open, and a later reconcile resumes it.
+    written in full), a lease whose release faulted, the journal lock this call took whose release faulted
+    (named beside the refusal, never in its place). RECONCILE_FAILED: the recovery faulted AFTER it began,
+    or a transaction directory was replaced during it, so it may be PARTIAL: what it already restored or published stays as the journal
+    records it, the transaction stays open, and a later reconcile resumes it; also the recovery finished
+    and only the release of the journal lock this call took faulted, which it names, that lock with it.
     RECONCILE_LEASE_RELEASE_FAILED: releasing a store lease this call took faulted after the recovery
     finished: one that could not be released stays, one whose directory close failed after its
     ownership-verified removal is named as released, and one whose durability fsync failed after that
@@ -2033,13 +2035,19 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
     (RECONCILE_UNCLASSIFIABLE), prelock (RECONCILE_PRELOCK_FAULT), claim (RECONCILE_STORE_LEASE_HELD, set
     once the journal exclusion is held, as the store leases are taken: a claim's close error, rendered with
     its notes, which name a lease the claim left) and recovering (RECONCILE_FAILED), the last set only once
-    the leases are taken, right before the first recovery write."""
+    the leases are taken, right before the first recovery write. The release of the journal lock this run
+    took is outside every stage: a fault it raises is recorded (`unreleased`) and named as that release's,
+    the lock named as one that STAYS while it is still present (lock_said), beside the refusal or exception
+    already in flight, which it never replaces; with nothing in flight (the recovery finished) it refuses
+    as RECONCILE_FAILED naming what the recovery did and that fault."""
     journal_root = _journal_root(product_root)
     arb_rel = JOURNAL_REL + "/lock.break"
     outcomes = []
+    lock_rel = JOURNAL_REL + "/lock"
     stage = ["classify"]
     held = []           # non-empty once THIS run holds the journal lock (released by the finally below)
     arb_before = []     # whether lock.break was present as this run's stale-lock arbitration began
+    unreleased = []     # the fault releasing the journal lock THIS run took raised, once it raised one
 
     def arbitration_said():
         if arb_before != [False]:
@@ -2051,6 +2059,21 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
             return "; whether this run's stale-lock arbitration left {} could not be observed".format(arb_rel)
         return ("; this run's stale-lock arbitration created {}, which stays (the journal's arbitration "
                 "file, never removed)".format(arb_rel))
+
+    def lock_said():
+        if not unreleased:
+            return ""
+        fault = _journal._msg_said(unreleased[0])
+        try:
+            present = _journal._lstat_contained(root_fd, lock_rel) is not None
+        except (_journal.JournalError, OSError) as exc:
+            return ("; releasing the journal lock this run took then faulted ({}), and whether {} stays could not "
+                    "be observed ({})".format(fault, lock_rel, exc))
+        if present:
+            return ("; releasing the journal lock this run took then faulted ({}), and {} is still present: that "
+                    "lock STAYS, and a later reconcile breaks it once its owner has exited".format(fault, lock_rel))
+        return ("; releasing the journal lock this run took then faulted after its removal ({}): {} is absent, and "
+                "whether that removal is durable is unknown".format(fault, lock_rel))
 
     try:
         _journal.require_containment()
@@ -2186,7 +2209,8 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                                                "listed under that name classifies {!r}: the name was renamed "
                                                "or replaced during the recovery, so it is never reported "
                                                "recovered. What the recovery wrote stays as the journal "
-                                               "records it{}; the journal lock this run took is released, and "
+                                               "records it{}; the journal lock this run took is released unless "
+                                               "this message names it as one that STAYS, and "
                                                "a later `opf adopt reconcile` reconciles what the journal then "
                                                "holds (fail-closed)".format(
                                                    JOURNAL_REL, txn.name, outcome, state,
@@ -2196,15 +2220,33 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                         outcome = "rolled-forward" if state == "complete" else "rolled-back"
                     outcomes.append((txn.name, outcome))
             finally:
-                _journal.release_lock(journal_root)
+                # the journal lock's release is a step of its own, outside the claim and recovery stages: its
+                # fault is recorded and named as that release's (lock_said) beside what is in flight, never in
+                # its place, and with nothing in flight it refuses as this release's own
+                inflight = _journal._in_flight_in(sys._getframe())
+                try:
+                    _journal.release_lock(journal_root)
+                except (_journal.JournalError, OSError) as exc:
+                    unreleased.append(exc)
+                    if inflight is None:
+                        stage[0] = "release"
+                        raise
+                    if not isinstance(inflight, (ReconcileRefusal, _journal.JournalError, OSError)):
+                        inflight.add_note(lock_said()[2:])
         finally:
             _close_held(held_fds)   # the held transaction directories (deepest appended last), then jr_fd
     except ReconcileRefusal as exc:
-        said = arbitration_said()
-        if said and said not in str(exc):
+        said = "".join(s for s in (arbitration_said(), lock_said()) if s and s not in str(exc))
+        if said:
             raise ReconcileRefusal(exc.finding, "{}{}".format(exc, said)) from exc
         raise
     except (_journal.JournalError, OSError) as exc:
+        if stage[0] == "release":
+            # nothing was in flight: the recovery finished, and only the journal lock's release faulted
+            raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery finished ({}), but{}; what "
+                                   "the recovery did stays as the journal records it (fail-closed)".format(
+                                       JOURNAL_REL, ", ".join("{} {}".format(t, o) for t, o in outcomes)
+                                       or "nothing to recover", lock_said()[1:]))
         if stage[0] == "classify":
             raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption journal {} holds a lock, entry or "
                                    "transaction that cannot be read or classified ({}); nothing was written "
@@ -2221,13 +2263,15 @@ def _reconcile_run(product_root, root_fd, taken, broke, released=None):
                                    "taking the store lease(s) faulted with the journal's exclusion held, before "
                                    "any recovery write ({}); a lease that cannot be taken is treated as held (spec "
                                    "5.7). This reconcile made no recovery write, every transaction is as found, "
-                                   "and {}{} (fail-closed)".format(JOURNAL_REL, _journal._msg_said(exc),
-                                                                   _RELEASED_UNLESS_NAMED, arbitration_said()))
+                                   "and {}{}{} (fail-closed)".format(JOURNAL_REL, _journal._msg_said(exc),
+                                                                     _RELEASED_UNLESS_NAMED, arbitration_said(),
+                                                                     lock_said()))
         raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery faulted after it began ({}): "
                                "the recovery may be PARTIAL (what it already restored or published stays as "
                                "the journal records it, and the transaction stays open); {}; a later `opf adopt "
                                "reconcile` resumes it from the journal (fail-closed)".format(
-                                   JOURNAL_REL, exc, "the journal lock this run took is released" if held
+                                   JOURNAL_REL, exc, lock_said()[2:] if unreleased
+                                   else "the journal lock this run took is released" if held
                                    else "the dead run's journal lock is kept, so a later reconcile breaks it "
                                    "again"))
     return outcomes, bool(held)
@@ -13028,6 +13072,84 @@ def _self_test_checks():
               and lease_rel + " its claim created STAYS" in said and "LEFT in place" in said
               and "before this run held the journal lock" not in said and "releases every" not in said
               and released == [] and own_lease(root) and txn_state(root, rid) == "open" and lock_free(root), said)
+
+    # the same claim on the stale-lock path, under the journal's arbitration lock with the dead run's lock retained:
+    # the refusal is store-lease-held, names the lease the claim left as one that STAYS, and never calls the fault
+    # one before the journal lock (red when the stale-lock claim does not enter the claim stage)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        apply_lease = (root / lease_rel).exists()
+        if apply_lease:
+            (root / lease_rel).unlink()
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        faulty_close, fired = dir_close_fault(root, lambda: own_lease(root))
+        with mock.patch.object(os, "close", faulty_close):
+            _outcomes, claimed = outcome_of(reconcile_report, root)
+        said = str(claimed)
+        check("reconcile-stale-claim-dir-close-fault-lease-named",
+              apply_lease and dead is not None and fired == [True] and isinstance(claimed, ReconcileRefusal)
+              and claimed.finding == RECONCILE_STORE_LEASE_HELD and "INJECTED-MACHINE-DIR-CLOSE-EIO" in said
+              and lease_rel + " its claim created STAYS" in said and "before this run held the journal lock" not in said
+              and own_lease(root) and txn_state(root, rid) == "open"
+              and (_journal_root(root) / "lock").read_bytes() == stale, said)
+
+    def release_lock_eacces(journal_root):
+        """The journal lock's release failing before it removes anything (EACCES), the lock left in place."""
+        raise OSError(errno.EACCES, "INJECTED-LOCK-RELEASE-EACCES")
+    lock_stays = "{}/lock is still present: that lock STAYS".format(JOURNAL_REL)
+
+    # a claim refused as held by a peer, and then the release of the journal lock this run took faults before it
+    # removes that lock: the refusal keeps the peer's reason, names the fault as the release's, never as taking the
+    # store lease, and names the lock as one that STAYS (red when the release runs inside the claim stage again)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        apply_lease = (root / lease_rel).exists()
+        if apply_lease:
+            (root / lease_rel).unlink()
+
+        def peer_claims(root_fd, machine_rel, verb, **kwargs):
+            raise _opf_write_guard.LeaseHeldError("INJECTED-PEER-CLAIM of {}".format(lease_rel))
+        with mock.patch.object(_opf_write_guard, "acquire_lease", peer_claims), \
+                mock.patch.object(_journal, "release_lock", release_lock_eacces):
+            _outcomes, refused = outcome_of(reconcile_report, root)
+        said = str(refused)
+        check("reconcile-claim-refusal-lock-release-fault-lock-named",
+              apply_lease and isinstance(refused, ReconcileRefusal) and refused.finding == RECONCILE_STORE_LEASE_HELD
+              and "INJECTED-PEER-CLAIM" in said and "INJECTED-LOCK-RELEASE-EACCES" in said
+              and "taking the store lease(s) faulted" not in said and lock_stays in said
+              and not lock_free(root) and txn_state(root, rid) == "open", said)
+
+    # a recovery fault, and then the release of the journal lock this run took faults too: the recovery-failed
+    # refusal keeps the recovery's fault, names the lock that STAYS, and never says that lock is released (red when
+    # the release's fault replaces the recovery's, or the released clause is kept beside it)
+    def recover_fails(*args, **kwargs):
+        raise _journal.JournalError("INJECTED-RECOVERY-FAULT")
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        with mock.patch.object(_journal, "recover", recover_fails), \
+                mock.patch.object(_journal, "release_lock", release_lock_eacces):
+            _outcomes, faulted = outcome_of(reconcile_report, root)
+        said = str(faulted)
+        check("reconcile-recovery-fault-lock-release-fault-lock-named",
+              isinstance(faulted, ReconcileRefusal) and faulted.finding == RECONCILE_FAILED
+              and "INJECTED-RECOVERY-FAULT" in said and "INJECTED-LOCK-RELEASE-EACCES" in said and lock_stays in said
+              and "the journal lock this run took is released" not in said and not lock_free(root)
+              and txn_state(root, rid) == "open", said)
+
+    # the recovery finishes and only the release of the journal lock this run took faults: the refusal says the
+    # recovery finished, names the release's fault and the lock that STAYS, and never calls it a recovery fault
+    # that may be partial (red when that release faults inside the recovery stage again)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        with mock.patch.object(_journal, "release_lock", release_lock_eacces):
+            _outcomes, finished = outcome_of(reconcile_report, root)
+        said = str(finished)
+        check("reconcile-finished-lock-release-fault-named",
+              isinstance(finished, ReconcileRefusal) and finished.finding == RECONCILE_FAILED
+              and "recovery finished (" in said and "{} rolled-back".format(rid) in said
+              and "INJECTED-LOCK-RELEASE-EACCES" in said and lock_stays in said and "may be PARTIAL" not in said
+              and txn_state(root, rid) == "rolled-back" and not lock_free(root), said)
 
     # a later target's claim refuses and releasing the lease the first claim took then faults: the refusal names
     # that lease as one that STAYS and never says every lock and lease this run took is released (red when the
