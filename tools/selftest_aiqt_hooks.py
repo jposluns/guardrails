@@ -2815,6 +2815,89 @@ def _procsubst_taken_failures():
     return out
 
 
+def _alias_unread_reads(command):
+    """(reads, lexes, result) for one _git_alias_unread call on command, given the stops of the command's own
+    partial lex (made as _git_alias_recovered makes it, before the count): reads counts the _git_region_read
+    calls the call makes, lexes its partial lexes (_lex_command with partial True), each recorded by a wrapper
+    installed on that module attribute for the call and restored after it."""
+    try:
+        with aiqt_hooks._WordSpellings(), aiqt_hooks._LexStops() as stops:
+            aiqt_hooks._lex_command(command, partial=True)
+        seen = stops.seen
+    except ValueError:
+        seen = [(0, None)]
+    region_read, lex = aiqt_hooks._git_region_read, aiqt_hooks._lex_command
+    counts = [0, 0]
+
+    def reading(text, at):
+        counts[0] += 1
+        return region_read(text, at)
+
+    def lexing(text, partial=False, **kwargs):
+        counts[1] += bool(partial)
+        return lex(text, partial=partial, **kwargs)
+
+    aiqt_hooks._git_region_read, aiqt_hooks._lex_command = reading, lexing
+    try:
+        result = aiqt_hooks._git_alias_unread(command, seen)
+    finally:
+        aiqt_hooks._git_region_read, aiqt_hooks._lex_command = region_read, lex
+    return counts[0], counts[1], result
+
+
+@contextlib.contextmanager
+def _alias_unread_rescan():
+    """A wrong _git_alias_unread for _alias_unread_reads_failures, the per-construct rescan the word chain
+    replaced: with no resume at a process substitution, every construct copies and lexes the rest of the
+    text, and every every-git-word reading walks from its own position to the end of its text with no chain,
+    so a git word past a run of constructs has its region read again for each of them."""
+    resume, everyword = aiqt_hooks._RESUME_AT_PROCSUBST_RE, aiqt_hooks._git_alias_unread_everyword
+
+    def rescan(command, pos, chain=None, base=0):
+        return everyword(command, pos)
+
+    aiqt_hooks._RESUME_AT_PROCSUBST_RE = re.compile(r"(?!)")
+    aiqt_hooks._git_alias_unread_everyword = rescan
+    try:
+        yield
+    finally:
+        aiqt_hooks._RESUME_AT_PROCSUBST_RE, aiqt_hooks._git_alias_unread_everyword = resume, everyword
+
+
+def _alias_unread_reads_failures():
+    """(dl-alias-unread-reads) One _git_alias_unread call reads each git word's region at most once: on the
+    procsubst_run_after shape at 64 KB (about 13,000 process substitutions, then a force-push), given the
+    stops of its own partial lex, the call makes at least one and at most G _git_region_read calls, G being
+    the number of git words in the command (its _GIT_WORD_RE matches, here 1), a bound linear in the git words
+    whatever the number of constructs, and allows (the force-push's region is read in full). The 64 KB timed
+    rows do not pin this: the per-construct rescan the word chain replaced stayed under the 1.5 s bound there
+    when measured (about 1.2 s of CPU for one branch_root, git_discard or gate_weakening call, against 17 s at
+    256 KB, in-process on one host with Python 3.14, 2026-10-28). That rescan must be caught by the same count
+    (dl-alias-unread-reads-red, _alias_unread_rescan: one region read per construct), so the count
+    discriminates."""
+    needed = ("_git_region_read", "_git_alias_unread_everyword", "_RESUME_AT_PROCSUBST_RE")
+    missing = [name for name in needed if not hasattr(aiqt_hooks, name)]
+    if missing:
+        return ["(dl-alias-unread-reads-missing) aiqt_hooks has no {} to count the reading on".format(
+            ", ".join(missing))]
+    command = _DEADLINE_SHAPES["procsubst_run_after"](65536, "/")[1]["command"]
+    words = len(aiqt_hooks._GIT_WORD_RE.findall(command))
+    out = []
+    reads, lexes, result = _alias_unread_reads(command)
+    if not 1 <= reads <= words or result is not False:
+        out.append("(dl-alias-unread-reads) one _git_alias_unread call on {} process substitutions before {} git "
+                   "word(s) made {} _git_region_read call(s) and {} partial lex(es) and returned {!r} (want 1 to {} "
+                   "reads and False)".format(len(re.findall(r"[<>]\(", command)), words, reads, lexes, result,
+                                             words))
+    with _alias_unread_rescan():
+        red_reads, red_lexes, _result = _alias_unread_reads(command)
+    if red_reads <= words:
+        out.append("(dl-alias-unread-reads-red) a reading that rescans the rest of the text at each construct "
+                   "made {} _git_region_read call(s) and {} partial lex(es) for {} git word(s), within the read "
+                   "bound".format(red_reads, red_lexes, words))
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -3845,7 +3928,10 @@ _DEADLINE_SHAPES = {
     # CPU for one call of the copying split alone at 1 MB, in-process on a 24-core host with Python
     # 3.14.4, 2026-10-18, against about 0.11 s for the in-place walk), then a force-push to a protected
     # branch. The bounds here are not what pins the in-place walk (the copying split stayed under the
-    # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does.
+    # 1 MB CPU bound when measured); the call record (dl-procsubst-taken) does. The same run once had the
+    # unread-region reading (_git_alias_unread) of branch_root, git_discard and gate_weakening copy, lex and
+    # rescan the rest of the command at each substitution, past the 256 KB and 1 MB bounds; the read count
+    # (dl-alias-unread-reads) pins its linear reading at 64 KB, where that rescan stayed under the bound.
     "procsubst_run_after": lambda n, base: ("Bash", {"command": "cat " + _repeat(
         "<(x) >(x) ", n - 4, "; git push --force origin main")}),
     # A run of ANSI-C quotes beside a here-string (an ordinary parse failure), whose escapes the gatdis and
@@ -3929,14 +4015,14 @@ def _deadline_hash_decision(name, shape, size):
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens"),
-    "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens"),
+    "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
-                       "ansi_c_herestr", "ansi_c_noverify_after"),
+                       "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after"),
     "gensrc_guard": ("write_content", "write_deep_path"),
-    "git_discard": ("git_segments_reset", "nest_parens"),
+    "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
     "orch_ask_guard": ("ask_long",),
@@ -6372,6 +6458,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_mirror_failures())
     failures.extend(_procsubst_skip_failures())
     failures.extend(_procsubst_taken_failures())
+    failures.extend(_alias_unread_reads_failures())
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
