@@ -945,12 +945,13 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
 
 
 def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_existing=None):
-    """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). Its one caller
-    is the generation-2 init operation (_opf_init_operation._inspect_homes_gitignore), reached only
-    through that operation's explicit homes2 input: before its plan is persisted it requires an
-    absent file, no hold, and planned bytes equal to its own create-only payload, writes those bytes
-    through its journal, and re-checks with verify_homes_gitignore_effective after the write. No
-    default verb calls it.
+    """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). Its callers are
+    the two generation-2 init paths: the init operation (_opf_init_operation._inspect_homes_gitignore),
+    reached only through that operation's explicit homes2 input, and plain `opf init`
+    (opf._init_homes_gitignore_inspect), reached only while this tooling activates homes 2. Each
+    requires an absent file, no hold, and planned bytes equal to its own create-only payload before
+    it writes those bytes, and re-checks with verify_homes_gitignore_effective after the write. No
+    verb calls it at the shipped constants.
 
     Returns (planned, holds, prestate): `planned` is the full new file bytes
     _opf_store.plan_homes_gitignore computed (None for no change), `prestate` is the exact file
@@ -1006,9 +1007,10 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
 
 
 def verify_homes_gitignore_effective(store_root, verb):
-    """The post-write effectiveness re-check for the caller that installs the managed block (the
+    """The post-write effectiveness re-check for the callers that install the managed block (the
     generation-2 init operation, after its journaled write and on every later attempt of that
-    plan, _opf_init_operation._verify_homes_gitignore): re-runs the inspector's contained read of
+    plan, _opf_init_operation._verify_homes_gitignore, and generation-2 plain `opf init` under its
+    held mutex, opf._init_homes_gitignore_verify): re-runs the inspector's contained read of
     .working/.gitignore (homes-gitignore-unreadable), confirms the exact managed block in those bytes
     (homes-gitignore-block-missing when it is absent, adopter-only or drifted: other ignore rules
     covering the homes do not stand in for it), the read-only tracked-control-path index probe, the
