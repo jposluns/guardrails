@@ -19,7 +19,9 @@ job of the three workflows, as this file's own launch; in the five host-patch jo
 after the Python host pin step, which tools/check_python_host_pin.py holds as the step right after
 setup-python there. opf/tools/opf.py, tools/check_selftest_execution.py and
 the hooks dispatcher (.aiqt/core/hooks/scripts/aiqt_hooks.py and its generated plugin copy) carry inline
-copies, because each is a single-file unit that cannot import a sibling; tools/check_child_status_coverage.py
+copies, because each is a single-file unit that cannot import a sibling; opf/tools/_opf_adopt_complete.py,
+opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py, tools/check_gitleaks_pin.py and
+tools/check_must_deliver.py carry the same inline copy at their entry lines. tools/check_child_status_coverage.py
 pins every copy to this text by AST and enumerates every entry point.
 
 A refusal is itself a child exit status, so it reaches a verdict only through a reader that can still see

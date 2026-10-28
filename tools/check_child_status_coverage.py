@@ -9,9 +9,11 @@ canonical guard is opf/tools/_child_status.py (a disposition read, then a fork-a
 with exit 2). This gate holds where it runs:
 
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
-  2. copies: the inline copies in opf/tools/opf.py and tools/check_selftest_execution.py (the constant and both
-     functions) and in the hooks dispatcher and its generated plugin copy (the constant and the probe) are each
-     defined once at the top level and AST-identical (ast.dump, docstrings included) to the canonical text.
+  2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
+     opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
+     tools/check_gitleaks_pin.py and tools/check_must_deliver.py; the constant and both functions) and in the
+     hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
+     top level and AST-identical (ast.dump, docstrings included) to the canonical text.
   3. entries: each CLI copy's __main__ body is exactly sys.exit(_child_status_refusal_exit("<basename>") or
      main()), the canonical file's entry ends in that line, and each dispatcher's main() holds HOOK_BLOCK as the
      statements right after its is_fail_open assignment.
@@ -163,7 +165,12 @@ CANONICAL_REL = "opf/tools/_child_status.py"
 COVERAGE_REL = "tools/" + Path(__file__).name
 CANONICAL_NAMES = ("_CHILD_STATUS_PROBE_CODE", "_child_status_refusal", "_child_status_refusal_exit")
 HOOK_NAMES = CANONICAL_NAMES[:2]
-CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.py", "check_selftest_execution.py"))
+CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.py", "check_selftest_execution.py"),
+              ("opf/tools/_opf_adopt_complete.py", "_opf_adopt_complete.py"),
+              ("opf/tools/_opf_adopt_state.py", "_opf_adopt_state.py"),
+              ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
+              ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
+              ("tools/check_must_deliver.py", "check_must_deliver.py"))
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
@@ -171,7 +178,7 @@ HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 # "args" is exactly HOOK_ARGS followed by one mode.
 HOOK_COMMAND = "python3"
 HOOK_ARGS = ["-I", HOOK_TARGET]
-# The entries that carry the pinned guard: the canonical file, this gate (leg 1 runs first in main), the two CLI
+# The entries that carry the pinned guard: the canonical file, this gate (leg 1 runs first in main), the CLI
 # copies and the two dispatcher copies.
 SELF_ENTRIES = frozenset((CANONICAL_REL, COVERAGE_REL) + tuple(rel for rel, _name in CLI_COPIES) + HOOK_COPIES)
 CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
@@ -278,18 +285,15 @@ DIRECT_LAUNCH_RESIDUAL = (
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
     "opf/tools/_opf_adopt_apply.py",
-    "opf/tools/_opf_adopt_complete.py",
     "opf/tools/_opf_adopt_discover.py",
     "opf/tools/_opf_adopt_hook.py",
     "opf/tools/_opf_adopt_observe.py",
     "opf/tools/_opf_adopt_plan.py",
-    "opf/tools/_opf_adopt_state.py",
     "opf/tools/_opf_changelog.py",
     "opf/tools/_opf_check.py",
     "opf/tools/_opf_emit.py",
     "opf/tools/_opf_fuzz.py",
     "opf/tools/_opf_import_batch.py",
-    "opf/tools/_opf_import_complete.py",
     "opf/tools/_opf_init.py",
     "opf/tools/_opf_init_operation.py",
     "opf/tools/_opf_init_substrate.py",
@@ -329,7 +333,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_entry_guard.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
-    "tools/check_gitleaks_pin.py",
     "tools/check_hooks_preview.py",
     "tools/check_instruction_budget.py",
     "tools/check_internal_names.py",
@@ -338,7 +341,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_mappings.py",
     "tools/check_mistakes_register.py",
     "tools/check_msg_leaks.py",
-    "tools/check_must_deliver.py",
     "tools/check_newtab.py",
     "tools/check_no_dashes.py",
     "tools/check_opf_standalone_closure.py",
