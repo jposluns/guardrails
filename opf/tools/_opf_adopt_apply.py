@@ -204,7 +204,9 @@ non-clean adoption journal (require_clean_journal); journal state a foreign tree
 home is a same-user residual: it is never admitted, surfaced or removed implicitly, a corrupt or
 unclassifiable journal refuses fail-closed, and the explicit, operator-run reconcile() consumes as
 recovery state only an open transaction whose INTENT records THIS product root's binding (_root_binding),
-as init-store's recovery scrub consumes only such a rolled-back INTENT (_init_store_orphan_or_refuse),
+as init-store's recovery scrub consumes only such a rolled-back INTENT (_init_store_orphan_or_refuse), and
+every other reader consumes only such an INTENT as admission or ancestry state (a prior run's committed
+work, an archived machine directory, a phase's committed base; _root_binding names each reader),
 so one copied in from another tree refuses fail-closed with nothing written (spec 14.2; the engine is an
 in-process cooperation boundary, not protection from a malicious same-user writer, who can forge that
 binding too, and a planted lock alone carries no binding, so a dead owner's lock is broken as any other
@@ -1558,7 +1560,11 @@ def _root_binding(root_fd):
     (device, inode) of the product root it writes through, read from the held product-root descriptor, the
     same identity the coupled-init substrate binds its recorded plan to (_opf_init_operation.observe_binding).
     reconcile() consumes an open transaction as recovery state only when it records this binding of the
-    live product root (spec 14.2). RESIDUAL (disclosed): a tree moved to another filesystem, restored from a
+    live product root (spec 14.2), and so does every other reader that consumes a journal INTENT as
+    recovery, admission or ancestry state: init-store's recovery scrub (_init_store_orphan_or_refuse), its
+    admission of a prior run's committed work (_init_store_prior_run_paths) and of an archived machine
+    directory (_init_store_archival_committed), and a phase's committed base (_committed_base_or_refuse).
+    RESIDUAL (disclosed): a tree moved to another filesystem, restored from a
     backup, or remounted under another device number no longer matches its own binding, so its open
     transaction refuses the same way, fail-closed, and clearing it is the operator's own act; every such
     refusal names this cause beside a copied-in tree (_binding_mismatch_said), as `opf adopt reconcile`'s
@@ -2184,7 +2190,9 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
     composed). An inventory.toml on disk alone, hand-planted or swapped since the commit, never admits a
     phase (fail-closed). The classification and the INTENT digest come from ONE captured frame set (QA
     round 3): the journal is read once, so a journal swapped between a classify read and an extract read
-    can never split the decision across two observations. Returns the creates that INTENT published,
+    can never split the decision across two observations. That INTENT is this phase's ancestry only when
+    it records this product root's binding (_root_binding, spec 14.2): a base copied in from another tree,
+    or recording none, refuses with nothing written. Returns the creates that INTENT published,
     ({path: content sha256}, {path: mode}), the committed preservation a retirement-stage removal
     pairs with and the mode it keeps."""
     base_rel = inventory_rel(run_id)
@@ -2214,6 +2222,15 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
     except (_journal.JournalError, OSError) as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
         raise AdoptApplyError("cannot inspect the run's base transaction ({}); fail-closed".format(exc))
+    try:
+        here = _root_binding(root_fd)
+    except OSError as exc:
+        raise AdoptApplyError("cannot read the product root's binding ({}); fail-closed".format(exc))
+    recorded = _recorded_binding(intent.get("header") if isinstance(intent, dict) else None)
+    if recorded != here:
+        raise AdoptApplyError("phase {!r} needs the run's COMMITTED base transaction, and {!r} {}, so it is "
+                              "never this phase's committed base (spec 14.2); nothing written "
+                              "(fail-closed)".format(phase, run_id, _binding_mismatch_said(recorded, here)))
     ops = intent.get("ops", []) if isinstance(intent, dict) else []
     published = next(((op.get("poststate") or {}).get("content-sha256") for op in ops
                       if isinstance(op, dict) and op.get("op") == "create"
@@ -3740,14 +3757,16 @@ def _init_store_bundle_listed(root_fd, model, run_id):
     return out
 
 
-def _init_store_prior_committed_ops(jr_fd, journal_root, prior):
+def _init_store_prior_committed_ops(jr_fd, journal_root, prior, here):
     """(creates, archivals) a PRIOR adoption run committed in this journal: creates maps path to
     the bare-hex content sha256 of every `create` op across the prior run's COMPLETE
     transactions (its init-store transaction, which publishes no adoption artefact, excluded);
     archivals lists (source_path, hex_sha256, preservation) for every pinned `remove` whose
     preservation copy the SAME complete transaction created with the same digest -- the
-    committed preserve-first archival shape of spec 14.2. Raises on an unreadable journal
-    (fail-closed, never an empty answer)."""
+    committed preserve-first archival shape of spec 14.2. Each such INTENT must record the live
+    product root's binding `here` (_root_binding): one copied in from another tree, or recording
+    none, refuses (AdoptApplyError), never read as the prior run's committed work (spec 14.2).
+    Raises on an unreadable journal (fail-closed, never an empty answer)."""
     creates, archivals = {}, []
     for txn_dir in _journal._journal_txn_dirs(jr_fd, journal_root):
         name = txn_dir.name
@@ -3759,6 +3778,12 @@ def _init_store_prior_committed_ops(jr_fd, journal_root, prior):
             continue
         frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
         intent = _journal._first(frames, _journal.F_INTENT)
+        recorded = _recorded_binding(intent.get("header") if isinstance(intent, dict) else None)
+        if recorded != here:
+            raise AdoptApplyError("prior run {}'s committed transaction {!r} {}, so the artefacts it created "
+                                  "are never admitted as that run's committed work (spec 14.2); nothing "
+                                  "written (fail-closed)".format(prior, name,
+                                                                 _binding_mismatch_said(recorded, here)))
         ops = intent.get("ops") if isinstance(intent, dict) else None
         if not isinstance(ops, list):
             continue
@@ -3802,7 +3827,11 @@ def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_
     prior run's COMMITTED archival: a complete transaction that created the preservation copy
     and removed a machine-store source pinned to the same digest, the copy live and admitted.
     Anything not so proven stays foreign and refuses; no journal descriptor proves nothing
-    (fail-closed)."""
+    (fail-closed). Every INTENT read as that proof (the rolled-back init-store transaction's, then
+    each complete transaction's, _init_store_prior_committed_ops) must record THIS product root's
+    binding (_root_binding): one copied in from another tree, or recording none, refuses with
+    nothing written, naming the cause (spec 14.2). The classification and the binding of the
+    init-store transaction come from ONE captured frame set (the _committed_base_or_refuse posture)."""
     out, machine_archived = {}, False
     if jr_fd is None or journal_root is None:
         return out, machine_archived
@@ -3821,15 +3850,28 @@ def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_
         try:
             if _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn) is None:
                 continue
-            if _journal.classify_state(jr_fd, journal_root / txn) != "rolled-back":
+            # classify_state's own state machine applied to the frames the binding is read from
+            frames, _torn, _good = _journal.read_frames(jr_fd, journal_root / txn)
+            _journal._validate_terminal_agreement(frames)
+            if _journal.F_RC not in [t for t, _ in frames]:
                 continue
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("cannot classify prior run {}'s init-store transaction ({}); "
                                   "fail-closed".format(prior, exc))
+        try:
+            here = _root_binding(root_fd)
+        except OSError as exc:
+            raise AdoptApplyError("cannot read the product root's binding ({}); fail-closed".format(exc))
+        recorded = _recorded_binding(_journal._first(frames, _journal.F_INTENT).get("header"))
+        if recorded != here:
+            raise AdoptApplyError("prior run {}'s rolled-back init-store transaction {!r} {}, so that run's "
+                                  "artefacts are never admitted as its committed work (spec 14.2); nothing "
+                                  "written (fail-closed)".format(prior, txn,
+                                                                 _binding_mismatch_said(recorded, here)))
         if _verify_bundle_at(root_fd, prior, evidence_home_rel(prior)).status != store.VALID:
             continue
         try:
-            creates, archivals = _init_store_prior_committed_ops(jr_fd, journal_root, prior)
+            creates, archivals = _init_store_prior_committed_ops(jr_fd, journal_root, prior, here)
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("cannot search the adoption journal for prior run {}'s "
                                   "committed transactions ({}); fail-closed".format(prior, exc))
@@ -3852,16 +3894,23 @@ def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_
     return out, machine_archived
 
 
-def _init_store_archival_committed(jr_fd, journal_root, source_path, digest, preservation):
+def _init_store_archival_committed(root_fd, jr_fd, journal_root, source_path, digest, preservation):
     """Whether a COMMITTED adoption transaction of this journal archived the occupying file at
     `source_path` preserve-first (spec 14.2): its durable intent creates the preservation copy
     at `preservation` with this digest AND removes the source pinned to the same digest. A
     sources row alone proves PLANNED work; only this committed archival evidence (plus the
     live, digest-matched preservation copy the caller requires) can admit the emptied machine
-    directory. No journal descriptor reads as no evidence, the fail-closed direction."""
+    directory. No journal descriptor reads as no evidence, the fail-closed direction. The intent
+    that proves the archival must record the binding of the product root beneath `root_fd`
+    (_root_binding): one copied in from another tree, or recording none, refuses with nothing
+    written, never read as this tree's archival (spec 14.2)."""
     if jr_fd is None or journal_root is None:
         return False
     hexd = _plan_hex(digest)
+    try:
+        here = _root_binding(root_fd)
+    except OSError as exc:
+        raise AdoptApplyError("cannot read the product root's binding ({}); fail-closed".format(exc))
     try:
         for txn_dir in _journal._journal_txn_dirs(jr_fd, journal_root):
             if _journal.classify_state(jr_fd, txn_dir) != "complete":
@@ -3880,6 +3929,12 @@ def _init_store_archival_committed(jr_fd, journal_root, source_path, digest, pre
                           and (o.get("source-poststate") or {}).get("sha256") == hexd
                           for o in ops)
             if preserved and removed:
+                recorded = _recorded_binding(intent.get("header"))
+                if recorded != here:
+                    raise AdoptApplyError("the archival transaction {!r} of the occupying file {} {}, so it "
+                                          "never proves that file's archival (spec 14.2); nothing written "
+                                          "(fail-closed)".format(txn_dir.name, source_path,
+                                                                 _binding_mismatch_said(recorded, here)))
                 return True
     except (_journal.JournalError, OSError) as exc:
         raise AdoptApplyError("cannot search the adoption journal for the occupying file's "
@@ -3991,7 +4046,7 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
         for orow in occ_rows:
             pres = orow.get("preservation")
             if not (isinstance(pres, str) and admitted_paths.get(pres) == orow["digest"]
-                    and _init_store_archival_committed(jr_fd, journal_root, orow["path"],
+                    and _init_store_archival_committed(root_fd, jr_fd, journal_root, orow["path"],
                                                        orow["digest"], pres)):
                 raise AdoptApplyError("the pre-existing machine directory {} is admitted only "
                                       "on completed archival evidence: the occupying row's "
@@ -11459,8 +11514,10 @@ def _self_test_checks():
               dead is not None and txn_state(root, rid) == "rolled-back"
               and (rid, "rolled-back") in outcomes and snapshot(root) == before and lock_free(root))
 
-    # 7d: reconcile consumes only journal state this tree's own run wrote (see _reconcile_binding_self_test).
+    # 7d: reconcile consumes only journal state this tree's own run wrote (see _reconcile_binding_self_test),
+    # and a phase extends only a committed base this tree's own run wrote (_committed_base_binding_self_test).
     _reconcile_binding_self_test(check)
+    _committed_base_binding_self_test(check)
 
     def finding_of(fn, *args):
         """The named finding of a reconcile refusal (ReconcileRefusal.finding, which `opf adopt reconcile`
@@ -15251,6 +15308,48 @@ def _reconcile_binding_self_test(check):
           and _recorded_binding(None) is None)
 
 
+def _committed_base_binding_self_test(check):
+    """Spec 14.2: a phase's ancestry is a committed base transaction this product root's own run wrote. A base
+    committed in tree T1, copied with the whole tree into T2, refuses a phase in T2 before anything is written,
+    T2's tree as found, while T1's own phase still publishes; a base whose INTENT records no binding refuses a
+    phase the same way (each red against a _committed_base_or_refuse that reads any complete base there)."""
+    import shutil
+    import tempfile
+    from unittest import mock
+    rid = mint_run_id(datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc), "0123456789abcdef")
+
+    def phase_of(root):
+        try:
+            return None, _st_run_adopt_transaction(root, rid, lambda ops: ops.create(
+                evidence_home_rel(rid) + "/completion/result.toml", b"green = true\n"), phase="completion")
+        except AdoptApplyError as exc:
+            return str(exc), None
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        t1, t2 = Path(temp).resolve() / "t1", Path(temp).resolve() / "t2"
+        t1.mkdir()
+        _root, files = _st_fixture(t1)
+        _st_run_adopt_transaction(t1, rid, _st_compose_full(files))
+        shutil.copytree(t1, t2, symlinks=True)
+        copied = init_op._tree_snapshot(str(t2))
+        why, _txn = phase_of(t2)
+        check("phase-copied-in-base-refused",
+              "is bound to another product root" in (why or "") and "spec 14.2" in (why or "")
+              and "nothing written" in (why or "") and init_op._tree_snapshot(str(t2)) == copied
+              and _st_lock_free(t2), why)
+        why, txn = phase_of(t1)
+        check("phase-own-base-still-admits", why is None and txn == rid + ".completion", why)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        with mock.patch.dict(globals(), dict(_root_binding=lambda root_fd: None)):
+            _st_run_adopt_transaction(root, rid, _st_compose_full(files))
+        was = init_op._tree_snapshot(str(root))
+        why, _txn = phase_of(root)
+        check("phase-unbound-base-refused",
+              "records no binding to this product root" in (why or "") and "nothing written" in (why or "")
+              and init_op._tree_snapshot(str(root)) == was and _st_lock_free(root), why)
+
+
 def _st_rendering(exc):
     """Every exception of `exc`'s chain (cause and context), each as str and with its notes."""
     seen, todo, parts = [], [exc], []
@@ -18091,8 +18190,8 @@ def _init_store_git_checks(check, ctx, refused):
         def widened_listed(root_fd_, model_, run_id_):
             return dict(real_listed(root_fd_, model_, run_id_), **{stray_rel: "sha256:" + stray_hex})
 
-        def widened_ops(jr_fd_, journal_root_, prior_):
-            creates, archivals = real_ops(jr_fd_, journal_root_, prior_)
+        def widened_ops(jr_fd_, journal_root_, prior_, here_):
+            creates, archivals = real_ops(jr_fd_, journal_root_, prior_, here_)
             return dict(creates, **{stray_rel: stray_hex}), archivals
 
         def prior_paths(fresh):
@@ -18205,6 +18304,109 @@ def _init_store_git_checks(check, ctx, refused):
               reversed_r1
               and refused(dispatch(row, ctx(root, run_id=rid())), "undispositioned foreign")
               and snap(root) == before and op_ids(root) == [])
+
+        # Spec 14.2: init-store reads a journal INTENT as admission state (an occupying file's archival, a
+        # prior reversed run's committed work) only when this product root's own run wrote it. The whole tree
+        # copied elsewhere refuses the fresh run there before anything is written, the copy as found and no
+        # store published, while the original still publishes; an INTENT recording no binding refuses the
+        # same way. Each refusal is red against the reader with its binding gate dropped: the copied or
+        # unbound INTENT is admitted and a store is published.
+        root = init_op._plain_repo(os.path.join(base, "archtwin"), env)
+        plant(root, manifest_rel, occ_bytes)
+        run = rid()
+        run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(run, manifest_rel))
+        twin = os.path.join(base, "archtwin-copy")
+        shutil.copytree(root, twin, symlinks=True)
+        whole = init_op._tree_snapshot(twin)
+        res = dispatch(row, ctx(twin, run_id=run, sources=[occ_row]))
+        check("init-store-copied-in-archival-intent-refused",
+              refused(res, "the archival transaction") and refused(res, "is bound to another product root")
+              and refused(res, "spec 14.2") and refused(res, "nothing written")
+              and init_op._tree_snapshot(twin) == whole and op_ids(twin) == []
+              and store.resolve_store(twin).status != store.RESOLVED, observed=res.findings)
+        res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
+        check("init-store-own-archival-intent-still-admitted", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED, observed=res.findings)
+        root = init_op._plain_repo(os.path.join(base, "archunbound"), env)
+        plant(root, manifest_rel, occ_bytes)
+        run = rid()
+        with mock.patch.dict(globals(), dict(_root_binding=lambda root_fd: None)):
+            run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(run, manifest_rel))
+        before = snap(root)
+        res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
+        check("init-store-unbound-archival-intent-refused",
+              refused(res, "the archival transaction") and refused(res, "records no binding to this product root")
+              and snap(root) == before and op_ids(root) == [] and txn_state(root, run) == "nothing-opened",
+              observed=res.findings)
+
+        # The prior run's rolled-back init-store INTENT: copied with the whole tree, and written with no
+        # binding (the archival it admits bound, so only this INTENT's gate refuses).
+        root = init_op._plain_repo(os.path.join(base, "priortwin"), env)
+        plant(root, manifest_rel, occ_bytes)
+        r1 = rid()
+        run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(r1, manifest_rel))
+        reversed_r1 = refused(dispatch(dict(row, members=wrongv), ctx(root, run_id=r1, sources=[occ_row])),
+                              "restoring NOT-ADOPTED")
+        twin = os.path.join(base, "priortwin-copy")
+        shutil.copytree(root, twin, symlinks=True)
+        whole = init_op._tree_snapshot(twin)
+        r2 = rid()
+        res = dispatch(row, ctx(twin, run_id=r2))
+        check("init-store-copied-in-prior-run-intent-refused",
+              reversed_r1 and refused(res, "rolled-back init-store transaction")
+              and refused(res, "is bound to another product root") and refused(res, "spec 14.2")
+              and refused(res, "nothing written") and init_op._tree_snapshot(twin) == whole
+              and op_ids(twin) == [] and store.resolve_store(twin).status != store.RESOLVED,
+              observed=res.findings)
+        res = dispatch(row, ctx(root, run_id=r2))
+        check("init-store-own-prior-run-intent-still-admitted", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED, observed=res.findings)
+        root = init_op._plain_repo(os.path.join(base, "priorunbound"), env)
+        plant(root, manifest_rel, occ_bytes)
+        r1 = rid()
+        run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(r1, manifest_rel))
+        real_begin = _init_store_txn_begin
+
+        def unbound_begin(root_fd_, jr_fd_, journal_root_, txn_, header_, ops_):
+            return real_begin(root_fd_, jr_fd_, journal_root_, txn_, dict(header_, product_root=None), ops_)
+
+        with mock.patch.dict(globals(), dict(_init_store_txn_begin=unbound_begin)):
+            reversed_r1 = refused(dispatch(dict(row, members=wrongv),
+                                           ctx(root, run_id=r1, sources=[occ_row])), "restoring NOT-ADOPTED")
+        before = snap(root)
+        res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-unbound-prior-init-store-intent-refused",
+              reversed_r1 and txn_state(root, r1) == "rolled-back"
+              and intent_header(root, r1).get("product_root", ()) is None
+              and refused(res, "rolled-back init-store transaction")
+              and refused(res, "records no binding to this product root")
+              and snap(root) == before and op_ids(root) == [], observed=res.findings)
+
+        # The prior run's COMPLETE transaction written with no binding, its rolled-back init-store INTENT
+        # bound: a prior run whose committed work is one bundle file and touches no machine store, so its own
+        # init-store admits that bundle as this run's (not as a prior's) and the unbound INTENT is first read
+        # as committed work by the fresh run.
+        root = init_op._plain_repo(os.path.join(base, "priorunboundbase"), env)
+        r1 = rid()
+        with mock.patch.dict(globals(), dict(_root_binding=lambda root_fd: None)):
+            run_adopt_transaction(root, r1, lambda ops: ops.create(evidence_home_rel(r1) + "/note.md",
+                                                                   b"a prior run's note\n"))
+        reversed_r1 = refused(dispatch(dict(row, members=wrongv), ctx(root, run_id=r1)), "restoring NOT-ADOPTED")
+        before = snap(root)
+        res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-unbound-prior-committed-intent-refused",
+              reversed_r1 and txn_state(root, r1) == "rolled-back"
+              and refused(res, "committed transaction {!r}".format(r1))
+              and refused(res, "records no binding to this product root")
+              and snap(root) == before and op_ids(root) == [], observed=res.findings)
 
         # CRASH AT EVERY POINT (round 2): the transaction mkdir, the INTENT, a member's staging
         # write (machine-dir and root-level), between a member's link and its staging unlink,
