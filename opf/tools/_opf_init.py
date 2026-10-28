@@ -131,6 +131,29 @@ def _emit_validated(document, name, validator):
     return text
 
 
+def base_table_text(model):
+    """The `[opf]` base table of the manifest `model` as TOML text: one `key = value` line per member,
+    in the model's own key order (a string quoted, an integer bare). This is the spelling hand-written
+    fixture manifests use, so a fixture takes its base declaration (spec_version, and homes where the
+    model declares it) from the builder instead of restating it. The text is reparsed and refused
+    unless it reads back as exactly the model's table."""
+    base = model.get("opf") if isinstance(model, dict) else None
+    if not isinstance(base, dict):
+        raise InitError("the manifest model carries no [opf] base table")
+    lines = ["[opf]"]
+    for key, value in base.items():
+        lines.append('{} = "{}"'.format(key, value) if type(value) is str
+                     else "{} = {}".format(key, value))
+    text = "\n".join(lines) + "\n"
+    try:
+        parsed = tomllib.loads(text)
+    except (ValueError, RecursionError, MemoryError):
+        parsed = None
+    if parsed != {"opf": base}:
+        raise InitError("[opf]: the base table does not read back as the model's own")
+    return text
+
+
 def build_manifest(homes2=False):
     """Return the generic adopter's manifest; no profile, foreign paths, or root VERSION.
     `homes2` selects the homes-2 declaration (_manifest_model)."""
@@ -266,6 +289,26 @@ def imported_leaf_documents(manifest):
     for type_name in sorted(roster):
         for name in _opf_store.imported_leaf_names((type_name,)):
             documents[name] = build_imported_leaf(type_name)
+    return documents
+
+
+def bootstrap_documents(model, *, seed=None):
+    """{machine-store file name: text} of every bootstrap document a store built from the manifest
+    `model` (_manifest_model) starts with, in creation order: the manifest, the counters ledger
+    (`seed` as build_counters takes it, with the model's imported counter rows), the version and
+    worklog ledgers, one empty index per INDEX_TYPES member, then the empty imported leaves while the
+    model's imported series is active (imported_leaf_documents). The plain init command and the init
+    operation both build from here, so their rosters cannot drift; the default model adds no file."""
+    documents = {
+        _opf_store.MANIFEST_NAME: _emit_validated(model, _opf_store.MANIFEST_NAME,
+                                                  _opf_store.validate_manifest),
+        COUNTERS_NAME: build_counters(seed=seed, manifest=model),
+        VERSION_NAME: build_version(),
+        WORKLOG_NAME: build_worklog(),
+    }
+    for type_name in INDEX_TYPES:
+        documents[type_name + INDEX_SUFFIX] = build_index(type_name)
+    documents.update(imported_leaf_documents(model))
     return documents
 
 
@@ -551,6 +594,40 @@ def self_test():
         check("imported leaves and counter rows agree",
               sorted(_opf_store.BASELINE_TYPES[t] for t in _opf_store.BASELINE_TYPES
                      if _opf_store.imported_leaf_names((t,)) & set(active_leaves)) == imported_ns)
+        # The shared bootstrap builder: on the default model, exactly the individual builders'
+        # documents in creation order (red on an added, dropped, reordered or changed document);
+        # on the active homes-2 model, the same documents with the imported counter rows plus every
+        # imported leaf after them (red when the leaves or the manifest-keyed counters are dropped);
+        # and a seed reaches the counters builder unchanged.
+        individual = [(_opf_store.MANIFEST_NAME, manifest_text), (COUNTERS_NAME, build_counters()),
+                      (VERSION_NAME, build_version()), (WORKLOG_NAME, build_worklog())]
+        individual += [(t + INDEX_SUFFIX, build_index(t)) for t in INDEX_TYPES]
+        check("bootstrap documents on the default model are the individual builders' documents",
+              list(bootstrap_documents(model).items()) == individual)
+        active_docs = gated(lambda: bootstrap_documents(homes2_model)) or {}
+        check("bootstrap documents on an active homes-2 model add the imported leaves last",
+              list(active_docs)[:len(individual)] == [name for name, _text in individual]
+              and list(active_docs)[len(individual):] == list(active_leaves)
+              and active_docs.get(COUNTERS_NAME) == active_text
+              and active_docs.get(_opf_store.MANIFEST_NAME) == homes2_text)
+        check("bootstrap documents pass a seed to the counters builder",
+              bootstrap_documents(model, seed=good_seed)[COUNTERS_NAME]
+              == build_counters(seed=good_seed))
+        # The fixture-facing [opf] spelling: the hand-written fixtures' exact lines on the default model
+        # (red on a reordered, requoted or dropped line), the homes-2 pair on the explicit model, and a
+        # refusal for a model with no base table or a value that does not read back.
+        check("base table text is the fixtures' default [opf] lines",
+              base_table_text(model) == '[opf]\nstandard = "opf"\nspec_version = "{}"\nlayout = "inline"\n'
+              'posture = "required"\nimport_status = "none"\n'.format(_opf_store.SUPPORTED_SPEC_VERSION))
+        homes2_base = gated(lambda: base_table_text(homes2_model), spec=None) or ""
+        check("base table text carries the homes-2 pair",
+              homes2_base.endswith('spec_version = "{}"\nlayout = "inline"\nposture = "required"\n'
+                                   'import_status = "none"\nhomes = 2\n'.format(
+                                       _opf_store.HOMES2_SPEC_VERSION))
+              and tomllib.loads(homes2_base) == {"opf": homes2_model["opf"]})
+        check("base table text refuses a model with no base table or a value that does not read back",
+              rejects(lambda: base_table_text({}))
+              and rejects(lambda: base_table_text({"opf": {"standard": 'a"b'}})))
 
         for name, text in documents.items():
             check(name + " byte-canon scan", not authority.scan_bytes(text.encode("utf-8")))

@@ -23244,6 +23244,248 @@ def _main_isolated(monitor):
              "FOO=x cd -", "allow-note")
         bcmd("(ap-c84b) 'FOO=x cd' allows with a note (any leading assignment -> bare-cd $HOME ALLOWS WITH A NOTE, round-4 conservative cost)",
              "FOO=x cd", "allow-note")
+        # UNREAD TAIL: the text from a construct the full lex does not read (a here-string, process
+        # substitution, '{fd}' redirect, unquoted here-document, or unbalanced quote) onward is judged on the
+        # raw text for the deny tier (_abspth_unread_truncation): a truncating redirect there whose target is
+        # not shown absolute DENIES. Every deny below except ap-c89 allowed before that scan (fails when
+        # reverted); ap-c89 is a redirect the full lex reads and denied before it. The allows pin the tiers the
+        # scan keeps and the over-deny it discloses.
+        bcmd("(ap-c85) relative truncating redirect AFTER a here-string DENIES (unread tail)",
+             "cat <<<y > out.txt", "deny")
+        bcmd("(ap-c86) relative truncating redirect AFTER a process substitution DENIES (unread tail)",
+             "cat <(true) > out.txt", "deny")
+        bcmd("(ap-c87) a '>' in an unbalanced quote's text DENIES (unread tail, disclosed over-deny)",
+             'echo "a > out.txt', "deny")
+        bcmd("(ap-c88) a here-string with no redirect keeps its allow (unread tail holds no '>')",
+             "cat <<<y", "allow")
+        bcmd("(ap-c89) a readable relative truncating redirect still DENIES (full lex, unchanged)",
+             "echo x > out.txt", "deny")
+        bcmd("(ap-c90) an ABSOLUTE truncating redirect after a here-string allows (unread tail)",
+             "cat <<<y > {}/out.txt".format(rp), "allow")
+        bcmd("(ap-c91) a relative '>|' after a here-string DENIES (unread tail)", "cat <<<y >| out.txt", "deny")
+        bcmd("(ap-c91b) a relative '&>' after a here-string DENIES (unread tail)", "cat <<<y &> out.txt", "deny")
+        bcmd("(ap-c91c) a '>&' to a relative file after a here-string DENIES (unread tail)",
+             "cat <<<y >& out.txt", "deny")
+        bcmd("(ap-c91d) an opaque '$F' truncating target after a here-string DENIES (unread tail)",
+             "cat <<<y > $F", "deny")
+        bcmd("(ap-c91e) a relative truncating redirect in a LATER segment after a here-string DENIES "
+             "(unread tail)", "cat <<<y > {}/out.txt; echo z > out.txt".format(rp), "deny")
+        bcmd("(ap-c91f) a relative truncating redirect inside an output process substitution DENIES "
+             "(unread tail)", "cmd > >(tee > out.txt)", "deny")
+        bcmd("(ap-c91g) a relative truncating '{fd}>' redirect DENIES (unread tail)",
+             "exec {fd}> out.txt", "deny")
+        # the tiers the unread-tail scan keeps: append, descriptor duplication or close, current-user tilde,
+        # a read redirect, a cd, a process-substitution target, and an escaped '>' (not an operator to bash).
+        bcmd("(ap-c92) an append '>>' after a here-string keeps its allow (unread tail)",
+             "cat <<<y >> out.txt", "allow")
+        bcmd("(ap-c92b) an append '&>>' after a here-string keeps its allow (unread tail)",
+             "cat <<<y &>> out.txt", "allow")
+        bcmd("(ap-c92c) a '2>&1' duplication after a here-string keeps its allow (unread tail)",
+             "cat <<<y 2>&1", "allow")
+        bcmd("(ap-c92d) a '>&-' close after a here-string keeps its allow (unread tail)", "cat <<<y >&-", "allow")
+        bcmd("(ap-c92e) a current-user tilde target after a here-string allows (unread tail)",
+             "cat <<<y > ~/out.txt", "allow")
+        bcmd("(ap-c92f) a read '<' after a here-string keeps its allow (unread tail)", "cat <<<y < in.txt", "allow")
+        bcmd("(ap-c92g) a read-write '<>' after a here-string keeps its allow (unread tail)",
+             "cat <<<y <> rw.txt", "allow")
+        bcmd("(ap-c92h) a relative cd after a here-string keeps its allow (unread tail)", "cat <<<y; cd rel", "allow")
+        bcmd("(ap-c92i) a process-substitution redirect target allows (unread tail)",
+             "cmd > >(tee {}/log)".format(rp), "allow")
+        bcmd("(ap-c92j) an escaped '\\>' after a here-string is an argument, not a redirect: allows (unread tail)",
+             "cat <<<y \\> out.txt", "allow")
+        bcmd("(ap-c92k) a '{fd}>>' append keeps its allow (unread tail)", "exec {fd}>> out.txt", "allow")
+        # the scan starts where the full lex stopped: a quoted '>' the lex read BEFORE the construct is not
+        # rescanned, while a '>' in the here-string's own quoted text is (the disclosed over-deny).
+        bcmd("(ap-c93) a quoted '>' BEFORE a here-string keeps its allow (scan starts where the lex stopped)",
+             'echo "a > b"; cat <<<y', "allow")
+        bcmd("(ap-c93b) a '>' in a here-string's quoted text DENIES (unread tail, disclosed over-deny)",
+             'cat <<<"a > b"', "deny")
+        bcmd("(ap-c93c) a '>' in a comment after a here-string DENIES (unread tail, disclosed over-deny)",
+             "cat <<<y # a > b", "deny")
+        # an unquoted here-document: the body of the one the lex stopped at is left out only in the narrow shape
+        # _abspth_unread_truncation states (no quote, escape, expansion, brace or parenthesis before the opener
+        # or after the delimiter on its line, no line before the delimiter line starting with the delimiter
+        # text, and no backslash, '$' or backquote in the body); its line, the text after its body, a body
+        # holding any of those three, an unterminated body and a body after an opener line holding quoting are
+        # read.
+        bcmd("(ap-c94) a relative truncating redirect on an unquoted here-document's line DENIES (unread tail)",
+             "cat <<EOF > out.txt\nx\nEOF", "deny")
+        bcmd("(ap-c94b) a relative truncating redirect after an unquoted here-document's body DENIES "
+             "(unread tail)", "cat <<EOF\nx\nEOF\necho y > out.txt", "deny")
+        bcmd("(ap-c94c) a '>' in the plain body of an unquoted here-document allows (the body is left out)",
+             "cat <<EOF > {}/out\nif a > b\nEOF".format(rp), "allow")
+        bcmd("(ap-c94d) a '>' in the plain body of a '<<-' here-document allows (tab-stripped delimiter)",
+             "cat <<-EOF > {}/out\n\ta > b\n\tEOF".format(rp), "allow")
+        bcmd("(ap-c94e) a '$(...)' in an unquoted here-document body is read and DENIES (unread tail)",
+             "cat <<EOF > {}/out\n$(echo a > b)\nEOF".format(rp), "deny")
+        bcmd("(ap-c94f) a backquote substitution in an unquoted here-document body is read and DENIES",
+             "cat <<EOF > {}/out\n`echo a > b`\nEOF".format(rp), "deny")
+        bcmd("(ap-c94g) an unterminated unquoted here-document body is read and DENIES (disclosed over-deny)",
+             "cat <<EOF > {}/out\na > b".format(rp), "deny")
+        bcmd("(ap-c94h) a body after an opener line holding a quote is read and DENIES (disclosed over-deny)",
+             'cat <<EOF "q"\na > b\nEOF', "deny")
+        bcmd("(ap-c94i) a here-document opener inside a later quoted text is not trusted, so the text after it "
+             "is read and DENIES", "cat <<<'see <<EOF here'\necho y > out.txt\ncat <<EOF\nbody\nEOF", "deny")
+        # a body holding a backslash, '$' or backquote is read whatever form it takes, so each shape below,
+        # which hides a command or the body's end from a match on the raw text, DENIES: a '${ cmd; }' or
+        # '${| cmd; }' substitution, a backslash-newline that joins a split delimiter line (bash ends the body
+        # there and runs the next line) and a '$', backslash-newline, '(' substitution. A body holding one of
+        # the three where bash reads it as data denies too (a disclosed over-deny); a plain body allows.
+        bcmd("(ap-c94j) a '${ cmd; }' substitution in an unquoted here-document body is read and DENIES",
+             "cat <<EOF > {}/out\n${{ echo y > out.txt; }}\nEOF".format(rp), "deny")
+        bcmd("(ap-c94k) a '${| cmd; }' substitution in an unquoted here-document body is read and DENIES",
+             "cat <<EOF > {}/out\n${{| echo y > out.txt; }}\nEOF".format(rp), "deny")
+        bcmd("(ap-c94l) a delimiter split by a backslash-newline ends the body, so the command after it DENIES",
+             "cat <<EOF > {}/out\nbody\nE\\\nOF\necho y > out.txt\nEOF".format(rp), "deny")
+        bcmd("(ap-c94m) a '<<-' body holding a backslash-newline is read and DENIES (disclosed over-deny where "
+             "bash reads the rest as body)", "cat <<-EOF > {}/out\n\tE\\\n\tOF\necho y > out.txt\n\tEOF".format(rp),
+             "deny")
+        bcmd("(ap-c94n) a '$', backslash-newline, '(' substitution in an unquoted body is read and DENIES",
+             "cat <<EOF > {}/out\n$\\\n(echo y > out.txt)\nEOF".format(rp), "deny")
+        bcmd("(ap-c94o) a split 'EO\\<newline>F' delimiter ends the body, so the command after it DENIES",
+             "cat <<EOF\nx\nEO\\\nF\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94p) a '$\\<newline>(' substitution in an unquoted body DENIES (no redirect on the opener line)",
+             "cat <<EOF\n$\\\n(echo y > out.txt)\nEOF\n", "deny")
+        bcmd("(ap-c94q) a delimiter joined to an empty line by a backslash-newline ends the body, so the command "
+             "after it DENIES", "cat <<EOF\nEOF\\\n\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94r) a split delimiter with its leading tab in a '<<-' body ends it, so the command after it "
+             "DENIES", "cat <<-EOF\nx\n\tEO\\\nF\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94s) a split delimiter after a '0<<' opener ends the body, so the command after it DENIES",
+             "cat 0<<EOF\nx\nEO\\\nF\ntrue > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94t) a backslash-newline that joins a body line to the delimiter line is read and DENIES "
+             "(disclosed over-deny where bash reads the rest as body)",
+             "cat <<EOF\nx\\\nEOF\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c94u) a '$' that starts no substitution in an unquoted body is read and DENIES (disclosed "
+             "over-deny)", "cat <<EOF > {}/out\ncost $5 -> y\nEOF".format(rp), "deny")
+        bcmd("(ap-c94v) a backslash before a letter in an unquoted body is read and DENIES (disclosed over-deny)",
+             "cat <<EOF > {}/out\na\\b -> y\nEOF".format(rp), "deny")
+        bcmd("(ap-c94w) a plain body holding '->' and '=>' and no backslash, '$' or backquote allows (the body "
+             "is left out)", "cat <<EOF > {}/out\nx -> y\na => b\nEOF".format(rp), "allow")
+        # a here-document opened inside a '$(...)' substitution can end in bash at a line such as 'EOF)' or
+        # 'EOF );' that is not exactly its delimiter, and bash then runs the next line as a command; the scan
+        # does not model where such a body ends. A body is read where the command's text before its '<<' holds
+        # a quote, escape, expansion, brace or parenthesis, or where a line before its delimiter line starts
+        # with the delimiter text, so each shape below DENIES (a disclosed over-deny where bash reads that body
+        # as data). The allows pin where each condition looks: only before the '<<', and only at the start of
+        # a body line (after its leading tabs for the <<- form alone).
+        bcmd("(ap-c96) a body inside '$(...)' that bash ends at 'EOF)' is read, so the command after it DENIES",
+             "x=$(cat <<EOF\nhi\nEOF)\necho y > out.txt\n: <<EOF\nEOF\n", "deny")
+        bcmd("(ap-c96b) an 'echo $(cat <<EOF' body that bash ends at 'EOF)' is read, so the command after it "
+             "DENIES", "echo $(cat <<EOF\nhi\nEOF)\necho y > out.txt\n: <<EOF\nEOF\n", "deny")
+        bcmd("(ap-c96c) a body inside '$(...)' ending at 'EOF)' before a later 'cat <<EOF' is read and DENIES",
+             "x=$(cat <<EOF\nhi\nEOF)\necho y > out.txt\ncat <<EOF\nEOF\n", "deny")
+        bcmd("(ap-c96d) a body inside '$(...)' ending at 'EOF)' before a bare 'EOF' line is read and DENIES",
+             "echo $(cat <<EOF\nx\nEOF)\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96e) a body inside '$(...)' ending at 'EOF )' is read and DENIES",
+             "echo $(cat <<EOF\nx\nEOF )\necho y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96f) a body inside '$(...)' ending at 'EOF);' with a command after it on that line DENIES",
+             "echo $(cat <<EOF\nx\nEOF);echo y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96g) a '>|' after a body inside '$(...)' ending at 'EOF)' DENIES",
+             "echo $(cat <<EOF\nx\nEOF)\ntrue >| out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96h) a '&>' after a body inside '$(...)' ending at 'EOF)' DENIES",
+             "echo $(cat <<EOF\nx\nEOF)\ntrue &> out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96i) an absolute redirect on the opener line inside '$(...)' does not leave its body out: "
+             "the command after 'EOF)' DENIES", "echo $(cat <<EOF > {}/out\nx\nEOF)\necho y > out.txt\nEOF\n"
+             .format(rp), "deny")
+        bcmd("(ap-c96j) a body inside '$(...)' ending at 'EOF );' with a command after it on that line DENIES",
+             "echo $(cat <<EOF\nx\nEOF );echo y > out.txt\nEOF\n", "deny")
+        bcmd("(ap-c96k) a body after a '{' before its opener is read and DENIES (disclosed over-deny)",
+             "{{ cat <<EOF > {}/out\na > b\nEOF\n}}".format(rp), "deny")
+        bcmd("(ap-c96l) a body after a quote on an earlier line is read and DENIES (disclosed over-deny)",
+             "echo 'a'\ncat <<EOF > {}/out\nx -> y\nEOF".format(rp), "deny")
+        bcmd("(ap-c96m) a body after a quote just before its '<<' is read and DENIES (disclosed over-deny)",
+             'cat ""<<EOF > {}/out\nx -> y\nEOF'.format(rp), "deny")
+        bcmd("(ap-c96n) a body after a '(' at the command's start is read and DENIES (disclosed over-deny)",
+             "(cat <<EOF > {}/out\nx -> y\nEOF\n)".format(rp), "deny")
+        bcmd("(ap-c96o) a quote, '$' or brace only after the delimiter line leaves the plain body out: allows",
+             "cat <<EOF > {}/out\nx -> y\nEOF\necho \"$HOME\" 'q' {{a,b}}".format(rp), "allow")
+        bcmd("(ap-c96p) a body line starting with the delimiter text ('EOF)') is read and DENIES (disclosed "
+             "over-deny)", "cat <<EOF > {}/out\nEOF) a > b\nEOF".format(rp), "deny")
+        bcmd("(ap-c96q) a last body line starting with the delimiter text is read and DENIES (disclosed "
+             "over-deny)", "cat <<EOF > {}/out\nx -> y\nEOFX\nEOF".format(rp), "deny")
+        bcmd("(ap-c96r) a '<<-' body line starting with the delimiter text after a tab is read and DENIES "
+             "(disclosed over-deny)", "cat <<-EOF > {}/out\n\tEOF) a > b\n\tEOF".format(rp), "deny")
+        bcmd("(ap-c96s) a '<<' body line holding a tab before the delimiter text leaves the body out: allows",
+             "cat <<EOF > {}/out\n\tEOF) a > b\nEOF".format(rp), "allow")
+        bcmd("(ap-c96t) a body line holding the delimiter text after its start leaves the body out: allows",
+             "cat <<EOF > {}/out\nx EOF) a > b\nEOF".format(rp), "allow")
+        bcmd("(ap-c96u) a line after the delimiter line starting with the delimiter text leaves the body out: "
+             "allows", "cat <<EOF > {}/out\nx -> y\nEOF\nEOFX".format(rp), "allow")
+        # inside a backquote substitution bash turns each '\\' into '\' and keeps a '\>' before it reads the
+        # command there, so an odd run of three or more backslashes before a '>' can leave it an operator; where
+        # the command holds a backquote the scan reads the text again with each such run cut to two. Every deny
+        # below allowed before that second reading (fails when reverted), and bash 5.3.9 writes out.txt for each
+        # of them except ap-c97p, which pins the disclosed over-deny (five backslashes inside one backquote
+        # substitution leave the '>' escaped); a single backslash and a command with no backquote keep their
+        # allow.
+        bcmd("(ap-c97) three backslashes before '>' in a backquote substitution after a here-string DENY",
+             "cat <<<y; echo `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97b) three backslashes before '>' in a backquote substitution in a here-document body DENY",
+             "cat <<EOF\n`echo a \\\\\\> out.txt`\nEOF", "deny")
+        bcmd("(ap-c97c) seven backslashes before '>' in a backquote substitution DENY",
+             "cat <<<y; echo `echo a \\\\\\\\\\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97d) five backslashes before '>' in a nested backquote substitution DENY",
+             "cat <<<y; echo `echo \\`echo a \\\\\\\\\\> out.txt\\``", "deny")
+        bcmd("(ap-c97e) a '>|' after three backslashes in a backquote substitution DENIES",
+             "cat <<<y; echo `echo a \\\\\\>| out.txt`", "deny")
+        bcmd("(ap-c97f) a '>&' to a file after three backslashes in a backquote substitution DENIES",
+             "cat <<<y; echo `echo a \\\\\\>& out.txt`", "deny")
+        bcmd("(ap-c97g) three backslashes before '>' in a backquote substitution inside double quotes DENY",
+             "cat <<<y; echo \"`echo a \\\\\\> out.txt`\"", "deny")
+        bcmd("(ap-c97h) three backslashes before '>' in a '$(...)' inside a backquote substitution DENY",
+             "cat <<<y; echo `echo $(echo a \\\\\\> out.txt)`", "deny")
+        bcmd("(ap-c97i) three backslashes before '>' in a backquote substitution inside '$(...)' DENY",
+             "cat <<<y; echo $(echo `echo a \\\\\\> out.txt`)", "deny")
+        bcmd("(ap-c97j) three backslashes before '>' in a backquote substitution on a here-document's opener "
+             "line DENY", "cat <<EOF; echo `echo a \\\\\\> out.txt`\nx\nEOF", "deny")
+        bcmd("(ap-c97k) three backslashes before '>' in a backquote substitution after a here-document body "
+             "DENY", "cat <<EOF\nx\nEOF\necho `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97l) three backslashes before '>' in a backquote substitution after a process substitution "
+             "DENY", "cat <(true); echo `echo a \\\\\\> out.txt`", "deny")
+        bcmd("(ap-c97m) three backslashes before '>' inside an absolute target word in a backquote substitution "
+             "DENY", "cat <<<y; echo `echo a >{}/x\\\\\\>out.txt `".format(rp), "deny")
+        bcmd("(ap-c97n) one backslash before '>' in a backquote substitution keeps its allow",
+             "cat <<<y; echo `echo a \\> out.txt`", "allow")
+        bcmd("(ap-c97o) three backslashes before '>' with no backquote in the command keep their allow",
+             "cat <<<y; echo a \\\\\\> out.txt", "allow")
+        bcmd("(ap-c97p) five backslashes before '>' in one backquote substitution DENY (disclosed over-deny)",
+             "cat <<<y; echo `echo a \\\\\\\\\\> out.txt`", "deny")
+        # the deny names the unread construct, the target and the remedy.
+        _ut_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                  "tool_input": {"command": "cat <<<y > out.txt"}})
+        _ut_reason = (_ut_out[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        if ("could not read" not in _ut_reason or "'out.txt'" not in _ut_reason
+                or "ABSOLUTE" not in _ut_reason):
+            failures.append("(ap-c95) the unread-tail deny must say the redirect target could not be read, "
+                            "name 'out.txt' and ask for an ABSOLUTE target; got {!r}".format(_ut_reason))
+        # the full lex reports where it stopped: the first character of the token it could not read.
+        try:
+            aiqt_hooks._lex_command("cat <<<y > out.txt", skip_empty=True)
+            failures.append("(ap-c95b) the here-string command must fail the full lex")
+        except aiqt_hooks._UncertainHashError:
+            failures.append("(ap-c95c) the here-string command must fail the full lex without an uncertain '#'")
+        except ValueError as _ut_exc:
+            if getattr(_ut_exc, "stop", None) != 4:
+                failures.append("(ap-c95d) the full lex must stop at index 4, the here-string's '<<<'; got "
+                                "{!r}".format(getattr(_ut_exc, "stop", None)))
+        # COST: an escaped '>' run inside one absolute target word is passed over, so the scan makes one word
+        # read for that run, not one per '>' (a read per '>' grows with the square of the run's length).
+        _ut_cost_cmd = "cat <<<y > /" + "\\>/" * 8000
+        _ut_t0 = time.process_time()
+        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
+        _ut_cpu = time.process_time() - _ut_t0
+        if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
+            failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
+                            .format(_ut_cost_got, _ut_cpu))
+        # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
+        # it and the reads stay linear in the command's length.
+        _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
+        _ut_t0 = time.process_time()
+        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
+        _ut_cpu = time.process_time() - _ut_t0
+        if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
+            failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
+                            "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
