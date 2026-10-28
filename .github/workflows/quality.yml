@@ -88,6 +88,10 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: Secrets (project scanner)
         shell: bash
         run: python3 -I -B tools/check_secrets.py
@@ -175,6 +179,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Dashes
         shell: bash
@@ -269,6 +277,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: OPF homes contract self-test
         shell: bash
@@ -426,6 +438,10 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: OPF standalone-closure gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-a
@@ -446,6 +462,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -468,6 +488,10 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: OPF standalone-closure gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
@@ -488,6 +512,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -510,6 +538,10 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: OPF standalone-closure gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
@@ -530,6 +562,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Corpus-core library self-test
         shell: bash
@@ -674,6 +710,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Rules self-test
         shell: bash
@@ -862,6 +902,10 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: Selftest-execution gate self-test
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --self-test
@@ -893,6 +937,18 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
 
+      # The child-status probe's own vectors and the coverage gate that holds every probe placement, every
+      # inline copy of the guard and every entry point's classification (execution-reconciled self-tests).
+      - name: Child-status probe self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite child-status-selftest
+      - name: Child-status coverage self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite child-status-coverage-selftest
+      - name: Child-status coverage
+        shell: bash
+        run: python3 -I -B tools/check_child_status_coverage.py
+
   git-fixture-env-core:
     name: Git-fixture-env core self-test
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
@@ -906,6 +962,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Git-fixture-env core behaviour self-test (execution-reconciled)
         shell: bash
@@ -931,10 +991,14 @@ jobs:
   # step, one Python setup step pinning that release, the gate itself as the next step (it fails when the
   # job does not run that release) and the job's one suite, each held step with exactly name, run
   # and shell: bash; its jobs leg also runs outside these jobs, in the registry job (--jobs-only), which
-  # carries no if:, so an edit here cannot silence every CI run of it. All five are required through Quality
-  # gates. They are heavy jobs, so they run on a push and on a merge-train-* pull request of this
-  # repository, and in no other pull request run; an edit to a pull request's title or body starts no
-  # Quality run.
+  # carries no if:, so an edit here cannot silence every CI run of it.
+  # The child-status probe step right after the gate is the child-status coverage gate's rule, not this
+  # gate's: tools/check_child_status_coverage.py accepts the host pin step between the Python setup step
+  # and the probe in these five jobs of this workflow only, and requires the probe step, named for that
+  # placement, right after it.
+  # All five are required through Quality gates. They are heavy jobs, so they run on a push and on a
+  # merge-train-* pull request of this repository, and in no other pull request run; an edit to a pull
+  # request's title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
@@ -952,6 +1016,10 @@ jobs:
       - name: Python host pin
         shell: bash
         run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Python host pin self-test
         shell: bash
@@ -979,6 +1047,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_python_host_pin.py
 
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: Git-fixture-env core behaviour self-test (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
@@ -1000,6 +1072,10 @@ jobs:
       - name: Python host pin
         shell: bash
         run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane (execution-reconciled, host patch)
         shell: bash
@@ -1023,6 +1099,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_python_host_pin.py
 
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: Git-fixture-env malformed-config lane (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
@@ -1045,6 +1125,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_python_host_pin.py
 
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: Git-fixture-env system-config lane (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
@@ -1061,6 +1145,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       - name: Record-drift self-test
         shell: bash
@@ -1304,6 +1392,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
       - name: Byte canon self-test (vectors)
         shell: bash
         run: python3 -I -B tools/check_byte_canon.py --self-test

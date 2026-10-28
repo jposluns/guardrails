@@ -1521,6 +1521,27 @@ def _test_note_literal_sites(failures, tmp):
         obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
          (code, obj, None), "could not run")
+    # The child-status re-probe still failing after main() restores SIGCHLD to SIG_DFL (a cause the restore
+    # cannot clear): a fail-open mode prints the dispatcher's fail-open note, exits 0 and runs no handler. The
+    # probe is replaced for this one call and the suite's own SIGCHLD disposition is put back after it.
+    reasons = iter(("SIGCHLD is ignored (SIG_IGN) in this process", "a probe child that exited 77 was read as 0"))
+    saved_probe = aiqt_hooks._child_status_refusal
+    saved_disposition = aiqt_hooks.signal.getsignal(aiqt_hooks.signal.SIGCHLD)
+    buf = io.StringIO()
+    try:
+        aiqt_hooks._child_status_refusal = lambda: next(reasons)
+        with contextlib.redirect_stdout(buf):
+            code = aiqt_hooks.main(["orch_stop_guard"])
+    finally:
+        aiqt_hooks._child_status_refusal = saved_probe
+        aiqt_hooks.signal.signal(aiqt_hooks.signal.SIGCHLD, saved_disposition)
+    try:
+        obj = json.loads(buf.getvalue())
+    except ValueError:
+        obj = "unparseable stdout " + repr(buf.getvalue())
+    note("(nl-child-status-warn) a fail-open mode whose child-status re-probe still fails after the SIGCHLD "
+         "restore prints the dispatcher's fail-open note", (code, obj, None),
+         "child exit status unobservable: a probe child that exited 77 was read as 0")
     rd = orch.RdpFixture(base, "review-dispatch")
     note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
          rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
