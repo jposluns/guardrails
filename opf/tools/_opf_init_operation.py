@@ -337,9 +337,13 @@ class InitResult:
     REFUSED, FAILED, CANNOT-EVALUATE. `created` and `deduplicated` name the planned paths this
     attempt created or found byte-identical to the plan on resume; `conflicts` the preserved
     destinations that refused; `primary_failure` the first failure (code, detail) or None;
-    `finalization_failures` every later release, outcome, or close failure, kept separately."""
+    `finalization_failures` every later release, outcome, or close failure, kept separately;
+    `staging_removed` and `recovered` what the mutex acquisition removed (its staging leftovers,
+    then the stale records its explicit recovery cleared, in delete order), as the holder, or the
+    refusal of an acquisition that failed after a removal, reports them."""
     __slots__ = ("status", "operation_id", "plan_digest", "milestone", "created", "deduplicated",
-                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases")
+                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases",
+                 "staging_removed", "recovered")
 
     def __init__(self):
         self.status = CANNOT_EVALUATE
@@ -353,6 +357,8 @@ class InitResult:
         self.primary_failure = None
         self.finalization_failures = []
         self.phases = ()
+        self.staging_removed = ()
+        self.recovered = ()
 
 
 # --- the source-digest basis (init.toml excluded) -------------------------------------------------
@@ -2892,7 +2898,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         try:
             run.holder = _opf_oplock.acquire_init_operation(root, OPERATION, recover=recover)
         except _opf_oplock.OpLockError as exc:
+            result.staging_removed = getattr(exc, "staging_removed", ())
+            result.recovered = getattr(exc, "recovered", ())
             raise InitOperationError("cannot take the operation mutex ({})".format(exc))
+        result.staging_removed = getattr(run.holder, "staging_removed", ())
+        result.recovered = getattr(run.holder, "recovered", ())
         binding, head = observe_binding(root, git)
         if (binding, head) != (pre_binding, pre_head):
             raise InitOperationError("the binding or HEAD changed while the mutex was taken; "
