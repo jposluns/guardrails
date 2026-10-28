@@ -218,6 +218,8 @@ non-occupying retire, move and migrate rows of its plan (and only those) are its
 sources, and a frozen source whose live bytes still match its plan digest is graded as bounded
 adoption state while a drifted or vanished source is a containment failure at `required`
 (section 11).
+At homes 2 the doctor does not yet grade that adoption home: it reports a store holding it as
+cannot-evaluate until adoption grading lands there.
 The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the
 committed adoption evidence alone, the bundle under `.working/imported/adoption/<run-id>/` and
 the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so

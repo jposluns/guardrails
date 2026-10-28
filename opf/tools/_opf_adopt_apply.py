@@ -402,6 +402,10 @@ OPERATION = "adopt-apply"
 JOURNAL_REL = ".aiqt/adopt/journal"
 # The refusal of apply and reconcile on base 2.0.0 (adoption_journal_fenced).
 ADOPTION_FENCE = "adoption on base 2.0.0 lands with the adoption-journal move; nothing was read or written"
+# The cannot-evaluate of plan and status on base 2.0.0 (adoption_journal_fenced): the journal is not read
+# there, so its state is unknown, never clean.
+JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: the .aiqt adoption journal is not "
+                  "read, and its homes-2 home lands with the adoption-journal move")
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
 # The run's evidence-bundle members apply persists: the approved plan and its captured approval (spec 14.1).

@@ -19252,8 +19252,10 @@ def _cmd_adopt(rest):
     journal (an open transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything
     else is read; `reconcile` is how that journal is made clean again. On base 2.0.0
     (_opf_adopt_apply.adoption_journal_fenced; never at this build's SUPPORTED_HOMES 1) that journal,
-    a homes-1 location under .aiqt, is not read: apply and reconcile refuse with exit 2 before any
-    .aiqt access, and plan, approve and status run without the journal.
+    a homes-1 location under .aiqt, is not read: apply refuses with exit 2 before it reads its inputs
+    and reconcile before any .aiqt access; plan and status report its unknown state as cannot-evaluate
+    (exit 2, _opf_adopt_apply.JOURNAL_UNREAD) before they read any file; approve runs without the
+    journal.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19493,9 +19495,11 @@ def _cmd_adopt(rest):
     if sub == "plan":
         import datetime
         try:
-            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced).
-            if not _opf_adopt_apply.adoption_journal_fenced():
-                _opf_adopt_apply.require_clean_journal(root_abs)
+            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so the
+            # reconcile-first gate cannot pass over its unknown state: cannot-evaluate.
+            if _opf_adopt_apply.adoption_journal_fenced():
+                raise _opf_adopt_apply.AdoptApplyError(_opf_adopt_apply.JOURNAL_UNREAD)
+            _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
             res = _opf_adopt_plan.plan(
@@ -19512,8 +19516,8 @@ def _cmd_adopt(rest):
                 print("opf adopt plan: unresolved source disposition: {}".format(source), file=sys.stderr)
             return _adopt_exit(res.status)
         except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
-            # A fail-closed --inputs read error or a non-clean adoption journal: cannot-evaluate (exit 2),
-            # never a silent skip.
+            # A fail-closed --inputs read error or a non-clean or unread adoption journal: cannot-evaluate
+            # (exit 2), never a silent skip.
             print("opf adopt plan: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
@@ -19524,8 +19528,10 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
-            # On base 2.0.0 the .aiqt adoption journal is not read here, and run_apply refuses
-            # (adoption_journal_fenced), so apply reaches no .aiqt path.
+            # On base 2.0.0 (adoption_journal_fenced) apply refuses with the fence before it reads its
+            # inputs, so nothing was read or written, and approve does not read the .aiqt adoption journal.
+            if sub == "apply" and _opf_adopt_apply.adoption_journal_fenced():
+                raise _opf_adopt_apply.AdoptApplyError(_opf_adopt_apply.ADOPTION_FENCE)
             if not _opf_adopt_apply.adoption_journal_fenced():
                 _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
@@ -19560,6 +19566,10 @@ def _cmd_adopt(rest):
     # own classification (journal_state).
     adopt, journal = _opf_adopt_apply, _opf_adopt_apply._journal
     try:
+        # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so its state is
+        # unknown: status is cannot-evaluate before it reads either home, never clean over an unread journal.
+        if adopt.adoption_journal_fenced():
+            raise adopt.AdoptApplyError(adopt.JOURNAL_UNREAD)
         journal.require_containment()
         root_fd = adopt._open_product_root(root_abs)
         try:
@@ -19605,9 +19615,7 @@ def _cmd_adopt(rest):
             finally:
                 if dfd is not None:
                     _opf_store._close_fd_exc_safe(dfd)
-            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced).
-            owner, opened = ((None, []) if adopt.adoption_journal_fenced()
-                             else adopt.journal_state(root_fd, adopt._journal_root(root_abs)))
+            owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
         finally:
             _opf_store._close_fd_exc_safe(root_fd)
         journal_rel = adopt.JOURNAL_REL
@@ -20603,39 +20611,50 @@ def _cli_self_test():
 
                 # On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced, SUPPORTED_HOMES raised to 2
                 # inside the vector and restored in a finally) the .aiqt adoption journal is not read, so
-                # the same debris is invisible: status is clean (red when status still reads the
-                # journal: exit 1 and the journal finding), plan goes on to its worksheet (red when plan
-                # still reads the journal: the reconcile-first refusal), and reconcile and apply (the
-                # worksheet and artefact reads stubbed, so apply reaches the engine) refuse with the
-                # fence. The debris stays byte-identical.
+                # its state is unknown: status and plan are cannot-evaluate over the debris and over the
+                # clean root alike (red when status reports clean, exit 0 and the no-adoption-run message,
+                # or plan goes on to its worksheet; red when either still reads the journal: the journal
+                # finding or the reconcile-first refusal). reconcile and apply refuse with the fence, apply
+                # before it reads its inputs (the worksheet and artefact reads are recorded: red when apply
+                # reads any of them first). Both roots stay byte-identical.
                 from unittest import mock
                 this = sys.modules[__name__]
                 missing = os.path.join(abase, "no-such-worksheet.toml")
                 fenced = {}
+                read = []
+                clean_before = tree_snapshot(clean)
                 saved_homes = _opf_store.SUPPORTED_HOMES
                 try:
                     _opf_store.SUPPORTED_HOMES = 2
-                    fenced["status"] = run_adopt(["adopt", "status", "--root", debris])
-                    fenced["plan"] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", debris])
-                    fenced["reconcile"] = run_adopt(["adopt", "reconcile", "--root", debris])
-                    with mock.patch.object(this, "_adopt_read_inputs", lambda _path: {}), \
-                            mock.patch.object(this, "_adopt_read_bounded", lambda *_args: b""):
-                        fenced["apply"] = run_adopt(["adopt", "apply", "--inputs", missing, "--plan", missing,
-                                                     "--approval", missing, "--root", debris])
+                    for where, at in (("journal debris", debris), ("a clean root", clean)):
+                        fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
+                        fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
+                    fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
+                    with mock.patch.object(this, "_adopt_read_inputs", lambda path: read.append(path) or {}), \
+                            mock.patch.object(this, "_adopt_read_bounded",
+                                              lambda path, *_args: read.append(path) or b""):
+                        fenced["apply", "journal debris"] = run_adopt(
+                            ["adopt", "apply", "--inputs", missing, "--plan", missing, "--approval", missing,
+                             "--root", debris])
                 finally:
                     _opf_store.SUPPORTED_HOMES = saved_homes
+                unread = "cannot evaluate: " + _opf_adopt_apply.JOURNAL_UNREAD
                 fence = "cannot evaluate: " + _opf_adopt_apply.ADOPTION_FENCE
-                for sub, want, needle, refused in (
-                        ("status", EXIT_OK, "no adoption run exists", "interrupted transaction"),
-                        ("plan", EXIT_MALFORMED, "--inputs worksheet", "reconcile"),
-                        ("reconcile", EXIT_MALFORMED, fence, "nothing to reconcile"),
-                        ("apply", EXIT_MALFORMED, fence, "reconcile")):
-                    rc, out = fenced[sub]
+                for sub, where, want, needle, refused in (
+                        ("status", "journal debris", EXIT_MALFORMED, unread, "interrupted transaction"),
+                        ("status", "a clean root", EXIT_MALFORMED, unread, "no adoption run exists"),
+                        ("plan", "journal debris", EXIT_MALFORMED, unread, "reconcile"),
+                        ("plan", "a clean root", EXIT_MALFORMED, unread, "--inputs worksheet"),
+                        ("reconcile", "journal debris", EXIT_MALFORMED, fence, "nothing to reconcile"),
+                        ("apply", "journal debris", EXIT_MALFORMED, fence, "reconcile")):
+                    rc, out = fenced[sub, where]
                     if rc != want or needle not in out or refused in out:
-                        failures.append("adopt {} over journal debris on base 2.0.0: rc={!r} (expected {} + "
-                                        "{!r}, without {!r}): {!r}".format(sub, rc, want, needle, refused, out))
-                if tree_snapshot(debris) != before:
-                    failures.append("adopt on base 2.0.0 (journal debris) mutated the product root")
+                        failures.append("adopt {} over {} on base 2.0.0: rc={!r} (expected {} + {!r}, without "
+                                        "{!r}): {!r}".format(sub, where, rc, want, needle, refused, out))
+                if read:
+                    failures.append("adopt apply on base 2.0.0 read {!r} before its fence refused".format(read))
+                if tree_snapshot(debris) != before or tree_snapshot(clean) != clean_before:
+                    failures.append("adopt on base 2.0.0 mutated a product root (journal debris or clean)")
 
                 # status reads both homes through the ENGINE (K9a fix 1), each vector red on the K9a head:
                 # a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal

@@ -6670,6 +6670,18 @@ def self_test():
                                "and adoption grading on base 2.0.0 is not yet implemented (spec 4.2; "
                                "lands with the adoption-journal move)"
                           for m in _is2_ad_run.cannot_evaluate))
+            # A regular file of that name is found by the listing's file arm and is the same
+            # C-CONTAINMENT CANNOT-EVALUATE (red when the file arm is dropped: the file is then only an
+            # off-inventory C-EVIDENCE-ENUM finding, and C-CONTAINMENT passes).
+            _is2_adf_run = run(copy.deepcopy(_is2_act), obs=_is2_prior(),
+                               working={"imported/adoption": "not a directory\n"})
+            check("containment-homes2-adoption-file-cannot-evaluate",
+                  _is2_adf_run is not None
+                  and _is2_adf_run.checks.get("C-CONTAINMENT") == "CANNOT-EVALUATE"
+                  and any(m == "C-CONTAINMENT: the adoption home .working/imported/adoption/ exists, "
+                               "and adoption grading on base 2.0.0 is not yet implemented (spec 4.2; "
+                               "lands with the adoption-journal move)"
+                          for m in _is2_adf_run.cannot_evaluate))
             _is2_noad_run = run(copy.deepcopy(_is2_act), obs=_is2_prior())
             check("containment-homes2-no-adoption-home-pass",
                   _is2_noad_run is not None and not _is2_noad_run.findings

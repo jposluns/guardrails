@@ -913,7 +913,8 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
     restored in a finally. The homes .gitignore inspection refuses the fixture's GIT_CONFIG_GLOBAL and
     GIT_CONFIG_SYSTEM overrides, so those two are unset around each raised vector. The last vector
     pins the shipped constants: the payload names, their order and their bytes are the ones the
-    individual D1 builders produced before the shared bootstrap builder."""
+    per-document builders (build_manifest, build_counters, build_version, build_worklog and
+    build_index) produced before the shared bootstrap builder."""
     import tomllib
     from unittest import mock
     import _opf_check
@@ -1025,6 +1026,26 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
           and inert("the .working/.gitignore installation is held: synthetic-hold") in output
           and "preflight refused; no publication attempted." in output)
 
+    # Plain init is create-only: an inspection with no hold that found the file present, or that
+    # planned bytes other than init's own payload, refuses in the preflight the same way (red when
+    # the create-only condition, or either arm of it, is removed: the run then succeeds). The
+    # earlier destination refusal stops a real present file first, so each arm is driven through
+    # the inspection's answer.
+    for tag, prestate, extra in (("present", b"# adopter\n", b""), ("unplanned", None, b"# drift\n")):
+        def answer(_root, _verb, prestate=prestate, extra=extra):
+            return (_opf_store.render_homes_gitignore().encode("utf-8") + extra, [], prestate)
+
+        root = make_git("gen2-cli-create-only-" + tag)
+        before = _snapshot(root)
+        with gen2():
+            rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", answer),))
+        check("init-cli-gen2-create-only-" + tag + "-refused",
+              rc == EXIT_ERROR and _snapshot(root) == before
+              and not (root / ".git" / "opf-oplock").exists()
+              and inert("the .working/.gitignore inspection did not plan the bootstrap block for an "
+                        "absent file; init is create-only") in output
+              and "preflight refused; no publication attempted." in output)
+
     # The re-inspection under the held mutex: a hold that appears only there refuses with
     # nothing published (red when the re-inspection is removed: the run then succeeds).
     real_inspect = _opf_write_guard.inspect_homes_gitignore
@@ -1062,8 +1083,8 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
           and (root / gitignore).is_file())
 
     # The shipped constants: the created paths, in order, and their bytes are exactly the ones the
-    # D1 builders produce one by one, with no .gitignore and no imported leaf (red on any default
-    # change: an added, dropped, reordered or re-encoded payload).
+    # per-document builders produce one by one, with no .gitignore and no imported leaf (red on any
+    # default change: an added, dropped, reordered or re-encoded payload).
     expected = [(_opf_store.MANIFEST_NAME, _opf_init.build_manifest()),
                 (_opf_check.COUNTERS_NAME, _opf_init.build_counters()),
                 (_opf_check.VERSION_NAME, _opf_init.build_version()),
