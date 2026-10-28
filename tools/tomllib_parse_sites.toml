@@ -64,7 +64,15 @@ reason = "test-code"
 path = "opf/tools/_opf_adopt_apply.py"
 function = "_self_test_checks"
 form = "call"
-count = 18
+count = 19
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/_opf_adopt_apply.py"
+function = "_self_test_checks._inventory_seal"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 
@@ -167,7 +175,7 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/_opf_adopt_complete.py"
-function = "_rereceipt"
+function = "_reinventory"
 form = "call"
 count = 1
 class = "EXEMPT"

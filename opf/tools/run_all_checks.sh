@@ -30,6 +30,10 @@ run_gate() {
   echo
 }
 
+# Child exit status first (see _child_status.py): under an inherited SIGCHLD ignore every gate below would
+# read its failed children as passes, so the probe runs as the first gate and its exit 2 fails the subset.
+run_gate "child-status"                python3 -I -B "$here/_child_status.py"
+run_gate "child-status-selftest"       python3 -I -B "$here/_child_status.py" --self-test
 run_gate "opf-homes-selftest"          python3 -I -B "$here/check_opf_homes.py" --self-test
 run_gate "opf-homes-contract"          python3 -I -B "$here/check_opf_homes.py"
 run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test

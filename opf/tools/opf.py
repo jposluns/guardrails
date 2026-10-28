@@ -34,9 +34,14 @@ starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 le
 git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
-`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
-author one change (with its own worklog entry, and for done-with-receipt the one-to-one done receipt)
-through one journaled publication, then render and require doctor VALID, leaving the change uncommitted.
+`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, `receipt-repair`, and
+`worklog-append` author one change (with its own worklog entry, and for done-with-receipt the one-to-one done
+receipt) through one journaled publication, then render and require doctor VALID, leaving the change
+uncommitted. `receipt-repair BI-ID --actor maintainer[:ID] --reason S` adds the missing receipt of an item a
+committed reviewed edit put at done, claiming its id through a homes-2 id reservation; it refuses at homes 1,
+so while this build activates homes 1 only it refuses on every store (exit 2, recording nothing; like every
+subcommand, on a homes-1 store it first reconciles any interrupted earlier run, and that recovery, where one
+is needed, writes the store before the run refuses).
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.
@@ -19070,10 +19075,10 @@ def _import_namespace_findings(func):
 
 def _cmd_record(rest):
     """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create`, `transition`,
-    `done-with-receipt`, and `worklog-append` run the shared journaled operation sequence in _opf_record
-    (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta postcondition,
-    cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease release before
-    the report). The final doctor's one exception is a status change (transition or done-with-receipt),
+    `done-with-receipt`, `receipt-repair`, and `worklog-append` run the shared journaled operation sequence
+    in _opf_record (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta
+    postcondition, cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease
+    release before the report). The final doctor's one exception is a status change (transition or done-with-receipt),
     which may leave only doctor's cannot-evaluate for exactly that record and from/to pair, never a finding;
     doctor keeps reporting it until the change is committed. Exit 0 recorded (left uncommitted), exit 2
     every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe siblings a
@@ -19240,7 +19245,9 @@ def _cmd_adopt(rest):
       apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
           (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
           live tree and its observed revision, then in the run's one journaled base transaction persist the
-          plan and the approval in its evidence bundle, dispatch every plan op in the apply stage and compose
+          plan, the approval and the sealed planning inventory re-derivation reproves (the bytes the plan's
+          inventory_digest binds, which the completion check reads) in its evidence bundle, dispatch every
+          plan op in the apply stage and compose
           the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
           stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
           written, which in this build is every plan. Exit 0: applied
@@ -19494,8 +19501,9 @@ def _cmd_adopt(rest):
                 return EXIT_OK
             approval = _adopt_read_bounded(given["--approval"], "--approval file", _opf_adopt_plan.MAX_FILE_BYTES)
             txn = _opf_adopt_apply.run_apply(root_abs, plan_bytes, approval, doc)
-            print("opf adopt apply: applied in transaction {}; the plan and its approval are in the evidence "
-                  "bundle at {}; completion, then retirement, follow".format(
+            print("opf adopt apply: applied in transaction {}; the plan, its approval and the sealed "
+                  "planning inventory are in the evidence bundle at {}; completion, then retirement, "
+                  "follow".format(
                       txn, _opf_adopt_apply.evidence_home_rel(txn)))
             return EXIT_OK
         except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
@@ -19770,6 +19778,10 @@ def _cli_self_test():
                EXIT_MALFORMED)                                   # --supersedes takes a record id
         expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
         expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # maintainer-only, refused before the store
+        expect(["record", "receipt-repair", "BI-1", "--actor", "maintainer"],
+               EXIT_MALFORMED)                                   # missing --reason
+        expect(["record", "receipt-repair", "BI-1", "--actor", "assistant", "--reason", "r"],
                EXIT_MALFORMED)                                   # maintainer-only, refused before the store
         expect(["record", "create"], EXIT_MALFORMED)             # missing --type/--title/--actor
         expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
@@ -23252,5 +23264,62 @@ def main(argv=None):
     return EXIT_MALFORMED
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. It runs at the entry line, not inside
+# main(), because the CLI self-test calls main() in process many times and some of its fixtures set
+# SIGCHLD to SIG_IGN in process on purpose; it covers every verb, the CLI self-test, opf-ci.sh and the
+# pre-commit hook, which all start this file.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_child_status_refusal_exit("opf.py") or main())

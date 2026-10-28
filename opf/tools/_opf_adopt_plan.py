@@ -39,8 +39,13 @@ its store base must be observed (an excluded or unobserved nearest ancestor is
 cannot-evaluate) and an occupied default destination is a collision. A declared
 destination whose file name is an enforcement launcher's (opf.yml, opf-ci.sh, pre-commit
 or install.sh, compared case-insensitively) refuses unless it lies beneath that Move
-archive: no enforcement row can name a moved file, so the frozen plan would refuse it as
-an uninspected launcher (_opf_adopt._launcher_writes). Every move
+archive, because the frozen plan refuses it whether or not an enforcement row names it
+(_opf_adopt._enforcement_launch_refusal). Named in no row, it is an uninspected launcher
+(cannot-evaluate, exit 2, once every op row is valid and every row's member list is well
+formed and installed).
+Named in a row, it is a member no install op installs (invalid, exit 1); where an install
+op does install that path, the move and the install write it twice (invalid, exit 1),
+unless a launch check refuses the installed launcher first (cannot-evaluate, exit 2). Every move
 destination and archive preservation copy is checked against the one
 protected-destination predicate the apply shell shares (_opf_adopt.protected_destination).
 DISCLOSED-STRICTER (disclose-guard-residuals): spec 14.2 requires only the default Move
@@ -824,7 +829,9 @@ def _decisions(observation, decisions, run_id, managed):
     preservation destination alike need observed absence (an occupied destination
     is a collision, never an overwrite). A move without a destination takes the spec
     14.2 default (_default_move_destination); a declared one under a launcher's file
-    name refuses unless it lies beneath the Move archive. A keep's register-unmanaged
+    name refuses unless it lies beneath the Move archive, since the frozen plan refuses
+    it whether or not an enforcement row names it (the module docstring gives each
+    reason and exit code). A keep's register-unmanaged
     row is minted here without its manifest digests, which _bind_registrations adds
     once the program is ordered."""
     if type(decisions) is not list:
@@ -877,17 +884,18 @@ def _decisions(observation, decisions, run_id, managed):
                 destination = _default_move_destination(kinds, path)
             else:
                 destination = _path(row["destination"])
-                # A moved file is never an enforcement member (a member is installed by an install op,
-                # which would write its path twice), so the frozen plan refuses a launcher-named move
-                # destination outside the Move archive as uninspected; refuse it here with the remedy.
+                # The frozen plan refuses a launcher-named move destination outside the Move archive
+                # whether or not an enforcement row names it: named in none, as an uninspected launcher;
+                # named, as a member no install op installs, or, when one does, as a path written twice
+                # unless a launch check refuses it first. Refuse it here with the remedy.
                 if (schema._launcher_of(destination) is not None
                         and not schema._in_move_archive(destination, ".")):
                     raise PlanError(
                         "move destination {!r} of {!r} has an enforcement launcher's file name "
                         "(opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) outside {}/, "
-                        "and no enforcement row can name a moved file, so the plan would refuse it "
-                        "as an uninspected launcher; omit the destination to take the default, or "
-                        "choose another file name".format(
+                        "and the frozen plan refuses one there whether or not an enforcement row "
+                        "names it; omit the destination to take the default, or choose another "
+                        "file name".format(
                             destination, path, schema.ARCHIVE_REL + "/moved"))
                 # Only observed absence is accepted: the destination's own absent entry, or an
                 # absent or walked ancestor. Declare a destination outside the walked roots in
@@ -1404,8 +1412,8 @@ def self_test():
 
         def test_launcher_named_move_destination(self):
             # A declared move destination whose file name is a launcher's, in any case, refuses before
-            # the plan freezes, naming the remedy: the frozen plan would refuse it as an uninspected
-            # launcher, since no enforcement row can name a moved file. The default destination, a
+            # the plan freezes, naming the remedy: the frozen plan would refuse it whether or not an
+            # enforcement row names it (the adopt self-test pins each case). The default destination, a
             # declared one beneath the Move archive, and another file name still plan.
             (self.root / ".opf/hooks").mkdir(parents=True)
             for name in ("pre-commit", "install.sh"):
@@ -1430,8 +1438,10 @@ def self_test():
                     self.assertTrue(result.findings[0].startswith(
                         "move destination {!r} of {!r} has an enforcement launcher's file name".format(
                             destination, source)), result.findings)
-                    self.assertIn("omit the destination to take the default, or choose another "
-                                  "file name", result.findings[0])
+                    self.assertIn("file name (opf.yml, opf-ci.sh, pre-commit or install.sh, in any case) "
+                                  "outside .working/archive/moved/, and the frozen plan refuses one there "
+                                  "whether or not an enforcement row names it; omit the destination to "
+                                  "take the default, or choose another file name", result.findings[0])
             for destination in (None, moved, "legacy/hooks/pre-commit.old"):
                 with self.subTest(destination=destination):
                     decision = dict(path=".opf/hooks/pre-commit", disposition="move", actor="fixture")

@@ -454,20 +454,22 @@ _HOMES2_RESIDUALS = (
 # firewall governs, and its residuals are unchanged. The firewall arms this engine grades (the receipt
 # firewall and the pending_decision chain arm, _check_importer_receipts and _check_importer_chains, and
 # C-HANDOFF's importer exclusion) are part of section 8.6 only, so their PASS must never read as full
-# section 8.6 coverage: the section 8.6 obligations this engine is known to leave ungraded are named here,
-# beside the one acceptance it cannot judge beyond its shape. The self-test pins these entries, so
-# changing or dropping one fails it.
+# section 8.6 coverage: the section 8.6 obligations this engine is known to leave ungraded, or to grade
+# only through the views a store declares, are named here, beside the one acceptance it cannot judge
+# beyond its shape. The self-test pins these entries, so changing or dropping one fails it.
 _FIREWALL_RESIDUALS = (
-    "Section 8.6 firewall obligations no check of this engine grades, so a pass of the firewall arms it "
-    "grades (the receipt firewall, the pending_decision chain arm and the at-most-one-current handoff "
-    "exclusion) is not full section 8.6 coverage: importer-authored blocks granting a current stop, "
-    "importer-authored open or active backlog items joining actionability, and the decision register "
-    "listing an importer-authored decision as an effective resolution are not graded, since this engine "
-    "has no actionability or decision-register join of its own and C-VIEW-DRIFT compares committed views "
-    "only against the views planner, which does not filter importer-authored records there; an "
-    "importer-authored record discharging a required supersession outside a pending_decision chain is not "
-    "graded, nor is a required supersession that no record discharges at all; and an importer-authored "
-    "record satisfying a current approval obligation is not interpreted by any check.",
+    "Section 8.6 firewall obligations this engine grades only in part or not at all, so a pass of the "
+    "firewall arms it grades (the receipt firewall, the pending_decision chain arm and the at-most-one-"
+    "current handoff exclusion) is not full section 8.6 coverage. This engine has no actionability or "
+    "decision-register join of its own: importer-authored blocks granting a current stop, importer-"
+    "authored open or active backlog items joining actionability, and the decision register listing an "
+    "importer-authored decision as an effective resolution are graded only through C-VIEW-DRIFT, which "
+    "holds each declared view to the views planner, whose actionability join (the TODO.md, BACKLOG.md and "
+    "PIPELINE.md views) and decision-resolution join (the DECISIONS.md and DECISIONS.toml views) exclude "
+    "importer-authored records; a store that declares none of those views leaves these obligations "
+    "ungraded. An importer-authored record discharging a required supersession outside a pending_decision "
+    "chain is not graded, nor is a required supersession that no record discharges at all; and an "
+    "importer-authored record satisfying a current approval obligation is not interpreted by any check.",
     "The section 8.6 current-state joins over the module-tier types (an active waiver, a held "
     "session_lease, an active mode) and field-borne authority (a gate_run verdict, a tier_assessment "
     "outcome, an artifact's promoted state, a release's published state, a maintainer_action's done) are "
@@ -475,10 +477,11 @@ _FIREWALL_RESIDUALS = (
     "such a clean record is CANNOT-EVALUATE under the module-tier schema deferral, and an imported one is a "
     "C-IMPORTED-SCHEMA finding, so neither certifies VALID until those schemas ship. No check of this "
     "engine joins preference_pattern records into current state: C-RECORDS grades their records and C-LINKS "
-    "resolves links to them, but nothing reads a ratified active status as current authority, and C-VIEW-DRIFT "
-    "compares the decisions view only against the views planner, which lists an importer-authored active "
-    "pattern as active, so the firewall obligation on an importer-authored active preference_pattern binds "
-    "the readers of those records.",
+    "resolves links to them, but nothing reads a ratified active status as current authority. Where the "
+    "store declares a DECISIONS.md view, C-VIEW-DRIFT holds it to the views planner, which holds an "
+    "importer-authored pattern out of Active and lists it only under Imported history; beyond that view, "
+    "the firewall obligation on an importer-authored active preference_pattern binds the readers of those "
+    "records.",
     "The section 8.6 receipt remedy is accepted on its machine-checkable shape alone: a maintainer-"
     "authored clean maintainer_decision whose `corrects` link targets the ratified done item. Whether its "
     "decision text records that the item's completion stands is prose the specification gives no "
@@ -2298,24 +2301,30 @@ def _check_handoff(recs, rep, unread=frozenset()):
 
 def decision_chains(recs, by_id, firewall=True):
     """The pending_decision supersession chains THAT HAVE A RESOLUTION (OPF-SPEC 8.5), as (members, current)
-    pairs in record order. A chain is a connected component over `supersedes` links, whatever their
-    direction; a current effective resolution is a decided (unqualified) pending_decision that no other
-    supersedes. A wholly-undecided chain has no resolution yet and is not listed. The section 8.6 firewall
-    applies here as in every current-state join, keyed on provenance alone (the maintainer ruling: OPF has
-    never been released, so no store predates the firewall): the chains are derived over clean records not
-    authored by an importer, so an importer-authored pending_decision neither resolves nor supersedes a
-    non-importer chain member and confers no decision authority. Only the exact kind `importer` is exempt;
-    a record whose actor kind is absent, unreadable or a lookalike the schema does not admit (None) stays
-    in the derivation, read as not importer-authored. Its provenance is not known, so the doctor never
-    passes a chain over it: C-DECISION-CHAINS is then CANNOT-EVALUATE naming it, and the firewall arm
-    (_check_importer_chains) does not run. The one derivation shared by C-DECISION-CHAINS and opf record's
-    pre-publication chain check (spec 8.8), so the verb never judges a chain by a rule of its own and both
-    apply the firewall the same way (the verb derives over a record of unreadable or lookalike kind as
-    this does). `firewall` False derives the chains over every clean pending_decision, importer-authored
-    ones included, for the one reader that must see where an importer-authored decision stands as the
-    current resolution (_check_importer_chains)."""
+    pairs in record order. A chain is the connected component section 8.8 defines: every clean
+    pending_decision is seated, importer-authored ones included, and every `supersedes` link joins its two
+    members, whatever its direction and whoever authored it. A current effective resolution is a decided
+    (unqualified) pending_decision that no other supersedes. A chain with no decided member has no
+    resolution yet and is not listed. The section 8.6 firewall applies here as in every current-state
+    join, keyed on provenance alone (the maintainer ruling: OPF has never been released, so no store
+    predates the firewall): an importer-authored pending_decision is never a current effective resolution,
+    and its `supersedes` links remove no current authority, so a non-importer decision it supersedes stays
+    current, while a non-importer decision superseding it is the section 8.6 remedy. A maintainer PD-1
+    that an importer-authored PD-2 supersedes is therefore its chain's one resolution, and a maintainer
+    PD-3 that then supersedes PD-2 is a second one in the same chain (spec 8.5 allows one). A chain whose
+    only decided members are importer-authored has no resolution here and is not listed; the firewall arm
+    (_check_importer_chains) reports it. Only the exact kind `importer` is exempt; a record whose actor
+    kind is absent, unreadable or a lookalike the schema does not admit (None) is read as not
+    importer-authored. Its provenance is not known, so the doctor never passes a chain over it:
+    C-DECISION-CHAINS is then CANNOT-EVALUATE naming it, and the firewall arm does not run. The one
+    derivation shared by C-DECISION-CHAINS and opf record's pre-publication chain check (spec 8.8), so the
+    verb never judges a chain by a rule of its own and both apply the firewall the same way (the verb
+    derives over a record of unreadable or lookalike kind as this does). `firewall` False derives the same
+    chains with an importer-authored decision resolving and superseding as any other does, for the one
+    reader that must see where an importer-authored decision stands as the current resolution
+    (_check_importer_chains)."""
     pds = [r for r in recs if r.rtype == "pending_decision" and isinstance(r.id, str)
-           and r.location != "imported" and (not firewall or r.actor_kind != "importer")]
+           and r.location != "imported"]
     parent = {r.id: r.id for r in pds}
 
     def find(x):
@@ -2336,16 +2345,18 @@ def decision_chains(recs, by_id, firewall=True):
         for rel, tid in r.links:
             if rel == "supersedes" and isinstance(tid, str) and tid in parent:
                 union(r.id, tid)
-                superseded.add(tid)
+                if not firewall or r.actor_kind != "importer":
+                    superseded.add(tid)
     components = {}
     for pid in parent:
         components.setdefault(find(pid), []).append(pid)
     chains = []
     for _root, members in components.items():
         decided = [m for m in members if by_id.get(m) is not None
-                   and by_id[m].state == "decided" and by_id[m].qual is None]
+                   and by_id[m].state == "decided" and by_id[m].qual is None
+                   and (not firewall or by_id[m].actor_kind != "importer")]
         if not decided:
-            continue     # a wholly-undecided chain has no resolution yet: zero current is legitimate
+            continue     # a chain with no decided member has no resolution yet: zero current is legitimate
         chains.append((members, [m for m in decided if m not in superseded]))
     return chains
 
@@ -3194,13 +3205,18 @@ def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset(), unevaluate
     reported under `cid` (C-IMPORTED-SEGREGATION with the imported series active, C-DECISION-CHAINS
     otherwise): "An importer-authored decision MUST NOT be treated as the current effective resolution of a
     clean `pending_decision` chain; resolving such a chain now MUST take a new clean decision linking
-    back." A chain whose current effective resolution, derived with the importer-authored records kept in
-    (decision_chains with its firewall off), is an importer-authored pending_decision is a finding, whoever
-    authored the rest of the chain: a state-bearing status on an importer-authored record confers nothing
-    now (spec 8.6), so the join never seats it as current. C-DECISION-CHAINS counts over the firewalled
-    derivation, where such a record resolves nothing, so a clean decision it supersedes can still read as
-    the chain's one resolution there; this arm still reports the chain, since resolving it now takes a new
-    clean decision. A resolution by any other actor is not graded here. When the pending_decision records
+    back." Both derivations of decision_chains give the same chains; only the firewalled one, which
+    C-DECISION-CHAINS counts, keeps an importer-authored decision from resolving or superseding. A chain
+    that derivation gives at least one current effective resolution is resolved by a non-importer
+    decision, and C-DECISION-CHAINS judges it there (one is a pass, two or more a finding), so this arm
+    skips it: a maintainer decision that an importer-authored one supersedes stays the chain's
+    resolution. Any other chain whose current effective resolution, derived with the firewall off, is an
+    importer-authored pending_decision is a finding, since no non-importer decision resolves it and
+    resolving it now takes a new clean decision linking back: a state-bearing status on an
+    importer-authored record confers nothing now (spec 8.6). That is a chain whose only decided members
+    are importer-authored, or one whose non-importer decisions are all superseded by non-importer ones
+    (C-DECISION-CHAINS also reports its zero current resolutions). A resolution by any other actor is
+    not graded here. When the pending_decision records
     are in `unread`, or one has a status, links or actor kind that could not be interpreted, the arm is
     CANNOT-EVALUATE naming the cause and is not run (_firewall_partial): a member not read, or one whose
     author is unknown, could be the importer-authored resolution or hide it. `unevaluated` is read as in
@@ -3211,7 +3227,13 @@ def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset(), unevaluate
                  "over the clean records it could not seat".format(cid, ", ".join(unevaluated)))
     if _firewall_partial(recs, rep, cid, unread, {"pending_decision"}, "decision-chain firewall"):
         return
-    for _members, current in decision_chains(recs, by_id, firewall=False):
+    resolved = set()
+    for members, current in decision_chains(recs, by_id):
+        if current:
+            resolved.update(members)
+    for members, current in decision_chains(recs, by_id, firewall=False):
+        if resolved.intersection(members):
+            continue
         for pid in current:
             cur = by_id.get(pid)
             if cur is not None and cur.actor_kind == "importer":
@@ -5992,6 +6014,67 @@ def self_test():
         rv = validate_store(resolve_store(root_v), observations=clean_prior())
         check("view-drift-invalid", rv.status == INVALID)
         check("view-drift-named", any("C-VIEW-DRIFT" in f for f in rv.findings))
+        # The section 8.6 firewall over the declared views: this engine has no actionability or
+        # decision-register join of its own, so C-VIEW-DRIFT grades those obligations by holding each
+        # declared view to the views planner, whose joins exclude importer-authored records
+        # (_FIREWALL_RESIDUALS names that reach). On each store below the committed view is first the
+        # planner's own text, which certifies, then the stale text a planner whose provenance predicate
+        # pair admits every record renders, a C-VIEW-DRIFT finding: an importer-authored active block
+        # scoping the maintainer item BI-2 hides it from TODO (red when the planner's actionability join
+        # reads importer-authored blocks), an importer-authored open BI-2 is listed in TODO as actionable
+        # (red when is_actionable drops its provenance predicate), and an importer-authored PD-2 that
+        # supersedes the maintainer PD-1 is listed in DECISIONS as the effective resolution (red when
+        # render_decisions and join_resolution admit importer-authored decisions).
+        def _vd_plan(root, name):
+            vres = resolve_store(root)
+            vfd = _open_store_root_fd(vres.store_root, vres.pointer_source != "default")
+            try:
+                vplanned = _opf_views.plan_views(vfd, vres.machine_rel)
+            finally:
+                os.close(vfd)
+            return {n: t for n, _s, _d, t in vplanned}.get(name)
+
+        def _vd_unfiltered(root, name):
+            vsaved = _opf_views._FILTER_PREDICATES
+            _opf_views._FILTER_PREDICATES = dict(vsaved, importer_authored=lambda: (lambda r: False),
+                                                 not_importer_authored=lambda: (lambda r: True))
+            try:
+                return _vd_plan(root, name)
+            finally:
+                _opf_views._FILTER_PREDICATES = vsaved
+
+        def _vd_drift(machine, name, sources):
+            vm = copy.deepcopy(machine)
+            vm["manifest.toml"] = base_manifest(views={name: {
+                "kind": "composed", "sources": list(sources), "target": ".working/" + name}})
+            vroot = build(vm, clean_product())
+            vtext, vstale = _vd_plan(vroot, name), _vd_unfiltered(vroot, name)
+            (vroot / ".working" / name).write_text(vtext, encoding="utf-8")
+            vgood = validate_store(resolve_store(vroot), observations=clean_prior())
+            (vroot / ".working" / name).write_text(vstale, encoding="utf-8")
+            vbad = validate_store(resolve_store(vroot), observations=clean_prior())
+            return (vgood is not None and vgood.status == VALID
+                    and all(x in vgood.residuals for x in _FIREWALL_RESIDUALS)
+                    and vbad is not None and vbad.status == INVALID
+                    and {c for c, v in vbad.checks.items() if v != "PASS"} == {"C-VIEW-DRIFT"}
+                    and vbad.by_check.get("C-VIEW-DRIFT")
+                    == ["C-VIEW-DRIFT: view {!r} target {!r} has drifted from its generated source (spec "
+                        "5.8/10)".format(name, ".working/" + name)])
+
+        vm = clean_machine()
+        vm["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["BI-2"],
+                                               actor={"kind": "importer"})])
+        vm["counters.toml"] = counters(BL=1)
+        check("view-drift-importer-block-grants-no-stop", _vd_drift(vm, "TODO.md", ("backlog_item", "block")))
+        vm = clean_machine()
+        vm["backlog_item.index.toml"] = idx([bi(1, "done"), dict(bi(2, "open"), actor={"kind": "importer"})])
+        check("view-drift-importer-item-not-actionable", _vd_drift(vm, "TODO.md", ("backlog_item", "block")))
+        vm = clean_machine()
+        vm["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        vm["counters.toml"] = counters(PD=2)
+        check("view-drift-importer-decision-not-effective",
+              _vd_drift(vm, "DECISIONS.md", ("pending_decision", "autonomous_decision", "maintainer_decision",
+                                             "preference_pattern")))
 
         # --- topology (tracked / sync / containment) ------------------------------------------------
         check("untracked-invalid",
@@ -8458,40 +8541,65 @@ def self_test():
                   _i3_qlr is not None and _i3_qlr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
                   and not _i3_msgs(_i3_qlr, "C-IMPORTED-SEGREGATION"))
             # The decision-chain firewall (spec 8.6): "An importer-authored decision MUST NOT be
-            # treated as the current effective resolution of a clean pending_decision chain". A
-            # maintainer PD-1 decided plus an importer-authored PD-2 that supersedes it leaves the
-            # importer decision as the chain's only current resolution, which C-DECISION-CHAINS counts
-            # as the one required resolution and passes, so the finding is this check's alone and the
-            # store must not certify (red when the chain arm is dropped). The same chain resolved by a
-            # maintainer PD-2, and an importer-authored PD-1 a maintainer PD-2 supersedes (history
-            # below a clean resolution), each certify.
-            def _i3_chain(cur_actor=None, old_actor=None):
+            # treated as the current effective resolution of a clean pending_decision chain". An
+            # importer-authored PD-1 decided alone is a chain no non-importer decision resolves, which
+            # C-DECISION-CHAINS does not list, so its importer resolution is this check's finding alone
+            # and the store must not certify (red when the chain arm is dropped or skips every chain).
+            # An importer-authored decision's `supersedes` links remove no current authority, over the
+            # chain section 8.8 defines with those links included: a maintainer PD-1 decided plus an
+            # importer-authored PD-2 that supersedes it keeps PD-1 the chain's one resolution and
+            # certifies (red when an importer-authored link counts toward supersession again, which
+            # leaves the importer decision the chain's resolution), while a maintainer PD-3 that then
+            # supersedes PD-2 is a second current resolution of the same chain, a C-DECISION-CHAINS
+            # finding with this check passing (red when the chain derivation drops importer-authored
+            # decisions again, which splits PD-1 and PD-3 into two chains that each pass). The same
+            # chain resolved by a maintainer PD-2, and an importer-authored PD-1 a maintainer PD-2
+            # supersedes (history below a clean resolution), each certify.
+            def _i3_chain(cur_actor=None, old_actor=None, head_actor=None):
                 m = _i3_machine()
                 p1, p2 = pd(1), pd(2, supersedes="PD-1")
                 if old_actor is not None:
                     p1["actor"] = {"kind": old_actor}
                 if cur_actor is not None:
                     p2["actor"] = {"kind": cur_actor}
-                m["pending_decision.index.toml"] = idx([p1, p2])
-                m["counters.toml"]["counters"]["PD"] = 2
+                rows = [p1, p2]
+                if head_actor is not None:
+                    rows.append(dict(pd(3, supersedes="PD-2"), actor={"kind": head_actor}))
+                m["pending_decision.index.toml"] = idx(rows)
+                m["counters.toml"]["counters"]["PD"] = len(rows)
                 return m
 
-            _i3_dcr = _i3_run(_i3_chain(cur_actor="importer"))
+            def _i3_lone():
+                m = _i3_machine()
+                m["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"})])
+                m["counters.toml"]["counters"]["PD"] = 1
+                return m
+
+            _i3_dcr = _i3_run(_i3_lone())
             check("imported-segregation-importer-current-resolution-finding",
                   _i3_dcr is not None and _i3_dcr.status != VALID
                   and _i3_dcr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
                   and _i3_dcr.checks.get("C-DECISION-CHAINS") == "PASS"
                   and _i3_msgs(_i3_dcr, "C-IMPORTED-SEGREGATION")
-                  == ["C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-2' is the current "
+                  == ["C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-1' is the current "
                       "effective resolution of a clean pending_decision chain; resolving it now takes "
                       "a new clean decision linking back (spec 8.6)"]
                   and _i3_bad(_i3_dcr) == {"C-IMPORTED-SEGREGATION"})
+            check("imported-segregation-importer-link-keeps-clean-resolution",
+                  _i3_clean_active(_i3_run(_i3_chain(cur_actor="importer"))))
+            _i3_jtr = _i3_run(_i3_chain(cur_actor="importer", head_actor="maintainer"))
+            check("imported-segregation-importer-joined-two-heads-finding",
+                  _i3_jtr is not None and _i3_jtr.status != VALID
+                  and _i3_jtr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and _i3_msgs(_i3_jtr, "C-DECISION-CHAINS")
+                  == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
+                      "has 2 current effective resolutions; exactly one exists per chain (spec 8.5)"]
+                  and _i3_bad(_i3_jtr) == {"C-DECISION-CHAINS"})
             check("imported-segregation-clean-resolution-passes",
                   _i3_clean_active(_i3_run(_i3_chain()))
                   and _i3_clean_active(_i3_run(_i3_chain(old_actor="importer"))))
             check("imported-segregation-chain-flip-disabled-passes",
-                  _i3_off(_i3_flip("_check_imported_segregation", _i3_chain(cur_actor="importer")),
-                          "C-IMPORTED-SEGREGATION"))
+                  _i3_off(_i3_flip("_check_imported_segregation", _i3_lone()), "C-IMPORTED-SEGREGATION"))
             # The chain arm grades importer authorship only: a chain whose current resolution an assistant
             # or automation actor authored (ratified, so unqualified) certifies (red when the arm widens
             # to every non-maintainer actor). A maintainer decision that links the item by any relation
@@ -8509,8 +8617,8 @@ def self_test():
             # missing or unreadable evidence fails closed). On the receipt store above, the importer-authored
             # receipt's links read as a string (a C-RECORDS finding), or that receipt enumerated as rotated
             # to a destination that does not hold it (a C-ARCHIVE-ENUM finding), leaves BI-1 with no receipt
-            # the firewall can read; on the chain store above, the importer-authored resolution's status
-            # does not parse (a C-RECORDS finding), so the chain reads as resolved by the maintainer. Each
+            # the firewall can read; on the chain store above, the importer-authored PD-2's status does
+            # not parse (a C-RECORDS finding), so the chain reads as resolved by the maintainer. Each
             # is CANNOT-EVALUATE naming the cause and the rule not run, with no finding of that rule, never
             # a pass over the records that were read (red when the firewall ignores the collectors' unread
             # set or _make_rec's unparsed fields).
@@ -8598,17 +8706,17 @@ def self_test():
                   and _i3_seg_cant(_i3_rmvr, "the records of 'reference' could not all be read",
                                    "the clean-to-imported link rule")
                   and len(_i3_msgs(_i3_rmvr, "C-IMPORTED-SEGREGATION")) == 1)
-            # The decision-chain arm reads the collectors' unread set itself: on the importer-current chain
+            # The decision-chain arm reads the collectors' unread set itself: on the importer-only chain
             # store above, a moved pending_decision row its destination does not hold (a C-ARCHIVE-ENUM
             # finding) leaves the pending_decision population unconfirmed, so the decision-chain firewall
             # is CANNOT-EVALUATE naming it, with no finding of that rule (red when the chain arm ignores the
             # unread set; the link rule's CANNOT-EVALUATE alone would leave the verdict unchanged).
-            _i3_cmv = _i3_chain(cur_actor="importer")
+            _i3_cmv = _i3_lone()
             _i3_cmv["archive/2026/archive.toml"]["moved"] = [
-                {"id": "PD-3", "type": "pending_decision",
+                {"id": "PD-2", "type": "pending_decision",
                  "destination": "archive/2026/pending_decision.index.toml"}]
             _i3_cmv["archive/2026/pending_decision.index.toml"] = idx([])
-            _i3_cmv["counters.toml"]["counters"]["PD"] = 3
+            _i3_cmv["counters.toml"]["counters"]["PD"] = 2
             _i3_cmvr = _i3_run(_i3_cmv)
             check("imported-segregation-unconfirmed-moved-chain-member-cannot-evaluate",
                   _i3_cmvr is not None and _i3_cmvr.checks.get("C-RECORDS") == "PASS"
@@ -8742,7 +8850,7 @@ def self_test():
             check("imported-residuals-pinned",
                   len(_FIREWALL_RESIDUALS) == 3
                   and hashlib.sha256("\n".join(_FIREWALL_RESIDUALS).encode("utf-8")).hexdigest()
-                  == "55680668b6b21cd3d7ac0ee3c4870e92032695d7efdc6f9b24f1ad3010d4d4c8"
+                  == "002825b3eb55681aa1637241bd87f902d91179c59db90062ed4ed88366e1a594"
                   and len(_IMPORTED_RESIDUALS) == 1
                   and hashlib.sha256("\n".join(_IMPORTED_RESIDUALS).encode("utf-8")).hexdigest()
                   == "15be7339b7047adcc7f4831e29a52a00c87b93eca3cfbe58ea8a65045176dfbf")
@@ -9638,7 +9746,7 @@ def self_test():
         # ... and an importer-authored supersedes link removes no current authority: a clean decided PD-1
         # that an importer-authored withdrawn PD-2 supersedes stays its chain's one current resolution,
         # and with no importer decision current the store is VALID (red when the C-DECISION-CHAINS count
-        # derives its chains with the importer-authored records kept in, as only the firewall arm does).
+        # lets an importer-authored link supersede, as only the firewall arm's derivation does).
         f = clean_machine()
         _r3_implk = pd(2, status="withdrawn", supersedes="PD-1")
         _r3_implk["actor"] = {"kind": "importer", "id": "import-assistant"}
@@ -9874,18 +9982,60 @@ def self_test():
         check("firewall-inactive-non-corrects-remedy-confers-nothing",
               _fw_rl is not None and _fw_rl.checks.get("C-RECEIPTS") == "FINDING"
               and any("'BI-1'" in m and "importer-authored" in m for m in _fw_rl.by_check.get("C-RECEIPTS", [])))
+        # The decision-chain arm on this store: an importer-authored decision's `supersedes` links remove
+        # no current authority, over the chain section 8.8 defines with those links included. A maintainer
+        # PD-1 decided that an importer-authored PD-2 supersedes stays the chain's one resolution, and the
+        # store certifies (red when an importer-authored link counts toward supersession again: the arm
+        # then reads PD-2 as the resolution and reports it).
+        def _fw_shape(head=False, archived=False):
+            m = clean_machine()
+            rows = [pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})]
+            if head:
+                rows.append(pd(3, supersedes="PD-2"))
+            if archived:
+                m["archive/2026/archive.toml"]["moved"] = [
+                    {"id": "PD-2", "type": "pending_decision",
+                     "destination": "archive/2026/pending_decision.index.toml"}]
+                m["archive/2026/pending_decision.index.toml"] = idx([rows.pop(1)])
+            m["pending_decision.index.toml"] = idx(rows)
+            m["counters.toml"] = counters(PD=3 if head else 2)
+            return m
+
+        _fw_ch = run(_fw_shape())
+        check("firewall-inactive-importer-link-keeps-clean-resolution",
+              _fw_ch is not None and _fw_ch.status == VALID
+              and _fw_ch.checks.get("C-DECISION-CHAINS") == "PASS" and _fw_disclosed(_fw_ch))
+        # ... so a maintainer PD-3 that supersedes PD-2 is a second current resolution of the one chain
+        # PD-2 joins, a C-DECISION-CHAINS finding (spec 8.5, 8.8), never two one-member chains that each
+        # pass (red when the derivation drops importer-authored decisions again). The same holds with PD-2
+        # rotated to the archive, since the chain reads active and archived decisions together (spec 12).
+        _fw_two = ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution has 2 "
+                   "current effective resolutions; exactly one exists per chain (spec 8.5)"]
+        _fw_jh = run(_fw_shape(head=True))
+        check("firewall-inactive-importer-joined-two-heads-finding",
+              _fw_jh is not None and _fw_jh.status == INVALID
+              and {c for c, v in _fw_jh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and _fw_jh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_jh))
+        _fw_ajh = run(_fw_shape(head=True, archived=True))
+        check("firewall-inactive-archived-importer-joined-two-heads-finding",
+              _fw_ajh is not None and _fw_ajh.status == INVALID
+              and {c for c, v in _fw_ajh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and _fw_ajh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_ajh))
+        # A chain no non-importer decision resolves (an importer-authored PD-1 decided alone) is the arm's
+        # finding: resolving it now takes a new clean decision linking back (spec 8.6; red when the arm
+        # skips every chain, or is dropped).
         f = clean_machine()
-        f["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
-        f["counters.toml"] = counters(PD=2)
-        _fw_ch = run(f)
-        check("firewall-inactive-importer-current-resolution-finding",
-              _fw_ch is not None and _fw_ch.status == INVALID
-              and {c for c, v in _fw_ch.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
-              and _fw_ch.by_check.get("C-DECISION-CHAINS")
-              == ["C-DECISION-CHAINS: importer-authored pending_decision 'PD-2' is the current effective "
+        f["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"})])
+        f["counters.toml"] = counters(PD=1)
+        _fw_lone = run(f)
+        check("firewall-inactive-importer-only-chain-finding",
+              _fw_lone is not None and _fw_lone.status == INVALID
+              and {c for c, v in _fw_lone.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and _fw_lone.by_check.get("C-DECISION-CHAINS")
+              == ["C-DECISION-CHAINS: importer-authored pending_decision 'PD-1' is the current effective "
                   "resolution of a clean pending_decision chain; resolving it now takes a new clean decision "
                   "linking back (spec 8.6)"]
-              and _fw_disclosed(_fw_ch))
+              and _fw_disclosed(_fw_lone))
         # The arms are fail-closed on this store too, over the same unread set and _make_rec's unparsed
         # fields as on an active one. A receipt with no actor beside the importer-authored one leaves the
         # receipt join and the receipt firewall CANNOT-EVALUATE under C-RECEIPTS naming it, where both
@@ -9931,12 +10081,12 @@ def self_test():
         _fw_mv["archive/2026/maintainer_decision.index.toml"] = idx([])
         _fw_mv["counters.toml"] = counters(MD=1)
         f = clean_machine()
-        f["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        f["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"})])
         f["archive/2026/archive.toml"]["moved"] = [
-            {"id": "PD-3", "type": "pending_decision",
+            {"id": "PD-2", "type": "pending_decision",
              "destination": "archive/2026/pending_decision.index.toml"}]
         f["archive/2026/pending_decision.index.toml"] = idx([])
-        f["counters.toml"] = counters(PD=3)
+        f["counters.toml"] = counters(PD=2)
         check("firewall-inactive-unconfirmed-moved-arm-records-cannot-evaluate",
               _fw_cant(_fw_run(_fw_mv, _fw_dig), "C-RECEIPTS",
                        "the records of 'maintainer_decision' could not all be read", "the receipt firewall")
@@ -10013,9 +10163,9 @@ def self_test():
         # hands an arm no unseated list, or the reader leaves that list), and is not run, so it grades none
         # of the records it did seat (red when either arm runs past its cant). An unread pending_decision
         # index or registry leaves only the decision-chain arm's type unread, so only that arm is checked
-        # there. The first store is the importer-current-resolution store above with its index unreadable;
-        # the last joins the importer-only receipt and importer-current-resolution stores above beside an
-        # unreadable archive, so each arm has a seated finding it does not raise.
+        # there. The first store is the importer-only chain store above with its index unreadable; the last
+        # joins the importer-only receipt and importer-only chain stores above beside an unreadable
+        # archive, so each arm has a seated finding it does not raise.
         def _fw_unseated(r, reader, arms=("C-RECEIPTS", "C-DECISION-CHAINS")):
             def cants(cid):
                 return [m for m in r.by_check.get(cid, []) if "did not evaluate" in m]
@@ -10024,10 +10174,10 @@ def self_test():
                             and cants(cid)[0].startswith("{}: {} did not evaluate".format(cid, reader))
                             for cid in arms))
 
-        _fw_chain = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
+        _fw_chain = idx([dict(pd(1), actor={"kind": "importer"})])
         f = clean_machine()
         f["pending_decision.index.toml"] = _opf_emit.emit(_fw_chain) + "\n[[[ broken\n"
-        f["counters.toml"] = counters(PD=2)
+        f["counters.toml"] = counters(PD=1)
         check("firewall-inactive-unread-records-cannot-evaluate",
               _fw_unseated(run(f), "C-RECORDS", ("C-DECISION-CHAINS",)))
         f = clean_machine()
@@ -10040,14 +10190,14 @@ def self_test():
                            ("C-DECISION-CHAINS",)))
         f = _fw_receipt()
         f["pending_decision.index.toml"] = copy.deepcopy(_fw_chain)
-        f["counters.toml"] = counters(PD=2)
+        f["counters.toml"] = counters(PD=1)
         f["archive/2026/archive.toml"] = "moved = [ not toml"
         _fw_sd = _fw_run(f, _fw_dig)
         check("firewall-inactive-unseated-still-grades-seated",
               _fw_unseated(_fw_sd, "C-ARCHIVE-ENUM")
               and not any("'BI-1' is authored by a non-importer actor" in m
                           for m in _fw_sd.by_check.get("C-RECEIPTS", []))
-              and not any("'PD-2' is the current effective resolution" in m
+              and not any("'PD-1' is the current effective resolution" in m
                           for m in _fw_sd.by_check.get("C-DECISION-CHAINS", [])))
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2, supersedes="PD-1"), pd(3, supersedes="PD-1")])
