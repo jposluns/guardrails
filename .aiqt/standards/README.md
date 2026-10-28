@@ -49,7 +49,7 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   numbered standard designators in its grammar's spellings and fails on one that no manifest's `name` or
   `edition` carries and no recorded exclusion covers. This repository's CI and `run_all_checks.sh` pass
   `--config .aiqt/cited-standards.toml` (tracked, not shipped), which adds the OPF prompt-pack Markdown
-  members (`opf/prompt-pack/**/*.md`), and the repository-only `.github/check_cited_standards_contract.py`
+  members (`opf/prompt-pack/**/*.md`) and import examples (`opf/prompt-pack/import/examples/*.batch.toml`), and the repository-only `.github/check_cited_standards_contract.py`
   fails if that corpus stops covering the rule files or a member `opf/prompt-pack/pack.toml` lists (the
   pack manifest is validated by its owning validator, `opf/tools/check_opf_prompt_pack.py`), or if either
   runner's gate line is not exactly `--config .aiqt/cited-standards.toml` with nothing added; without
