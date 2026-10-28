@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "07b1949041d5074b12465101455117697bb84857e81363d4b3a0a0362251b72d"
+tree-sha256 = "5a57e65faacfefb497bd6ba4e6194212f29685c7934dc98485be86202a22bb42"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3481,8 +3481,8 @@ sha256 = "70cfd07cbabd684ff0a8f009d81ba5582bcb2643f84fe1e8b6c739d455118e78"
 
 [[sources]]
 path = "tools/check_opf_declaration.py"
-bytes = 41681
-sha256 = "bdcfebf7c6bdb8de823c50221f80858c967faa2f1ccbed71ba0ff17e5d63af76"
+bytes = 57509
+sha256 = "669293a8e95b101338db0abed054ea3e2108cc753b088d5806a838e16f4284bb"
 
 [[sources]]
 path = "tools/check_opf_enforce_platforms.py"
@@ -3811,8 +3811,8 @@ sha256 = "bb7074eff0221a76ab166a6be96f54f2c94e76f7abbe64d0f19f145ff5bb6bc7"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 134984
-sha256 = "93ee35b590105e6a9ec925b8e96167fed5ebb37955a85eea4714f9b7e74b9b27"
+bytes = 135949
+sha256 = "a10f2268326604b9660d7ddad2a5b2b379714744d05451bc76d4ab92e467e92d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

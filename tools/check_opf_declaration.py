@@ -3,6 +3,10 @@
 
   check_opf_declaration.py                        check this tree (exit 0 clean, 1 finding, 2 cannot evaluate)
   check_opf_declaration.py --self-test [--execution-report ABS_PATH]
+  check_opf_declaration.py --execution-report ABS_PATH
+                                                  the self-test (exit 0 pass, 1 fail, 2 cannot evaluate), the
+                                                  last form as tools/check_selftest_execution.py launches it;
+                                                  any other argument list is a usage error (exit 2)
 
 The gate applies the section 16.1 rules to the declaration file opf/tools/opf-declaration.toml as the release
 ships it, never to an installed copy and never taking a field from the documentation:
@@ -23,14 +27,32 @@ ships it, never to an installed copy and never taking a field from the documenta
 A restatement is the block of an HTML surface between a line `<div class="tree"><pre id="opf-declaration">`
 and the next line `</pre></div>`, and of a Markdown surface between a line "```toml opf-declaration" and the
 next line "```" at the same indentation (that indentation is removed from each line of the block). A block
-whose opening line lies inside an HTML comment (after a `<!--` with no `-->` after it, the comment form of both
-HTML and Markdown; in Markdown a marker inside a fenced code block or a one-line code span is literal text and
-does not count) is no restatement, so a surface whose only block is commented out is a finding for having
-none. The comment is found lexically: a marker elsewhere that is not a comment (an HTML attribute value or
-script, an indented Markdown code block) counts and refuses the block, and a block a reader cannot see for
-another reason (a hidden element, a style, or a Markdown fence around it) is not detected.
+whose opening line may lie inside an HTML comment is no restatement, so a surface whose only block is commented
+out is a finding for having none. Where the reader cannot tell whether a comment is open, it holds it open:
 
-A helper module that cannot be imported is a cannot-evaluate (exit 2), never a finding.
+  - In an HTML surface a `<!--` opens a comment and the next `-->` closes it, read lexically, so a marker that
+    is not a comment (in an attribute value, a script or a textarea) still counts and refuses the block.
+  - In a Markdown surface a `<!--` counts unless it is code: inside a fenced code block, or inside a one-line
+    code span outside an HTML block. A fenced code block is skipped only where its opening line starts at the
+    left margin, outside any HTML block and before any fence-like line the reader cannot place (one that is
+    indented or inside a list item, a quote or an HTML block, whose end may close a fence there), and it ends
+    at a closing line of at most three spaces of indentation. So an indented code block, an indented fence
+    and every line after a fence-like line the reader cannot place keep their markers.
+  - In a Markdown surface a line that begins with `<` (after any quote or list markers) may open an HTML
+    block, which lasts until its CommonMark end condition, or the later end of any block one of its lines may
+    open; inside it no fence opens and no code span is removed. A `-->` closes a comment opened on an earlier
+    line only inside an HTML comment block opened by a `<!--` at the left margin (before any fence-like line
+    the reader cannot place); in any other HTML block it closes only a `<!--` on its own line, and an HTML
+    block that ends with a comment open (a raw `<!--` that no raw `-->` closes, so a browser hides the rest of
+    the page) leaves it open to the end of the surface. Outside an HTML block, a `<!--` in a paragraph counts,
+    though CommonMark renders one that the paragraph does not close as text.
+
+A block a reader cannot see for another reason (a hidden element, a style, or a Markdown fence around it) is
+not detected.
+
+Every helper module the gate imports that cannot be imported is a cannot-evaluate (exit 2), never a finding:
+tools/_selftest_exit_report.py and tools/check_selftest_execution.py, opf/tools/_opf_declaration.py and
+opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
@@ -61,13 +83,20 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
-import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
+try:
+    import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
+    import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
+except (ImportError, OSError) as exc:   # a tools-side helper is missing or cannot be read: main() exits 2
+    _selftest_exit_report = check_selftest_execution = None
+    _HELPER_ERROR = exc
+else:
+    _HELPER_ERROR = None
 
 ROOT = Path(__file__).resolve().parents[1]
 OPF_TOOLS = ROOT / "opf" / "tools"
@@ -90,6 +119,21 @@ _MD_CLOSE = "```"
 _COMMENT_OPEN = "<!--"
 _COMMENT_CLOSE = "-->"
 _CODE_SPAN = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
+_MD_LINE_END = re.compile(r"\r\n|\r|\n")
+# a block quote marker or a list item marker, after any indentation
+_MD_CONTAINER = re.compile(r"[ \t]*(?:>|[-+*](?=[ \t]|\Z)|[0-9]{1,9}[.)](?=[ \t]|\Z))")
+_MD_FENCE = re.compile(r"(`{3,})[^`]*\Z|(~{3,})")
+_MD_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*\Z")
+# the start and end conditions of the CommonMark HTML blocks of types 1 to 5; any other line that begins with
+# `<` may open a block of type 6 or 7, which a blank line ends
+_MD_HTML_BLOCKS = (
+    (re.compile(r"<(?:pre|script|style|textarea)(?:[ \t>]|\Z)", re.IGNORECASE),
+     re.compile(r"</(?:pre|script|style|textarea)>", re.IGNORECASE)),
+    (re.compile(re.escape(_COMMENT_OPEN)), re.compile(re.escape(_COMMENT_CLOSE))),
+    (re.compile(r"<\?"), re.compile(r"\?>")),
+    (re.compile(r"<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r"<!\[CDATA\["), re.compile(r"\]\]>")),
+)
 DOC_SUFFIXES = (".md", ".html")
 MAX_READ_BYTES = 1 << 20
 
@@ -105,6 +149,12 @@ def _load():
         sys.path.insert(0, str(OPF_TOOLS))
     import _opf_declaration
     import _opf_store
+
+
+def _load_opf():
+    """opf/tools/opf.py, whose dispatcher vectors the self-test runs (after _load(), which puts it on the path)."""
+    import opf
+    return opf
 
 
 def _read_regular(path, rel):
@@ -130,29 +180,107 @@ def _read_regular(path, rel):
         os.close(fd)
 
 
-def _in_comment(before):
-    """True where text ending at `before` leaves an HTML comment open (a `<!--` with no `-->` after it)."""
-    return before.rfind(_COMMENT_OPEN) > before.rfind(_COMMENT_CLOSE)
-
-
-def _comment_text(rel, lines):
-    """The text of `lines` in which a comment can open or close: for a Markdown surface, without its fenced code
-    blocks and its inline code spans on one line, where a comment marker is literal text."""
-    if rel.endswith(".html"):
-        return "\n".join(lines)
-    kept = []
-    fence = None
-    for line in lines:
-        stripped = line.strip()
-        # a fence opens on three or more backticks or tildes; a backtick in the rest of the line opens none
-        if fence is None and stripped[:3] in ("```", "~~~") and "`" not in stripped.lstrip(stripped[0]):
-            fence = stripped[:len(stripped) - len(stripped.lstrip(stripped[0]))]
-        elif fence is not None:
-            if set(stripped) == {fence[0]} and len(stripped) >= len(fence):
-                fence = None
+def _scan_markers(text, is_open):
+    """Whether a comment is open after `text`, from `is_open`: a `<!--` opens one and the next `-->` closes it."""
+    at = 0
+    while True:
+        if is_open:
+            at = text.find(_COMMENT_CLOSE, at)
+            if at < 0:
+                return True
+            at += len(_COMMENT_CLOSE)
+            is_open = False
         else:
-            kept.append(_CODE_SPAN.sub("", line))
-    return "\n".join(kept)
+            at = text.find(_COMMENT_OPEN, at)
+            if at < 0:
+                return False
+            at += 2   # `<!-->` and `<!--->` close the comment they open
+            is_open = True
+
+
+def _md_fence_opener(line, in_html, unsure):
+    """The marker run of a Markdown line that surely opens a fenced code block, or None: three or more backticks
+    (with no backtick after them) or tildes at the left margin, outside any HTML block, and before any
+    fence-like line the reader could not place."""
+    found = None if in_html or unsure else _MD_FENCE.match(line)
+    return found and (found.group(1) or found.group(2))
+
+
+def _md_fence_closes(line, run):
+    """Whether a Markdown line closes the fenced code block `run` opened: at most three spaces of indentation, a
+    run of the same character at least as long, then only spaces or tabs."""
+    found = _MD_FENCE_CLOSE.match(line)
+    return bool(found) and found.group(1)[0] == run[0] and len(found.group(1)) >= len(run)
+
+
+def _md_html_end(body):
+    """The end condition of the HTML block a Markdown line beginning `body` may open: a pattern its last line
+    contains, or None for a blank line."""
+    return next((end for start, end in _MD_HTML_BLOCKS if start.match(body)), None)
+
+
+def _md_comment_block(line, unsure):
+    """Whether a Markdown line surely opens an HTML comment block, whose lines up to the first `-->` are raw
+    HTML: a `<!--` at the left margin, before any fence-like line the reader could not place."""
+    return line.startswith(_COMMENT_OPEN) and not unsure
+
+
+def _md_text(line, in_html):
+    """The text of a Markdown line in which comment markers count: outside an HTML block, without its code
+    spans."""
+    return line if in_html else _CODE_SPAN.sub("", line)
+
+
+def _markdown_in_comment(text):
+    """Whether Markdown `text` may leave an HTML comment open at its end (the rules are in the module
+    docstring)."""
+    is_open = False
+    run = None       # the marker run of the fenced code block the line is in
+    unsure = False   # a fence-like line the reader could not place has been seen
+    block = None     # (surely a comment block, its pending end conditions) of the HTML block the line may be in
+    for line in _MD_LINE_END.split(text):
+        if run is not None:
+            if _md_fence_closes(line, run):
+                run = None
+            continue
+        body = line
+        container = _MD_CONTAINER.match(body)
+        while container:
+            body = body[container.end():]
+            container = _MD_CONTAINER.match(body)
+        body = body.lstrip(" \t")
+        run = _md_fence_opener(line, block is not None, unsure)
+        if run:
+            block = None
+            continue
+        if body.startswith(("```", "~~~")) and (block is None or not block[0]):
+            unsure = True
+        if block is None and body.startswith("<"):
+            block = (_md_comment_block(line, unsure), {_md_html_end(body)})
+        elif block is None:
+            is_open = _scan_markers(_md_text(line, False), is_open)
+            continue
+        elif not block[0] and body.startswith("<"):
+            block[1].add(_md_html_end(body))   # the line may open a block of its own, which may end later
+        if block[0]:
+            is_open = _scan_markers(_md_text(line, True), is_open)
+        else:
+            # a `-->` closes only a `<!--` on its own line: the block may end before it, leaving it text
+            is_open = is_open or _scan_markers(_md_text(line, True), False)
+        pending = {end for end in block[1] if not (end.search(line) if end else line.strip(" \t") == "")}
+        if pending:
+            block = (block[0], pending)
+            continue
+        block = None
+        if is_open:   # a raw `<!--` no raw `-->` closes: a browser hides the rest of the surface
+            return True
+    return is_open
+
+
+def _in_comment(rel, lines):
+    """Whether `lines` of the surface `rel`, the lines before its opening line, may leave an HTML comment open."""
+    text = "\n".join(lines)
+    return _scan_markers(text, False) if rel.endswith(".html") else _markdown_in_comment(text)
 
 
 def restatement(rel, text):
@@ -165,7 +293,7 @@ def restatement(rel, text):
     if len(opens) != 1:
         return None
     start = opens[0]
-    if _in_comment(_comment_text(rel, lines[:start])):
+    if _in_comment(rel, lines[:start]):
         return None
     indent = "" if html else lines[start][:len(lines[start]) - len(lines[start].lstrip(" "))]
     block = []
@@ -383,12 +511,12 @@ def self_test(report_path=None):
 
     try:
         _load()
+        opf = _load_opf()
     except (ImportError, OSError) as exc:
         print("SELF-TEST CANNOT EVALUATE: opf-declaration: a helper module cannot be loaded ({}: {})".format(
             type(exc).__name__, exc))
         return 2
     from unittest.mock import patch   # after arm: it imports logging, whose import registers an atexit hook
-    import opf
     if opf._bootstrap() != 0:
         print("SELF-TEST CANNOT EVALUATE: opf-declaration: opf.py helpers could not be bootstrapped")
         return 2
@@ -609,7 +737,7 @@ def self_test(report_path=None):
     found = doc_problems(shipped, dict((rel, "<!-- a note -->\n" + text)
                                        for rel, text in _sample_surfaces(shipped, shipped).items()))
     check("doc/closed-comment-before-passes", found == [], found)
-    with patch.object(here, "_in_comment", lambda before: False):
+    with patch.object(here, "_in_comment", lambda rel, lines: False):
         found = doc_problems(shipped, commented)
     check("revert/comment-check-dropped-red", found == [], found)
     sample = _sample_surfaces(shipped, shipped)
@@ -620,9 +748,98 @@ def self_test(report_path=None):
                                    "doc.html": "<code><!--</code>\n" + sample["doc.html"]})
     check("doc/marker-outside-markdown-code-red", len(found) == 2 and all("restates no declaration" in problem
                                                                            for problem in found), found)
-    with patch.object(here, "_comment_text", lambda rel, lines: "\n".join(lines)):
+    with patch.object(here, "_markdown_in_comment", lambda text: _scan_markers(text, False)):
         found = doc_problems(shipped, literal)
     check("revert/markdown-code-not-skipped-red", len(found) == 1 and "restates no declaration" in found[0], found)
+
+    # Markdown forms a CommonMark reader renders with the restatement inside a comment (raw HTML that opens one
+    # and nothing raw closes), whose fence or HTML block a lexical reader misplaces: each is a finding, and red
+    # under the revert of the rule it needs
+    md = sample["doc.md"]
+    hidden = {
+        "html-block-fence": "<div>\n```\n</div>\n\n<!--\n" + md,
+        "indented-code-fence": "    ```\n\n<!--\n" + md,
+        "list-item-fence": "carried in {} as {}\n\n- item\n\n  ```\n- <!--\n\n".format(*DIGEST_LOCATION)
+                           + md.split("\n\n", 1)[1],
+        "html-pre-block-fence": "<pre>\n\n```\n</pre>\n\n<!--\n" + md,
+        "indented-fence-then-margin-fence": "  ```\n  x\n```\n<!--\n" + md,
+        "indented-fence-closer": "```\n    ```\n```\n\n<!--\n" + md,
+        "html-block-code-span": "<div>`<!--`\n\n" + md,
+        "quoted-html-escaped-closer": "> <div><!--\n-->\n\n" + md,
+        "html-block-escaped-closer": "<div><!--\n\n-->\n\n" + md,
+        "html-block-inside-paragraph": "<3\n<pre>\n\n```\n</pre>\n\n<!--\n" + md,
+    }
+    for check_id, name in (
+        ("doc/html-block-fence-red", "html-block-fence"),
+        ("doc/indented-code-fence-red", "indented-code-fence"),
+        ("doc/list-item-fence-red", "list-item-fence"),
+        ("doc/html-pre-block-fence-red", "html-pre-block-fence"),
+        ("doc/indented-fence-then-margin-fence-red", "indented-fence-then-margin-fence"),
+        ("doc/indented-fence-closer-red", "indented-fence-closer"),
+        ("doc/html-block-code-span-red", "html-block-code-span"),
+        ("doc/quoted-html-escaped-closer-red", "quoted-html-escaped-closer"),
+        ("doc/html-block-escaped-closer-red", "html-block-escaped-closer"),
+        ("doc/html-block-inside-paragraph-red", "html-block-inside-paragraph"),
+    ):
+        found = doc_problems(shipped, {"doc.md": hidden[name]})
+        check(check_id, len(found) == 1 and "restates no declaration" in found[0], found)
+    # and forms where the marker is not raw HTML (a comment closed before the block, a fence whose info has a
+    # backtick after tildes) still pass
+    found = doc_problems(shipped, {"doc.md": "<!--\n```\n-->\n\n" + md})
+    check("doc/closed-comment-with-fence-line-passes", found == [], found)
+    found = doc_problems(shipped, {"doc.md": "~~~ `x`\n<!--\n~~~\n\n" + md})
+    check("doc/tilde-fence-backtick-info-passes", found == [], found)
+
+    def loose_opener(line, in_html, unsure):   # a fence on any line whose stripped text starts with one
+        found = _MD_FENCE.match(line.strip())
+        return found and (found.group(1) or found.group(2))
+
+    def clean_under(name, replaced):
+        """True where the gate finds nothing in the hidden surface `name` with these attributes replaced."""
+        with contextlib.ExitStack() as stack:
+            for attribute, value in replaced.items():
+                stack.enter_context(patch.object(here, attribute, value))
+            return doc_problems(shipped, {"doc.md": hidden[name]}) == []
+
+    sure_opener = _md_fence_opener
+    for check_id, names, replaced in (
+        ("revert/fence-placement-unchecked-red",
+         ("html-block-fence", "indented-code-fence", "list-item-fence", "html-pre-block-fence"),
+         {"_md_fence_opener": loose_opener}),
+        ("revert/unplaced-fence-line-ignored-red", ("indented-fence-then-margin-fence",),
+         {"_md_fence_opener": lambda line, in_html, unsure: sure_opener(line, in_html, False),
+          "_md_comment_block": lambda line, unsure: line.startswith(_COMMENT_OPEN)}),
+        ("revert/fence-closer-indentation-unchecked-red", ("indented-fence-closer",),
+         {"_md_fence_closes": lambda line, run: set(line.strip()) == {run[0]} and len(line.strip()) >= len(run)}),
+        ("revert/html-block-code-span-removed-red", ("html-block-code-span",),
+         {"_md_text": lambda line, in_html: _CODE_SPAN.sub("", line)}),
+        ("revert/every-html-block-closes-earlier-comment-red", ("quoted-html-escaped-closer",),
+         {"_md_comment_block": lambda line, unsure: True}),
+    ):
+        check(check_id, all(clean_under(name, replaced) for name in names),
+              [name for name in names if not clean_under(name, replaced)])
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        for check_id, name, old, new in (
+            ("revert/html-block-open-comment-dropped-red", "html-block-escaped-closer",
+             "        if is_open:   # a raw `<!--` no raw `-->` closes: a browser hides the rest of the "
+             "surface", "        if False:"),
+            ("revert/nested-html-block-ignored-red", "html-block-inside-paragraph",
+             "            block[1].add(_md_html_end(body))   # the line may open a block of its own, which may end "
+             "later", "            pass"),
+        ):
+            module = "opf_declaration_md_mutant_" + name.replace("-", "_")
+            try:
+                mutant = _copy_mutant(tmp, Path(__file__).resolve(), module, old, new)
+                mutant._opf_declaration = _opf_declaration
+                found = mutant.doc_problems(shipped, {"doc.md": hidden[name]})
+            except AssertionError as exc:
+                found = str(exc)
+            finally:
+                sys.modules.pop(module, None)
+            check(check_id, found == [], found)
+    finally:
+        shutil.rmtree(tmp)
 
     # rule 6: the documents that open a restatement block are exactly DOC_SURFACES, and one dropped from it is red
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
@@ -677,6 +894,60 @@ def self_test(report_path=None):
         sys.modules.pop("opf_declaration_load_mutant", None)
         shutil.rmtree(tmp)
     check("revert/load-outside-try-red", rc != 2 and str(rc).startswith("raised"), rc)
+
+    # the self-test too: a missing opf/tools helper or opf.py is a cannot-evaluate, and a finding (the escaping
+    # ImportError) with the load back outside the try
+    def missing_opf():
+        raise ModuleNotFoundError("No module named 'opf'", name="opf")
+    outcomes = []
+    for replaced in ({"_load": missing_helper}, {"_load_opf": missing_opf}):
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()) as out:
+            for attribute, value in replaced.items():
+                stack.enter_context(patch.object(here, attribute, value))
+            outcomes.append((self_test(), "cannot be loaded" in out.getvalue()))
+    check("live/self-test-missing-helper-cannot-evaluate", outcomes == [(2, True), (2, True)], outcomes)
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        unguarded = _copy_mutant(tmp, Path(__file__).resolve(), "opf_declaration_self_test_load_mutant",
+                                 "    try:\n        _load()\n        opf = _load_opf()\n    except",
+                                 "    _load()\n    opf = _load_opf()\n    try:\n        pass\n    except")
+        with patch.object(unguarded, "_load", lambda: None), patch.object(unguarded, "_load_opf", missing_opf), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                rc = unguarded.self_test()
+            except ImportError as exc:
+                rc = "raised {!r}".format(exc)
+    except AssertionError as exc:
+        rc = 2, str(exc)
+    finally:
+        sys.modules.pop("opf_declaration_self_test_load_mutant", None)
+        shutil.rmtree(tmp)
+    check("revert/self-test-load-outside-try-red", str(rc).startswith("raised"), rc)
+
+    # a missing tools-side helper (the execution report or the registry schema) is a cannot-evaluate in every
+    # mode: a copy of this gate alone in a scratch tools directory, launched as its own process, exits 2; with
+    # its imports unguarded it exits 1 on the escaping ModuleNotFoundError
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    guard = ("except (ImportError, OSError) as exc:   # a tools-side helper "
+             "is missing or cannot be read")
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        lone = []
+        for name, text, args in (("guarded", source, []), ("guarded-self-test", source, ["--self-test"]),
+                                 ("unguarded", source.replace(guard, "except SyntaxError as exc:  # "), [])):
+            home = Path(tmp, name, "tools")
+            home.mkdir(parents=True)
+            (home / "check_opf_declaration.py").write_text(text, encoding="utf-8")
+            done = subprocess.run([sys.executable, "-I", "-B", str(home / "check_opf_declaration.py")] + args,
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+            lone.append((done.returncode, done.stdout + done.stderr))
+    finally:
+        shutil.rmtree(tmp)
+    check("live/missing-tools-helper-cannot-evaluate", source.count(guard) == 1 and all(
+        rc == 2 and "CANNOT EVALUATE" in output and "_selftest_exit_report" in output for rc, output in lone[:2]),
+          lone[:2])
+    check("revert/tools-helper-import-unguarded-red", lone[2][0] == 1 and "ModuleNotFoundError" in lone[2][1],
+          lone[2])
     check("live/real-tree-passes", run(ROOT) == 0)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
@@ -695,14 +966,19 @@ def self_test(report_path=None):
         return 1
     print("SELF-TEST PASS: opf-declaration {} checks ({} runtime vectors and {} dispatcher vectors, each red "
           "under its revert; the documentation and file rules red on a changed, omitted or added field, a byte "
-          "variant, a missing or commented-out restatement or digest location, a surface dropped from the list, "
-          "a CRLF file and a release other than VERSION; a missing helper module a cannot-evaluate)".format(
+          "variant, a missing or commented-out restatement or digest location, a Markdown comment behind a fence "
+          "or HTML block the reader cannot place, a surface dropped from the list, a CRLF file and a release "
+          "other than VERSION; a missing helper module, tools-side or opf-side, a cannot-evaluate)".format(
               len(results), len(covered), len(cli_covered)))
     return 0
 
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    if _HELPER_ERROR is not None:
+        print("opf-declaration: CANNOT EVALUATE: a helper module cannot be loaded ({}: {})".format(
+            type(_HELPER_ERROR).__name__, _HELPER_ERROR), file=sys.stderr)
+        return 2
     if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
             and args[:-2] in ([], ["--self-test"])):
         return self_test(args[-1])
@@ -710,9 +986,10 @@ def main(argv=None):
         return self_test()
     if not args:
         return run(ROOT)
-    print("usage: check_opf_declaration.py [--self-test] [--execution-report ABS_PATH]", file=sys.stderr)
+    print("usage: check_opf_declaration.py [--self-test | [--self-test] --execution-report ABS_PATH]",
+          file=sys.stderr)
     return 2
 
 
 if __name__ == "__main__":
-    _selftest_exit_report.exit_with(main())
+    (sys.exit if _selftest_exit_report is None else _selftest_exit_report.exit_with)(main())
