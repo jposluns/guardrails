@@ -1610,12 +1610,15 @@ def _root_binding(root_fd):
     admission of a prior run's committed work (_init_store_prior_run_paths) and of an archived machine
     directory (_init_store_archival_committed), and a phase's committed base (_committed_base_or_refuse).
     RESIDUAL (disclosed): a tree moved to another filesystem, restored from a
-    backup, or remounted under another device number no longer matches its own binding, so its open
-    transaction refuses the same way, fail-closed, and clearing it is the operator's own act. Since the
-    binding gate also covers a phase's committed base and the prior-run and archival admissions, such a
-    tree also refuses its own next phase and those admissions: the run cannot continue there, and the
-    operator resolves that by re-adopting the tree, not by clearing anything. Every such refusal names
-    this cause beside a copied-in tree (_binding_mismatch_said), as `opf adopt reconcile`'s help does."""
+    backup, or remounted under another device number no longer matches its own binding, so every such
+    reader refuses its journal state there exactly as one copied in from another tree, fail-closed: an
+    open transaction refuses reconcile, a phase refuses its committed base, and init-store refuses the
+    recovery scrub and the prior-run and archival admissions. No OPF operation clears that state. Every
+    such refusal names this cause beside a copied-in tree (_binding_mismatch_said), as `opf adopt
+    reconcile`'s help does, and states the remedy that resolves it, which the self-test executes: for a
+    phase, a fresh run, whose phases extend the base it writes there; otherwise the operator's removal,
+    outside any OPF operation, of that run's journal transactions (for init-store, with what that run left
+    beneath `.working` and any substrate record it names)."""
     st = os.fstat(root_fd)
     return dict(device=st.st_dev, inode=st.st_ino)
 
@@ -1635,19 +1638,29 @@ def _binding_mismatch_said(recorded, here):
     (`here`, _root_binding): both identities, then the cause, which every refusal on it states the same way.
     The cause is not only a tree copied in: this tree's own journal no longer matches after the tree moved
     to another filesystem, was restored from a backup, or was remounted under another device number (the
-    residual _root_binding discloses). Such a tree also refuses its own next phase and its prior-run and
-    archival admissions, which the operator resolves by re-adopting, not by clearing, so the cause says so
-    for every caller, the recovery refusals (an open transaction, a recorded operation) included."""
+    residual _root_binding discloses). The remedy differs by reader, so each caller states its own
+    (reconcile(), _committed_base_or_refuse, _binding_cleared_by_hand)."""
     return ("{} (device {}, inode {}): journal state not bound to this product root is never consumed as "
             "recovery, admission or ancestry state, whether a transaction copied in from another tree or this "
             "tree's own after it moved to another filesystem, was restored from a backup or was remounted under "
-            "another device number, each of which changes the identity its journal recorded; such a moved, "
-            "restored or remounted tree also refuses its own next phase and its prior-run and archival "
-            "admissions, which the operator resolves by re-adopting the tree, not by clearing".format(
+            "another device number, each of which changes the identity its journal recorded".format(
                 "records no binding to this product root" if recorded is None else
                 "is bound to another product root (device {}, inode {}), not this one".format(
                     recorded["device"], recorded["inode"]),
                 here["device"], here["inode"]))
+
+
+def _binding_cleared_by_hand(run_id, op_id=None):
+    """The remedy every init-store refusal on a binding mismatch states (spec 14.2): nothing a later run does
+    consumes that journal state, so a fresh run's init-store refuses too, and only the operator's removal,
+    outside any OPF operation, of run `run_id`'s journal transactions, of the substrate record of `op_id`
+    when one is named, and of what that run left beneath `.working` lets a fresh run's init-store past it
+    (each site's self-test row executes exactly this)."""
+    return ("every later init-store refuses, a fresh run's included, until the operator, outside any OPF "
+            "operation, removes run {}'s journal transactions{} and what that run left beneath {}; a fresh run "
+            "is then no longer refused on it".format(
+                run_id, "" if op_id is None else ", the substrate's record of operation {}".format(op_id),
+                store.WORKING_DIRNAME))
 
 
 def journal_state(root_fd, journal_root):
@@ -2018,8 +2031,11 @@ def _reconcile_run(product_root, root_fd, taken, broke):
                 recorded = intents[name][2]
                 if recorded != here:
                     raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the open adoption transaction {!r} {} "
-                                           "(spec 14.2). Nothing was written; clearing it is the operator's "
-                                           "own act outside any OPF operation (fail-closed)".format(
+                                           "(spec 14.2). Nothing was written; a later reconcile refuses the "
+                                           "same way and every run refuses into reconcile until the operator, "
+                                           "outside any OPF operation, removes that transaction from the "
+                                           "journal, after which reconcile finds nothing to reconcile "
+                                           "(fail-closed)".format(
                                                name, _binding_mismatch_said(recorded, here)))
             stage[0] = "prelock"
             if owner is not None and not _journal.owner_confirmed_dead(owner):
@@ -2280,7 +2296,9 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
     recorded = _recorded_binding(intent.get("header") if isinstance(intent, dict) else None)
     if recorded != here:
         raise AdoptApplyError("phase {!r} needs the run's COMMITTED base transaction, and {!r} {}, so it is "
-                              "never this phase's committed base (spec 14.2); nothing written "
+                              "never this phase's committed base (spec 14.2): this run's phases refuse here every "
+                              "time, and removing that transaction leaves them no base at all, while a fresh "
+                              "run's phases extend the base that run writes here; nothing written "
                               "(fail-closed)".format(phase, run_id, _binding_mismatch_said(recorded, here)))
     ops = intent.get("ops", []) if isinstance(intent, dict) else []
     published = next(((op.get("poststate") or {}).get("content-sha256") for op in ops
@@ -3832,9 +3850,10 @@ def _init_store_prior_committed_ops(jr_fd, journal_root, prior, here):
         recorded = _recorded_binding(intent.get("header") if isinstance(intent, dict) else None)
         if recorded != here:
             raise AdoptApplyError("prior run {}'s committed transaction {!r} {}, so the artefacts it created "
-                                  "are never admitted as that run's committed work (spec 14.2); nothing "
+                                  "are never admitted as that run's committed work (spec 14.2): {}; nothing "
                                   "written (fail-closed)".format(prior, name,
-                                                                 _binding_mismatch_said(recorded, here)))
+                                                                 _binding_mismatch_said(recorded, here),
+                                                                 _binding_cleared_by_hand(prior)))
         ops = intent.get("ops") if isinstance(intent, dict) else None
         if not isinstance(ops, list):
             continue
@@ -3916,9 +3935,10 @@ def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_
         recorded = _recorded_binding(_journal._first(frames, _journal.F_INTENT).get("header"))
         if recorded != here:
             raise AdoptApplyError("prior run {}'s rolled-back init-store transaction {!r} {}, so that run's "
-                                  "artefacts are never admitted as its committed work (spec 14.2); nothing "
+                                  "artefacts are never admitted as its committed work (spec 14.2): {}; nothing "
                                   "written (fail-closed)".format(prior, txn,
-                                                                 _binding_mismatch_said(recorded, here)))
+                                                                 _binding_mismatch_said(recorded, here),
+                                                                 _binding_cleared_by_hand(prior)))
         if _verify_bundle_at(root_fd, prior, evidence_home_rel(prior)).status != store.VALID:
             continue
         try:
@@ -3983,9 +4003,11 @@ def _init_store_archival_committed(root_fd, jr_fd, journal_root, source_path, di
                 recorded = _recorded_binding(intent.get("header"))
                 if recorded != here:
                     raise AdoptApplyError("the archival transaction {!r} of the occupying file {} {}, so it "
-                                          "never proves that file's archival (spec 14.2); nothing written "
+                                          "never proves that file's archival (spec 14.2): {}; nothing written "
                                           "(fail-closed)".format(txn_dir.name, source_path,
-                                                                 _binding_mismatch_said(recorded, here)))
+                                                                 _binding_mismatch_said(recorded, here),
+                                                                 _binding_cleared_by_hand(
+                                                                     txn_dir.name.split(".", 1)[0])))
                 return True
     except (_journal.JournalError, OSError) as exc:
         raise AdoptApplyError("cannot search the adoption journal for the occupying file's "
@@ -4238,10 +4260,11 @@ def _init_store_orphan_or_refuse(product_root, root_fd, jr_fd, journal_root, rec
     recorded = _recorded_binding(intent["header"])
     if recorded != here:
         raise AdoptApplyError("the rolled-back init-store transaction {!r} that names the recorded "
-                              "operation {} {}, so that record is never discarded; clearing it is the "
-                              "operator's own act outside any OPF operation (spec 14.2); nothing "
+                              "operation {} {}, so that record is never discarded (spec 14.2): {}; nothing "
                               "written (fail-closed)".format(txn_dir.name, record.op_id,
-                                                             _binding_mismatch_said(recorded, here)))
+                                                             _binding_mismatch_said(recorded, here),
+                                                             _binding_cleared_by_hand(
+                                                                 txn_dir.name.split(".", 1)[0], record.op_id)))
     for op in intent.get("ops", []):
         try:
             present = _journal._lstat_contained(root_fd, op.get("path")) is not None
@@ -15395,6 +15418,31 @@ def _reconcile_binding_self_test(check):
         check("reconcile-own-transaction-still-recovers",
               got is None and (rid, "rolled-back") in outcomes and product(t1) == prestate
               and state(t1) == "rolled-back", (got, outcomes))
+        # The remedy the refusal states, executed: without it a later reconcile refuses the same way and a fresh
+        # run refuses into reconcile; once the operator removes that transaction from the journal by hand,
+        # reconcile finds nothing to reconcile and the fresh run commits (red against a refusal that names another
+        # remedy, or a reconcile that still refuses with the transaction gone).
+        fresh = mint_run_id(datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc), "00000000000000aa")
+
+        def fresh_run(root):
+            try:
+                return _st_run_adopt_transaction(root, fresh, lambda ops: ops.create(
+                    evidence_home_rel(fresh) + "/note.md", b"a fresh run's note\n")), None
+            except AdoptApplyError as exc:
+                return None, str(exc)
+
+        again, said_again = refusal_of(t2)
+        _txn, refused_fresh = fresh_run(t2)
+        check("reconcile-copied-in-refusal-stands-without-its-remedy",
+              again == RECONCILE_UNCLASSIFIABLE and said_again == why
+              and "removes that transaction from the journal" in (why or "")
+              and "must be reconciled" in (refused_fresh or "") and state(t2) == "open", (said_again, refused_fresh))
+        shutil.rmtree(_journal_root(t2) / rid)
+        got, outcomes = refusal_of(t2)
+        txn, refused_fresh = fresh_run(t2)
+        check("reconcile-copied-in-transaction-removed-by-hand-resolves",
+              got is None and outcomes == [] and txn == fresh and refused_fresh is None,
+              (got, outcomes, refused_fresh))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = _st_fixture(temp)
         with mock.patch.dict(globals(), dict(_root_binding=lambda root_fd: None)):
@@ -15447,6 +15495,28 @@ def _committed_base_binding_self_test(check):
               and _st_lock_free(t2), why)
         why, txn = phase_of(t1)
         check("phase-own-base-still-admits", why is None and txn == rid + ".completion", why)
+        # The remedy the refusal states, executed: the copied run's phase refuses the same way every time and,
+        # with its base transaction removed by hand, refuses for having no base at all; a fresh run in the same
+        # tree commits its own base and its phase extends it (red against a refusal that names another remedy,
+        # or a gate that refuses the fresh run's phase too).
+        fresh = mint_run_id(datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc), "00000000000000aa")
+        again, _txn = phase_of(t2)
+        try:
+            base_txn = _st_run_adopt_transaction(t2, fresh, lambda ops: ops.create(
+                evidence_home_rel(fresh) + "/note.md", b"a fresh run's note\n"))
+            fresh_txn = _st_run_adopt_transaction(t2, fresh, lambda ops: ops.create(
+                evidence_home_rel(fresh) + "/completion/result.toml", b"green = true\n"), phase="completion")
+            fresh_why = None
+        except AdoptApplyError as exc:
+            base_txn = fresh_txn = None
+            fresh_why = str(exc)
+        shutil.rmtree(_journal_root(t2) / rid)
+        gone, _txn = phase_of(t2)
+        check("phase-copied-in-base-remedy-is-a-fresh-run",
+              "is bound to another product root" in (again or "")
+              and "a fresh run's phases extend the base that run writes here" in (again or "")
+              and base_txn == fresh and fresh_txn == fresh + ".completion"
+              and "and none exists" in (gone or ""), (again, fresh_why, gone))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = _st_fixture(temp)
         with mock.patch.dict(globals(), dict(_root_binding=lambda root_fd: None)):
@@ -17461,6 +17531,27 @@ def _init_store_git_checks(check, ctx, refused):
             for path in reversed(made):
                 os.chmod(path, 0o755)
 
+        def cleared_by_hand(root, runs, records=()):
+            """The operator's own removal, outside any OPF operation, that an init-store refusal on a binding
+            mismatch names (_binding_cleared_by_hand): each run's journal transactions, each named substrate
+            record, and what the runs left beneath `.working`, which in these fixtures is everything there but
+            the journals home."""
+            journal = _journal_root(root)
+            for name in os.listdir(journal):
+                if any(name == r or name.startswith(r + ".") for r in runs):
+                    shutil.rmtree(journal / name)
+            for op_id in records:
+                shutil.rmtree(os.path.join(init_op._ops_dir(root), op_id))
+            working = os.path.join(root, store.WORKING_DIRNAME)
+            for name in os.listdir(working):
+                path = os.path.join(working, name)
+                if name == store.JOURNALS_DIRNAME:
+                    continue
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+
         # The probe: the SUBSTRATE itself publishes one store in a scratch repo, and the
         # planner-bindable view digests are harvested from it (each view is a pure function of the
         # planned sources, so the harvest is repository-independent; the probe never meets the
@@ -17916,6 +18007,22 @@ def _init_store_git_checks(check, ctx, refused):
               and refused(res, "nothing written") and init_op._tree_snapshot(twin) == whole
               and op_ids(twin) == partial and store.resolve_store(twin).status != store.RESOLVED,
               observed=res.findings)
+        # The remedy the refusal states, executed: without it a later fresh recover dispatch refuses the same way;
+        # once the operator removes the killed run's journal transactions, the named record and what that run left
+        # beneath `.working` (in a copy of the twin, bound to neither), a fresh run publishes (red against a
+        # refusal that names another remedy, or a scrub gate the removal does not clear).
+        killed = [n.split(".", 1)[0] for n in os.listdir(_journal_root(twin)) if n.endswith("." + INIT_STORE_PHASE)]
+        again = dispatch(row, ctx(twin, run_id=rid(), recover=True))
+        cleared = twin + "-cleared"
+        shutil.copytree(twin, cleared, symlinks=True)
+        cleared_by_hand(cleared, killed, partial)
+        res = dispatch(row, ctx(cleared, run_id=rid(), recover=True))
+        check("init-store-copied-in-orphan-remedy-resolves",
+              len(killed) == 1 and refused(again, "is bound to another product root")
+              and refused(again, "removes run {}'s journal transactions, the substrate's record of operation {} and "
+                          "what that run left beneath".format(killed[0], partial[0]))
+              and op_ids(twin) == partial and res.status == valid
+              and store.resolve_store(cleared).status == store.RESOLVED, observed=(again.findings, res.findings))
         whole = init_op._tree_snapshot(root)
         with mock.patch.dict(globals(), dict(_recorded_binding=lambda header: None)):
             res = dispatch(row, ctx(root, run_id=rid(), recover=True))
@@ -17935,8 +18042,9 @@ def _init_store_git_checks(check, ctx, refused):
         # interrupted and reconciled run, with a foreign `.working` file planted, refuses at the admission
         # preflight once the scrub discarded the record, and names that record and what else the scrub removed,
         # in removal order: the killed holder's stale lease and active record, which the mutex acquisition's
-        # explicit recovery removes before the scrub observes either, then the record (red against a refusal
-        # that keeps its "nothing written" once the scrub ran, or that drops the lease or the active record).
+        # explicit recovery removes before the scrub observes either, then the machine directory the operation
+        # created, then the record (red against a refusal that keeps its "nothing written" once the scrub ran,
+        # that drops the lease or the active record, or that names them after the scrub's own cleanup).
         root = init_op._plain_repo(os.path.join(base, "killscrub"), env)
         rc = _init_store_child(root, env, "source:2", row, ctx(root, run_id=rid()))
         partial = op_ids(root)
@@ -17948,6 +18056,8 @@ def _init_store_git_checks(check, ctx, refused):
         said = " ".join(res.findings)
         named = [said.find(n) for n in (init_op.LEASE_RELPATH + " (a confirmed-dead holder's stale store lease",
                                         "the operation mutex's stale active record " + _opf_oplock.ACTIVE_NAME,
+                                        "{}/{} (a directory the operation created)".format(
+                                            store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR),
                                         "record of operation " + partial[0])]
         check("init-store-post-scrub-refusal-names-what-the-scrub-removed",
               "rolled-back" in [outcome for _t, outcome in outcomes] and stale == [True, True]
@@ -17978,6 +18088,68 @@ def _init_store_git_checks(check, ctx, refused):
               and "the coupled-init substrate's operation mutex WROTE" in said
               and "the operation mutex's stale active record " + _opf_oplock.ACTIVE_NAME in said
               and not os.path.lexists(active) and op_ids(root) == [], observed=said)
+        # A mutex acquisition that fails AFTER its explicit recovery removed a stale record still has that removal
+        # named, on both acquisitions: the recover dispatch's scrub, whose acquisition removes the killed holder's
+        # stale lease and then fails (red against a scrub that drops the failed acquisition's report), and the
+        # substrate's own, which removes a dead holder's active record and then fails (red against a
+        # run_init_operation that drops the report of its failed acquisition).
+        real_recover_stale = _opf_oplock._recover_stale
+
+        def removed_then_failed(*args, **kwargs):
+            real_recover_stale(*args, **kwargs)
+            raise _opf_oplock.OpLockError("a synthetic failure after a stale record's removal")
+
+        root = init_op._plain_repo(os.path.join(base, "killscrubfail"), env)
+        rc = _init_store_child(root, env, "source:2", row, ctx(root, run_id=rid()))
+        left = op_ids(root)
+        outcomes = reconcile(root) if rc != 0 and len(left) == 1 else []
+        with mock.patch.object(_opf_oplock, "_recover_stale", removed_then_failed):
+            res = dispatch(row, ctx(root, run_id=rid(), recover=True))
+        said = " ".join(res.findings)
+        check("init-store-scrub-mutex-failure-names-what-it-removed",
+              "rolled-back" in [outcome for _t, outcome in outcomes]
+              and refused(res, "cannot take the substrate operation mutex to scrub")
+              and "a synthetic failure after a stale record's removal" in said and "recovery scrub" in said
+              and init_op.LEASE_RELPATH + " (a confirmed-dead holder's stale store lease" in said
+              and "nothing written" not in said and not os.path.lexists(os.path.join(root, init_op.LEASE_RELPATH))
+              and op_ids(root) == left, observed=said)
+        root = init_op._plain_repo(os.path.join(base, "mutexrecoverfail"), env)
+        _opf_oplock.release_init_holder(_opf_oplock.acquire_init_operation(root, init_op.OPERATION))
+        os.makedirs(os.path.dirname(os.path.join(root, init_op.LEASE_RELPATH)))
+        dead_pid, dead_start = _opf_oplock._st_reaped_child()
+        _opf_oplock._st_write_active_owned(root, dead_pid, dead_start, os.uname().nodename,
+                                           op_id="mutexrecoverfail-op-id")
+        shutil.rmtree(os.path.join(root, store.WORKING_DIRNAME))
+        active = os.path.join(_opf_oplock._st_ctl_dir(root), _opf_oplock.ACTIVE_NAME)
+        planted = os.path.lexists(active)
+        with mock.patch.object(_opf_oplock, "_recover_stale", removed_then_failed):
+            res = dispatch(row, ctx(root, run_id=rid(), recover=True))
+        said = " ".join(res.findings)
+        check("init-store-substrate-mutex-failure-names-what-it-removed",
+              planted and refused(res, "a synthetic failure after a stale record's removal")
+              and "the coupled-init substrate's operation mutex WROTE" in said
+              and "the operation mutex's stale active record " + _opf_oplock.ACTIVE_NAME in said
+              and not os.path.lexists(active) and op_ids(root) == [], observed=said)
+        # The removal order, pinned on the namers themselves: the mutex acquisition's staging leftovers before its
+        # stale records, as it removes them (red against the two lists swapped), and a refusal names the scrub's
+        # removals before those of the substrate acquisition that runs after the scrub (red against the two
+        # report blocks swapped).
+
+        class _Report:
+            staging_removed = ("active record staging leftover x",)
+            recovered = ("lease", "active record")
+
+        said = _init_mutex_removed(_Report())
+        check("init-store-mutex-removals-named-in-removal-order",
+              len(said) == 3 and said[0].startswith("the operation mutex's active record staging leftover x")
+              and said[1].startswith(init_op.LEASE_RELPATH + " (a confirmed-dead holder's stale store lease")
+              and said[2].startswith("the operation mutex's stale active record"), observed=said)
+        said = _init_store_left_said("a synthetic refusal; nothing written (fail-closed)", [], [],
+                                     scrubbed=["the scrub's removal"], recovered=["the acquisition's removal"])
+        check("init-store-refusal-names-scrub-before-substrate-acquisition",
+              0 <= said.find("recovery scrub") < said.find("the scrub's removal")
+              < said.find("operation mutex WROTE") < said.find("the acquisition's removal")
+              and "nothing written" not in said, observed=said)
         # A refusal never sweeps around a transaction directory it cannot observe: with only the lstat of this
         # run's transaction directory failing, the refusal keeps the journal directories the run's preparation
         # created and names why (red against an unobservable directory read as absent and swept).
@@ -18489,6 +18661,19 @@ def _init_store_git_checks(check, ctx, refused):
         res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
         check("init-store-own-archival-intent-still-admitted", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED, observed=res.findings)
+        # The remedy the refusal states, executed: without it the same run refuses the same way and a fresh run
+        # refuses too; once the operator removes the run's journal transactions and what it left beneath
+        # `.working`, a fresh run publishes (red against a refusal that names another remedy).
+        again = dispatch(row, ctx(twin, run_id=run, sources=[occ_row]))
+        fresh = dispatch(row, ctx(twin, run_id=rid()))
+        cleared_by_hand(twin, [run])
+        res = dispatch(row, ctx(twin, run_id=rid()))
+        check("init-store-copied-in-archival-remedy-resolves",
+              refused(again, "the archival transaction")
+              and refused(again, "removes run {}'s journal transactions and what that run left beneath".format(run))
+              and fresh.status == store.CANNOT_EVALUATE and res.status == valid
+              and store.resolve_store(twin).status == store.RESOLVED,
+              observed=(again.findings, fresh.findings, res.findings))
         root = init_op._plain_repo(os.path.join(base, "archunbound"), env)
         plant(root, manifest_rel, occ_bytes)
         run = rid()
@@ -18527,6 +18712,17 @@ def _init_store_git_checks(check, ctx, refused):
         res = dispatch(row, ctx(root, run_id=r2))
         check("init-store-own-prior-run-intent-still-admitted", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED, observed=res.findings)
+        # The remedy the refusal states, executed: without it another fresh run refuses the same way; once the
+        # operator removes the prior run's journal transactions and what it left beneath `.working`, a fresh run
+        # publishes (red against a refusal that names another remedy, such as a fresh run alone).
+        again = dispatch(row, ctx(twin, run_id=rid()))
+        cleared_by_hand(twin, [r1])
+        res = dispatch(row, ctx(twin, run_id=rid()))
+        check("init-store-copied-in-prior-run-remedy-resolves",
+              refused(again, "rolled-back init-store transaction") and refused(again, "is bound to another product root")
+              and refused(again, "removes run {}'s journal transactions and what that run left beneath".format(r1))
+              and res.status == valid and store.resolve_store(twin).status == store.RESOLVED,
+              observed=(again.findings, res.findings))
         root = init_op._plain_repo(os.path.join(base, "priorunbound"), env)
         plant(root, manifest_rel, occ_bytes)
         r1 = rid()
@@ -18587,6 +18783,15 @@ def _init_store_git_checks(check, ctx, refused):
               and not refused(res, "rolled-back init-store transaction")
               and snap(twin) == before and op_ids(twin) == []
               and store.resolve_store(twin).status != store.RESOLVED, observed=res.findings)
+        # The remedy the refusal states, executed (as for the copied init-store INTENT above).
+        again = dispatch(row, ctx(twin, run_id=rid()))
+        cleared_by_hand(twin, [r1])
+        res = dispatch(row, ctx(twin, run_id=rid()))
+        check("init-store-copied-in-prior-committed-remedy-resolves",
+              refused(again, "committed transaction {!r}".format(r1))
+              and refused(again, "removes run {}'s journal transactions and what that run left beneath".format(r1))
+              and res.status == valid and store.resolve_store(twin).status == store.RESOLVED,
+              observed=(again.findings, res.findings))
 
         # CRASH AT EVERY POINT (round 2): the transaction mkdir, the INTENT, a member's staging
         # write (machine-dir and root-level), between a member's link and its staging unlink,
