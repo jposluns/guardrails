@@ -327,8 +327,9 @@ def _filter_neutralizing_config(git, store_root, timeout=_GIT_TIMEOUT_S):
     clean/process filters and MUST pass these overrides to _run_git too; a verb that never compares worktree content
     (rev-parse, ls-files, config, cat-file, remote, show HEAD:<blob>) does not and must not pay the cost. A
     residual TOCTOU remains: enumeration and the status are two calls, so a driver ADDED to .git/config
-    between them could exec on the status. The upgrade's dirty-probe runs as a read-only gate BEFORE the
-    single-writer lease is claimed (opf.py step 3 precedes step 4), so the lease does NOT bound this window;
+    between them could exec on the status. A writer's dirty-probe runs as a read-only gate BEFORE the
+    single-writer lease is claimed (opf record's step 6 probes, then acquires), so the lease does NOT
+    bound this window;
     the mitigation is that adding a driver between the two calls requires an adversary with concurrent write
     access to the store's .git/config, who could already rewrite HEAD (or the driver) directly, so only a raw
     filter-free reimplementation (rejected for its text/eol regression) would close it fully."""
@@ -1017,13 +1018,7 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                          _MANIFEST_NAME, notes)
     if manifest is None:
         return None
-    # The prior committed snapshot may predate the OPFiles base-table rename: during `opf upgrade` the
-    # working tree is already [opf] while HEAD is still the legacy [devprocess] store. Read the base under
-    # the current token, falling back to the retired one, so an across-time comparison against a legacy
-    # prior reconstructs (spec 9.2) instead of falsely omitting the whole prior.
     base = manifest.get(_opf_store.STANDARD_TOKEN)
-    if not isinstance(base, dict):
-        base = manifest.get(_opf_store.PRIOR_STANDARD_TOKEN)
     layout = base.get("layout") if isinstance(base, dict) else None
     if layout not in _LAYOUTS:
         notes.append("prior: HEAD manifest declares layout {!r}, which is not a recognized store layout; "
@@ -1253,7 +1248,8 @@ def self_test_isolated():
     """Exercise gather over synthetic git repositories built in a tempdir (removed in a finally, for
     test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes; a prior
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
-    _record_digest over the same committed content); an unborn HEAD -> the honest empty prior; a
+    _record_digest over the same committed content); a HEAD manifest whose base table is named [devprocess]
+    rather than [opf] -> the whole prior OMITTED with a note; an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
     "untracked"; the imported baseline of a homes-2 HEAD that ACTIVATES the series under the homes-2 test
     toggle (the member absent while the series is inactive, the committed leaf rows, worklog entries
@@ -1267,8 +1263,10 @@ def self_test_isolated():
     worklog.toml or the archive/ listing cannot be read, when the HEAD manifest's worklog generation is
     unreadable, when the archive/, the active worklog.toml or, at generation 2, the worklog/ is committed as
     another entry type, and, at generation 2, when the worklog/ listing cannot be read or holds a file or a
-    directory that is not a worklog entry. Judged ONLY on gather's RETURNED structure (never by grepping
-    git's stdout for verdicts).
+    directory that is not a worklog entry; and the bounded capture feeding 128 KiB of stdin to a child that
+    first writes 128 KiB, without deadlock, run in a separate interpreter under a 30 s deadline so a
+    deadlocking transport is red rather than a hang. Judged ONLY on gather's RETURNED structure (never by
+    grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error or when git is not on PATH: every vector
     gathers from a git fixture, so without git none of them runs, which is cannot-evaluate, never a
     clean exit a gate would read as the vectors having passed."""
@@ -1339,6 +1337,34 @@ def self_test_isolated():
         globals()["_run_git"] = _saved_run_git
         tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(_prev_digits)
+
+    # The bounded capture feeds stdin while it drains stdout and stderr (check_ignored's NUL-framed
+    # transport): a child that writes 128 KiB, more than a pipe buffer, before it reads its own 128 KiB of
+    # input completes within the bound rather than deadlocking against a blocked stdin write. The capture
+    # runs in a separate interpreter under its own deadline, which also covers the stdin write: a transport
+    # that writes all of stdin before it drains blocks outside the capture's own bound, so without this
+    # deadline the self-test would hang rather than report the check red.
+    probe = "\n".join((
+        "import sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "import _opf_observe as observe",
+        "body = (\"import sys; sys.stdout.buffer.write(b'o' * 131072); sys.stdout.buffer.flush(); \"",
+        "        \"sys.stdout.buffer.write(sys.stdin.buffer.read())\")",
+        "got = observe._capture_bounded([sys.executable, '-I', '-B', '-c', body], observe._scrubbed_env(), 10,",
+        "                               524288, input_bytes=b'i' * 131072)",
+        "drained = got.completed and got.rc == 0 and got.out == b'o' * 131072 + b'i' * 131072",
+        "sys.stdout.write('drained' if drained else 'not drained')",
+    ))
+    # 30 s covers the interpreter's start, its imports and the capture's own 10 s bound.
+    here = str(Path(__file__).resolve().parent)
+    try:
+        transport = subprocess.run([sys.executable, "-I", "-B", "-c", probe, here],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=_scrubbed_env(), timeout=30)
+        drained = transport.returncode == 0 and transport.stdout == b"drained"
+    except subprocess.TimeoutExpired:
+        drained = False
+    check("bounded-stdin-transport-drains", drained)
 
     machine_rel = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
 
@@ -1450,6 +1476,23 @@ def self_test_isolated():
                 done_idx = tomllib.loads(fh.read().decode("utf-8"))
             expected = _opf_check._record_digest(done_idx["record"][0])
             check("prior-digest-matches-engine", prior.get("digests", {}).get("DN-1") == expected)
+
+        # 1b. The prior reads its layout from the [opf] base table alone: a HEAD manifest whose base table is
+        # named [devprocess] instead, the store otherwise reconstructable, declares no layout there, so the
+        # WHOLE prior is omitted with its note rather than read from that other table.
+        devprocess_repo = base / "devprocess-head"
+        devprocess_repo.mkdir()
+        _git_setup(devprocess_repo, home, "init")
+        _write_store(devprocess_repo)
+        devprocess_manifest = devprocess_repo / machine_rel / _MANIFEST_NAME
+        devprocess_manifest.write_text(devprocess_manifest.read_text(encoding="utf-8").replace(
+            '[opf]\nstandard = "opf"\n', '[devprocess]\nstandard = "devprocess"\n'), encoding="utf-8")
+        _git_setup(devprocess_repo, home, "add", "-A")
+        _git_setup(devprocess_repo, home, "commit", "-m", "a [devprocess] base table at HEAD")
+        obs, notes = gather(_Res(devprocess_repo, machine_rel))
+        check("prior-devprocess-base-table-omitted",
+              "prior" not in obs and any("declares layout None, which is not a recognized store layout" in n
+                                         for n in notes))
 
         # 2. A repository with the manifest present on disk but NOT committed -> "untracked".
         untracked_repo = base / "untracked"
@@ -1818,11 +1861,13 @@ def self_test_isolated():
             print("opf observe self-test: FAIL: {}".format(f), file=sys.stderr)
         return 1
     print("opf observe self-test: PASS (tracked/untracked; 0/1/multiple remotes; prior from a committed "
-          "HEAD with an engine-matching immutable-body digest; unborn HEAD -> empty prior; a non-repo dir "
+          "HEAD with an engine-matching immutable-body digest; a [devprocess] HEAD manifest omits the whole "
+          "prior; unborn HEAD -> empty prior; a non-repo dir "
           "omits remote and prior with a note; a homes-2 HEAD's imported baseline, worklog entries "
           "included, and an unreadable leaf or tree omitting the whole prior; an inactive HEAD carries no "
           "baseline member; the ids HEAD held, worklog "
-          "and archive included, and an unreadable or malformed archive or worklog omitting them alone)")
+          "and archive included, and an unreadable or malformed archive or worklog omitting them alone; "
+          "bounded stdin transport)")
     return 0
 
 

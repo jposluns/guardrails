@@ -7,13 +7,12 @@ unstaged. F19 is a separate hypothetical-membership predicate, not a v1 activati
 It covers literal source membership only; index modes, conflict stages, intent-to-add,
 expansion and installation require the later staging implementation.
 
-Compatibility checks cover supplied manifest/provenance bytes and snapshot deltas,
-not physical-store health or snapshot completeness. No CLI exit is promoted to an
-InitResult. Existing pure validators retain the detailed payload/schema authority.
+Compatibility checks cover supplied manifest/provenance bytes, not physical-store
+health. No CLI exit is promoted to an InitResult. Existing pure validators retain
+the detailed payload/schema authority.
 """
 import base64
 import binascii
-import copy
 import functools
 import sys
 import tomllib
@@ -116,7 +115,10 @@ def _membership(plan):
     _require(len(sets["E"]) <= 1 and all(e["path"] == operation.CHANGELOG_RELPATH
                                       for e in sets["E"]),
              "UNCLASSIFIED", "E", "only a preserved CHANGELOG.md is permitted")
-    roster = set(operation.BOOTSTRAP_SOURCE_ROSTER) | {operation.PROVENANCE_RELPATH}
+    # The roster of the plan's own generation: operation.plan_generation compares the manifest
+    # payload with the builders' bytes, so an unmatched or malformed one reads as generation 1.
+    roster = set(operation.bootstrap_source_roster(operation._plan_manifest_model(plan))) \
+        | {operation.PROVENANCE_RELPATH}
     if not sets["E"]:
         roster.add(operation.CHANGELOG_RELPATH)
     sources = [e["path"] for e in sets["S"]]
@@ -264,30 +266,3 @@ def _compatibility(manifest, provenance):
 def validate_compatibility(raw_manifest, *, provenance=None):
     """Absent provenance is valid. None explicitly denotes absence, not a failed read."""
     return _compatibility(_manifest(raw_manifest), provenance)
-
-
-def _snapshot(value, location):
-    _require(type(value) is dict and MANIFEST_PATH in value,
-             "INPUT", location, "expected a file snapshot containing the manifest")
-    _require(all(type(p) is str and contract._bad_relpath(p) is None
-                 and type(raw) is bytes for p, raw in value.items()),
-             "INPUT", location, "expected canonical relative paths mapped to bytes")
-
-
-@_validation
-def validate_upgrade_delta(before, after):
-    """Check a supplied 1.1.0 -> 1.2.0 snapshot delta; neither upgrade nor inventory I/O."""
-    _snapshot(before, "before")
-    _snapshot(after, "after")
-    old, new = _manifest(before[MANIFEST_PATH]), _manifest(after[MANIFEST_PATH])
-    _require(type(old.get("opf")) is dict
-             and old["opf"].get("spec_version") == "1.1.0",
-             "VERSION", "before", "expected the 1.1.0 upgrade origin")
-    expected = copy.deepcopy(old)
-    expected["opf"]["spec_version"] = "1.2.0"
-    _require(new == expected, "UPGRADE", "manifest", "only spec_version may change")
-    _require(set(before) == set(after)
-             and all(before[p] == after[p] for p in before if p != MANIFEST_PATH),
-             "UPGRADE", "files", "no files or counters may change; never invent init.toml")
-    _compatibility(new, after.get(operation.PROVENANCE_RELPATH))
-    return new

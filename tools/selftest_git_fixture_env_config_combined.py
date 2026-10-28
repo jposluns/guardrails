@@ -314,8 +314,6 @@ def _combined_lane(base):
              "tools/selftest_ci_status.py"),
             ("config/check_opf_init/rc", "config/check_opf_init/hooks",
              "opf/tools/check_opf_init.py"),
-            ("config/check_opf_upgrade/rc", "config/check_opf_upgrade/hooks",
-             "opf/tools/check_opf_upgrade.py"),
             ("config/check_opf_doctor/rc", "config/check_opf_doctor/hooks",
              "opf/tools/check_opf_doctor.py"),
             ("config/_opf_init_operation/rc", "config/_opf_init_operation/hooks",
