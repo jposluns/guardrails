@@ -29,13 +29,14 @@ THREAT MODEL (carried here per the op row's pin; the gates-manifest residue repe
 whatever the registration file registers executes with the adopter's FULL USER AUTHORITY on the
 platform's next load, and the file usually already carries the adopter's own security controls.
   1. Malicious or wrong registration content (privilege escalation). A plan row must never register
-     arbitrary command text. `plugin_entry` is a token naming a member of the digest-verified
-     installed pack (the plant-governance trust gate); until that trust gate lands, the op-row
-     grammar (`_opf_adopt._is_hook_entry`) holds the token to ONE shell word of portable filename
-     characters, so a plan row cannot carry arguments or shell syntax (that one word can still name
-     any program on the adopter's PATH or any repository file, which only the trust gate's
-     installed-pack check closes); the merge inserts exactly that pinned token and nothing else;
-     the exact post-merge bytes are pinned by the plan's `new_digest`, which the
+     arbitrary command text. The op-row grammar (`_opf_adopt._is_hook_entry`) admits exactly one
+     `plugin_entry`, `_opf_adopt.HOOK_COMMAND`: the isolated interpreter running the deny hook at
+     `_opf_adopt.HOOK_MEMBER`, whose path comes from the platform's project directory, so no other
+     repository file is chosen; the interpreter is the first python3 on PATH where the platform
+     runs the command, which this grammar does not pin; the plan validator refuses a registration
+     whose plan plants no file at HOOK_MEMBER, and plant-governance plants that file only from its own
+     digest-verified pack member (the trust gate); the merge inserts exactly that command and
+     nothing else; the exact post-merge bytes are pinned by the plan's `new_digest`, which the
      single approval binds transitively through `plan_digest`, so the adopter's one informed yes
      covers the precise executable registration byte-exact. The approval presentation must quote
      what will execute and when (on the platform's next load, not at apply).
@@ -1041,6 +1042,20 @@ def self_test():
     # personal settings.local.json, another platform's settings file, an unrelated JSON file, a
     # case variant, a re-rooted spelling and a non-string each refuse.
     check("registration-path-allowlist-pinned", REGISTRATION_PATHS == (".claude/settings.json",))
+    check("registration-path-is-hook-registration", REGISTRATION_PATHS == (schema.HOOK_REGISTRATION,))
+    # The reviewed settings template (_opf_adopt.SETTINGS_TEMPLATE_MEMBER) is exactly this merge of the fixed
+    # command into an empty settings table, and merging the command into it again is the verified no-op.
+    # The template is read here, before the purity harness below is armed.
+    template_rel = schema.SETTINGS_TEMPLATE_MEMBER[len(schema.PACK_MIRROR_ROOT) + 1:]
+    try:
+        template = (Path(__file__).resolve().parent.parent / template_rel).read_bytes()
+    except OSError:
+        template = None
+    pinned = merge_registration(b"{}", schema.HOOK_COMMAND)
+    again = merge_registration(template, schema.HOOK_COMMAND) if template is not None else None
+    check("settings-template-pinned", template is not None and pinned.status is VALID
+          and template == pinned.new_bytes and again.status is VALID and again.changed is False
+          and again.new_bytes == template)
     check("registration-path-canonical-op-supported",
           supported_registration_path(schema.canonical_op("enable-hook")["registration_path"]))
     for bad in (".claude/settings.local.json", ".gemini/settings.json", ".cursor/hooks.json",

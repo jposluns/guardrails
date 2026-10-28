@@ -34,7 +34,7 @@ import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus 
 def main():
     root = repo_root()
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
     except (ManifestError, OSError) as exc:
         # OSError too: an unreadable manifest file, or an existing-but-unlistable standards dir
         # (load_manifests raises rather than reading it as empty), is a read error, not a clean skip.

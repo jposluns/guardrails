@@ -681,9 +681,9 @@ def _self_test_checks():
         rows = [dict(op="init-store", store_root=".", members=[dict(
                     path=mrel + "/manifest.toml", digest=digest(manifest_text.encode("utf-8")))]),
                 dict(op="render-views", store_root=".",
-                     members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
-                schema.enforcement_install_op(bindings["enforcement"])]
-        # The opf/ mirror the pack row plants lies outside every walked root, so its absence is a declared
+                     members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views])]
+        rows += schema.enforcement_install_ops(bindings["enforcement"])
+        # The opf/ mirror the plant rows fill lies outside every walked root, so its absence is a declared
         # target beside each explicit move destination.
         sheet = dict(sources=sorted(srcs), targets=[schema.PACK_MIRROR_ROOT] + sorted(dests.values()),
                      product="opf",
@@ -1760,6 +1760,7 @@ def _self_test_checks():
         import contextlib
         import io
         import _opf_observe
+        import _opf_oplock
         import opf as _opf_cli
 
         def git_commit_all(root):
@@ -1798,7 +1799,11 @@ def _self_test_checks():
         quiet = io.StringIO()
         ok = apply._selftest_git_commit(e2e) is not None
         with contextlib.redirect_stdout(quiet):
-            ok = ok and _opf_cli.main(["init", "--root", str(e2e)]) == 0
+            # The in-process init takes the shared init operation mutex, whose rev-parse strips
+            # every GIT_* variable; the OPF git lifecycle's PATH wrapper reasserts the
+            # system-config pins there, so this run never reads the host's system configuration.
+            ok = ok and _opf_oplock._st_with_git_lifecycle(
+                lambda: _opf_cli.main(["init", "--root", str(e2e)])) == 0
         ok = ok and git_commit_all(e2e)
         with contextlib.redirect_stdout(quiet):
             ok = ok and _opf_cli.main(["render", "--write", "--root", str(e2e)]) == 0

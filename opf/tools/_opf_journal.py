@@ -13,6 +13,7 @@ fork while using the capability. Homes 2 has no homes migration and no legacy jo
 import contextlib
 import os
 import stat
+import tomllib
 from pathlib import Path
 
 import _journal
@@ -267,10 +268,14 @@ def recover_transaction(cap, kind, run_id):
         return result
 
 
-# --- irrevocable ID reservations (homes plan PR-3): the homes-2 allocation seam's durable half ----------
+# --- irrevocable ID reservations (homes plan PR-3): the homes-2 allocation seam ---------------------------
 # One journals/<kind>/allocations/<run-id>.toml per run (spec 4.2/8.2), created BEFORE the reversible
-# journaled publication and never rewritten, whatever the run's outcome. It is read back on exactly
-# one path: a repeat call that finds the entry present judges it against the exact payload it would
+# journaled publication and never rewritten, whatever the run's outcome. The seam itself derives the
+# numbers it reserves (spec 8.2's next-ID rule): under the held capability it reads counters.toml and
+# every other reservation of every journal kind (reservation_high), and claims, per demanded counter
+# key, the demanded count above the larger of the two, so two runs never reserve the same number
+# whatever their callers planned. Each reservation is read back by that scan, and the run's own
+# entry by a repeat call that finds it present and judges it against the exact payload it would
 # publish. A failure inside publication (a failed directory fsync included) removes the just-linked
 # entry, leaving no reservation rather than a non-durable one, EXCEPT when that cleanup cannot
 # prove the entry exclusively its own or cannot remove it (a failed stat or unlink, or a link
@@ -309,6 +314,216 @@ def _check_claims(kind, claims):
             "id reservation claims must be a non-empty map of counter key (a record namespace, "
             "plus a quoted \"imported:<NS>\" key for an import-engine kind) to the run's new "
             "high-water (an integer >= 1 and at most 2**63 - 1, TOML's integer range)")
+
+
+def _check_demand(kind, demand):
+    """Validate a reservation request's demand purely, before any capability use: a non-empty map of
+    counter key to how many ids the run takes under that key (an int in 1.._CLAIM_VALUE_MAX; a bool
+    is not an int here). The admitted keys are _check_claims' keys for the reserving kind (the one
+    shared key validator, _opf_schema._is_counter_key)."""
+    imported = kind in _IMPORTED_SERIES_KINDS
+    if (not isinstance(demand, dict) or not demand
+            or not all(_opf_schema._is_counter_key(key, imported)
+                       and type(n) is int and 1 <= n <= _CLAIM_VALUE_MAX
+                       for key, n in demand.items())):
+        raise _journal.JournalError(
+            "an id reservation demand must be a non-empty map of counter key (a record namespace, "
+            "plus a quoted \"imported:<NS>\" key for an import-engine kind) to how many ids the run "
+            "takes under it (an integer >= 1 and at most 2**63 - 1)")
+
+
+class ReservationDerivationChanged(_journal.JournalError):
+    """The claims derived under the held capability differ from the ones the caller planned and
+    passed as `expected`: another reservation or a counters change landed in between. Raised before
+    anything is written."""
+
+
+def _allocations_rel(kind):
+    """The homes-2 reservation home of one journal kind, derived from the one path authority
+    (_opf_store.allocation_record, over a placeholder run id in that kind's own run grammar): the
+    directory every run of the kind publishes its irrevocable id reservation into (spec 4.2/8.2).
+    Raises KeyError or ValueError for a kind the store grammar does not admit."""
+    placeholder = _opf_store._HOME_RUN_PREFIXES[kind] + "-00000000T000000Z-0000000000000000"
+    return _opf_store.allocation_record(kind, placeholder).rsplit("/", 1)[0]
+
+
+def _reservation_run_id(kind, entry):
+    """The run id a reservation file name binds in `kind`'s home, or None when the name is not
+    <kind-run-id>.toml (allocation_record is the one grammar authority)."""
+    if not (isinstance(entry, str) and entry.endswith(".toml")):
+        return None
+    run_id = entry[:-len(".toml")]
+    try:
+        _opf_store.allocation_record(kind, run_id)
+    except ValueError:
+        return None
+    return run_id
+
+
+def _is_reservation_garbage(kind, entry):
+    """True ONLY for a staging leftover of a reservation publication (the _opf_oplock staging pattern
+    bound to a grammar-valid reservation name of `kind`): a process that died before its exclusive link
+    published no reservation (reserve_allocation retires such a leftover as garbage under the held
+    capability), so the scan skips it, never reads it, and never removes it."""
+    head, marker, _hexpart = entry.rpartition(_opf_oplock._STAGING_MARKER)
+    return (bool(marker) and entry.startswith(".") and _opf_oplock._is_staging_name(entry, head[1:])
+            and _reservation_run_id(kind, head[1:]) is not None)
+
+
+def _read_reservation(afd, kind, entry):
+    """One reservation of `kind`, read fail-closed beneath that kind's already-open allocations
+    directory fd, returning its validated claims map: the entry bytes must equal the exact canonical
+    payload of the `kind` reservation its own name and content declare (reservation_payload: a reader
+    requires exact equality, so content naming another kind or run conflicts), so an unreadable,
+    non-regular, misnamed, malformed or conflicting entry refuses (JournalError), never a silent
+    fallback."""
+    home = _allocations_rel(kind)
+    rel = "{}/{}".format(home, entry)
+    run_id = _reservation_run_id(kind, entry)
+    if run_id is None:
+        raise _journal.JournalError("the {} allocations home {} holds {!r}, which is not an id "
+                                    "reservation (<{}-run-id>.toml) or a staging leftover of one; "
+                                    "manual intervention required (fail-closed)".format(
+                                        kind, home, entry, kind))
+    try:
+        raw, _st = _journal._read_at(afd, entry, rel)
+    except (_journal.JournalError, OSError) as exc:
+        raise _journal.JournalError("cannot read the id reservation {} ({}); fail-closed".format(rel, exc))
+    try:
+        model = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
+        raise _journal.JournalError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
+    claims = model.get("claims") if isinstance(model, dict) else None
+    operation_id = model.get("operation_id") if isinstance(model, dict) else None
+    try:
+        expected = reservation_payload(kind, run_id, operation_id, claims)
+    except _journal.JournalError as exc:
+        raise _journal.JournalError("the id reservation {} is malformed ({}); fail-closed".format(rel, exc))
+    if raw != expected:
+        raise _journal.JournalError("the id reservation {} conflicts with the exact canonical reservation "
+                                    "its name and content declare (a reservation is never rewritten, "
+                                    "spec 8.2); manual intervention required (fail-closed)".format(rel))
+    return dict(claims)
+
+
+def _kind_reservation_high(root_fd, kind, home, skip=None):
+    """The per-counter-key maximum over the reservations in one kind's allocations home `home`: an
+    absent home reads as no reservations (the empty map); an unopenable or unlistable home, and any
+    entry _read_reservation refuses, refuses. A staging leftover of the publication idiom is skipped
+    (_is_reservation_garbage): it carries no reservation. `skip`, when given, is one entry name left
+    out unread (the requesting run's own reservation, reserve_allocation)."""
+    try:
+        pfd, name = _journal._open_parent(root_fd, home)
+    except FileNotFoundError:
+        return {}
+    except (_journal.JournalError, OSError) as exc:
+        raise _journal.JournalError("cannot open the {} allocations home {} ({}); fail-closed".format(
+            kind, home, exc))
+    try:
+        try:
+            afd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            raise _journal.JournalError("cannot open the {} allocations home {} ({}); fail-closed".format(
+                kind, home, exc))
+        try:
+            try:
+                entries = sorted(os.listdir(afd))
+            except OSError as exc:
+                raise _journal.JournalError("cannot list the {} allocations home {} ({}); fail-closed".format(
+                    kind, home, exc))
+            high = {}
+            for entry in entries:
+                if entry == skip or _is_reservation_garbage(kind, entry):
+                    continue
+                for key, value in _read_reservation(afd, kind, entry).items():
+                    if value > high.get(key, 0):
+                        high[key] = value
+            return high
+        finally:
+            _journal._close_fd_quietly(afd)
+    finally:
+        _journal._close_fd_quietly(pfd)
+
+
+def reservation_high(root_fd, exclude=None):
+    """The per-counter-key maximum over EVERY existing id reservation in EVERY journal kind's
+    allocations home, the spec 8.2 next-ID derivation input (every reservation's [claims] value for
+    each counter key, whichever kind published it): the homes are enumerated from the authoritative
+    _opf_store.JOURNAL_KINDS registry, read at call time, never one hard-coded home, and each
+    reservation is validated against its own kind and file name (_read_reservation). `exclude`, a
+    (kind, run_id) pair, leaves that one run's own reservation out of the scan. An absent home reads as
+    no reservations of that kind; a kind whose home cannot be derived, and an unreadable, non-regular,
+    misnamed, malformed or conflicting entry in any home, refuse (JournalError), never a silent
+    fallback."""
+    high = {}
+    for kind in _opf_store.JOURNAL_KINDS:
+        try:
+            home = _allocations_rel(kind)
+        except (KeyError, ValueError) as exc:
+            raise _journal.JournalError("the journal kind {!r} has no reservation home this build can "
+                                        "derive ({}); fail-closed".format(kind, exc))
+        skip = exclude[1] + ".toml" if exclude is not None and exclude[0] == kind else None
+        for key, value in _kind_reservation_high(root_fd, kind, home, skip).items():
+            if value > high.get(key, 0):
+                high[key] = value
+    return high
+
+
+def _counter_high(root_fd, machine_rel, keys):
+    """The counters.toml high-water of each counter key in `keys`, read fail-closed beneath the held
+    store root (spec 8.2). The file is read as a singly-linked regular file through a no-follow,
+    non-blocking open, so a missing file or parent, a symlink, a FIFO, a second hard link, a file past
+    the read cap and a read error each refuse; so do bytes that are not UTF-8 TOML, any finding of the
+    shared counters validator (_opf_schema.validate_counters, over every imported-series key the file
+    itself carries), and a requested key the file does not carry: an absent counter is never read as
+    0, since only an explicit row starts a series at zero."""
+    rel = "{}/{}".format(machine_rel, _opf_store.COUNTERS_NAME)
+    try:
+        raw, _st = _journal._read_contained(root_fd, rel, require_single_link=True)
+    except (_journal.JournalError, OSError) as exc:
+        raise _journal.JournalError("cannot read {} for the id derivation ({}); fail-closed".format(rel, exc))
+    try:
+        model = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError: tomllib.TOMLDecodeError and an over-long integer literal; RecursionError and MemoryError:
+        # deep nesting and a many-part key.
+        raise _journal.JournalError("{} is malformed ({}); fail-closed".format(rel, exc))
+    table = model.get("counters")
+    prefix = _opf_schema.IMPORTED_PREFIX
+    imported = frozenset(key[len(prefix):] for key in table if key.startswith(prefix)) \
+        if isinstance(table, dict) else frozenset()
+    high, findings = _opf_schema.validate_counters(model, imported_namespaces=imported)
+    if findings:
+        raise _journal.JournalError("{} cannot license an id derivation: {}; fail-closed".format(
+            rel, "; ".join(findings)))
+    for key in keys:
+        if key not in high:
+            raise _journal.JournalError("{} carries no high-water for {}; an absent counter is never read "
+                                        "as 0 (spec 8.2); fail-closed".format(rel, key))
+    return {key: high[key] for key in keys}
+
+
+def _derive_claims(root_fd, machine_rel, kind, run_id, demand):
+    """The spec 8.2 next-ID derivation for one run, under the held capability: per demanded counter key,
+    the larger of the counters.toml high-water and every other reservation's [claims] value for that key
+    (the run's own reservation excluded, so a repeat call derives what the first call did), plus the
+    demanded count. A result past _CLAIM_VALUE_MAX refuses: the range is used up."""
+    reserved = reservation_high(root_fd, exclude=(kind, run_id))
+    counters = _counter_high(root_fd, machine_rel, sorted(demand))
+    claims = {}
+    for key in sorted(demand):
+        base = max(counters[key], reserved.get(key, 0))
+        if base + demand[key] > _CLAIM_VALUE_MAX:
+            raise _journal.JournalError(
+                "cannot reserve {} more {} id(s) above the high-water {}: the result would pass "
+                "2**63 - 1, the largest value an id reservation can carry, so the range is used up "
+                "(spec 8.2); fail-closed".format(demand[key], key, base))
+        claims[key] = base + demand[key]
+    return claims
 
 
 def reservation_record(kind, run_id, operation_id, claims):
@@ -375,9 +590,22 @@ def _existing_reservation(pfd, name, kind, run_id, payload):
     return payload
 
 
-def reserve_allocation(cap, kind, run_id, claims):
-    """Create THE run's irrevocable ID reservation at _opf_store.allocation_record(kind, run_id) under
-    the held capability (spec 4.2/8.2): exclusive, create-only, durable before return. The destination
+def reserve_allocation(cap, kind, run_id, demand, expected=None):
+    """Derive and create THE run's irrevocable ID reservation at _opf_store.allocation_record(kind,
+    run_id) under the held capability (spec 4.2/8.2): exclusive, create-only, durable before return.
+    `demand` maps each counter key to how many ids the run takes under it. The claims are derived here,
+    inside the one held-capability scope that also publishes them (spec 8.2: one atomic claim under
+    the store's lock): per key, the demanded count above the larger of the counters.toml high-water
+    and every other reservation's [claims] value in every journal kind's home (_derive_claims). A
+    missing, unreadable or invalid counters.toml, a demanded key it does not carry, any reservation
+    the scan cannot read and validate, and a range that would pass 2**63 - 1 each refuse with nothing
+    written, not even a directory. `expected`, when given, is the claims map the caller planned: a
+    derivation that differs raises ReservationDerivationChanged, again before anything is written.
+    The run's own entry is left out of the derivation, so a repeat call under the same capability
+    derives the same claims while counters.toml and every other reservation are unchanged. After
+    either moves, the repeat derives again: claims that now differ are refused as different bytes,
+    and a change that leaves the demanded keys' maximum where it was derives the published claims
+    again and is answered from the read-back entry. The destination
     derives from kind and run identity alone; no caller names a path. Publication is _project's
     atomic-exclusive idiom (_create_control_file): the full payload is written and fsynced at a
     staging name, linked exclusively to the final name, the staging name retired and the directory
@@ -395,14 +623,21 @@ def reserve_allocation(cap, kind, run_id, claims):
     the PERSISTED operation id instead (attach_init_lease), so its byte-identical retry is
     answered as crash repair, safe because the directory is fsynced before the payload is
     returned. A refusal is NEVER evidence that the run holds its
-    numbers; only the returned payload bytes are. This seam publishes ONE run's claims; per-series
-    uniqueness ACROSS runs (spec 8.2's next-ID derivation over the counters.toml high-water and
-    every reservation's [claims] value) is the calling allocator's job under the same held lock
-    and is NOT enforced by this publication seam. Returns the published payload bytes."""
+    numbers; only the returned payload bytes are. Uniqueness across runs rests on every writer of
+    counters.toml and of the allocations homes doing so under a held capability. Returns the
+    published payload bytes."""
     _validate_identity(kind, run_id)
-    _check_claims(kind, claims)
+    _check_demand(kind, demand)
+    if expected is not None:
+        _check_claims(kind, expected)
     rel = _opf_store.allocation_record(kind, run_id)
     with _held_root(cap) as root_fd:
+        claims = _derive_claims(root_fd, cap.machine_rel, kind, run_id, demand)
+        if expected is not None and claims != expected:
+            raise ReservationDerivationChanged(
+                "the {} id derivation for {} changed from the planned claims {!r} to {!r} (another "
+                "reservation or a counters change landed in between); nothing written".format(
+                    kind, run_id, dict(sorted(expected.items())), claims))
         payload = reservation_payload(kind, run_id, cap.op_id, claims)
         pfd = None
         try:
