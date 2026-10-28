@@ -96,7 +96,9 @@ mutex on both the fresh path (before the plan is persisted) and the resume path 
 validates), so its own disclosed residual holds here too (an ignore input git cannot read is read as
 no rule, as git add reads it, and is not refused); the adoption observer that distinguishes a first
 adoption from a committed deletion is not part of this layer, so this layer refuses an existing store it did
-not itself record; a
+not itself record, and refuses a first adoption whenever plain `opf init`'s history scan (HEAD's
+first-parent line, the root's current path, the committed pointer or a store manifest) shows a prior
+store, but seeds a re-adoption only from an evidence commit its caller supplies; a
 same-uid writer racing the held mutex can still change a destination between the final check and a
 later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
 foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly
@@ -2465,10 +2467,11 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
     digest each re-verified here, under the mutex) plus their implied ancestor directories, recorded
     in the plan's E set so every later check and resume re-verifies them. With `ancestral` (a pinned
     evidence commit, PR4's selection) the counters are seeded from the validated snapshot and the
-    plan records it. `operation_id` is a caller-minted id (the coupled adoption binds it into its
-    own durable intent BEFORE this operation runs); None mints a fresh one. `homes2` plans
-    generation 2 (build_init_plan), whose .working/.gitignore installation the read-only inspection
-    must admit before the plan is persisted (_inspect_homes_gitignore)."""
+    plan records it; without it, a first adoption whose HEAD's first-parent history already shows
+    a store refuses (_refuse_prior_store). `operation_id` is a caller-minted id (the coupled
+    adoption binds it into its own durable intent BEFORE this operation runs); None mints a fresh
+    one. `homes2` plans generation 2 (build_init_plan), whose .working/.gitignore installation the
+    read-only inspection must admit before the plan is persisted (_inspect_homes_gitignore)."""
     import uuid
     root, root_fd = run.root, run.root_fd
     for pointer in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL):
@@ -2614,7 +2617,37 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
     _refuse_ignored_destinations(git, binding, plan)
     if plan_generation(plan["sets"]["S"]) == 2:
         _inspect_homes_gitignore(root, plan)
+    if ancestral is None and head["kind"] == "commit":
+        _refuse_prior_store(git, binding, head)
     return plan, raw
+
+
+def _refuse_prior_store(git, binding, head):
+    """Refuse a FIRST adoption over a store in git history (spec 8.2: only a genuinely first
+    adoption may start its counters at zero; re-adoption seeds them from a pinned ancestral
+    snapshot). The detector is _opf_init_observe.prior_store_holder, which applies plain `opf
+    init`'s markers, first-parent walk and fail-closed boundaries to the HEAD observed under the
+    mutex (an unborn HEAD has no history and is never scanned). It runs last in _fresh_plan, the
+    position plain init's scan takes after its index and ignore checks, before the plan is
+    persisted, so a refusal records no operation and writes nothing. A found holder is REFUSED,
+    naming the commit; a scan that cannot evaluate (a shallow repository, a grafts entry, an
+    unreadable answer) is CANNOT-EVALUATE, never a pass. A re-adoption (an ancestral commit
+    supplied) and a resume are not scanned: the seed is pinned, and a resume's plan pins its
+    HEAD."""
+    try:
+        holder = _opf_init_observe.prior_store_holder(
+            git, binding["repository_root"]["path"], pinned_head=head["oid"],
+            prefix=binding["product_prefix"], object_format=binding["object_format"])
+    except _opf_init_observe.ObservationError as exc:
+        code = CANNOT_EVALUATE if exc.code == _opf_init_observe.CANNOT_EVALUATE else REFUSED
+        raise InitOperationError("cannot evaluate prior-store ancestry ({}: {}); a first "
+                                 "adoption never starts its counters at zero over history it "
+                                 "cannot read".format(exc.input_name, exc.detail), code) from exc
+    if holder is not None:
+        raise InitOperationError("a prior store exists on HEAD's first-parent line at commit {}; "
+                                 "spec 8.2 forbids zero-seeding prior ancestry, so this is a "
+                                 "re-adoption: re-adopt with its ancestral evidence "
+                                 "commit".format(holder), REFUSED)
 
 
 def _inspect_homes_gitignore(root, plan):
@@ -3607,6 +3640,8 @@ def _run_self_test_isolated():
         tests_run.append("seam")
         _ignore_tests(base, env, ok)
         tests_run.append("ignore")
+        _ancestry_tests(base, env, ok)
+        tests_run.append("ancestry")
         _homes2_tests(base, env, ok)
         tests_run.append("homes2")
         import check_opf_init_qa
@@ -3625,7 +3660,7 @@ def _run_self_test_isolated():
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
     print("filesystem under test: {} (TMPDIR={})".format(base, os.environ.get("TMPDIR", "")))
-    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore", "homes2"]:
+    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore", "ancestry", "homes2"]:
         sys.stderr.write("_opf_init_operation SELF-TEST: FAIL ({} of {})\n".format(
             len(failed), len(checks)))
         return 1
@@ -4256,6 +4291,186 @@ def _ignore_tests(base, env, ok):
     res = run_init_operation(root, recover=True)
     ok("IGNORE-resume-finishes-once-unignored", res.status == VIEWS_READY
        and _opf_store.resolve_store(root).status == _opf_store.RESOLVED, str(res.primary_failure))
+
+
+def _ancestry_tests(base, env, ok):
+    """OPF spec 8.2 over real git stores: a FIRST adoption (no ancestral commit), plain or coupled,
+    whose HEAD's first-parent history already shows a store refuses with nothing written and no
+    operation recorded, naming the newest holding commit (a nested product prefix, and a merge
+    that drops the mainline store, included); a shallow or grafted history refuses
+    CANNOT-EVALUATE; a history that never held a store, and a store that lived only on a merged
+    side branch, proceed, each having consulted the detector (_opf_init_observe.prior_store_holder)
+    for the pinned HEAD; and a re-adoption over the same history is not scanned and seeds from its
+    evidence commit. Without the _fresh_plan call every refusal here fails (the store is published)
+    and each proceeding run consults nothing. A first adoption over an unborn HEAD reaches
+    VIEWS-READY unscanned (scanning it would raise, having no commit to pin), and a git read that
+    exits non-zero (rev-list over a pinned head the repository does not hold) is CANNOT-EVALUATE,
+    never None."""
+    from unittest import mock
+    d = os.path.join(base, "ancestry")
+    real = _opf_init_observe.prior_store_holder
+    calls = []
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        calls.append((k["pinned_head"], out))
+        return out
+
+    def run(root, **kw):
+        del calls[:]
+        with mock.patch.object(_opf_init_observe, "prior_store_holder", spy):
+            return run_init_operation(root, **kw)
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def deleted_store(name, prefix=""):
+        # A store committed under prefix (pointer, manifest, counters with BI = 7), then removed
+        # by git rm in a later commit; a kept file holds the product root open. Returns
+        # (repository, evidence commit, product root).
+        repo = _plain_repo(os.path.join(d, name), env)
+        root = os.path.join(repo, prefix) if prefix else repo
+        values = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
+        values["BI"] = 7
+        _write(os.path.join(root, "kept.txt"), b"kept\n")
+        _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+        _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+        _write(os.path.join(root, COUNTERS_RELPATH), _counters_toml(values))
+        _git(["add", "-A"], repo, env)
+        _git(["commit", "-q", "-m", "store"], repo, env)
+        evidence = _head(repo, env)
+        _git(["rm", "-q", "-r", "--", os.path.join(prefix, _opf_store.WORKING_DIRNAME),
+              os.path.join(prefix, _opf_store.POINTER_REL)], repo, env)
+        _git(["commit", "-q", "-m", "drop store"], repo, env)
+        return repo, evidence, root
+
+    def refused(label, res, code, needles, after, before, ops):
+        detail = (res.primary_failure or {}).get("detail", "")
+        ok(label, res.status == code and all(n in detail for n in needles) and after == before
+           and ops == [], "{} {}".format(res.status, res.primary_failure))
+
+    for name, kw in (("plain", {}),
+                     ("coupled", {"operation_id": "0000a001-c0de-4ead-8ead-00000000a001"})):
+        repo, evidence, root = deleted_store(name)
+        before = _tree_snapshot(root)
+        res = run(root, **kw)
+        refused("ANC-{}-first-adoption-over-history-refused".format(name), res, REFUSED,
+                ("prior store", evidence), _tree_snapshot(root), before, sub_ops(root))
+
+    repo, evidence, root = deleted_store("nested", prefix="prod")
+    before = _tree_snapshot(repo)
+    res = run(root)
+    refused("ANC-nested-prefix-first-adoption-refused", res, REFUSED, ("prior store", evidence),
+            _tree_snapshot(repo), before, sub_ops(root))
+
+    # The first-parent line is load-bearing: a merge whose tree IS its storeless side parent's
+    # drops the mainline store. On HEAD's first-parent line that merge deletes the store, so its
+    # first parent is the holder; a walk without --first-parent simplifies the merge to its
+    # TREESAME side parent, never visits the store, and would proceed.
+    root = _plain_repo(os.path.join(d, "treesame"), env)
+    fork = _head(root, env)
+    _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "store on main"], root, env)
+    store = _head(root, env)
+    _git(["checkout", "-q", "-b", "side", fork], root, env)
+    _write(os.path.join(root, "side.txt"), b"side\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "side work"], root, env)
+    side = _head(root, env)
+    merge = _git(["commit-tree", side + "^{tree}", "-p", store, "-p", side,
+                  "-m", "merge drops store"], root, env).stdout.decode("ascii").strip()
+    _git(["checkout", "-q", "main"], root, env)
+    _git(["reset", "-q", "--hard", merge], root, env)
+    before = _tree_snapshot(root)
+    res = run(root)
+    refused("ANC-treesame-merge-dropping-mainline-store-refused", res, REFUSED,
+            ("prior store", store), _tree_snapshot(root), before, sub_ops(root))
+
+    # A re-adoption over the same history is never scanned: its counters copy the pinned seed.
+    repo, evidence, root = deleted_store("readopt")
+    res = run(root, ancestral=evidence)
+    body = _read_or_none(os.path.join(root, COUNTERS_RELPATH)) or b""
+    ok("ANC-readoption-not-scanned-seeds-from-evidence", res.status == VIEWS_READY
+       and calls == [] and re.search(rb"(?m)^BI = 7$", body) is not None,
+       "{} {} {} {!r}".format(res.status, res.primary_failure, calls, body))
+
+    # Fail closed: a shallow clone hides the store behind its boundary, and a grafts entry cuts the
+    # parent link that reaches it; removing the grafts entry finds the store again.
+    repo, evidence, root = deleted_store("shallow-source")
+    shallow = os.path.join(d, "shallow")
+    _git(["clone", "-q", "--depth", "1", "file://" + repo, shallow], d, env)
+    before = _tree_snapshot(shallow)
+    res = run(shallow)
+    refused("ANC-shallow-cannot-evaluate", res, CANNOT_EVALUATE, ("SHALLOW",),
+            _tree_snapshot(shallow), before, sub_ops(shallow))
+    repo, evidence, root = deleted_store("grafts")
+    grafts = os.path.join(repo, ".git", "info", "grafts")
+    _write(grafts, (_head(repo, env) + "\n").encode("ascii"))
+    before = _tree_snapshot(root)
+    res = run(root)
+    refused("ANC-grafts-cannot-evaluate", res, CANNOT_EVALUATE, ("grafts",),
+            _tree_snapshot(root), before, sub_ops(root))
+    os.unlink(grafts)
+    res = run(root)
+    refused("ANC-grafts-removed-refused-again", res, REFUSED, ("prior store", evidence),
+            _tree_snapshot(root), before, sub_ops(root))
+
+    # No over-refusal: a history that never held a store, and a store created and deleted on a
+    # side branch that WAS merged (it never reached a first-parent tree), proceed; each consulted
+    # the detector once, for the pinned HEAD, which found nothing.
+    root = _plain_repo(os.path.join(d, "never"), env)
+    _write(os.path.join(root, "later.txt"), b"later\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "later"], root, env)
+    head = _head(root, env)
+    res = run(root)
+    ok("ANC-never-held-proceeds-after-scan", res.status == VIEWS_READY
+       and calls == [(head, None)], "{} {} {}".format(res.status, res.primary_failure, calls))
+    root = _plain_repo(os.path.join(d, "side"), env)
+    _git(["checkout", "-q", "-b", "feature"], root, env)
+    _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "store on side"], root, env)
+    _git(["rm", "-q", "-r", "--", _opf_store.WORKING_DIRNAME, _opf_store.POINTER_REL], root, env)
+    _git(["commit", "-q", "-m", "drop store on side"], root, env)
+    _git(["checkout", "-q", "main"], root, env)
+    _git(["merge", "-q", "--no-ff", "-m", "merge feature", "feature"], root, env)
+    head = _head(root, env)
+    merged = _git(["merge-base", "--is-ancestor", "feature", head], root, env, allow_fail=True)
+    res = run(root)
+    ok("ANC-side-branch-only-store-proceeds-after-scan", merged.returncode == 0
+       and res.status == VIEWS_READY and calls == [(head, None)],
+       "{} {} {} {}".format(merged.returncode, res.status, res.primary_failure, calls))
+
+    # An unborn HEAD (a fresh git init, no commit) has no history: the first adoption reaches
+    # its normal outcome without consulting the detector, whose pinned head would not exist.
+    root = os.path.join(d, "unborn")
+    os.makedirs(root)
+    _git(["init", "-q", "-b", "main", "."], root, env)
+    try:
+        res = run(root)
+        outcome = (res.status, res.primary_failure)
+    except Exception as exc:
+        outcome = ("raised", "{}: {}".format(type(exc).__name__, exc))
+    ok("ANC-unborn-head-proceeds-without-scan", outcome[0] == VIEWS_READY and calls == [],
+       "{} {}".format(outcome, calls))
+
+    # A git read that exits non-zero is CANNOT-EVALUATE, never "no prior store": rev-list over
+    # a well-formed pinned head the repository does not hold fails, and its empty output must
+    # not read as an empty walk.
+    root = _plain_repo(os.path.join(d, "unresolvable"), env)
+    try:
+        out = _opf_init_observe.prior_store_holder(
+            _opf_observe._git_path(), root, pinned_head="f" * 40, prefix="",
+            object_format="sha1")
+    except _opf_init_observe.ObservationError as exc:
+        out = (exc.code, exc.detail)
+    ok("ANC-unresolvable-pinned-head-cannot-evaluate", type(out) is tuple
+       and out[0] == _opf_init_observe.CANNOT_EVALUATE and out[1].startswith("rc "), repr(out))
 
 
 def _b6_tests(base, env, ok, refuses):
