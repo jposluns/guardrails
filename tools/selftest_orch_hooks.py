@@ -14490,9 +14490,10 @@ def _main_isolated(report_path=None):
               "allow")
         check("wl/handler-allow-nested",
               _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
-        # A poll loop behind a compound command's reserved word classifies 'indeterminate' by design: this guard
-        # emits nothing and defers to the truncation guard, which denies the foreground bare-& detach on the same
-        # event, so the wrapped loop is still refused (the one wrapped form the command reading leaves to it).
+        # A control, not a test of the command reading: neither path here asks for that reading, so the row
+        # passes with it on or off. A poll loop behind a compound command's reserved word classifies
+        # 'indeterminate' by design: this guard emits nothing and defers to the truncation guard, which denies the
+        # foreground bare-& detach on the same event, so the wrapped loop is still refused.
         _crd_loop = "if true; then while true; do gh run view 1; sleep 10; done & fi"
         check("crd/waitloop-wrapped-deferred", (_verdict(wl(_crd_loop)), _verdict(tg(_crd_loop))),
               ("allow", "deny"))

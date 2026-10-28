@@ -19721,6 +19721,40 @@ def _main_isolated(monitor):
                     failures.append("(crd-control-{}-{}) {!r}: expected {}, got {}"
                                     .format(crd_guard, crd_number, crd_command, crd_want, crd_got))
 
+        # A backquote substitution after a double-quoted '$(...)' that holds a quote: bash 5.3 runs the body (a
+        # quote there opens a string of that substitution's own), so each guard decides as on the bare shape.
+        crd_quoted = (("hash", 'echo "$(echo " #")" `{}`'), ("quote", 'echo "$(echo "\'")" `{}` "\'"'))
+        for crd_guard, crd_shape, crd_bare, crd_want, _crd_already in crd_shapes:
+            for crd_name, crd_template in crd_quoted:
+                # A backquote nested in the substitution is escaped, as bash needs it.
+                crd_command = crd_template.format(crd_bare.replace("`", "\\`"))
+                crd_got = _decision(getattr(aiqt_hooks, crd_guard), crd_command)
+                if crd_got != crd_want:
+                    failures.append("(crd-quoted-{}-{}-{}) {!r}: expected {} as the bare form decides, got {}"
+                                    .format(crd_name, crd_guard, crd_shape, crd_command, crd_want, crd_got))
+        # A compound's output goes where its closing word sends it, so diff_source_pretool notes a producer in
+        # one redirected to a file or piped into a pager, as for any compound; one reaching the console, or
+        # captured by a backquote substitution or a coprocess as by '$(...)', denies.
+        crd_destinations = (
+            ("{ git diff; } > out.txt", "allow-note"), ("if true; then git diff; fi > out.txt", "allow-note"),
+            ("for i in 1; do git diff; done > out.txt", "allow-note"),
+            ("function f { git diff; }; f > out.txt", "allow-note"), ("f() { git diff; }; f | less", "allow-note"),
+            ("{ git diff; } | less", "allow-note"), ("while true; do git diff; break; done | less", "allow-note"),
+            ("{ if true; then git diff; fi; } > out.txt", "allow-note"), ("{ git diff; } | cat", "deny"),
+            ("function f { git diff; }; f", "deny"), ("x=`git diff`", "deny"), ("coproc git diff", "deny"),
+            ("{ git diff; } > out.txt; git diff", "deny"))
+        for crd_command, crd_want in crd_destinations:
+            crd_got = _decision(aiqt_hooks.diff_source_pretool, crd_command)
+            if crd_got != crd_want:
+                failures.append("(crd-destination) diff_source_pretool {!r}: expected {}, got {}".format(
+                    crd_command, crd_want, crd_got))
+        # A body is lexed partially, so what it runs before a construct the lexer does not read is still read
+        # (bash creates the orphan branch here).
+        crd_got = _decision(aiqt_hooks.branch_root, "x=`git checkout --orphan nb; cat <<<y`")
+        if crd_got != "deny":
+            failures.append("(crd-partial-body) branch_root on a body ending in a here-string: expected deny, "
+                            "got {}".format(crd_got))
+
         def crd_pairs(crd_list):
             return [(list(crd_seg.argv), crd_seg.sep_after) for crd_seg in crd_list]
 
@@ -19740,7 +19774,14 @@ def _main_isolated(monitor):
             ("a `b` 'c `d`' \"e `f`\" \\`g\\` # `h`", [(2, "b"), (17, "f")]),
             ("x=`a \\`b\\` \\\\ \\$c`", [(2, "a `b` \\ $c")]),
             ("echo $'`a`' `b", [(12, "b")]),
-            ("x=$( echo #`a`\n) ${y:- #`b`}", [(11, "a"), (24, "b")]))
+            # A '#' at the start of a word inside a substitution: from there every run between two backquotes is
+            # read as a possible body, since a comment there can hold a quote (re-pinned from [(11, "a"),
+            # (24, "b")], which read those two bodies only).
+            ("x=$( echo #`a`\n) ${y:- #`b`}", [(11, "a"), (13, "\n) ${y:- #"), (24, "b"), (26, "}")]),
+            # A quote inside a '$(...)' that a double-quoted string holds opens a string of that substitution's
+            # own, so the backquote after it is read (bash runs it).
+            ('echo "$(echo " #")" `git stash pop`', [(20, "git stash pop")]),
+            ('echo "$(echo "\'")" `git stash pop` "\'"', [(19, "git stash pop")]))
         for crd_text, crd_want in crd_bodies:
             crd_got = aiqt_hooks._backquote_bodies(crd_text)
             if crd_got != crd_want:
