@@ -644,10 +644,27 @@ takes the same re-spelling without a generator-version bump: a projection an ear
 from a record holding either character differs from the current render in exactly that spelling, and
 the byte-level view-drift gate reports it as drifted until one re-render re-spells it. A projection
 over records holding neither character renders byte-identically, so a store without these characters
-sees no drift. A hand edit or hand merge that leaves canonical bytes
-passes it undetected, so this integration-base rule is a separate requirement that the precondition
-does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by `opf
-doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section
+sees no drift. `opf doctor`, and the pre-commit hook that runs it, also refuses a machine-store TOML
+file that is not in canonical form, at every run rather than only before a write: such a file is a
+C-CONTAINMENT finding, with the same allowance for a literal U+2028 or U+2029. It leaves out a path
+under a valid `[unmanaged]` declaration (the containment walk grades the declaration, never the
+files under it), the legacy import staging area, which the containment walk grades, and a file it
+cannot read or parse, which the check that reads it grades (except `init.toml`, which no other check
+reads, so an unreadable one cannot be evaluated and an unparseable one is a finding). During a
+partial import backed by an active import run, it also leaves out the stray paths the containment
+and archive walks triage there (section 14.2): a file outside the managed set and outside the
+archive tree (which, in an adopting store, the containment walk reports as a finding instead), and,
+within the archive tree, a file directly under `archive/`, a file under a bucket subdirectory, or a
+bucket file other than `archive.toml`, `worklog.toml` and a `<type>.index.toml`. Nor does it enter,
+there, a directory beneath which it leaves out every path: outside the archive tree, a directory
+that is not a managed namespace derived from the manifest (a per-record type directory, the
+generation-2 worklog directory or an ancestor of a store-scope view target), and, within it, a
+bucket subdirectory, so a symlink, an unreadable directory or deep nesting beneath one does not stop
+the store being evaluated. A bucket's `archive.toml`, `worklog.toml` and `<type>.index.toml` are
+checked at every import status. A hand edit or hand merge that leaves canonical bytes passes both the
+precondition and doctor undetected, so the integration-base rule above is a separate requirement
+that neither enforces. A merge that resolves without a conflict yet duplicates an ID is caught by
+`opf doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section
 8.2). A collision MUST NOT be resolved by decrementing a counter or reusing an ID.
 
 ### 5.8 The public deliverables are identical across topologies
