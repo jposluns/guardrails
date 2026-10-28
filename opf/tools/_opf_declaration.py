@@ -547,8 +547,9 @@ def main():
 # in teardown (a finalizer that runs after that, as one reached only from an interpreter-state registry does: the
 # codec search and error registries, at-fork hooks, sys.monitoring callbacks, gc callbacks, warnings filters, is
 # not seen); a launch made below Python (a native extension, ctypes, a Tcl exec through tkinter) is not recorded;
-# and code that deliberately evades an in-process hook (clearing the hooks below Python, rewriting the driver's own
-# state so the record goes elsewhere, which closing or redirecting the record descriptor alone does not do, as
+# and code that deliberately evades an in-process hook (by any means, among them clearing the hooks below Python,
+# reading the record back from the record descriptor (for example through /proc/self/fd), rewriting the driver's
+# own state so the record goes elsewhere, which closing or redirecting the record descriptor alone does not do, as
 # that ends the run, forging or unregistering the report, a subinterpreter not made through _interpreters) is
 # outside what it can see).
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.

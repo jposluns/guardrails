@@ -45,10 +45,11 @@ with exit 2). This gate holds where it runs:
      reached only from an interpreter-state registry does: the codec search and error registries, at-fork hooks,
      sys.monitoring callbacks, gc callbacks, warnings filters, is not seen); a launch made below Python (a native
      extension, ctypes, a Tcl exec through tkinter) is not recorded; and code that deliberately evades an
-     in-process hook (clearing the hooks below Python, rewriting the driver's own state so the record goes
-     elsewhere, which closing or redirecting the record descriptor alone does not do, as that ends the run,
-     forging or unregistering the report, a subinterpreter not made through _interpreters) is outside what it
-     can see), each ENTRY_COPIES file
+     in-process hook (by any means, among them clearing the hooks below Python, reading the record back from
+     the record descriptor (for example through /proc/self/fd), rewriting the driver's own state so the record
+     goes elsewhere, which closing or redirecting the record descriptor alone does not do, as that ends the
+     run, forging or unregistering the report, a subinterpreter not made through _interpreters) is outside
+     what it can see), each ENTRY_COPIES file
      (tools/check_opf_declaration.py, whose entry raises its own exit rather than calling sys.exit) has the
      __main__ body exactly the single call _entry(), and _entry bound exactly once at module scope (the same
      count), by one undecorated top-level def with no parameters whose first statement is exactly
