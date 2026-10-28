@@ -367,7 +367,7 @@ def check_ignored(root, relpaths, verb):
                               str(root), ", ".join(repr(os.fsdecode(p[2:])) for p in matches[:-1]), verb))
 
 
-# --- homes-2 gitignore reconciliation: the read-only inspector (spec 4.2; unwired until J) -------------
+# --- homes-2 gitignore reconciliation: the read-only inspector (spec 4.2; generation-2 init only) ------
 # The store-relative control paths this inspector reasons about, derived from the topology constants so
 # this reader cannot drift from the layout the validator enforces (single source of truth).
 _HOMES_GITIGNORE_REL = "{}/.gitignore".format(_opf_store.WORKING_DIRNAME)
@@ -623,7 +623,7 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
     (path namespace race): each probe resolves its pathname again when git launches, so a symlink or
     directory on either path that a concurrent local actor swaps during the inspection (between
     _homes_logical_path's check and a launch, or between probes) can direct a probe at another
-    repository whose answer is then read as this one's; such an actor is outside this unwired
+    repository whose answer is then read as this one's; such an actor is outside this read-only
     helper's threat model, and the inspection does not bind the path namespace against it."""
     head = _homes_allowlisted_verb(args)
     dropped = _homes_config_overrides()
@@ -945,11 +945,12 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
 
 
 def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_existing=None):
-    """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). UNWIRED in
-    this release: no production verb calls it; homes-2 init (J), its planned consumer, will call it,
-    write the returned bytes through its journal (prestate and poststate digests, so a change
-    between inspection and write fails closed), and re-check with verify_homes_gitignore_effective
-    after the write.
+    """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). Its one caller
+    is the generation-2 init operation (_opf_init_operation._inspect_homes_gitignore), reached only
+    through that operation's explicit homes2 input: before its plan is persisted it requires an
+    absent file, no hold, and planned bytes equal to its own create-only payload, writes those bytes
+    through its journal, and re-checks with verify_homes_gitignore_effective after the write. No
+    default verb calls it.
 
     Returns (planned, holds, prestate): `planned` is the full new file bytes
     _opf_store.plan_homes_gitignore computed (None for no change), `prestate` is the exact file
@@ -1005,9 +1006,10 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
 
 
 def verify_homes_gitignore_effective(store_root, verb):
-    """The post-write effectiveness re-check for the planned caller that installs the managed block
-    (J, after its journaled write): re-runs the inspector's contained read of .working/.gitignore
-    (homes-gitignore-unreadable), confirms the exact managed block in those bytes
+    """The post-write effectiveness re-check for the caller that installs the managed block (the
+    generation-2 init operation, after its journaled write and on every later attempt of that
+    plan, _opf_init_operation._verify_homes_gitignore): re-runs the inspector's contained read of
+    .working/.gitignore (homes-gitignore-unreadable), confirms the exact managed block in those bytes
     (homes-gitignore-block-missing when it is absent, adopter-only or drifted: other ignore rules
     covering the homes do not stand in for it), the read-only tracked-control-path index probe, the
     .working/.gitignore index-flag check, the effectiveness probes, and the partial-clone

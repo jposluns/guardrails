@@ -67,8 +67,8 @@ jobs:
   # the local runner runs check_ci_parity.
   # Within a job the steps keep their original relative order. The Quality gates job at the end
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
-  # The heavy jobs (the three OPF tooling shards opf, opf-adopt and opf-init, selftest-execution, the four
-  # git-fixture-env lanes, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
+  # The heavy jobs (opf-tooling, selftest-execution, the git-fixture-env-core canary, the five host-patch
+  # jobs and byte-canon-matrix) carry one pinned job-level if:,
   # so they run only on a push and on a pull request whose head is a merge-train-* branch of this
   # repository; every other job runs in every run. That if: is the second layer behind the labeled
   # trigger above, which already keeps a member head from running at all. In any other pull request
@@ -249,14 +249,15 @@ jobs:
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py
 
-  # The OPF tooling steps run as three parallel shards (opf, opf-adopt and opf-init), each with one
-  # opf.py --self-test-group step: SELF_TEST_GROUPS in opf/tools/opf.py names the groups, and the selector
-  # runs nothing unless they hold every registered self-test exactly once. Every other step runs in exactly
-  # one shard, keeping its original relative order there. tools/check_ci_parity.py holds the group steps
-  # to the heavy jobs and, in its self-test, each group to exactly one step here and one line of
-  # tools/run_all_checks.sh. The opf-host-patch job below runs the whole self-test, every group once.
-  opf:
-    name: OPF tooling (core, records and upgrade)
+  # The OPF tooling gates and direct self-tests run in this one '3.14' job, each step in its original
+  # relative order. The opf.py self-test itself runs in CI once, whole, in the opf-host-patch job below;
+  # no '3.14' job runs it or any opf.py --self-test-group step. The local runner runs it as its named
+  # groups (SELF_TEST_GROUPS in opf/tools/opf.py; the selector runs nothing unless they hold every
+  # registered self-test exactly once). tools/check_ci_parity.py holds, in its self-test, each group to
+  # exactly one line of tools/run_all_checks.sh and no line here, and the whole self-test to exactly one
+  # line here, in a heavy job.
+  opf-tooling:
+    name: OPF tooling gates (3.14)
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
@@ -276,10 +277,6 @@ jobs:
       - name: OPF homes contract drift gate
         shell: bash
         run: python3 -I -B opf/tools/check_opf_homes.py
-
-      - name: OPF tooling self-test (core group)
-        shell: bash
-        run: python3 -I -B opf/tools/opf.py --self-test-group core
 
       - name: OPF journal direct self-test
         shell: bash
@@ -325,24 +322,6 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py
 
-  opf-adopt:
-    name: OPF tooling (adoption)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: OPF tooling self-test (adopt group)
-        shell: bash
-        run: python3 -I -B opf/tools/opf.py --self-test-group adopt
-
       - name: OPF adoption schema and read-only planning self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt.py --self-test
@@ -382,24 +361,6 @@ jobs:
       - name: OPF adoption source-discovery self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
-
-  opf-init:
-    name: OPF tooling (init and watchdog)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: OPF tooling self-test (watchdog group)
-        shell: bash
-        run: python3 -I -B opf/tools/opf.py --self-test-group watchdog
 
       - name: OPF source-only init gate self-test
         shell: bash
@@ -950,69 +911,18 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 
-  git-fixture-env-config-combined:
-    name: Git-fixture-env combined config lane
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: Git-fixture-env combined config-injection lane (execution-reconciled)
-        shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
-
-  git-fixture-env-config-malformed:
-    name: Git-fixture-env malformed config lane
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: Git-fixture-env malformed-config lane (execution-reconciled)
-        shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
-
-  git-fixture-env-config-system:
-    name: Git-fixture-env system config lane
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: Git-fixture-env system-config lane (execution-reconciled)
-        shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
-
   # The host-patch legs. Every other job of this workflow that sets up Python pins '3.14' (Quality gates
   # sets up none); with check-latest off, the Python setup action may resolve that pin to a 3.14 already on
   # the runner rather than the newest patch release. Those jobs stay required. These five run the suites a
   # newer patch release most often breaks on the exact patch release the maintainer host runs, which
-  # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg, and a failure on the
-  # '3.14' legs alone is diagnostic evidence of a patch-release difference, not proof that the change is
-  # innocent. opf-host-patch runs the OPF tooling self-test, and each git-fixture-env-*-host-patch job runs
-  # the one git-fixture-env suite of its '3.14' lane, so the four suites run as parallel jobs, as they do on
-  # '3.14', and the host leg takes about as long as its longest suite rather than the sum of the four.
+  # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg. opf-host-patch runs
+  # the OPF tooling self-test, and each git-fixture-env-*-host-patch job runs one git-fixture-env suite,
+  # so the four suites run as parallel jobs and the host leg takes about as long as its longest suite
+  # rather than the sum of the four. These jobs are the only CI run of the OPF tooling self-test and of
+  # the combined, malformed and system git-fixture-env suites: no '3.14' job runs them. Only the
+  # git-fixture-env-core suite also runs on '3.14', in the git-fixture-env-core job above, the canary
+  # for a newer patch release; a failure there alone is diagnostic evidence of a patch-release
+  # difference, not proof that the change is innocent.
   # tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
   # jobs, and concurrency only as the pinned block) and each job whole: no job key but name, runs-on,
   # steps and the pinned heavy-job if: line, runs-on ubuntu-24.04 (on 2026-10-12 the Python versions
@@ -1022,9 +932,9 @@ jobs:
   # job does not run that release) and the job's one suite, each held step with exactly name, run
   # and shell: bash; its jobs leg also runs outside these jobs, in the registry job (--jobs-only), which
   # carries no if:, so an edit here cannot silence every CI run of it. All five are required through Quality
-  # gates. They are heavy jobs, so they run the OPF tooling self-test and the four git-fixture-env suites
-  # a second time in every run on a push or on a merge-train-* pull request of this repository, and in no
-  # other pull request run; an edit to a pull request's title or body starts no Quality run.
+  # gates. They are heavy jobs, so they run on a push and on a merge-train-* pull request of this
+  # repository, and in no other pull request run; an edit to a pull request's title or body starts no
+  # Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
@@ -1414,9 +1324,7 @@ jobs:
     needs:
       - secrets
       - site
-      - opf
-      - opf-adopt
-      - opf-init
+      - opf-tooling
       - opf-closure-a
       - opf-closure-b
       - opf-closure-c
@@ -1426,9 +1334,6 @@ jobs:
       - generated
       - selftest-execution
       - git-fixture-env-core
-      - git-fixture-env-config-combined
-      - git-fixture-env-config-malformed
-      - git-fixture-env-config-system
       - opf-host-patch
       - git-fixture-env-core-host-patch
       - git-fixture-env-config-combined-host-patch

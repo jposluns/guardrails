@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.14** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.15** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -82,9 +82,9 @@ generated-file `--check` and the manifest check, run locally before its push, a 
 per head; the full roster is first proven on the train tree by the train pull request's Quality run.
 Whenever the full `tools/run_all_checks.sh` runs, it FAILS when gitleaks is not on PATH or reports another
 version than the `Secrets (gitleaks)` step of `quality.yml` pins (`tools/check_gitleaks_pin.py`; its live
-leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the heavy jobs
-(`opf`, `opf-adopt`, `opf-init`, `selftest-execution`, the four `git-fixture-env-*` lanes, the five host
-jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
+leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the nine heavy jobs
+(`opf-tooling`, `selftest-execution`, the `git-fixture-env-core` canary, the five host jobs and
+`byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
 request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
 label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
 `Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
@@ -117,15 +117,22 @@ release the maintainer host runs, named in `.aiqt/python-host.toml`, on `runs-on
 `opf-host-patch` runs the OPF tooling self-test, and `git-fixture-env-core-host-patch`,
 `git-fixture-env-config-combined-host-patch`, `git-fixture-env-config-malformed-host-patch` and
 `git-fixture-env-config-system-host-patch` each run one of the four git-fixture-env suites, so the four
-host suites run in parallel, as their `3.14` lanes do, and take about as long as the longest of them
-rather than their sum. Every other job there that sets up Python pins `3.14` (the Quality gates job sets
-up none); with `check-latest` off, setup-python may resolve that pin to a 3.14 already on the runner rather
-than the newest patch release. Every other job in `quality.yml` stays required. The host jobs add CI time,
-a cost accepted for this signal: the OPF tooling self-test and the four git-fixture-env suites each run twice in
-every run that runs the heavy jobs, and an edit to a pull request's title or body starts no Quality run. A passing local suite on the host
-patch then predicts a required CI leg; a failure on the `3.14` legs alone is diagnostic evidence of a
-patch-release difference, not proof that the change is innocent (a change once passed every local suite and
-failed only in CI on a newer patch release). The runner image is pinned beside the patch: on 2026-10-12 the
+host suites run in parallel and take about as long as the longest of them rather than their sum. These
+host jobs are the ONLY CI run of the OPF tooling self-test and of the combined, malformed and system
+git-fixture-env suites; `git-fixture-env-core` stays on `3.14` as the one canary of those suites. Every
+other job there that sets up Python pins `3.14` (the Quality gates job sets up none); with `check-latest`
+off, setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release.
+Every other job in `quality.yml` stays required, `opf-tooling` (every OPF gate and direct self-test, run on
+`3.14`) among them. Under the maintainer's 2026-10-27 authorization this reverses the earlier decision that
+the host jobs' CI time was a cost accepted for running those suites twice: the `3.14` copies of the OPF
+tooling self-test and of the three config suites are gone, and the local runner's
+`opf.py --self-test-group` lines have no CI counterpart (CI runs the whole self-test once, on the host
+patch). An edit to a pull request's title or body starts no Quality run. A passing local suite on the host
+patch then predicts a required CI leg; a failure on the `3.14` canary alone is diagnostic evidence of a
+patch-release difference, not proof that the change is innocent. The newest-patch early warning (which
+once caught a change that passed every local suite and failed only in CI on a newer patch release) now
+rests on the `git-fixture-env-core` canary and on the `3.14` setup of every non-host job; for the OPF
+tooling self-test and the three config suites it is covered nowhere. The runner image is pinned beside the patch: on 2026-10-12 the
 setup-python versions manifest listed Linux x64 builds of 3.14.4 for Ubuntu 22.04 and 24.04 only, so
 `ubuntu-latest` moving to an image without one would fail every host job, and moving them off ubuntu-24.04
 (or its retirement) needs a host patch with a build for the new image. `tools/check_python_host_pin.py`
