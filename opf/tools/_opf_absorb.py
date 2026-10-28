@@ -1004,12 +1004,10 @@ def self_test():
     check("exit-map", EXIT[OK] == 0 and EXIT[NOT_APPLICABLE] == 0 and EXIT[CANNOT_EVALUATE] == 2)
 
     # --- end-to-end store resolution over synthetic on-disk stores -----------------------------------
-    manifest_wl = ("[opf]\n"
-                   'standard = "opf"\n'
-                   'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-                   'layout = "inline"\n'
-                   'posture = "required"\n'
-                   'import_status = "none"\n\n'
+    # The [opf] base table comes from the production builder, so the fixtures follow the tooling's
+    # constants rather than restating them.
+    import _opf_init
+    manifest_wl = (_opf_init.base_table_text(_opf_init._manifest_model()) + "\n"
                    "[types.worklog]\n"
                    'namespace = "WL"\n')
     manifest_done = manifest_wl + '\n[types.done]\nnamespace = "DN"\n'
