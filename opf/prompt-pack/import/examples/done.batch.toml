@@ -1,0 +1,13 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-changelog.md"
+
+[[record]]
+key = "export-csv-shipped"
+type = "done"
+created_at = "2019-04-11T16:40:00Z"
+links = [{id = "imported:BI-1", rel = "receipt_of"}]
+status = "recorded"
+title = "Shipped the CSV export for the monthly report"
+unrecorded = [{field = "updated_at", reason = "not_applicable"}]

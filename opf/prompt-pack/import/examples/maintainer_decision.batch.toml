@@ -1,0 +1,13 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-rulings.md"
+
+[[record]]
+key = "csv-default-delimiter"
+type = "maintainer_decision"
+created_at = "2020-01-15T12:00:01Z"
+decision = "Keep the comma; offer a semicolon option for locales that need it."
+status = "recorded"
+title = "Comma stays the default CSV delimiter"
+unrecorded = [{field = "updated_at", reason = "not_applicable"}]
