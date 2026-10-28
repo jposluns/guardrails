@@ -62,20 +62,26 @@ not detected.
 
 Every helper module the gate imports that cannot be imported (it is missing or unreadable, or its import raises
 any BaseException other than a KeyboardInterrupt, which is re-raised unchanged; a SyntaxError, a SystemExit of
-any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2), never a finding or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
-opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
-opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
-declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
-cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list. So, last, is
-any escape from the gate body: any BaseException other than a KeyboardInterrupt (re-raised unchanged) that
-leaves run() or the self-test, a SystemExit of any code or an error raised by a helper the gate calls included,
-ends the gate with exit 2, never with that SystemExit's code or a traceback's exit 1. Each of these
-cannot-evaluates prints its fixed CANNOT EVALUATE line first, then a cause line with the exception's type name
-and message; where reading the message raises (any BaseException, a SystemExit included), the cause line gives
-the type name alone, or is left out where that cannot be read either, and the exit is 2 all the same. The one
-SystemExit the gate expects, the execution-report harness refusing a --execution-report run that
-tools/check_selftest_execution.py did not launch (it prints its own SELF-TEST HARNESS ERROR line), is labelled
-as that refusal (exit 2), not as an escape.
+any code and a bare sys.exit() are included) is a cannot-evaluate (exit 2), never a finding or a clean exit:
+tools/_selftest_exit_report.py and tools/check_selftest_execution.py, opf/tools/_opf_declaration.py and
+opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each opf/tools helper its _bootstrap()
+imports (one that _bootstrap() itself maps to its exit 2 included). So is a declaration file, VERSION, surface
+or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes, cannot be read or (but for the
+declaration file) is not UTF-8, and a directory rule 6 cannot list. So, last, is any escape from the gate body:
+any BaseException other than a KeyboardInterrupt (re-raised unchanged) that leaves run() or the self-test, a
+SystemExit of any code or an error raised by a helper the gate calls included, ends the gate with exit 2, never
+with that SystemExit's code or a traceback's exit 1. An exception is a KeyboardInterrupt here by its real type
+alone: each such test applies issubclass to the exception's type(), never isinstance, so the gate reads none of
+the exception's attributes (its __class__ included) before printing its CANNOT EVALUATE line, and an exception
+whose __class__ raises (a SystemExit included) or claims KeyboardInterrupt is a cannot-evaluate like any other.
+Each of these cannot-evaluates prints its fixed CANNOT EVALUATE line first, then a cause line with the
+exception's type name and message; where reading the message raises (any BaseException other than a
+KeyboardInterrupt, a SystemExit included), the cause line gives the type name alone, or is left out where that
+cannot be read either, and the exit is 2 all the same. A KeyboardInterrupt raised while the CANNOT EVALUATE
+line or the cause line is printed, or while the message or type name is read (a Ctrl-C, or a __str__ that
+raises one), told by its real type in the same way, propagates instead. The one SystemExit the gate expects,
+the execution-report harness refusing a --execution-report run that tools/check_selftest_execution.py did not
+launch (it prints its own SELF-TEST HARNESS ERROR line), is labelled as that refusal (exit 2), not as an escape.
 
 The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime check and the emitter) and every
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
@@ -169,26 +175,35 @@ class CannotEvaluate(Exception):
 
 def _cannot_evaluate(what, exc, self_test=False):
     """Print the fixed cannot-evaluate line for `what`, then describe the exception `exc` that caused it, and
-    return 2 whatever the description does: `exc` may come from a helper, whose own __str__ (or type name) can
-    raise any BaseException, a SystemExit included, so the description falls back to the type name, or to none."""
+    return 2: `exc` may come from a helper, whose own __str__ (or type name) can raise any BaseException, a
+    SystemExit included, so the description falls back to the type name, or to none. A KeyboardInterrupt raised
+    while a line is printed or `exc` is described (a Ctrl-C, or a __str__ that raises one) propagates instead;
+    each step tells one by its real type and never reads the raised exception's __class__, so an exception
+    whose __class__ raises or claims KeyboardInterrupt is no KeyboardInterrupt there."""
     stream = sys.stdout if self_test else sys.stderr
     try:
         print(("SELF-TEST CANNOT EVALUATE: opf-declaration: " if self_test else
                "opf-declaration: CANNOT EVALUATE: ") + what, file=stream)
-    except BaseException:   # the exit status still carries the cannot-evaluate
-        pass
+    except BaseException as error:   # the exit status still carries the cannot-evaluate
+        if issubclass(type(error), KeyboardInterrupt):
+            raise
     try:
         cause = "{}: {}".format(type(exc).__name__, exc)
-    except BaseException:
+    except BaseException as error:
+        if issubclass(type(error), KeyboardInterrupt):
+            raise
         try:
             cause = "{} (its message cannot be read)".format(type(exc).__name__)
-        except BaseException:
+        except BaseException as error:
+            if issubclass(type(error), KeyboardInterrupt):
+                raise
             cause = None
     if cause is not None:
         try:
             print("  cause: " + cause, file=stream)
-        except BaseException:
-            pass
+        except BaseException as error:
+            if issubclass(type(error), KeyboardInterrupt):
+                raise
     return 2
 
 
@@ -453,7 +468,7 @@ def run(root):
     try:
         _load()
     except BaseException as exc:   # a helper _load() imports is missing, unreadable or fails to import
-        if isinstance(exc, KeyboardInterrupt):
+        if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("a helper module cannot be loaded", exc)
     try:
@@ -568,14 +583,14 @@ def self_test(report_path=None):
         _load()
         opf = _load_opf()
     except BaseException as exc:   # a helper or opf.py is missing, unreadable or fails to import
-        if isinstance(exc, KeyboardInterrupt):
+        if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("a helper module cannot be loaded", exc, self_test=True)
     from unittest.mock import patch   # after arm: it imports logging, whose import registers an atexit hook
     try:
         bootstrapped = opf._bootstrap()
     except BaseException as exc:   # a helper opf.py's _bootstrap() imports raises past its own arms
-        if isinstance(exc, KeyboardInterrupt):
+        if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("opf.py helpers could not be bootstrapped", exc, self_test=True)
     if bootstrapped != 0:
@@ -1038,7 +1053,7 @@ def self_test(report_path=None):
     # guard inside them is applied to a copy of this gate with that guard in main() removed as well
     main_try = "    try:\n        if (len(args) in (2, 3)"
     main_guard = ("    except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit "
-                  "included\n        if isinstance(exc, KeyboardInterrupt):\n            raise\n")
+                  "included\n        if issubclass(type(exc), KeyboardInterrupt):\n            raise\n")
     at = source.find(main_guard)
     removed_main = (source[:at] + source[source.find('    print("usage:', at):]).replace(
         main_try, "    if True:\n        if (len(args) in (2, 3)")
@@ -1298,8 +1313,24 @@ def self_test(report_path=None):
     check("revert/read-guard-single-print-undescribable-red", rc == "exit 0", rc)
 
     # a KeyboardInterrupt still propagates, at the tools import site and inside run() (at its helper load and from
-    # a helper it calls): the process ends by SIGINT, not exit 2; with the site's re-raise dropped it exits 2
-    reraise = "\n        if isinstance(exc, KeyboardInterrupt):\n            raise\n"
+    # a helper it calls), and so does one that a helper's exception raises from its __str__ while the guard in
+    # main() describes it: the process ends by SIGINT, not exit 2; with the site's re-raise dropped it exits 2
+    reraise = "\n        if issubclass(type(exc), KeyboardInterrupt):\n            raise\n"
+    # the four steps of _cannot_evaluate that catch what printing or describing raises, each with its re-raise
+    caught = {
+        "print": "   # the exit status still carries the cannot-evaluate\n"
+                 "        if issubclass(type(error), KeyboardInterrupt):\n            raise\n",
+        "message": "__name__, exc)\n    except BaseException as error:\n"
+                   "        if issubclass(type(error), KeyboardInterrupt):\n            raise\n",
+        "type-name": "        except BaseException as error:\n            if issubclass(type(error), KeyboardInterrupt):\n"
+                     "                raise\n            cause = None\n",
+        "cause-print": "file=stream)\n        except BaseException as error:\n"
+                       "            if issubclass(type(error), KeyboardInterrupt):\n                raise\n    return 2\n",
+    }
+
+    def dropped(text):
+        """`text` with its re-raise of a KeyboardInterrupt dropped."""
+        return re.sub(r"( *)if issubclass\(type\(error\), KeyboardInterrupt\):\n *raise\n", r"\1pass\n", text)
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         interrupted = {}
@@ -1310,6 +1341,9 @@ def self_test(report_path=None):
              guards["run"] + "\n"),
             ("main", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise KeyboardInterrupt\n",
              tree, main_guard, main_guard.split("\n")[0] + "\n"),
+            ("describe", "opf/tools/_opf_declaration.py", "class Unsayable(Exception):\n    def __str__(self):\n"
+             "        raise KeyboardInterrupt\n\n\ndef parse_declaration(data):\n    raise Unsayable()\n", tree,
+             caught["message"], dropped(caught["message"])),
         ):
             for reverted in (False, True):
                 interrupted[site, reverted] = (source.count(old) == 1,) + launch(
@@ -1324,9 +1358,179 @@ def self_test(report_path=None):
         ("revert/load-guard-keyboard-interrupt-reraise-dropped-red", "run", True, 2),
         ("live/run-helper-call-keyboard-interrupt-propagates", "main", False, -signal.SIGINT),
         ("revert/main-guard-keyboard-interrupt-reraise-dropped-red", "main", True, 2),
+        ("live/run-helper-call-undescribable-keyboard-interrupt-propagates", "describe", False, -signal.SIGINT),
+        ("revert/cannot-evaluate-message-keyboard-interrupt-reraise-dropped-red", "describe", True, 2),
     ):
         anchored, found, output = interrupted[site, reverted]
         check(check_id, anchored and found == rc, (found, output))
+
+    # whether a caught exception is a KeyboardInterrupt is told by its real type, never by its __class__, which the
+    # exception defines: at each site that tells it, a helper's exception whose __class__ raises a SystemExit(0), or
+    # claims KeyboardInterrupt, ends the gate with exit 2 and that site's fixed line; with the site's test back on
+    # isinstance (a site inside run() or the self-test in a copy with the guard in main() removed as well) the first
+    # exits 0 on that SystemExit and the second is re-raised, exiting 1 with a traceback
+    class_raises = ("class ClassRaises(Exception):\n    @property\n    def __class__(self):\n"
+                    "        raise SystemExit(0)\n\n\n")
+    class_claims = "class ClaimsInterrupt(Exception):\n    __class__ = KeyboardInterrupt\n\n\n"
+    told = {
+        "tools": "    if _HELPER_ERROR is not None:\n"
+                 "        if issubclass(type(_HELPER_ERROR), KeyboardInterrupt):\n",
+        "run": guards["run"] + reraise,
+        "self-test": guards["self-test"] + reraise,
+        "bootstrap": "except BaseException as exc:   # a helper opf.py's _bootstrap() " "imports raises past its own "
+                     "arms" + reraise,
+        "main": main_guard,
+    }
+
+    def on_isinstance(text):
+        """`text` with each real-type KeyboardInterrupt test in it back on isinstance."""
+        return re.sub(r"issubclass\(type\((\w+)\), KeyboardInterrupt\)", r"isinstance(\1, KeyboardInterrupt)", text)
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        lying = {}
+        for site, rel, raising, args, helpers in (
+            ("tools", "tools/check_selftest_execution.py", "raise {}\n", [], stubs),
+            ("run", "opf/tools/_opf_store.py", "raise {}\n", [], stubs),
+            ("self-test", "opf/tools/opf.py", "raise {}\n", ["--self-test"], stubs),
+            ("bootstrap", "opf/tools/_opf_worklog.py", "raise {}\n", ["--self-test"], with_opf),
+            ("main", "opf/tools/_opf_declaration.py", "def parse_declaration(data):\n    raise {}\n", [], tree),
+        ):
+            gate = (source if site in ("tools", "main") else removed_main).replace(told[site], on_isinstance(told[site]))
+            for kind, text in (("raises", class_raises + raising.format("ClassRaises('its __class__ raises')")),
+                               ("claims", class_claims + raising.format("ClaimsInterrupt('not an interrupt')"))):
+                for reverted in (False, True):
+                    lying[site, kind, reverted] = (source.count(told[site]) == 1,) + launch(
+                        Path(tmp, "lying-{}-{}-{}".format(site, kind, int(reverted))), None, rel, text, args, None,
+                        helpers, gate if reverted else source)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, site, kind, reverted, rc in (
+        ("live/tools-helper-class-raises-system-exit-0-cannot-evaluate", "tools", "raises", False, 2),
+        ("revert/tools-helper-isinstance-class-raises-system-exit-0-red", "tools", "raises", True, 0),
+        ("live/tools-helper-class-claims-keyboard-interrupt-cannot-evaluate", "tools", "claims", False, 2),
+        ("revert/tools-helper-isinstance-class-claims-keyboard-interrupt-red", "tools", "claims", True, 1),
+        ("live/opf-helper-class-raises-system-exit-0-cannot-evaluate", "run", "raises", False, 2),
+        ("revert/load-guard-isinstance-class-raises-system-exit-0-red", "run", "raises", True, 0),
+        ("live/opf-helper-class-claims-keyboard-interrupt-cannot-evaluate", "run", "claims", False, 2),
+        ("revert/load-guard-isinstance-class-claims-keyboard-interrupt-red", "run", "claims", True, 1),
+        ("live/self-test-helper-class-raises-system-exit-0-cannot-evaluate", "self-test", "raises", False, 2),
+        ("revert/self-test-load-guard-isinstance-class-raises-system-exit-0-red", "self-test", "raises", True, 0),
+        ("live/self-test-helper-class-claims-keyboard-interrupt-cannot-evaluate", "self-test", "claims", False, 2),
+        ("revert/self-test-load-guard-isinstance-class-claims-keyboard-interrupt-red", "self-test", "claims", True, 1),
+        ("live/self-test-bootstrap-helper-class-raises-system-exit-0-cannot-evaluate", "bootstrap", "raises", False,
+         2),
+        ("revert/self-test-bootstrap-guard-isinstance-class-raises-system-exit-0-red", "bootstrap", "raises", True,
+         0),
+        ("live/self-test-bootstrap-helper-class-claims-keyboard-interrupt-cannot-evaluate", "bootstrap", "claims",
+         False, 2),
+        ("revert/self-test-bootstrap-guard-isinstance-class-claims-keyboard-interrupt-red", "bootstrap", "claims",
+         True, 1),
+        ("live/run-helper-call-class-raises-system-exit-0-cannot-evaluate", "main", "raises", False, 2),
+        ("revert/main-guard-isinstance-class-raises-system-exit-0-red", "main", "raises", True, 0),
+        ("live/run-helper-call-class-claims-keyboard-interrupt-cannot-evaluate", "main", "claims", False, 2),
+        ("revert/main-guard-isinstance-class-claims-keyboard-interrupt-red", "main", "claims", True, 1),
+    ):
+        anchored, found, output = lying[site, kind, reverted]
+        cause = "ClassRaises: its __class__ raises" if kind == "raises" else "ClaimsInterrupt: not an interrupt"
+        if reverted:
+            shown = "CANNOT EVALUATE" not in output and (kind == "raises" or "Traceback" in output and cause in output)
+        else:
+            shown = describing[site][0].split('"')[1] + "\n  cause: " + cause + "\n" in output
+        check(check_id, anchored and found == rc and shown, (found, output))
+
+    # the same at each step of _cannot_evaluate that catches what printing or describing raises (the fixed line's
+    # print, the message, the type name it falls back to and the cause line's print), in this process: there a
+    # KeyboardInterrupt (a subclass of it here) propagates, and an error whose __class__ raises a SystemExit(0) or
+    # claims KeyboardInterrupt is caught, so it returns 2; with the step's re-raise dropped the KeyboardInterrupt
+    # returns 2, and with its test back on isinstance the SystemExit or the claiming error escapes
+    class Interrupt(KeyboardInterrupt):
+        pass
+
+    class ClassRaises(Exception):
+        @property
+        def __class__(self):
+            raise SystemExit(0)
+
+    class ClaimsInterrupt(Exception):
+        __class__ = KeyboardInterrupt
+
+    class Unsayable(Exception):
+        """An exception whose message raises `error`."""
+        def __init__(self, error):
+            super().__init__()
+            self.error = error
+
+        def __str__(self):
+            raise self.error
+
+    class Failing(io.StringIO):
+        """A stream whose write of a text starting with `prefix` raises `error`."""
+        def __init__(self, prefix, error):
+            super().__init__()
+            self.prefix, self.error = prefix, error
+
+        def write(self, text):
+            if text.startswith(self.prefix):
+                raise self.error
+            return super().write(text)
+
+    def nameless(error):
+        """An exception whose type name raises a RuntimeError when first read and `error` when read again."""
+        reads = []
+
+        class Unnamed(type):
+            @property
+            def __name__(cls):
+                reads.append(cls)
+                raise error if len(reads) > 1 else RuntimeError("the type name cannot be read")
+        return Unnamed("Nameless", (Exception,), {})()
+    raising = {
+        "print": lambda error: (RuntimeError("plain"), Failing("opf-declaration: CANNOT EVALUATE: ", error)),
+        "message": lambda error: (Unsayable(error), io.StringIO()),
+        "type-name": lambda error: (nameless(error), io.StringIO()),
+        "cause-print": lambda error: (RuntimeError("plain"), Failing("  cause: ", error)),
+    }
+    errors = {"interrupt": Interrupt, "raises": ClassRaises, "claims": ClaimsInterrupt}
+
+    def outcome(cannot_evaluate, step, kind):
+        """What `cannot_evaluate` does when its `step` raises an error of `kind`: the value it returns, or the type
+        name of what escapes it."""
+        exc, stream = raising[step](errors[kind]("raised while a cannot-evaluate is printed or described"))
+        with contextlib.redirect_stderr(stream):
+            try:
+                return cannot_evaluate("an input the gate needs cannot be read", exc)
+            except (Interrupt, SystemExit, ClaimsInterrupt) as escaped:
+                return type(escaped).__name__
+    steps = {}
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        for number, step in enumerate(caught):
+            for kind in errors:
+                steps[step, kind, None] = outcome(_cannot_evaluate, step, kind)
+            for revert, new in (("dropped", dropped(caught[step])), ("isinstance", on_isinstance(caught[step]))):
+                name = "opf_declaration_step_mutant_{}_{}".format(number, revert)
+                try:
+                    mutant = _copy_mutant(tmp, Path(__file__).resolve(), name, caught[step], new)
+                    for kind in errors:
+                        steps[step, kind, revert] = outcome(mutant._cannot_evaluate, step, kind)
+                except AssertionError as exc:
+                    for kind in errors:
+                        steps[step, kind, revert] = str(exc)
+                finally:
+                    sys.modules.pop(name, None)
+    finally:
+        shutil.rmtree(tmp)
+    for check_id, kind, revert, expected in (
+        ("live/cannot-evaluate-keyboard-interrupt-propagates", "interrupt", None, "Interrupt"),
+        ("revert/cannot-evaluate-keyboard-interrupt-reraise-dropped-red", "interrupt", "dropped", 2),
+        ("live/cannot-evaluate-class-raises-system-exit-0-returns-2", "raises", None, 2),
+        ("revert/cannot-evaluate-isinstance-class-raises-system-exit-0-red", "raises", "isinstance", "SystemExit"),
+        ("live/cannot-evaluate-class-claims-keyboard-interrupt-returns-2", "claims", None, 2),
+        ("revert/cannot-evaluate-isinstance-class-claims-keyboard-interrupt-red", "claims", "isinstance",
+         "ClaimsInterrupt"),
+    ):
+        found = [steps[step, kind, revert] for step in caught]
+        check(check_id, found == [expected] * len(caught), found)
 
     # the execution-report harness refusing a --execution-report run it did not launch is labelled as that
     # refusal, not as an escape: a copy of this gate beside the real tools/_selftest_exit_report.py, launched
@@ -1378,7 +1582,7 @@ def self_test(report_path=None):
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     if _HELPER_ERROR is not None:
-        if isinstance(_HELPER_ERROR, KeyboardInterrupt):
+        if issubclass(type(_HELPER_ERROR), KeyboardInterrupt):
             raise _HELPER_ERROR   # here: tools/check_python_floor.py admits no raise in an import fallback
         return _cannot_evaluate("a helper module cannot be loaded", _HELPER_ERROR)
     try:
@@ -1390,7 +1594,7 @@ def main(argv=None):
         if not args:
             return run(ROOT)
     except BaseException as exc:   # anything that escapes the gate body, a helper's SystemExit included
-        if isinstance(exc, KeyboardInterrupt):
+        if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("an exception escaped the gate body", exc)
     print("usage: check_opf_declaration.py [--self-test | [--self-test] --execution-report ABS_PATH]",
