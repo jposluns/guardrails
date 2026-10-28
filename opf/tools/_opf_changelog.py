@@ -998,12 +998,11 @@ def self_test():
     check("abspath-unresolvable-root-cannot-eval", abs_ok)
 
     # --- end-to-end store resolution over synthetic on-disk stores -----------------------------------
-    manifest = ("[opf]\n"
-                'standard = "opf"\n'
-                'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-                'layout = "inline"\n'
-                'posture = "required"\n'
-                'import_status = "none"\n\n'
+    # The [opf] base table comes from the production builder, so the fixtures follow the tooling's
+    # constants rather than restating them.
+    import _opf_init
+    base_table = _opf_init.base_table_text(_opf_init._manifest_model())
+    manifest = (base_table + "\n"
                 "[types.worklog]\n"
                 'namespace = "WL"\n')
     cl_disk = ("# Changelog\n\nA curated summary of the worklog.\n\n"
@@ -1137,12 +1136,7 @@ def self_test():
 
         # F5: a manifest that omits the required [types] section must fail the FULL manifest validator and
         # come back CANNOT-EVALUATE. Pre-fix only [vendors] was checked, so this clean-passed.
-        manifest_no_types = ("[opf]\n"
-                             'standard = "opf"\n'
-                             'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-                             'layout = "inline"\n'
-                             'posture = "required"\n'
-                             'import_status = "none"\n')
+        manifest_no_types = base_table
         check("f5-manifest-missing-types-cannot-eval",
               evaluate(build_store(version_text, worklog_text, cl_disk, manifest_no_types)).status
               == CANNOT_EVALUATE)
