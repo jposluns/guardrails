@@ -564,9 +564,10 @@ def self_test_main():
 
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
-# tools/check_child_status_coverage.py pins this copy to by AST. This gate reads child exit statuses
-# through the modules it imports, so under an ignored SIGCHLD it would read a failing child as a pass;
-# it refuses at its entry line instead, before main() runs.
+# tools/check_child_status_coverage.py pins this copy to by AST. The modules it imports hold child launch
+# and wait calls, which that gate's import scan counts, so under an ignored SIGCHLD a failing child they
+# start would read as a pass. This gate and its self-test start no child themselves; the guard runs at the
+# entry line, before main() dispatches either, so a launch added on either path later is covered.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
