@@ -527,11 +527,15 @@ def main():
 
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
-# tools/check_child_status_coverage.py pins this copy to by AST. This file's local import closure (_opf_store and
-# the modules it reaches) launches children and reads their exit status, so under an ignored SIGCHLD a failed
-# child would read as a success; it refuses at its entry line instead, before main() runs. The --self-test
-# statement stays first in the entry, where opf.py's aggregator requires it: self_test() also runs in process under
-# opf.py --self-test, behind opf.py's own guard, so it carries no guard call, and its vectors launch no child.
+# tools/check_child_status_coverage.py pins this copy to by AST. No path of this file launches a child other than
+# the guard's own probe: it reads only constants from _opf_store, and the launches in its local import closure are
+# in code of _opf_store and the modules that imports, which this file never calls. The guard is here because that
+# gate classifies an entry point by a static scan of its whole local import closure, which counts those launches,
+# so without it this file would be a new direct-launch residual, a finding; with it, the entry line refuses an
+# ignored SIGCHLD before main() runs. The --self-test statement stays first in the entry, where opf.py's
+# aggregator requires it: self_test() also runs in process under opf.py --self-test, behind opf.py's own guard, so
+# it carries no guard call, and its vectors launch no child (that gate's self-test runs it under a
+# process-creation audit hook and fails on any launch).
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 

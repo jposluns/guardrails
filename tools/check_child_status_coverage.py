@@ -11,15 +11,24 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_declaration.py and tools/check_opf_declaration.py (the constant and both functions) and in
-     the hooks dispatcher and its generated plugin copy (the constant and the probe) are each defined once at the
-     top level and AST-identical (ast.dump, docstrings included) to the canonical text.
+     the hooks dispatcher and its generated plugin copy (the constant and the probe) are each bound exactly once
+     at module scope, by one top-level definition (an undecorated one for a function), and AST-identical
+     (ast.dump, docstrings included) to the canonical text. The binding count (_bindings) is a static walk of
+     every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
+     list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
+     (a star import counts), del, and a global declaration of the name in any function. Every attribute or
+     subscript store or delete at module scope or in a class body (_entry.__code__ = ..., globals()["_entry"] =
+     ...) is counted for every name and is never clean: through an alias it can reach the module namespace or
+     the function. A rebinding made by a call (setattr, globals().update), by a store inside a function body
+     other than through a global declaration, or from another module is not seen.
   3. entries: each CLI copy's __main__ body is exactly sys.exit(_child_status_refusal_exit("<basename>") or
      main()), the canonical file's entry ends in that line, each SELF_TEST_FIRST_COPIES file
      (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical --self-test statement and
-     then that line (a direct --self-test launch of it is unguarded; its vectors launch no child), each
-     ENTRY_COPIES file (tools/check_opf_declaration.py,
-     whose entry raises its own exit rather than calling sys.exit) has the __main__ body exactly _entry() and one
-     top-level _entry() whose first statement is exactly _child_status_refusal_exit("<basename>"), and each
+     then that line (a direct --self-test launch of it is unguarded; the self-test runs that launch under a
+     process-creation audit hook and fails on any launch), each ENTRY_COPIES file (tools/check_opf_declaration.py,
+     whose entry raises its own exit rather than calling sys.exit) has the __main__ body exactly the single call
+     _entry(), and _entry bound exactly once at module scope (the same count), by one undecorated top-level def
+     with no parameters whose first statement is exactly _child_status_refusal_exit("<basename>"), and each
      dispatcher's main() holds HOOK_BLOCK as the statements right after its is_fail_open assignment.
   4. launchers: the first run_gate line of tools/run_all_checks.sh and of opf/tools/run_all_checks.sh is the
      probe, and no line above it names Python (read in line order through check_ci_parity.read_runner_text).
@@ -491,6 +500,85 @@ def _top_definitions(tree, name):
     return found
 
 
+# The form each binding _bindings finds is named by in a finding: a def or class by its kind, and a stored or
+# deleted name by the statement or walrus it is a target of.
+DEF_FORMS = {"FunctionDef": "def", "AsyncFunctionDef": "async def", "ClassDef": "class"}
+TARGET_FORMS = {"Assign": "an assignment", "AugAssign": "an augmented assignment",
+                "AnnAssign": "an annotated assignment", "For": "a for target", "AsyncFor": "a for target",
+                "With": "a with-as target", "AsyncWith": "a with-as target", "NamedExpr": "a walrus (:=)",
+                "Delete": "a del", "TypeAlias": "a type alias"}
+
+
+def _binding_forms(node, owner, name):
+    """The form of each binding of name that one module-scope node makes (owner is the statement or walrus it
+    sits in), one per binding."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        decorated = "a decorated " if node.decorator_list else "a "
+        return [decorated + DEF_FORMS[type(node).__name__]] if node.name == name else []
+    if isinstance(node, ast.Name):
+        stored = node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
+        return [TARGET_FORMS.get(type(owner).__name__, "a target")] if stored else []
+    if isinstance(node, ast.Import):
+        return ["an import" for alias in node.names if (alias.asname or alias.name.partition(".")[0]) == name]
+    if isinstance(node, ast.ImportFrom):
+        return ["a star import" if alias.name == "*" else "a from-import" for alias in node.names
+                if (alias.asname or alias.name) in (name, "*")]
+    if isinstance(node, ast.ExceptHandler):
+        return ["an except-as name"] if node.name == name else []
+    if isinstance(node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
+        return ["a match capture"] if (node.rest if isinstance(node, ast.MatchMapping) else node.name) == name else []
+    return []
+
+
+def _bindings(tree, name):
+    """Every binding of name at module scope, as (line, form) in line order. The walk reads every node that runs
+    in the module's own scope: nested if, try, with, for, while and match blocks, and the decorators, defaults,
+    annotations and bases of a def, lambda or class, but no function or lambda body and no comprehension's own
+    plain targets; a class body is read for stores only. It counts a def, async def or class so named, each Name
+    stored or deleted (an assignment, augmented or annotated assignment, for, with-as, walrus or del target,
+    tuple, list and starred targets included, or a type alias), each import or from-import alias that binds it
+    (a star import counts, as it may), an except-as or match name, and each global declaration of name anywhere
+    in the file. Every store to or delete of an attribute or a subscript at module scope or in a class body is
+    counted for every name: through an alias it can reach the module namespace or the function itself, so the
+    walk cannot classify it. A binding made by a call, inside a function body other than through a global
+    declaration, or from another module is not seen."""
+    found = [(node.lineno, "a global declaration") for node in ast.walk(tree)
+             if isinstance(node, ast.Global) and name in node.names]
+    stack = [(tree, None, False)]
+    while stack:
+        node, owner, in_class = stack.pop()
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            found.append((node.lineno, "a store the walk cannot classify ({})".format(ast.unparse(node))))
+        elif not in_class:
+            found.extend((node.lineno, form) for form in _binding_forms(node, owner, name))
+        owner = node if isinstance(node, (ast.stmt, ast.NamedExpr)) else owner
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            children = node.decorator_list + [node.args] + ([node.returns] if node.returns else [])
+        elif isinstance(node, ast.ClassDef):
+            children = node.decorator_list + node.bases + node.keywords
+            stack.extend((statement, statement, True) for statement in node.body)
+        elif isinstance(node, ast.Lambda):
+            children = [node.args]
+        elif isinstance(node, ast.comprehension):
+            children, targets = [node.iter] + node.ifs, [node.target]
+            while targets:
+                target = targets.pop()
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    targets.extend(target.elts)
+                elif isinstance(target, ast.Starred):
+                    targets.append(target.value)
+                elif not isinstance(target, ast.Name):
+                    children.append(target)
+        else:
+            children = list(ast.iter_child_nodes(node))
+        stack.extend((child, owner, in_class) for child in children)
+    return sorted(found)
+
+
+def _forms(bindings):
+    return ", ".join("{} (line {})".format(form, line) for line, form in bindings) or "none"
+
+
 def template(canonical):
     """{name: ast.dump} of the canonical definitions; a canonical file without exactly one of each cannot be
     evaluated."""
@@ -504,12 +592,18 @@ def template(canonical):
 
 
 def copy_findings(rel, tree, tmpl, names):
+    """Each name's inline copy is bound exactly once at module scope (_bindings), by one top-level definition,
+    undecorated and AST-identical to the canonical one."""
     out = []
     for name in names:
+        bindings = _bindings(tree, name)
         nodes = _top_definitions(tree, name)
-        if len(nodes) != 1:
-            out.append("{}: the inline copy of {} is defined {} times at the top level, not once".format(
-                rel, name, len(nodes)))
+        if len(bindings) != 1 or len(nodes) != 1:
+            out.append("{}: the inline copy of {} is bound {} times at module scope ({}), not once by one top-level "
+                       "definition".format(rel, name, len(bindings), _forms(bindings)))
+        elif getattr(nodes[0], "decorator_list", None):
+            out.append("{}: the inline copy of {} is decorated, so the name need not hold the function".format(
+                rel, name))
         elif ast.dump(nodes[0]) != tmpl[name]:
             out.append("{}: the inline copy of {} differs from {}".format(rel, name, CANONICAL_REL))
     return out
@@ -527,16 +621,23 @@ def cli_entry_finding(rel, tree, name, exact=True):
 
 
 def entry_function_finding(rel, tree, name):
-    """None when the module's __main__ body is exactly _entry() and its one top-level _entry() function opens with
-    exactly the guard call ENTRY_GUARD."""
+    """None when the module's __main__ body is exactly _entry(), _entry is bound exactly once at module scope
+    (_bindings), by one undecorated top-level function with no parameters, and that function opens with exactly
+    the guard call ENTRY_GUARD."""
     block = tree.body[-1] if tree.body and check_entry_guard._is_guard(tree.body[-1]) else None
     body = block.body if block is not None else []
     entry = ast.dump(ast.parse("_entry()").body[0])
     if len(body) != 1 or ast.dump(body[-1]) != entry:
         return "{}: its __main__ entry is not exactly _entry()".format(rel)
+    bindings = _bindings(tree, "_entry")
     definitions = _top_definitions(tree, "_entry")
-    if len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef):
-        return "{}: _entry is defined {} times at the top level, not once as a function".format(rel, len(definitions))
+    if len(bindings) != 1 or len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef):
+        return "{}: _entry is bound {} times at module scope ({}), not once by one top-level function".format(
+            rel, len(bindings), _forms(bindings))
+    if definitions[0].decorator_list:
+        return "{}: its _entry() is decorated, so the name need not hold the function".format(rel)
+    if ast.dump(definitions[0].args) != ast.dump(ast.parse("def _entry():\n    pass\n").body[0].args):
+        return "{}: its _entry() takes parameters, so a default could stand in for the guard".format(rel)
     guard = ast.dump(ast.parse(ENTRY_GUARD.format(name)).body[0])
     statements = [ast.dump(statement) for statement in definitions[0].body]
     if statements[:1] != [guard]:
@@ -1251,6 +1352,85 @@ README_REL = "README.md"
 SHELL_REAL = ("opf/enforcement/ci/opf-ci.sh", "opf/enforcement/precommit/pre-commit")
 # The root of the in-memory launcher tree the walk vectors read; nothing is read from it.
 FAKE_ROOT = Path("/nonexistent-child-status-coverage-root")
+# One module-scope rebinding per binding form the count reads: (form, the statement with {0} for the name, the
+# form the finding names). Each is placed after every definition in tools/check_opf_declaration.py and is a
+# finding for _entry and for _child_status_refusal_exit alike; the top-level-only count they replace accepted
+# each one.
+REBINDINGS = (
+    ("tuple", "{0}, _other = main, None\n", "an assignment"),
+    ("starred", "*{0}, = (main,)\n", "an assignment"),
+    ("if", "if True:\n    {0} = main\n", "an assignment"),
+    ("try", "try:\n    {0} = main\nexcept Exception:\n    pass\n", "an assignment"),
+    ("while", "while True:\n    {0} = main\n    break\n", "an assignment"),
+    ("with", "with open(__file__) as {0}:\n    pass\n", "a with-as target"),
+    ("for", "for {0} in (main,):\n    pass\n", "a for target"),
+    ("walrus", "({0} := main)\n", "a walrus (:=)"),
+    ("except-as", "try:\n    pass\nexcept Exception as {0}:\n    pass\n", "an except-as name"),
+    ("match", "match main:\n    case {0}:\n        pass\n", "a match capture"),
+    ("import", "import json as {0}\n", "an import"),
+    ("from-import", "from json import loads as {0}\n", "a from-import"),
+    ("global", "def _rebind():\n    global {0}\n    {0} = main\n", "a global declaration"),
+    ("del", "del {0}\n", "a del"),
+    ("attribute-store", "{0}.__code__ = main.__code__\n", "a store the walk cannot classify ({0}.__code__)"),
+    ("namespace-store", 'globals()["{0}"] = main\n', "a store the walk cannot classify (globals()['{0}'])"))
+# The decorated form, swapped in place: (tree key, the def line, the decorated def line).
+DECORATED = (("entry", "\ndef _entry():\n", "\n@(lambda function: main)\ndef _entry():\n"),
+             ("guard", "\ndef _child_status_refusal_exit(name):\n",
+              "\n@(lambda function: lambda name: 0)\ndef _child_status_refusal_exit(name):\n"))
+# Bindings of _entry and of the guard function that are not at module scope (a function's locals, a class body,
+# a comprehension's own targets): the clean control, a finding only for a count that reads too much.
+LOCAL_BINDINGS = ("def _local_bindings():\n    _entry = _child_status_refusal_exit = None\n"
+                  "    return _entry, _child_status_refusal_exit\n\n\n"
+                  "class _ClassBindings:\n    _entry = _child_status_refusal_exit = None\n\n\n"
+                  "_comprehension = [(_entry, _child_status_refusal_exit)\n"
+                  "                  for _entry, _child_status_refusal_exit in ()]\n")
+# The process-creation audit: the driver runs the script named by its first argument as __main__, with the rest
+# as its arguments, under an audit hook that records every launch event (the events os.fork, os.forkpty,
+# os.posix_spawn and os.posix_spawnp, subprocess.Popen, os.system, os.exec* and os.spawn* raise), and prints
+# them with the script's exit status as its last stdout line. The control script launches through each audited
+# API (os.spawnv raises os.fork on POSIX; the exec names a path that does not exist, so it fails after its event).
+AUDIT_DRIVER = '''import json
+import runpy
+import sys
+
+LAUNCHES = ("os.exec", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn", "os.startfile", "os.system",
+            "subprocess.Popen")
+seen = []
+
+
+def _audit(event, args):
+    if event in LAUNCHES:
+        seen.append(event)
+
+
+sys.addaudithook(_audit)
+sys.argv = sys.argv[1:]
+try:
+    runpy.run_path(sys.argv[0], run_name="__main__")
+    code = 0
+except SystemExit as exc:
+    code = exc.code
+print("AUDITED " + json.dumps({"code": code, "launches": seen}))
+'''
+AUDIT_CONTROL = '''import os
+import subprocess
+import sys
+
+child = [sys.executable, "-I", "-B", "-c", "pass"]
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+os.waitpid(pid, 0)
+os.waitpid(os.posix_spawn(sys.executable, child, dict(os.environ)), 0)
+subprocess.run(child, check=True)
+os.system("exit 0")
+os.spawnv(os.P_WAIT, sys.executable, child)
+try:
+    os.execv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "absent", "program"), ["program"])
+except OSError:
+    pass
+'''
+AUDIT_CONTROL_LAUNCHES = ("os.exec", "os.fork", "os.posix_spawn", "os.system", "subprocess.Popen")
 
 
 def _registered_check_ids(suite):
@@ -1311,9 +1491,26 @@ def _inputs():
                                                 '\n_entry = main\n\nif __name__ == "__main__":\n')),
             ("declaration-entry-bare", _swap(declaration, "\n    _entry()\n", "\n    main()\n")),
             ("declaration-entry-extra", _swap(declaration, "\n    _entry()\n", "\n    print('entry')\n    _entry()\n")),
+            ("declaration-entry-parameter", _swap(declaration, "\ndef _entry():\n",
+                                                  "\ndef _entry(_child_status_refusal_exit=lambda name: 0):\n")),
+            ("declaration-guard-other-name", _swap(declaration, declaration_guard,
+                                                   "    " + ENTRY_GUARD.format("opf.py") + "\n")),
             ("opf-declaration-guard-gone", _swap(opf_declaration, CLI_ENTRY.format("_opf_declaration.py"),
-                                                 "sys.exit(main())"))):
+                                                 "sys.exit(main())")),
+            ("opf-declaration-extra", _swap(opf_declaration, CLI_ENTRY.format("_opf_declaration.py"),
+                                            "print('entry')\n    " + CLI_ENTRY.format("_opf_declaration.py"))),
+            ("opf-declaration-widened", _swap(opf_declaration, 'if sys.argv[1:] == ["--self-test"]:',
+                                              'if sys.argv[1:2] == ["--self-test"]:')),
+            ("local-bindings", _swap(declaration, '\nif __name__ == "__main__":\n',
+                                     "\n" + LOCAL_BINDINGS + '\nif __name__ == "__main__":\n'))):
         trees[key] = ast.parse(source)
+    for form, statement, _named in REBINDINGS:
+        for key, name in (("entry", "_entry"), ("guard", "_child_status_refusal_exit")):
+            trees["{}-rebound-{}".format(key, form)] = ast.parse(_swap(
+                declaration, '\nif __name__ == "__main__":\n',
+                "\n" + statement.format(name) + '\nif __name__ == "__main__":\n'))
+    for key, old, new in DECORATED:
+        trees[key + "-rebound-decorated"] = ast.parse(_swap(declaration, old, new))
     probe_line = RUNNER_PROBES[0][1] + "\n"
     opf_probe = 'run_gate "child-status"                python3 -I -B "$here/_child_status.py"\n'
     quality = real[WORKFLOWS_REL + "/quality.yml"]
@@ -1549,7 +1746,7 @@ def _vectors(module, trees, texts, canonical_tree):
          and not copies("selftest", m.CANONICAL_NAMES) and not copies("hook", m.HOOK_NAMES)),
         ("copies/drift-is-finding", lambda: any("_child_status_refusal differs" in finding
                                                 for finding in copies("opf-drift", m.CANONICAL_NAMES))),
-        ("copies/missing-copy-is-finding", lambda: any("defined 0 times" in finding
+        ("copies/missing-copy-is-finding", lambda: any("bound 0 times" in finding
                                                        for finding in copies("selftest-missing", m.CANONICAL_NAMES))),
         ("copies/hook-drift-is-finding", lambda: any("_CHILD_STATUS_PROBE_CODE differs" in finding
                                                      for finding in copies("hook-drift", m.HOOK_NAMES))),
@@ -1577,6 +1774,22 @@ def _vectors(module, trees, texts, canonical_tree):
             "decl", trees["declaration-entry-bare"], "check_opf_declaration.py") is not None),
         ("entries/entry-function-extra-statement", lambda: m.entry_function_finding(
             "decl", trees["declaration-entry-extra"], "check_opf_declaration.py") is not None),
+        ("entries/entry-function-parameter-default", lambda: "takes parameters" in (m.entry_function_finding(
+            "decl", trees["declaration-entry-parameter"], "check_opf_declaration.py") or "")),
+        ("entries/entry-function-guard-other-name", lambda: m.entry_function_finding(
+            "decl", trees["declaration-guard-other-name"], "check_opf_declaration.py") is not None),
+        ("entries/entry-rebound-decorated", lambda: "its _entry() is decorated" in (m.entry_function_finding(
+            "decl", trees["entry-rebound-decorated"], "check_opf_declaration.py") or "")),
+        ("copies/guard-rebound-decorated", lambda: any(
+            "the inline copy of _child_status_refusal_exit is decorated" in finding
+            for finding in copies("guard-rebound-decorated", m.CANONICAL_NAMES))),
+        ("entries/entry-local-bindings-clean", lambda: m.entry_function_finding(
+            "decl", trees["local-bindings"], "check_opf_declaration.py") is None
+         and not copies("local-bindings", m.CANONICAL_NAMES)),
+        ("entries/self-test-first-extra-statement", lambda: m.self_test_first_finding(
+            "opf-decl", trees["opf-declaration-extra"], "_opf_declaration.py") is not None),
+        ("entries/self-test-first-widened-test", lambda: m.self_test_first_finding(
+            "opf-decl", trees["opf-declaration-widened"], "_opf_declaration.py") is not None),
         ("launchers/real-launchers-pass",
          lambda: m.runner_first_gate_finding("runner", texts["runner"], local_probe) is None
          and m.runner_first_gate_finding("opf", texts["opf-runner"], opf_probe) is None
@@ -1710,6 +1923,21 @@ def _vectors(module, trees, texts, canonical_tree):
          lambda: reads_of("tools/new_reader.py")[0] == [("tools/helper_mod.py", "import subprocess")]),
         ("completeness/scan-clean-module", lambda: reads_of("tools/plain.py") == ([], [])),
     )
+
+    def rebound(form, named):
+        """True when the rebinding of form is a finding for _entry and names it (form, line)."""
+        finding = m.entry_function_finding("decl", trees["entry-rebound-" + form], "check_opf_declaration.py") or ""
+        return "_entry is bound 2 times" in finding and named.format("_entry") + " (line " in finding
+
+    def guard_rebound(form, named):
+        """True when the rebinding of form is a copy finding for _child_status_refusal_exit that names it."""
+        return any("the inline copy of _child_status_refusal_exit is bound 2 times" in finding
+                   and named.format("_child_status_refusal_exit") + " (line " in finding
+                   for finding in copies("guard-rebound-" + form, m.CANONICAL_NAMES))
+
+    for form, _statement, named in REBINDINGS:
+        vectors += (("entries/entry-rebound-" + form, lambda form=form, named=named: rebound(form, named)),
+                    ("copies/guard-rebound-" + form, lambda form=form, named=named: guard_rebound(form, named)))
     out = {}
     for vector, thunk in vectors:
         try:
@@ -1722,22 +1950,70 @@ def _vectors(module, trees, texts, canonical_tree):
 # id, exact source text, replacement, the vector that must then fail).
 MUTANTS = (
     ("copy-compare", "elif ast.dump(nodes[0]) != tmpl[name]:", "elif False:", "copies/drift-is-finding"),
-    ("copy-count", "        if len(nodes) != 1:\n            out.append(", "        if False:\n            out.append(",
-     "copies/missing-copy-is-finding"),
+    ("copy-count", "        if len(bindings) != 1 or len(nodes) != 1:\n            out.append(",
+     "        if False:\n            out.append(", "copies/missing-copy-is-finding"),
+    ("copy-binding-count", "        bindings = _bindings(tree, name)\n",
+     "        bindings = [(node.lineno, \"a top-level definition\") for node in _top_definitions(tree, name)]\n",
+     "copies/guard-rebound-tuple"),
+    ("copy-decorated", "elif getattr(nodes[0], \"decorator_list\", None):", "elif False:",
+     "copies/guard-rebound-decorated"),
+    ("binding-global", "if isinstance(node, ast.Global) and name in node.names]", "if False]",
+     "entries/entry-rebound-global"),
+    ("binding-store",
+     "if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):",
+     "if False:", "copies/guard-rebound-namespace-store"),
+    ("binding-nested", "            children = list(ast.iter_child_nodes(node))\n",
+     "            children = [child for child in ast.iter_child_nodes(node)\n"
+     "                        if node is tree or not isinstance(child, ast.stmt)]\n", "entries/entry-rebound-if"),
+    ("binding-import", "        return [\"an import\" for alias in node.names",
+     "        return [\"an import\" for alias in node.names if False", "copies/guard-rebound-import"),
+    ("binding-from-import", "                if (alias.asname or alias.name) in (name, \"*\")]",
+     "                if False]", "entries/entry-rebound-from-import"),
+    ("binding-handler", "        return [\"an except-as name\"] if node.name == name else []\n",
+     "        return []\n", "entries/entry-rebound-except-as"),
+    ("binding-match", "        return [\"a match capture\"] if (node.rest",
+     "        return [] if (node.rest", "copies/guard-rebound-match"),
+    ("binding-function-bodies",
+     "children = node.decorator_list + [node.args] + ([node.returns] if node.returns else [])",
+     "children = node.decorator_list + [node.args] + ([node.returns] if node.returns else []) + node.body",
+     "entries/entry-local-bindings-clean"),
+    ("binding-class-bodies", "stack.extend((statement, statement, True) for statement in node.body)",
+     "stack.extend((statement, statement, False) for statement in node.body)", "entries/entry-local-bindings-clean"),
+    ("binding-comprehension-targets", "                elif not isinstance(target, ast.Name):\n",
+     "                else:\n", "entries/entry-local-bindings-clean"),
     ("cli-entry-call", "or ast.dump(block.body[-1]) != want", "or False", "entries/cli-line-shape"),
     ("cli-entry-exact", "or (exact and len(block.body) != 1)", "or False", "entries/cli-extra-statement"),
     ("entry-function-call", "if len(body) != 1 or ast.dump(body[-1]) != entry:", "if len(body) != 1:",
      "entries/entry-function-call-shape"),
     ("entry-function-exact", "if len(body) != 1 or ast.dump(body[-1]) != entry:",
      "if not body or ast.dump(body[-1]) != entry:", "entries/entry-function-extra-statement"),
-    ("entry-function-once", "if len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef):",
+    ("entry-function-once",
+     "if len(bindings) != 1 or len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef):",
      "if not isinstance(definitions[0], ast.FunctionDef):", "entries/entry-function-rebound"),
+    ("entry-binding-count", "    bindings = _bindings(tree, \"_entry\")\n",
+     "    bindings = [(node.lineno, \"a top-level definition\") for node in _top_definitions(tree, \"_entry\")]\n",
+     "entries/entry-rebound-tuple"),
+    ("entry-decorated", "    if definitions[0].decorator_list:\n", "    if False:\n",
+     "entries/entry-rebound-decorated"),
+    ("entry-parameters", "if ast.dump(definitions[0].args) != ", "if False and ast.dump(definitions[0].args) != ",
+     "entries/entry-function-parameter-default"),
     ("entry-guard-present", "    if statements[:1] != [guard]:\n", "    if False:\n",
      "entries/entry-function-guard-missing"),
     ("entry-guard-first", "if statements[:1] != [guard]:", "if guard not in statements:",
      "entries/entry-function-guard-not-first"),
+    ("entry-guard-name", "if statements[:1] != [guard]:",
+     "if [statement.split(\", args=\")[0] for statement in statements[:1]] != [guard.split(\", args=\")[0]]:",
+     "entries/entry-function-guard-other-name"),
     ("self-test-first-compare", "if block is None or [ast.dump(statement) for statement in block.body] != expected:",
      "if block is None:", "entries/self-test-first-guard-missing"),
+    ("self-test-first-last-only",
+     "if block is None or [ast.dump(statement) for statement in block.body] != expected:",
+     "if block is None or [ast.dump(statement) for statement in block.body][-1:] != expected[-1:]:",
+     "entries/self-test-first-widened-test"),
+    ("self-test-first-ends-only",
+     "if block is None or [ast.dump(statement) for statement in block.body] != expected:",
+     "if block is None or [ast.dump(statement) for statement in block.body[:1] + block.body[-1:]] != expected:",
+     "entries/self-test-first-extra-statement"),
     ("hook-block-compare", "    if got != want:\n", "    if False:\n", "entries/hook-block-shape"),
     ("runner-first", "if line.split() != probe_line.split():", "if False:", "launchers/runner-first-gate"),
     ("runner-prelude", "        if _names_python(line):\n            return", "        if False:\n            return",
@@ -2032,6 +2308,26 @@ def _behaviour(probe, base):
     runner = _copy(LOCAL_RUNNER, tree, _swap(text, RUNNER_PROBES[0][1] + "\n", ""))
     got = via("ignore", ["bash", str(runner)], cwd=str(tree))
     out.append(("revert/runner-probe-removed-red", got[0] == 0 and "RESULT: PASS" in got[1], got))
+
+    # The --self-test statement of opf/tools/_opf_declaration.py runs before its guard, so that launch is unguarded:
+    # run it under the process-creation audit, which must record no launch, and the control, which must record
+    # each audited API.
+    driver = _copy("audit/driver.py", base, AUDIT_DRIVER)
+
+    def audited(*argv):
+        got = via("default", python + [str(driver)] + list(argv), cwd=str(ROOT))
+        last = got[1].splitlines()[-1] if got[1].splitlines() else ""
+        try:
+            return got, json.loads(last[len("AUDITED "):]) if last.startswith("AUDITED ") else None
+        except ValueError:
+            return got, None
+
+    got, report = audited(str(ROOT / "opf/tools/_opf_declaration.py"), "--self-test")
+    out.append(("behaviour/opf-declaration-self-test-launches-nothing", got[0] == 0
+                and report == {"code": 0, "launches": []} and "opf declaration self-test: PASS" in got[1], got))
+    got, report = audited(str(_copy("audit/launches.py", base, AUDIT_CONTROL)))
+    out.append(("control/audit-sees-every-launch", got[0] == 0 and isinstance(report, dict)
+                and report.get("code") == 0 and set(AUDIT_CONTROL_LAUNCHES) <= set(report.get("launches", ())), got))
     return out
 
 
@@ -2069,7 +2365,13 @@ def self_test(lane, report_path=None):
                                 ("entries/entry-function-guard-not-first", 0),
                                 ("entries/entry-function-rebound", 0), ("entries/entry-function-call-shape", 0),
                                 ("entries/entry-function-extra-statement", 0),
-                                ("entries/self-test-first-guard-missing", 0), ("launchers/real-launchers-pass", 0),
+                                ("entries/entry-function-parameter-default", 0),
+                                ("entries/entry-function-guard-other-name", 0),
+                                ("entries/entry-rebound-decorated", 0), ("copies/guard-rebound-decorated", 0),
+                                ("entries/entry-local-bindings-clean", 0),
+                                ("entries/self-test-first-guard-missing", 0),
+                                ("entries/self-test-first-extra-statement", 0),
+                                ("entries/self-test-first-widened-test", 0), ("launchers/real-launchers-pass", 0),
                                 ("launchers/runner-first-gate", 0), ("launchers/opf-runner-first-gate", 0),
                                 ("launchers/runner-prelude-launch", 0),
                                 ("launchers/workflow-first-step", 0), ("launchers/workflow-no-setup", 0),
@@ -2122,6 +2424,26 @@ def self_test(lane, report_path=None):
                                 ("completeness/scan-follows-local-imports", 0),
                                 ("completeness/scan-clean-module", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
+        # One vector per REBINDINGS form for _entry and for the guard function, each id written out.
+        for check_id, _kind in (("entries/entry-rebound-tuple", 0), ("copies/guard-rebound-tuple", 0),
+                                ("entries/entry-rebound-starred", 0), ("copies/guard-rebound-starred", 0),
+                                ("entries/entry-rebound-if", 0), ("copies/guard-rebound-if", 0),
+                                ("entries/entry-rebound-try", 0), ("copies/guard-rebound-try", 0),
+                                ("entries/entry-rebound-while", 0), ("copies/guard-rebound-while", 0),
+                                ("entries/entry-rebound-with", 0), ("copies/guard-rebound-with", 0),
+                                ("entries/entry-rebound-for", 0), ("copies/guard-rebound-for", 0),
+                                ("entries/entry-rebound-walrus", 0), ("copies/guard-rebound-walrus", 0),
+                                ("entries/entry-rebound-except-as", 0), ("copies/guard-rebound-except-as", 0),
+                                ("entries/entry-rebound-match", 0), ("copies/guard-rebound-match", 0),
+                                ("entries/entry-rebound-import", 0), ("copies/guard-rebound-import", 0),
+                                ("entries/entry-rebound-from-import", 0), ("copies/guard-rebound-from-import", 0),
+                                ("entries/entry-rebound-global", 0), ("copies/guard-rebound-global", 0),
+                                ("entries/entry-rebound-del", 0), ("copies/guard-rebound-del", 0),
+                                ("entries/entry-rebound-attribute-store", 0),
+                                ("copies/guard-rebound-attribute-store", 0),
+                                ("entries/entry-rebound-namespace-store", 0),
+                                ("copies/guard-rebound-namespace-store", 0)):
+            check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
         with tempfile.TemporaryDirectory(prefix="child-status-coverage-selftest-") as base:
             gate_source, marker, rest = Path(__file__).read_text(encoding="utf-8").partition(
                 "\n# ---------------------------------------------------------------------------------------------- "
@@ -2155,7 +2477,9 @@ def self_test(lane, report_path=None):
                                 ("behaviour/opf-runner-first-gate-fails", 0), ("control/opf-runner-default-passes", 0),
                                 ("revert/launcher-guard-removed-red", 0), ("revert/opf-guard-removed-red", 0),
                                 ("revert/hook-guard-removed-red", 0), ("revert/probe-guard-removed-red", 0),
-                                ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0)):
+                                ("revert/coverage-guard-removed-red", 0), ("revert/runner-probe-removed-red", 0),
+                                ("behaviour/opf-declaration-self-test-launches-nothing", 0),
+                                ("control/audit-sees-every-launch", 0)):
             check(check_id, behaviour.get(check_id, (False, "not run"))[0], behaviour.get(check_id, (False, None))[1])
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
