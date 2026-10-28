@@ -1043,6 +1043,10 @@ def _config_poison_fixture(base):
 # later members SIZING_LATER_MEASURED does not cover), 34 had no time in the account (those 29 and
 # the five --ci-job members), and 111 malformed-lane members were not measured in that lane
 # (config/member-roster-figures prints the live figures).
+# The child-status change (2026-10-17) registers four more members, each outside the account
+# and with no recorded time: opf/tools/_child_status.py --self-test,
+# tools/check_child_status_coverage.py, and tools/check_selftest_execution.py --suite
+# child-status-selftest and the same with --suite child-status-coverage-selftest.
 # For every member, reaching its bound is cannot-evaluate, never a pass.
 # The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
 # proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
@@ -4050,6 +4054,8 @@ def _verdict(failures, cannot_evaluate, caused):
 # lifecycle. They still require a successful observed system-config-lane run.
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
+    "opf/tools/_child_status.py": ("Child-status probe vectors over forked and trampolined interpreter and bash "
+                                   "children; no git."),
     "opf/tools/_journal.py": "Descriptor-helper vectors over in-process pipes with patched os primitives.",
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
