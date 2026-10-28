@@ -48,7 +48,7 @@ a green completion check, and no adoption interface opens that transaction in th
 `complete` CLI subcommand remains a later slice, as does the driver's receipt stage; the read-only
 `opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` runs the
 journal-only recovery (reconcile_report) under the journal lock and its own store leases (a dead apply's
-leftover lease released only through its recovery claim). Live
+leftover lease beside an open transaction released only through its recovery claim). Live
 outside the self-test fixtures today: `opf adopt status` opens and lists the evidence home in opf.py
 through the _journal containment primitives, then grades each listed bundle through this module's
 _verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal through
@@ -161,9 +161,15 @@ operation capability whose lease leg is that lease at homes 2), checks the in-re
 (_store_clean_or_refuse: no conflict markers, no mid-merge state), holds the lease across the transaction,
 and releases it after the journal lock, the order reconcile and init-store take theirs; a transaction that
 may be left open (a FAILED one, or one an exception or interrupt left after it was entered) KEEPS the lease
-so no other opf writer mutates the store until reconcile recovers it, and reconcile releases that leftover
-only once its holder is confirmed dead (acquire_lease_for_recovery under ADOPT_LEASE_VERB). A lease another
-writer holds refuses, never seized. A pointer that names a store outside the product root refuses, and
+so no other opf writer mutates the store until it is reconciled, and reconcile releases that leftover
+only beside an OPEN adoption transaction and only once its holder is confirmed dead
+(acquire_lease_for_recovery under ADOPT_LEASE_VERB); a kept lease beside no open transaction (one that
+never opened, or is already terminal) and a homes-2 capability's lease stay the operator's to release
+(the KEPT note says which). A lease another
+writer holds refuses, never seized. A store that declares a homes generation this build does not activate
+refuses (_store_homes), and the homes-2 leg is dormant (_take_store_lease). A store resolved through a
+pointer is joined only through the in-root pointer init-store publishes (_IN_ROOT_POINTER), the one reconcile
+admits; a pointer that names a store outside the product root refuses, and
 EVERY store posture that cannot be evaluated (a malformed or unreadable pointer, multiple machine stores, an
 undiscoverable root) refuses too (spec 14.2: an unreadable declaration or detected input fails closed). The
 two first-adoption states adoption exists for take no lease: NOT-ADOPTED, and a present `.working/` at the
@@ -1628,6 +1634,24 @@ def _reconcile_intent(jr_fd, txn_dir, txn_fd=None):
     return init_store, {op.get("path") for op in ops if isinstance(op, dict) and isinstance(op.get("path"), str)}
 
 
+# The one store pointer reconcile admits beside an interrupted adoption transaction, and so the one an
+# adoption transaction joins a store through: exactly the in-root target init-store publishes, which
+# resolves a store at the product root itself. Any other pointer may resolve a store at another store root.
+_IN_ROOT_POINTER = {"store": {"target": "dir:."}}
+
+
+def _foreign_pointer(root_fd):
+    """The first present store pointer (.opf.local.toml, then .opf.toml) whose content, read contained and
+    no-follow, is not exactly _IN_ROOT_POINTER, or None when every present one is (or none is present).
+    A pointer that cannot be read or parsed raises (store.StoreError, _journal.JournalError or OSError),
+    the caller's refusal."""
+    for rel in (store.LOCAL_POINTER_REL, store.POINTER_REL):
+        if _journal._lstat_contained(root_fd, rel) is not None and \
+                store._read_toml_contained(root_fd, rel) != _IN_ROOT_POINTER:
+            return rel
+    return None
+
+
 def _reconcile_lease_targets(root_fd, shell, touched):
     """The machine subdirectories whose single-writer lease (spec 5.7) reconcile takes before its first
     recovery write when it reconciles an open transaction other than an init-store one (`shell` names
@@ -1638,7 +1662,9 @@ def _reconcile_lease_targets(root_fd, shell, touched):
     to, the default `toml` and any other alike. A store POINTER at the product root (.opf.local.toml or
     .opf.toml) can resolve a store at another store root, whose lease this journal-only reconcile cannot
     take without resolving the store (spec 14.2), so a present pointer REFUSES as
-    RECONCILE_STORE_LEASE_HELD. A lease already present in a listed subdirectory refuses the same way,
+    RECONCILE_STORE_LEASE_HELD, except the in-root pointer init-store publishes (_IN_ROOT_POINTER, read
+    and compared whole, _foreign_pointer): it resolves a store at the product root itself, whose machine
+    subdirectories are the ones listed here. A lease already present in a listed subdirectory refuses the same way,
     except the one this reconcile exists to clear (recover True): a complete well-formed lease an adoption
     apply stamped (_opf_write_guard._examined_leftover_holder over ADOPT_LEASE_VERB, holder on THIS host),
     the lease an interrupted apply keeps beside its open transaction; _take_reconcile_leases claims it
@@ -1661,14 +1687,16 @@ def _reconcile_lease_targets(root_fd, shell, touched):
     rel = None
     targets = []
     try:
-        for rel in (store.LOCAL_POINTER_REL, store.POINTER_REL):
-            if _journal._lstat_contained(root_fd, rel) is not None:
-                raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the store pointer {} is present beside "
-                                       "the interrupted adoption transaction(s) {}: an opf writer may resolve "
-                                       "a store at another store root, whose single-writer lease this "
-                                       "journal-only reconcile cannot take without resolving the store "
-                                       "(spec 14.2), so it is treated as held (spec 5.7). Nothing was "
-                                       "written (fail-closed)".format(rel, ", ".join(shell)))
+        rel = "{} or {}".format(store.LOCAL_POINTER_REL, store.POINTER_REL)
+        foreign = _foreign_pointer(root_fd)
+        if foreign is not None:
+            raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the store pointer {} is present beside "
+                                   "the interrupted adoption transaction(s) {} and is not the in-root pointer "
+                                   "init-store publishes (target \"dir:.\"): an opf writer may resolve "
+                                   "a store at another store root, whose single-writer lease this "
+                                   "journal-only reconcile cannot take without resolving the store "
+                                   "(spec 14.2), so it is treated as held (spec 5.7). Nothing was "
+                                   "written (fail-closed)".format(foreign, ", ".join(shell)))
         rel = store.WORKING_DIRNAME
         for name in store._immediate_subdirs(root_fd, store.WORKING_DIRNAME) or []:
             if name in store.RESERVED_MACHINE_SUBDIRS:
@@ -1731,14 +1759,17 @@ def _take_reconcile_leases(root_fd, targets, taken, released=None):
     recovery write, the order the adoption apply takes them: the apply and init-store take the adoption
     journal lock, then the store lease. A lease another writer holds, or one that cannot be taken, refuses
     as RECONCILE_STORE_LEASE_HELD before any recovery write; a refusal after a leftover was released names
-    that release."""
+    that release (reconcile_report appends each report `released` holds to the refusal). The recovery
+    claim names `opf adopt reconcile` as the command its remedies re-run."""
     import _opf_check
     import _opf_write_guard
     for machine_rel, recover in targets:
         verb = ADOPT_LEASE_VERB if recover else RECONCILE_LEASE_VERB
         try:
             if recover:
-                payload, report = _opf_write_guard.acquire_lease_for_recovery(root_fd, machine_rel, verb)
+                # the leftover is bound to the apply's verb, while the run to repeat is this reconcile
+                payload, report = _opf_write_guard.acquire_lease_for_recovery(
+                    root_fd, machine_rel, verb, command=_opf_write_guard.rerun_command(RECONCILE_LEASE_VERB))
                 if report and released is not None:
                     released.append(report)
             else:
@@ -1792,7 +1823,10 @@ def reconcile_report(product_root, released=None):
     An interrupted adoption transaction keeps the lease it joined (run_adopt_transaction), so a lease an
     adoption apply stamped (ADOPT_LEASE_VERB) is claimed through the recovery claim instead: released only
     when its holder is confirmed dead on this host, never seized, then claimed anew and released after the
-    recovery like any lease this call took; every other present lease refuses (spec 8.8 item 1).
+    recovery like any lease this call took; every other present lease refuses (spec 8.8 item 1). With no
+    open transaction other than an init-store one, no lease is observed or released: a leftover apply lease
+    beside no open transaction (its run died before the INTENT, or after the transaction went terminal)
+    stays the operator's to release. A refusal raised after this call released a leftover names that release.
     The acquisition order is the adoption apply's: the apply and init-store take the adoption journal
     lock, then the store lease (init-store through its substrate's operation mutex and lease,
     _init_store_run, _opf_init_operation.run_init_operation), so
@@ -1839,18 +1873,27 @@ def reconcile_report(product_root, released=None):
     root_fd = _open_product_root(product_root)
     taken = []      # (machine_rel, payload) of every store lease THIS call took: only these are released
     broke = []      # non-empty once THIS call's stale-lock break claimed its leases; its recovery follows
+    freed = released if released is not None else []    # the report of each leftover lease this call released
+    already = len(freed)
     try:
         try:
-            outcomes, lock_taken = _reconcile_run(product_root, root_fd, taken, broke, released)
+            outcomes, lock_taken = _reconcile_run(product_root, root_fd, taken, broke, freed)
         except BaseException as exc:
             failures = _release_reconcile_leases(root_fd, taken)    # after the journal lock's release
-            if failures:
+            # a leftover lease this call released before it refused (a later target's claim refused, say)
+            # is gone for good, so the refusal names that release, never a bare nothing-written claim
+            gone = "; ".join(freed[already:])
+            if failures or gone:
                 said = "; ".join(failures)
                 if isinstance(exc, ReconcileRefusal):
-                    raise ReconcileRefusal(exc.finding, "{}; additionally the store lease(s) this run took "
-                                           "could not be released and stay for the operator's own "
-                                           "reconciliation (spec 5.7): {}".format(exc, said)) from exc
-                exc.add_note("the store lease(s) this run took could not be released: {}".format(said))
+                    raise ReconcileRefusal(exc.finding, "{}{}{}".format(
+                        exc, "; additionally the store lease(s) this run took could not be released and stay "
+                        "for the operator's own reconciliation (spec 5.7): {}".format(said) if failures else "",
+                        "; before this refusal, {}".format(gone) if gone else "")) from exc
+                if failures:
+                    exc.add_note("the store lease(s) this run took could not be released: {}".format(said))
+                if gone:
+                    exc.add_note("before this exception, {}".format(gone))
             raise
         failures = _release_reconcile_leases(root_fd, taken)        # after the journal lock's release
         if failures:
@@ -2141,7 +2184,10 @@ ADOPT_LEASE_VERB = "adopt-apply"
 def _store_homes(root_fd, res):
     """The homes generation of the resolved in-root store `res` (store.homes_generation over its
     manifest, read contained and no-follow beneath the product-root descriptor). A manifest that cannot be
-    read refuses: the lease leg is chosen from it."""
+    read refuses: the lease leg is chosen from it. A manifest that declares a homes generation other than
+    the one this tooling activates for it (homes = 2 while SUPPORTED_HOMES is 1, say) refuses too, as the
+    record writer refuses it (_opf_record._probe_homes), so such a store is never written under the
+    homes-1 lease."""
     rel = "{}/{}".format(res.machine_rel, store.MANIFEST_NAME)
     try:
         model = store._read_toml_contained(root_fd, rel)
@@ -2152,7 +2198,16 @@ def _store_homes(root_fd, res):
     if not isinstance(model, dict):
         raise AdoptApplyError("the store manifest {} vanished after the store resolved; "
                               "fail-closed".format(rel))
-    return store.homes_generation(model)
+    generation = store.homes_generation(model)
+    base = model.get(store.STANDARD_TOKEN)
+    declared = base.get("homes", 1) if isinstance(base, dict) else 1
+    if type(declared) is not int or declared != generation:
+        raise AdoptApplyError("the store manifest {} declares homes generation {}, which this tooling does not "
+                              "activate (it activates homes {} at most, and homes 2 only with spec_version "
+                              "{}), so the single-writer lease leg cannot be chosen (fail-closed)".format(
+                                  rel, store._safe_display(declared), store.SUPPORTED_HOMES,
+                                  store.HOMES2_SPEC_VERSION))
+    return generation
 
 
 def _take_store_lease(root_fd, res, stays):
@@ -2164,10 +2219,30 @@ def _take_store_lease(root_fd, res, stays):
     lease, or one that cannot be taken, refuses as AdoptApplyError, the held-lease text kept. At homes 1 a
     plain WriteGuardError (any but the EEXIST LeaseHeldError) is acquire_lease's failure AFTER its create,
     which leaves the lease it created in place, so the clause naming that lease is appended to `stays` (a
-    list) and the run's refusal never claims nothing written over it."""
+    list) and the run's refusal never claims nothing written over it. A store resolved through a pointer
+    is joined only when every present pointer is the in-root one reconcile admits (_foreign_pointer), so
+    a transaction this run may leave open is one reconcile can recover; any other refuses before the take.
+
+    The homes-2 leg is DORMANT in this build: homes_generation is 2 only while SUPPORTED_HOMES is 2 or
+    more (it is 1), and _store_homes refuses a store that declares homes 2 meanwhile, so that leg runs only
+    under the self-test's patched SUPPORTED_HOMES. Its capability's lease names the operation lock's own
+    holder (opf:<host>:<pid>), which reconcile's recovery claim never matches, so a lease that leg keeps
+    is never released by reconcile and the KEPT note there names the operator's own reconciliation."""
     import _opf_check
     import _opf_oplock
     import _opf_write_guard
+    if res.pointer_source != "default":
+        try:
+            foreign = _foreign_pointer(root_fd)
+        except (_journal.JournalError, store.StoreError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
+            raise AdoptApplyError("cannot read the store pointer the store resolves through ({}); "
+                                  "fail-closed".format(exc))
+        if foreign is not None:
+            raise AdoptApplyError("the store resolves through the pointer {}, which is not the in-root pointer "
+                                  "init-store publishes (target \"dir:.\"): reconcile admits only that pointer "
+                                  "beside an interrupted adoption transaction, so a transaction this run left "
+                                  "open could never be recovered (fail-closed)".format(foreign))
     homes = _store_homes(root_fd, res)
     lease_rel = "{}/{}".format(res.machine_rel, _opf_check.LEASE_NAME)
     try:
@@ -2222,7 +2297,8 @@ def _store_clean_or_refuse(root_fd, res):
     directory a `.git` file's gitdir line names) carries none of _MID_MERGE_MARKERS. No conflict markers:
     no regular file beneath the machine store carries a conflict-hunk line. Git is never run and nothing is
     written, so an untracked store a first adoption just scaffolded is admitted (the plan's digests already
-    bind the live bytes each op reads). What cannot be read refuses (fail-closed). Disclosed: a product
+    bind the live bytes each op reads). What cannot be read refuses (fail-closed), and so does a gitdir
+    the `.git` file names that is absent or not a directory (no marker could be observed there). Disclosed: a product
     root below its repository's top level has no `.git` of its own, so only the conflict-marker leg
     applies there."""
     rel = ".git"
@@ -2243,6 +2319,16 @@ def _store_clean_or_refuse(root_fd, res):
                 raise AdoptApplyError("the product root's .git file names no gitdir, so whether the store's "
                                       "repository is mid-merge cannot be evaluated (spec 5.7)")
             gitdir = os.path.join(str(res.store_root), line[len("gitdir: "):])
+            rel = gitdir
+            try:
+                named = os.stat(gitdir)
+            except FileNotFoundError:
+                named = None
+            if named is None or not stat.S_ISDIR(named.st_mode):
+                # an absent git directory carries no marker to find, so it is unobservable, never clean
+                raise AdoptApplyError("the product root's .git file names the gitdir {}, which is {}, so whether "
+                                      "the store's repository is mid-merge cannot be evaluated (spec "
+                                      "5.7)".format(gitdir, "absent" if named is None else "not a directory"))
         for name in _MID_MERGE_MARKERS if gitdir is not None else ():
             rel = os.path.join(gitdir, name)
             try:
@@ -3354,7 +3440,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
             # transaction may have opened, published a store and completed between those checks
             # and this acquisition (or an interrupted one may have appeared). Re-prove every
             # consequential prerequisite HERE, under the held lock, before anything composes: no
-            # open transaction appeared, the store posture is still a first-adoption state, this
+            # open transaction appeared, the store posture still admits this run (a first-adoption
+            # state, or a store inside the product root whose lease it then joins), this
             # run and phase still have no transaction, and a phase's committed base still
             # verifies. The pre-lock copies stay as cheap early refusals only; nothing composed
             # before the lock authorizes anything after it.
@@ -3480,15 +3567,23 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
         if leases:
             # after the journal lock's release (reconcile's order). A transaction that may be left open (a
             # FAILED one, whose journal lock is retained, or one an exception or interrupt left after it
-            # was entered) KEEPS the lease, so no other opf writer mutates the store before reconcile
-            # recovers it; every other outcome releases it, a release failure named beside that outcome.
+            # was entered) KEEPS the lease, so no other opf writer mutates the store before it is
+            # reconciled; every other outcome releases it, a release failure named beside that outcome.
+            # Reconcile releases a kept homes-1 lease only beside an OPEN transaction, and never a homes-2
+            # capability's (its holder is the operation lock's), so the note promises no more than that.
             try:
                 if retain or (entered and not done and not isinstance(failure, AdoptApplyError)):
+                    if leases[0][0] >= 2:
+                        remedy = ("reconcile never releases this operation capability's lease, so once no opf "
+                                  "run is live, release it as your own reconciliation step (spec 5.7)")
+                    else:
+                        remedy = ("while that transaction is open, `opf adopt reconcile` releases the lease once "
+                                  "this run is confirmed dead (spec 5.7); reconcile never releases a lease beside "
+                                  "no open adoption transaction, so if it never opened or is already terminal, "
+                                  "release the lease as your own reconciliation step once no opf run is live")
                     lease_said.append("the single-writer lease {} this run took is KEPT beside the adoption "
                                       "transaction {}, which may be open, so no other opf writer mutates the "
-                                      "store before `opf adopt reconcile` recovers it; reconcile releases it "
-                                      "once this run is confirmed dead (spec 5.7)".format(
-                                          leases[0][2], txn))
+                                      "store before it is reconciled: {}".format(leases[0][2], txn, remedy))
                 else:
                     stays = _release_store_lease(root_fd, leases.pop())
                     if stays:
@@ -7735,6 +7830,11 @@ def _self_test_checks():
               and held.endswith(_NOTHING_WRITTEN) and snapshot(root) == before
               and (root / lease_rel).read_bytes() == foreign and not (root / JOURNAL_REL / rid).exists()
               and lock_free(root), held)
+        # the held-lease remedy names the command line the operator re-runs, never the lease verb's token
+        # (red when the remedy formats the verb itself: "opf adopt-apply" is no command)
+        check("lease-join-held-lease-remedy-names-real-command",
+              held is not None and "then re-run opf adopt apply." in held and "opf adopt-" not in held
+              and _opf_write_guard.rerun_command(RECONCILE_LEASE_VERB) == "opf adopt reconcile", held)
 
     # a FAILED transaction left open KEEPS its lease beside the retained journal lock, named in the refusal
     # (red when the lease is released on the retained path); once its holder is dead, reconcile recovers the
@@ -7848,6 +7948,205 @@ def _self_test_checks():
           and _CONFLICT_MARKER_RE.search(b"<<<<<< HEAD\n") is None
           and _CONFLICT_MARKER_RE.search(b"======= x\n") is None
           and _CONFLICT_MARKER_RE.search(b"a <<<<<<< b\n") is None)
+
+    def beneath_root(root, fn):
+        """(fn(root_fd, res), None), or (None, the refusal text) on AdoptApplyError, over the store resolved
+        at root, beneath a fresh product-root descriptor closed after."""
+        res = store.resolve_store(root)
+        held_root = _open_product_root(root)
+        try:
+            return fn(held_root, res), None
+        except AdoptApplyError as exc:
+            return None, str(exc)
+        finally:
+            store._close_fd_exc_safe(held_root)
+
+    def plant_git(root, form, marker=None):
+        """A git directory for root: `.git` itself (form "dir"), or one a `.git` file names by an absolute
+        ("abs") or product-root-relative ("rel") gitdir line; `marker`, when given, is planted in it."""
+        gitdir = root / ".git" if form == "dir" else root / "linked-gitdir"
+        gitdir.mkdir()
+        if form != "dir":
+            (root / ".git").write_text("gitdir: {}\n".format(gitdir if form == "abs" else "linked-gitdir"),
+                                       encoding="utf-8")
+        if marker is not None and marker.startswith("rebase-"):
+            (gitdir / marker).mkdir()
+        elif marker is not None:
+            (gitdir / marker).write_bytes(b"0" * 40 + b"\n")
+
+    # each mid-merge marker, named literally here (never read from _MID_MERGE_MARKERS, so dropping one there
+    # turns this red), refuses in a `.git` directory, and in the gitdir a `.git` file names by an absolute or
+    # a relative line (red when that gitdir leg is dropped); the same git directories without a marker admit
+    markers = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
+    marker_seen = {"dir": [], "abs": [], "rel": []}
+    for form in ("dir", "abs", "rel"):
+        for marker in (None,) + markers:
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                root = resolved_root(temp)
+                plant_git(root, form, marker)
+                marker_seen[form].append((marker, beneath_root(root, _store_clean_or_refuse)[1]))
+
+    def markers_refused(seen):
+        return len(seen) == 1 + len(markers) and all(
+            (why is None) if marker is None else (why is not None and "mid-merge" in why and marker in why)
+            for marker, why in seen)
+    check("lease-join-mid-merge-markers-each-refuse", markers_refused(marker_seen["dir"]), marker_seen["dir"])
+    check("lease-join-git-file-gitdir-markers-refuse",
+          markers_refused(marker_seen["abs"]) and markers_refused(marker_seen["rel"]),
+          (marker_seen["abs"], marker_seen["rel"]))
+
+    # a gitdir the `.git` file names that is absent (absolute, or relative to the product root) or not a
+    # directory carries no marker to observe, so the transaction refuses with nothing written and its lease
+    # released, never commits as clean (red when a missing gitdir is read as clean)
+    missing_seen = []
+    for line in ("gitdir: {}/no-such-gitdir", "gitdir: ../no-such-parent/.git/worktrees/x", "gitdir: plain-file"):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = resolved_root(temp)
+            (root / "plain-file").write_bytes(b"x\n")
+            (root / ".git").write_text(line.format(root) + "\n", encoding="utf-8")
+            before = snapshot(root)
+            why = refusal(run_adopt_transaction, root, rid, create_x)
+            missing_seen.append((why, snapshot(root) == before and not (root / lease_rel).exists()
+                                 and lock_free(root)))
+    check("lease-join-missing-gitdir-refuses",
+          len(missing_seen) == 3 and all(why is not None and "cannot be evaluated" in why
+                                         and why.endswith(_NOTHING_WRITTEN) and kept for why, kept in missing_seen),
+          missing_seen)
+
+    # a `.git` file with no gitdir line refuses as unobservable (red when that refusal is dropped), and a
+    # store path that cannot be read refuses as cannot-evaluate (red when that refusal fails open)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = resolved_root(temp)
+        (root / ".git").write_bytes(b"not a gitdir line\n")
+        _got, nameless = beneath_root(root, _store_clean_or_refuse)
+    check("lease-join-git-file-without-gitdir-refuses", nameless is not None and "names no gitdir" in nameless,
+          nameless)
+    real_read_contained = _journal._read_contained
+
+    def store_read_fails(root_fd, rel, *args, **kwargs):
+        if rel.startswith(".working/toml/"):
+            raise OSError(errno.EIO, "INJECTED-STORE-READ-FAULT")
+        return real_read_contained(root_fd, rel, *args, **kwargs)
+
+    def clean_with_read_fault(root_fd, res):
+        with mock.patch.object(_journal, "_read_contained", store_read_fails):
+            return _store_clean_or_refuse(root_fd, res)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        _got, unread = beneath_root(resolved_root(temp), clean_with_read_fault)
+    check("lease-join-clean-state-unreadable-refuses",
+          unread is not None and "cannot evaluate the store's clean state" in unread
+          and "INJECTED-STORE-READ-FAULT" in unread, unread)
+
+    # the lease leg is chosen from the store manifest: one that cannot be read refuses (red when it falls back
+    # to homes 1), and one declaring a homes generation this build does not activate refuses with nothing
+    # written, as the record writer refuses it (red when such a store is written under the homes-1 lease)
+    def homes_with_read_fault(root_fd, res):
+        with mock.patch.object(store, "_read_toml_contained",
+                               side_effect=store.StoreError("INJECTED-MANIFEST-READ-FAULT")):
+            return _store_homes(root_fd, res)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        homes, unreadable = beneath_root(resolved_root(temp), homes_with_read_fault)
+    check("lease-join-unreadable-manifest-refuses",
+          homes is None and unreadable is not None and "INJECTED-MANIFEST-READ-FAULT" in unreadable,
+          (homes, unreadable))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        declared = _opf_init.build_manifest().replace(
+            'spec_version = "{}"'.format(store.SUPPORTED_SPEC_VERSION),
+            'homes = 2\nspec_version = "{}"'.format(store.HOMES2_SPEC_VERSION), 1)
+        root = resolved_root(temp, declared)
+        status = store.resolve_store(root).status
+        before = snapshot(root)
+        inactive = refusal(run_adopt_transaction, root, rid, create_x)
+        check("lease-join-declared-inactive-homes-refuses",
+              store.SUPPORTED_HOMES == 1 and "homes = 2" in declared and status == store.RESOLVED
+              and inactive is not None and "declares homes generation 2" in inactive
+              and inactive.endswith(_NOTHING_WRITTEN) and snapshot(root) == before
+              and not (root / lease_rel).exists() and lock_free(root), (status, inactive))
+
+    # a store resolved through a pointer other than the in-root one init-store publishes (here the product
+    # root by its absolute path) refuses before the lease is taken, nothing written: reconcile could never
+    # recover a transaction left open there (red when such a pointer is joined)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = resolved_root(temp)
+        (root / store.POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(root), encoding="utf-8")
+        res = store.resolve_store(root)
+        before = snapshot(root)
+        pointed = refusal(run_adopt_transaction, root, rid, create_x)
+        check("lease-join-other-in-root-pointer-refuses",
+              res.status == store.RESOLVED and res.pointer_source != "default"
+              and Path(os.path.abspath(res.store_root)) == root and pointed is not None
+              and "not the in-root pointer" in pointed and pointed.endswith(_NOTHING_WRITTEN)
+              and snapshot(root) == before and not (root / lease_rel).exists() and lock_free(root),
+              (res.status, res.pointer_source, pointed))
+
+    # an engine error after the COMPLETE frame leaves a FAILED transaction that is already terminal: the lease
+    # is KEPT, and its note names the operator's own release, since reconcile releases a kept lease only
+    # beside an open transaction; once the run is dead, reconcile recovers nothing and leaves the lease
+    # (red when the note promises reconcile's release again)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = resolved_root(temp)
+        real_run_transaction = _journal.run_transaction
+
+        def fails_after_complete(*args, **kwargs):
+            real_run_transaction(*args, **kwargs)
+            raise _journal.JournalError("INJECTED-AFTER-COMPLETE")
+        with mock.patch.object(_journal, "run_transaction", fails_after_complete):
+            late = refusal(run_adopt_transaction, root, rid, create_x)
+        kept = (root / lease_rel).read_bytes() if (root / lease_rel).exists() else None
+        dead = dead_pid()
+        if kept is not None and dead is not None:
+            (root / lease_rel).write_bytes(kept.replace(":{}\"".format(os.getpid()).encode("utf-8"),
+                                                        ":{}\"".format(dead).encode("utf-8")))
+            row = dict(uid=os.getuid(), pid=dead, session="opf-adopt-selftest-dead", utc="2026-09-17T12:00:00Z")
+            row["pid-start"] = ""
+            (_journal_root(root) / "lock").write_text(json.dumps(row), encoding="utf-8")
+        released = []
+        report, why = outcome_of(reconcile_report, root, released)
+        check("lease-join-kept-beside-terminal-txn-names-operator-release",
+              late is not None and "FAILED and is complete" in late and "KEPT" in late
+              and "beside no open adoption transaction" in late and "your own reconciliation step" in late
+              and txn_state(root, rid) == "complete" and dead is not None and report is not None
+              and released == [] and (root / lease_rel).exists(), (late, report, why, released))
+
+    # the homes-2 leg is dormant (SUPPORTED_HOMES is 1), pinned against the operation lock's REAL default
+    # holder, taken from acquire_operation itself and stopped before anything is acquired: that holder is
+    # outside the lease holder grammar reconcile's recovery claim parses, so a lease that leg keeps beside a
+    # FAILED transaction is never released by reconcile, and its KEPT note names the operator's own release
+    # (red when the note promises reconcile's release at homes 2)
+    fields = []
+
+    def holder_seen(name, value):
+        fields.append((name, value))
+        raise _opf_oplock.OpLockError("STOPPED-AFTER-THE-HOLDER")
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        with mock.patch.object(_opf_oplock, "_validate_field", holder_seen):
+            _taken, stopped = outcome_of(_opf_oplock.acquire_operation, str(resolved_root(temp)), ADOPT_LEASE_VERB)
+    real_holder = fields[0][1] if fields and fields[0][0] == "holder" else None
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        homes2 = _opf_init.build_manifest().replace(
+            'spec_version = "{}"'.format(store.SUPPORTED_SPEC_VERSION),
+            'homes = 2\nspec_version = "{}"'.format(store.HOMES2_SPEC_VERSION), 1)
+        root = resolved_root(temp, homes2)
+        capability = object()
+
+        def apply_fault_h2(name):
+            if name == "after-apply-0":
+                raise _journal.JournalError("INJECTED-APPLY-FAULT")
+
+        def restore_fault_h2(*args, **kwargs):
+            raise _journal.JournalError("INJECTED-RESTORE-FAULT")
+        with mock.patch.object(store, "SUPPORTED_HOMES", 2), \
+                mock.patch.object(_opf_oplock, "acquire_operation", lambda *args, **kwargs: capability), \
+                mock.patch.object(_opf_oplock, "release_operation", lambda cap: None), \
+                mock.patch.object(_journal, "_kill_point", apply_fault_h2), \
+                mock.patch.object(_journal, "_restore_preimage", restore_fault_h2):
+            failed_h2 = refusal(run_adopt_transaction, root, rid, create_x)
+        check("lease-join-homes2-kept-names-operator-release",
+              isinstance(stopped, _opf_oplock.OpLockError) and isinstance(real_holder, str)
+              and real_holder.startswith("opf:") and _opf_write_guard._LEASE_HOLDER_RE.fullmatch(real_holder) is None
+              and failed_h2 is not None and "FAILED" in failed_h2 and "KEPT" in failed_h2
+              and "reconcile never releases this operation capability's lease" in failed_h2
+              and "`opf adopt reconcile` releases" not in failed_h2, (real_holder, stopped, failed_h2))
 
     # THE STALE-PREFLIGHT GUARD (QA round 2): the pre-lock journal and posture checks never
     # authorize composition. A cooperating writer (init-store takes this same lock) that opens a
@@ -12125,6 +12424,91 @@ def _self_test_checks():
               and named.finding == RECONCILE_STORE_LEASE_HELD and "op path" in str(named)
               and tree_state(root) == was, repr(named))
 
+    # reconcile's refusal of a LIVE apply's lease names the command the operator re-runs, `opf adopt
+    # reconcile`, never the lease verb's token nor the apply (red when the recovery claim's remedy is the
+    # apply's, or formats the verb itself)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        _outcomes, live_named = outcome_of(reconcile, root)
+        check("reconcile-live-apply-lease-remedy-names-reconcile",
+              isinstance(live_named, ReconcileRefusal) and (root / lease_rel).exists()
+              and "then re-run opf adopt reconcile." in str(live_named) and "opf adopt-" not in str(live_named)
+              and "re-run opf adopt apply" not in str(live_named), repr(live_named))
+
+    # a store resolved through the in-root pointer init-store publishes: the apply joins its lease, and once
+    # the interrupted run is dead, reconcile admits that pointer, recovers the transaction and releases the
+    # kept lease, the pointer left in place (red when reconcile refuses every present pointer again)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        (root / ".working/toml").mkdir(parents=True)
+        (root / ".working/toml/manifest.toml").write_text(_opf_init.build_manifest(), encoding="utf-8")
+        (root / store.POINTER_REL).write_bytes(emit_checked(_IN_ROOT_POINTER).encode("utf-8"))
+        res = store.resolve_store(root)
+        pointed = None
+        with mock.patch.object(_journal, "_kill_point", interrupt_when(lambda: True)):
+            try:
+                run_adopt_transaction(root, rid, create_x)
+            except _Interrupt as exc:
+                pointed = exc
+            except AdoptApplyError:
+                pass                # judged below: no interrupt was reached
+        open_then = txn_state(root, rid)
+        dead = dead_pid()
+        if dead is not None and (root / lease_rel).exists():
+            (root / lease_rel).write_bytes(holder_dead((root / lease_rel).read_bytes(), dead))
+        released = []
+        report, why = outcome_of(reconcile_report, root, released)
+        check("reconcile-in-root-pointer-lease-released",
+              res.status == store.RESOLVED and res.pointer_source != "default" and pointed is not None
+              and open_then == "open" and dead is not None and report is not None
+              and (rid, "rolled-back") in report[0] and len(released) == 1 and lease_rel in released[0]
+              and not (root / lease_rel).exists() and (root / store.POINTER_REL).exists() and lock_free(root),
+              (res.pointer_source, open_then, report, why, released))
+
+    # a reconcile that released a dead apply's leftover lease and then refused at a later machine
+    # subdirectory (another writer claims it first) names that release in its refusal: the lease it removed
+    # is gone (red when the refusal drops the release)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _stopped = interrupted_resolved(temp)
+        dead = dead_pid()
+        if dead is not None and (root / lease_rel).exists():
+            (root / lease_rel).write_bytes(holder_dead((root / lease_rel).read_bytes(), dead))
+        (root / ".working/zzz").mkdir()
+        real_claim = _opf_write_guard.acquire_lease
+
+        def peer_claims_later(root_fd, machine_rel, verb, **kwargs):
+            if machine_rel == ".working/zzz":
+                raise _opf_write_guard.LeaseHeldError("INJECTED-PEER-CLAIM of .working/zzz/lease.toml")
+            return real_claim(root_fd, machine_rel, verb, **kwargs)
+        released = []
+        with mock.patch.object(_opf_write_guard, "acquire_lease", peer_claims_later):
+            _outcomes, later = outcome_of(reconcile_report, root, released)
+        check("reconcile-refusal-after-release-names-it",
+              dead is not None and isinstance(later, ReconcileRefusal)
+              and later.finding == RECONCILE_STORE_LEASE_HELD and "INJECTED-PEER-CLAIM" in str(later)
+              and "before this refusal" in str(later) and lease_rel in str(later)
+              and "confirmed-dead" in str(later) and len(released) == 1 and not (root / lease_rel).exists()
+              and txn_state(root, rid) == "open" and lock_free(root), (repr(later), released))
+
+    # pin of the corrected claim: a dead apply's lease beside NO open transaction (its run died before the
+    # INTENT) is neither observed nor released by reconcile, and the next apply still refuses on it, never
+    # seized; it stays the operator's to release
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = resolved_root(temp)
+        lone, _why = beneath_root(root, lambda root_fd, _res: _opf_write_guard.acquire_lease(
+            root_fd, ".working/toml", ADOPT_LEASE_VERB))
+        dead = dead_pid()
+        if lone is not None and dead is not None:
+            (root / lease_rel).write_bytes(holder_dead(lone, dead))
+        was = (root / lease_rel).read_bytes() if (root / lease_rel).exists() else None
+        released = []
+        report, why = outcome_of(reconcile_report, root, released)
+        again = refusal(run_adopt_transaction, root, rid, create_x)
+        check("reconcile-leaves-lone-apply-lease",
+              lone is not None and dead is not None and report == ([], False, False) and released == []
+              and was is not None and (root / lease_rel).read_bytes() == was
+              and again is not None and "never seized" in again, (report, why, released, again))
+
     # 8e: reconcile lists the journal strictly and HELD (the journal_state posture), so it never reads as
     # nothing to reconcile a journal that journal_state refuses or reports open. A stray or wrong-type
     # journal entry refuses as unclassifiable with nothing written (red against the skipping listing: the
@@ -14382,10 +14766,11 @@ def _self_test_checks():
               bool(bound_plan) and bool(bound_approval) and bound_built == [plan_digest(files[man])]
               and "stopped once the driver's contexts are built" in (bound_err or "")
               and _snapshot(root) == bound_before, observed=(bound_built, bound_err))
-    # the committed store pointer as an entry: a planted pointer naming the product root itself, so the store
-    # still resolves in-root and only the protected-destination rule refuses the registration.
+    # the committed store pointer as an entry: a planted pointer naming the product root itself, in the one
+    # form the lease join admits (the in-root target init-store publishes), so the store still resolves
+    # in-root and only the protected-destination rule refuses the registration.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        pointer = '[store]\ntarget = "dir:{}"\n'.format(Path(temp).resolve()).encode("utf-8")
+        pointer = emit_checked(_IN_ROOT_POINTER).encode("utf-8")
         check("reg-entry-store-pointer-resolves-in-root", store.resolve_store(
             reg_fixture(temp, extra={".opf.toml": pointer})[0]).status == store.RESOLVED)
         reg_refusal(temp, lambda f: chain(f, [".opf.toml"]), "protected destination", "entry-store-pointer",

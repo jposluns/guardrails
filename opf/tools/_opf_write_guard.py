@@ -1119,13 +1119,25 @@ FOREIGN_LEASE_SCOPE = ("opf removes another run's lease only while reconciling a
 HELD_REMEDY = " If you have confirmed NO opf run is live,"
 
 
-def lease_held_message(pfd, name, lease_rel, verb):
+# A lease verb is one token of the holder grammar (_LEASE_HOLDER_RE), so a subcommand's verb carries a
+# hyphen where its command line has a space; a remedy names the command line the operator re-runs.
+_VERB_COMMANDS = {"adopt-apply": "opf adopt apply", "adopt-reconcile": "opf adopt reconcile"}
+
+
+def rerun_command(verb, command=None):
+    """The opf command line a lease remedy tells the operator to re-run: `command` when the caller names
+    one (a recovery claim made on another verb's behalf), else the command of `verb`."""
+    return command if command is not None else _VERB_COMMANDS.get(verb, "opf " + verb)
+
+
+def lease_held_message(pfd, name, lease_rel, verb, command=None):
     """Compose the EEXIST held-lease refusal, best-effort naming the existing holder/operation/acquired_at.
     A present-but-unreadable or malformed payload STILL refuses (present-is-held, matching C-LEASE); the
     lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy and the one case
     in which opf itself releases another run's lease (FOREIGN_LEASE_SCOPE). Its denial names only the lease
     now present: a refusal met by the claim retried after this run released a confirmed-dead leftover
-    (_claim_after_release) appends that release, so no clause here denies every removal by this run."""
+    (_claim_after_release) appends that release, so no clause here denies every removal by this run. The
+    remedy re-runs rerun_command(verb, command)."""
     detail = "a present lease with an unreadable payload"
     try:
         # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
@@ -1157,7 +1169,7 @@ def lease_held_message(pfd, name, lease_rel, verb):
     return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7).{} "
             "release that lease as your own reconciliation step (this run has not removed the lease now present; "
             "{}), then re-run "
-            "opf {}.".format(lease_rel, detail, HELD_REMEDY, FOREIGN_LEASE_SCOPE, verb))
+            "{}.".format(lease_rel, detail, HELD_REMEDY, FOREIGN_LEASE_SCOPE, rerun_command(verb, command)))
 
 
 def lease_holder(verb):
@@ -1168,14 +1180,14 @@ def lease_holder(verb):
     return "opf-{}:{}:{}".format(verb, socket.gethostname(), os.getpid())
 
 
-def acquire_lease(root_fd, machine_rel, verb):
+def acquire_lease(root_fd, machine_rel, verb, command=None):
     """Claim the single-writer lease ATOMICALLY (atomic-claim-from-pool). The claim IS the create: open
     machine_rel/lease.toml O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW beneath the parent fd, so there is no
     check-then-create gap and EEXIST IS the held-lease refusal. The closed payload (schema/holder/operation/
     acquired_at read from the clock, G5; the operation is `verb`) satisfies C-LEASE exactly, so the mid-run
     doctor stays VALID with the lease held (containment-clean, spec 5.7/11). RETURNS the exact payload bytes
     written, so the ownership-verified release can prove the lease it removes is still THIS run's own
-    (never-seize, spec 5.7)."""
+    (never-seize, spec 5.7). A refusal's remedy re-runs rerun_command(verb, command)."""
     journal = _opf_store._journal
     lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
     payload = _opf_emit.emit_checked({
@@ -1189,7 +1201,7 @@ def acquire_lease(root_fd, machine_rel, verb):
         try:
             fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
         except FileExistsError:
-            raise LeaseHeldError(lease_held_message(pfd, name, lease_rel, verb))
+            raise LeaseHeldError(lease_held_message(pfd, name, lease_rel, verb, command))
         try:
             try:
                 journal._write_all(fd, payload)
@@ -1213,8 +1225,8 @@ def acquire_lease(root_fd, machine_rel, verb):
                 "{} lease acquisition failed after the lease {} was created ({}); the lease is LEFT in "
                 "place as a leftover from this failed {} and is never seized (spec 5.7). If you have "
                 "confirmed NO opf run is live, release the leftover lease as your own reconciliation step "
-                "(this run never removes it; {}), then re-run opf {}.".format(
-                    verb, lease_rel, exc, verb, FOREIGN_LEASE_SCOPE, verb)) from exc
+                "(this run never removes it; {}), then re-run {}.".format(
+                    verb, lease_rel, exc, verb, FOREIGN_LEASE_SCOPE, rerun_command(verb, command))) from exc
     finally:
         _opf_store._close_fd_exc_safe(pfd)
     return payload
@@ -1459,7 +1471,7 @@ def _lease_holder_confirmed_dead(pid):
     return False
 
 
-def _exclusive_examination(pfd, lease_rel, verb):
+def _exclusive_examination(pfd, lease_rel, verb, command=None):
     """Serialize the WHOLE leftover-lease reconciliation (examine, release, re-claim) across concurrent
     recoveries: one EXCLUSIVE non-blocking flock on the lease's parent directory, taken through the open
     `pfd` and released by its close (the kernel releases it when the holder dies, so a killed recoverer
@@ -1494,8 +1506,8 @@ def _exclusive_examination(pfd, lease_rel, verb):
             raise WriteGuardError(
                 "another reconciliation is concurrently examining the {} lease {} ({}); this run refuses "
                 "rather than race it (at most one recoverer ever examines, releases, and re-claims the "
-                "lease), and no lease was examined or removed by this run. Re-run opf {} once that "
-                "reconciliation finishes.".format(verb, lease_rel, exc, verb)) from exc
+                "lease), and no lease was examined or removed by this run. Re-run {} once that "
+                "reconciliation finishes.".format(verb, lease_rel, exc, rerun_command(verb, command))) from exc
         raise WriteGuardError(
             "the examination lock that serializes reconciling the present {} lease {} could not be taken "
             "({}): the store's filesystem does not support or refused the directory lock, which is a lock "
@@ -1520,7 +1532,13 @@ def _lock_refusal(exc, held):
     return WriteGuardError("{} {}{}".format(exc, text[:1].upper(), text[1:]))
 
 
-def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
+def _named(command):
+    """The keyword arguments that pass a remedy's command on, empty when none is named, so a caller of
+    the plain signature (a replaced acquire_lease, say) is called exactly as before."""
+    return {} if command is None else {"command": command}
+
+
+def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released, command=None):
     """After the examined leftover lease was UNLINKED: make that release durable and retry the atomic claim
     once, returning the claimed payload. EVERY failure from here on carries `released` (the release
     report), whatever its type (QA round 2: a JournalError reopening the parent, or an EMFILE or EACCES
@@ -1531,26 +1549,27 @@ def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
         os.fsync(pfd)
     except Exception as exc:  # noqa: BLE001  any ordinary failure after the release carries its report
         raise WriteGuardError(
-            "the release of the leftover {} lease {} could not be made durable ({}); re-run opf "
+            "the release of the leftover {} lease {} could not be made durable ({}); re-run "
             "{} once the store volume is healthy. Before that failure, {}.".format(
-                verb, lease_rel, exc, verb, released)) from exc
+                verb, lease_rel, exc, rerun_command(verb, command), released)) from exc
     except BaseException as exc:
         exc.add_note("Before that interruption, {}.".format(released))
         raise
     try:
-        return acquire_lease(root_fd, machine_rel, verb)
+        return acquire_lease(root_fd, machine_rel, verb, **_named(command))
     except WriteGuardError as exc:
         raise WriteGuardError("{} Before that claim, {}.".format(exc, released)) from exc
     except Exception as exc:  # noqa: BLE001  any ordinary failure after the release carries its report
         raise WriteGuardError(
-            "the {} lease claim retried after that release failed ({!r}) (fail-closed); re-run opf {} once "
-            "the cause is cleared. Before that claim, {}.".format(verb, exc, verb, released)) from exc
+            "the {} lease claim retried after that release failed ({!r}) (fail-closed); re-run {} once "
+            "the cause is cleared. Before that claim, {}.".format(
+                verb, exc, rerun_command(verb, command), released)) from exc
     except BaseException as exc:
         exc.add_note("Before that interruption, {}.".format(released))
         raise
 
 
-def acquire_lease_for_recovery(root_fd, machine_rel, verb):
+def acquire_lease_for_recovery(root_fd, machine_rel, verb, command=None):
     """Claim the single-writer lease for a RECONCILIATION write (spec 5.7, 8.8 item 1, 16.1): the ordinary
     ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 never-seize
     and dead-run release clauses under a per-store EXCLUSIVE EXAMINATION LOCK (_exclusive_examination,
@@ -1574,16 +1593,17 @@ def acquire_lease_for_recovery(root_fd, machine_rel, verb):
     its own writer's interrupted journal, as sections 5.7 and 8.8 require, before its admission check.
     Ordinary (non-recovery) acquisition keeps the unexamined present-is-held refusal, so a lone leftover
     with no interrupted journal behind it stays the operator's reconciliation step, matching the homes-2
-    refusal of a lone lease with no paired active record."""
+    refusal of a lone lease with no paired active record. `command`, when given, is the command line every
+    remedy here re-runs (rerun_command): a reconciliation run by another command than `verb`'s own."""
     journal = _opf_store._journal
     try:
-        return acquire_lease(root_fd, machine_rel, verb), None
+        return acquire_lease(root_fd, machine_rel, verb, **_named(command)), None
     except LeaseHeldError as held:
         lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
         pfd, name = journal._open_parent(root_fd, lease_rel)
         try:
             try:
-                _exclusive_examination(pfd, lease_rel, verb)
+                _exclusive_examination(pfd, lease_rel, verb, **_named(command))
             except WriteGuardError as exc:
                 raise _lock_refusal(exc, held) from exc
             raw = read_lease_payload(pfd, name)
@@ -1603,7 +1623,8 @@ def acquire_lease_for_recovery(root_fd, machine_rel, verb):
                         "through this reconciliation (spec 5.7: a lease is never seized from a live "
                         "holder, and a leftover lease from a dead run is released only through this "
                         "reconciliation)".format(lease_rel, holder))
-            return _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released), released
+            return (_claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released, **_named(command)),
+                    released)
         finally:
             _opf_store._close_fd_exc_safe(pfd)
 

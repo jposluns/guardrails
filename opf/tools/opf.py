@@ -53,8 +53,8 @@ refuses before any write while a plan op's slice, or the driver's receipt stage,
 `opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
 alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
 own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
-safe; it releases a leftover store lease only when an interrupted adoption apply left it and its holder is
-confirmed dead (spec 5.7). `complete` is
+safe; it releases a leftover store lease only when an interrupted adoption apply left it beside an open
+adoption transaction and its holder is confirmed dead (spec 5.7). `complete` is
 recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -19276,9 +19276,11 @@ def _cmd_adopt(rest):
           never reported recovered), or store-lease-release-failed (the recovery finished,
           but a store lease this run took could not be released and stays, named). Also exit 2: a
           cannot-evaluate root. A leftover store lease an interrupted adoption apply kept (operation
-          adopt-apply) is released through this reconciliation only once its holder is confirmed dead on
-          this host (spec 5.7), and the release is printed; any other present lease refuses as
-          store-lease-held and stays the operator's to release. Exit 1 is not used.
+          adopt-apply) beside an OPEN adoption transaction is released through this reconciliation only
+          once its holder is confirmed dead on this host (spec 5.7), and the release is printed (named in
+          the refusal when a later step refuses); beside such a transaction any other present lease
+          refuses as store-lease-held, and a lease beside no open transaction is not touched: each stays
+          the operator's to release. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -21267,7 +21269,8 @@ def _cli_self_test():
             raise, so a store resolution turns it red), one interrupted after every op landed but before
             its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
             (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
-            transaction that never published its INTENT (each lock released and named). The no-op: no
+            transaction that never published its INTENT (each lock released and named), and a dead apply's
+            store lease kept beside its open transaction (the lease released, the release printed). The no-op: no
             journal, a completed transaction, a store lease with nothing open, and a second reconcile after
             a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
             its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
@@ -21526,6 +21529,37 @@ def _cli_self_test():
                     failures.append("adopt reconcile over a product root that does not exist: rc={!r} (expected "
                                     "2 + cannot evaluate, no REFUSED finding, nothing created; {})".format(
                                         rc, out.strip()))
+
+                # a dead apply's store lease kept beside its open transaction: reconcile recovers the
+                # transaction, releases that leftover through the recovery claim and PRINTS the release (red
+                # when the printing of the released leases is dropped)
+                import _opf_init
+                kept = os.path.join(rbase, "keptlease")
+                put(kept, lease_rel.rsplit("/", 1)[0] + "/" + _opf_store.MANIFEST_NAME,
+                    _opf_init.build_manifest().encode("utf-8"))
+
+                def kill_first(point):
+                    if point.startswith("after-apply-"):
+                        raise _Interrupt(point)
+                with mock.patch.object(journal, "_kill_point", kill_first):
+                    try:
+                        adopt.run_adopt_transaction(kept, rid, lambda ops: ops.create(adopt.plan_rel(rid), plan),
+                                                    plan_digest=digest)
+                    except (_Interrupt, adopt.AdoptApplyError):
+                        pass
+                kept_lease = os.path.join(kept, lease_rel)
+                if os.path.exists(kept_lease) and dead is not None:
+                    with open(kept_lease, "rb") as fh:
+                        left = fh.read()
+                    put(kept, lease_rel, left.replace(":{}\"".format(os.getpid()).encode("utf-8"),
+                                                      ":{}\"".format(dead).encode("utf-8")))
+                rc, out = run(kept)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and "opf adopt reconcile: the leftover single-writer lease {}".format(lease_rel) in out
+                        and "confirmed-dead" in out and not os.path.exists(kept_lease) and journal_clean(kept)):
+                    failures.append("adopt reconcile over a dead apply's lease kept beside its open transaction: "
+                                    "rc={!r} (expected 0 + rolled-back + the released lease printed, the lease "
+                                    "gone; {})".format(rc, out.strip()))
 
                 # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
                 # archive copy is discarded) exits 2 named, and the state is the journal's record of a
