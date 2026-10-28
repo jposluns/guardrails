@@ -101,17 +101,29 @@ def _bootstrap():
     (ImportError) or read (OSError) -- maps to a located cannot-evaluate (EXIT_MALFORMED / 2), never an
     uncaught ImportError that Python would surface as its default exit 1 and that a direct `opf render
     --check` would then read as a false DRIFT (the exit-1=drift conflation, reached here BEFORE the render
-    dispatcher's own fail-closed handler). Only ImportError and OSError (the broken/partial-install signals)
-    are caught; a broader error propagates rather than being masked as bootstrap. The imports moved OFF module
-    top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
+    dispatcher's own fail-closed handler). Every BaseException raised while a helper is imported maps to
+    EXIT_MALFORMED except a KeyboardInterrupt, which is re-raised unchanged, because exit 1 is the drift or
+    finding code and this function exists to keep an import fault from reaching it: ImportError and OSError
+    (the broken/partial-install signals) keep their own arms and messages, and every other one, an Exception
+    subclass included (a SyntaxError in an installed helper, a ValueError at import) and a SystemExit
+    (sys.exit(0) and a bare sys.exit() included, which would otherwise end any verb at exit 0, read as
+    success), maps to a located diagnostic naming the helper (the module running in the outermost module
+    frame of the traceback, and the innermost one's module when another module raised it) and the cause (its
+    type and text), rendered through _init_inert. An error raised after a helper is imported, outside this
+    function, is not mapped here. The imports moved OFF module top for exactly this reason -- an eager
+    top-level import failed before main()'s contract could apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
     that could not be brought in; the variable parts of that diagnostic (the helper name or the read
     error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
-    printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
-    SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
-    runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
-    OPF-QUICKSTART state. Both mapped arms render their variable parts AT this print (the init suite
+    printed on the way to any verb. Describing a cause runs code the cause controls (its __str__, a name
+    that is not a str), so no description may escape: the ImportError and OSError arms build their one line
+    inside a guard, and the broader arm prints a fixed cannot-bootstrap line first and then describes the
+    helper and the cause inside a guard; a description that raises anything (a SystemExit or a ValueError
+    included) falls back to a line naming only the cause's type, or to a fixed line naming nothing, and
+    every arm still returns EXIT_MALFORMED. A KeyboardInterrupt while a helper is imported surfaces as
+    Python's own traceback: it runs before init dispatch and outside _cmd_init's rendering boundary, a window
+    _cmd_init and OPF-QUICKSTART state. Every mapped arm renders its variable parts AT this print (the init suite
     drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
     and requires each printed line inert, QA round 13 C)."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
@@ -136,16 +148,146 @@ def _bootstrap():
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
-        print("opf: cannot bootstrap: {} (cannot evaluate)".format(
-            _init_inert(exc.name or str(exc))), file=sys.stderr)
+        try:
+            line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
+        except BaseException:  # noqa: BLE001  a cause that cannot be described is still a cannot-evaluate
+            line = _bootstrap_undescribed(exc)
+        print(line, file=sys.stderr)
         return EXIT_MALFORMED
     except OSError as exc:
-        print("opf: cannot bootstrap: a helper module could not be read "
-              "({}: {}) (cannot evaluate)".format(
-                  _init_inert(type(exc).__name__), _init_inert(str(exc))),
+        try:
+            line = ("opf: cannot bootstrap: a helper module could not be read "
+                    "({}: {}) (cannot evaluate)".format(
+                        _init_inert(type(exc).__name__), _init_inert(str(exc))))
+        except BaseException:  # noqa: BLE001  a cause that cannot be described is still a cannot-evaluate
+            line = _bootstrap_undescribed(exc)
+        print(line, file=sys.stderr)
+        return EXIT_MALFORMED
+    except BaseException as exc:  # noqa: BLE001  an import-time fault is a cannot-evaluate, never exit 0 or 1
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        # The fixed line first: describing the cause runs its code, whose own failure must not erase this one.
+        print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
               file=sys.stderr)
+        try:
+            # The helper is the module running in the outermost module frame of the traceback (the one this
+            # function's import statement was bringing in); the innermost one, when another, raised the cause.
+            modules, tb = [], exc.__traceback__
+            while tb is not None:
+                if tb.tb_frame.f_code.co_name == "<module>":
+                    modules.append(_init_inert(tb.tb_frame.f_globals.get("__name__", "?")))
+                tb = tb.tb_next
+            helper = "helper " + modules[0] if modules else "a helper module"
+            inner = ", in module " + modules[-1] if len(modules) > 1 and modules[-1] != modules[0] else ""
+            print("opf: cannot bootstrap: {} raised {} ({}) while being imported{} (cannot evaluate)".format(
+                helper, _init_inert(type(exc).__name__), _init_inert(str(exc)), inner), file=sys.stderr)
+        except BaseException:  # noqa: BLE001  a cause that cannot be described is still a cannot-evaluate
+            try:
+                print(_bootstrap_undescribed(exc), file=sys.stderr)
+            except BaseException:  # noqa: BLE001  the fixed line and the exit status still carry the fault
+                pass
         return EXIT_MALFORMED
     return EXIT_OK
+
+
+def _bootstrap_undescribed(exc):
+    """The cannot-bootstrap line for a cause whose description raised: it names only the cause's type
+    (rendered through _init_inert), or nothing when even that cannot be rendered. Never raises."""
+    try:
+        return "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)".format(
+            _init_inert(type(exc).__name__))
+    except BaseException:  # noqa: BLE001  a type name that cannot be rendered still leaves a fixed line
+        return "opf: cannot bootstrap: the cause could not be described (cannot evaluate)"
+
+
+# The lines _bootstrap_exit_findings expects, each a (template, raw parts) pair whose parts are rendered
+# through _init_inert: the broader arm's fixed first line, its located description, and the line for a
+# cause whose description raised.
+_BOOT_FAILED = ("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)", ())
+_BOOT_RAISED = "opf: cannot bootstrap: helper _opf_worklog raised {} ({}) while being imported (cannot evaluate)"
+_BOOT_UNDESCRIBED = "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)"
+
+# The import-time faults _bootstrap_exit_findings raises from a stand-in for the first helper _bootstrap
+# imports: (label, the stand-in's source, the exception type the call must let escape unchanged or None,
+# then the escaping exception's text, or else the exact lines the call must print as it returns EXIT_MALFORMED).
+_BOOTSTRAP_EXIT_CASES = (
+    ("systemexit-0", "raise SystemExit(0)\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+    ("bare-sys-exit", "import sys\nsys.exit()\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "")))),
+    ("systemexit-1", "raise SystemExit(1)\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "1")))),
+    ("custom-baseexception",
+     "class HelperHalt(BaseException):\n    pass\n\n\nraise HelperHalt('halted at $(import)')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperHalt", "halted at $(import)")))),
+    ("keyboardinterrupt", "raise KeyboardInterrupt('stop')\n", KeyboardInterrupt, "stop"),
+    ("broader-error", "raise ValueError('not an exit')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("ValueError", "not an exit")))),
+    ("helper-syntaxerror", "return 1\n",
+     None, (_BOOT_FAILED, ("opf: cannot bootstrap: a helper module raised {} ({}) while being imported (cannot "
+                           "evaluate)", ("SyntaxError", "'return' outside function (_opf_worklog.py, line 1)")))),
+    ("str-raises-systemexit-0",
+     "class HelperFault(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n\n\nraise HelperFault()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperFault",)))),
+    ("str-raises-valueerror",
+     "class HelperHalt(BaseException):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
+     "raise HelperHalt()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperHalt",)))),
+    ("importerror-str-raises-systemexit-0",
+     "class HelperMissing(ImportError):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
+     "raise HelperMissing()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperMissing",)),)),
+    ("oserror-str-raises-valueerror",
+     "class HelperUnread(OSError):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
+     "raise HelperUnread()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+)
+
+
+def _bootstrap_exit_findings(bootstrap=None):
+    """Drive each case of _BOOTSTRAP_EXIT_CASES through `bootstrap` (default _bootstrap) and return the
+    failures, empty when every case holds. Each case writes a stand-in _opf_worklog.py into a fresh temporary
+    directory put first on sys.path and takes the loaded _opf_worklog out of sys.modules for the call; the
+    loaded module, sys.path and the path importer cache are restored after it. An import-time fault other
+    than a KeyboardInterrupt (a SystemExit of 0, of None from a bare sys.exit(), of 1, a BaseException
+    subclass that is not an Exception, a ValueError, a SyntaxError in the helper) must return EXIT_MALFORMED,
+    raise nothing, and print exactly the fixed cannot-bootstrap line and then one line naming the helper and
+    the cause's type and text, rendered inert. A cause whose __str__ raises (SystemExit(0) or a ValueError),
+    in the broader arm or in the ImportError or OSError arm, must still return EXIT_MALFORMED, its
+    description falling back to a line naming only its type. A KeyboardInterrupt must escape unchanged. With
+    the broader arm narrowed back to exits only, the ValueError and SyntaxError cases escape the call and fail;
+    with any arm reverted to describing its cause in its one unguarded print, that arm's __str__ cases
+    escape the call and fail."""
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+    bootstrap = _bootstrap if bootstrap is None else bootstrap
+    failures = []
+    for label, source, escapes, want in _BOOTSTRAP_EXIT_CASES:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="opf-boot-exit-") as tmp:
+            (Path(tmp) / "_opf_worklog.py").write_text(source, encoding="utf-8")
+            loaded = sys.modules.pop("_opf_worklog", None)
+            try:
+                with patch.object(sys, "path", [tmp] + sys.path), patch.object(sys, "dont_write_bytecode", True):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                        rc = bootstrap()
+            except BaseException as exc:  # noqa: BLE001  an escape is this case's verdict, judged below
+                rc = exc
+            finally:
+                sys.path_importer_cache.pop(tmp, None)
+                sys.modules.pop("_opf_worklog", None)
+                if loaded is not None:
+                    sys.modules["_opf_worklog"] = loaded
+        if escapes is not None:
+            if type(rc) is not escapes or str(rc) != want:
+                failures.append("bootstrap {}: {!r} (expected the {} to escape unchanged)".format(
+                    label, rc, escapes.__name__))
+            continue
+        want = "".join(template.format(*map(_init_inert, parts)) + "\n" for template, parts in want)
+        if type(rc) is not int or rc != EXIT_MALFORMED or out.getvalue() != want:
+            failures.append("bootstrap {}: returned {!r} printing {!r} (expected exit {} printing {!r})".format(
+                label, rc, out.getvalue(), EXIT_MALFORMED, want))
+    return failures
+
 
 # F-SELFTEST-NO-MAIN: the one entry a module that binds self_test must carry, matched by AST structure (so
 # spacing, quoting, parentheses and comments do not matter). _ENTRY_TEST is the only accepted test of the entry
@@ -18704,10 +18846,11 @@ def _cmd_init(rest):
     CHAINS that exception (its type and its raw, unrendered text, then "During
     handling of the above exception, another exception occurred"; QA round 14
     C), so this window can print an init value raw; any failure BEFORE
-    init dispatch is outside this boundary entirely (a bootstrap fault other than
-    the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
-    example a SyntaxError in an installed helper, or an interrupt before or during
-    dispatch, surfaces as Python's own traceback or signal); and an interrupt
+    init dispatch is outside this boundary entirely (_bootstrap maps every fault
+    raised while a helper is imported, a SyntaxError in an installed helper
+    included, to a rendered cannot-evaluate, exit 2, except a KeyboardInterrupt;
+    that interrupt, or any interrupt before or during dispatch, surfaces as
+    Python's own traceback or signal); and an interrupt
     AFTER this function returns, in the dispatcher's own return and sys.exit
     statements, escapes as Python's traceback of those dispatcher lines (that
     traceback shows the dispatcher's source lines and the interrupt type; by
@@ -21592,6 +21735,11 @@ def _cli_self_test():
         _expect_harness("mkdtemp-oserror", tempfile, "mkdtemp")
         _expect_harness("makedirs-oserror", os, "makedirs")
 
+        # A helper that faults while being imported (sys.exit(0), a bare sys.exit(), SystemExit(1), another
+        # BaseException, a ValueError, a SyntaxError, a cause whose __str__ raises) must reach the located
+        # cannot-evaluate (exit 2), never a success or the finding code.
+        failures.extend(_bootstrap_exit_findings())
+
         # The same fixture vectors drive this in-process dispatcher and the dedicated gate's
         # isolated child. A refusal must name its reason and preserve the fixture, not merely return 2.
         # The in-process init and the lease fixtures take the shared init operation mutex, whose
@@ -21649,7 +21797,8 @@ def _cli_self_test():
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
               "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
               "the unlanded ops or an approval for another plan, each mutating nothing; an "
-              "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
+              "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2; a helper "
+              "faulting while being imported -> 2 naming the helper and the cause)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
