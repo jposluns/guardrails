@@ -173,9 +173,9 @@ class History:
         self.history_digest = history_digest  # SHA-256 hex of the canonical bytes, only when VALID
 
 
-class _CanonError(Exception):
+class _CanonError(ValueError):
     """A document the canonical emitter refuses (INVALID, fail-closed): emit_history never emits a best
-    effort."""
+    effort. A ValueError, so a direct caller refusing on ValueError refuses this too."""
 
 
 # --- canonical emission --------------------------------------------------------------------------------
@@ -191,6 +191,9 @@ def _canon_scalar(key, value):
 
 
 def _canon_table_lines(table):
+    # A non-string key has no TOML spelling; it is refused by its type before sorting could raise.
+    if any(type(k) is not str for k in table):
+        raise _CanonError("the history has no canonical form: a table holds a key that is not a string")
     order = [k for k in ("version",) if k in table]
     order += sorted(k for k in table if k != "version")
     return "".join("{} = {}\n".format(batch._canon_key(k), _canon_scalar(k, table[k])) for k in order)
@@ -199,9 +202,13 @@ def _canon_table_lines(table):
 def emit_history(doc):
     """The canonical emission of a parsed history document (see the module docstring). Raises _CanonError
     on a document outside the emittable shape or value grammar; parse_history grades that refusal, and a
-    direct caller must treat it as a refused history, never emit a best effort."""
+    direct caller must treat it as a refused history, never emit a best effort. A top-level key outside the
+    format is refused, never dropped, and so is a string no UTF-8 can encode (a lone surrogate)."""
     if type(doc) is not dict or type(doc.get("source")) is not dict:
         raise _CanonError("the history has no canonical form: it is not a table holding the [source] table")
+    if any(type(k) is not str or k not in TOP_KEYS for k in doc):
+        raise _CanonError("the history has no canonical form: it holds a top-level key outside schema, "
+                          "source and release")
     rows = doc.get("release", [])
     if type(rows) is not list or any(type(row) is not dict for row in rows):
         raise _CanonError("the history has no canonical form: [[release]] is not an array of tables")
@@ -209,7 +216,11 @@ def emit_history(doc):
     pieces.append("\n[source]\n" + _canon_table_lines(doc["source"]))
     for row in rows:
         pieces.append("\n[[release]]\n" + _canon_table_lines(row))
-    return "".join(pieces).encode("utf-8")
+    try:
+        return "".join(pieces).encode("utf-8")
+    except UnicodeEncodeError:
+        raise _CanonError("the history has no canonical form: a key or value holds a code point UTF-8 "
+                          "cannot encode (a lone surrogate)") from None
 
 
 # --- parsing -------------------------------------------------------------------------------------------
@@ -926,9 +937,11 @@ def self_test():
                                      source={"path": "release-notes.toml", key: "x"}))
             check("hist-source-measurement-{}-refused".format(key.replace("_", "-")),
                   _refuses(got, INVALID, "source carries the caller-supplied measurement"))
-        # Prose: a listed prose key, and keys spelling `note` or `prose` inside a longer name.
+        # Prose: a listed prose key, and keys spelling `note` or `prose` inside a longer name; the rule
+        # matches the casefolded key, so a capitalised listed name and an upper-case longer name are prose.
         for name, key in (("prose", "notes"), ("prose-description", "description"),
-                          ("prose-release-notes", "release_notes"), ("prose-proseblock", "proseBlock")):
+                          ("prose-release-notes", "release_notes"), ("prose-proseblock", "proseBlock"),
+                          ("prose-casefold-listed", "Notes"), ("prose-casefold-longer", "RELEASE_NOTE")):
             got = parse_history(_doc([{"version": "1.0.0", "date": _DATE, key: "x"}]))
             check("hist-{}-key-refused".format(name), _refuses(got, INVALID, "carries the prose key"))
         got = parse_history(_doc([{"version": "1.0.0", "date": _DATE, "channel": "x"}]))
@@ -966,6 +979,10 @@ def self_test():
         got = parse_history(_sized(MAX_HISTORY_BYTES + 1))
         check("hist-oversize-refused", _refuses(got, CANNOT_EVALUATE, "over the 4194304 byte bound")
               and len(got.findings) == 1)
+        # The bound runs before decoding: an oversized input that is not UTF-8 refuses on its size alone.
+        got = parse_history(b"\xff" * (MAX_HISTORY_BYTES + 1))
+        check("hist-oversize-before-decode", _refuses(got, CANNOT_EVALUATE, "over the 4194304 byte bound")
+              and len(got.findings) == 1)
 
         # The row-count bound, inclusive: just inside and at the bound parse VALID; one row past it is
         # refused alone, before any row is graded.
@@ -1000,6 +1017,23 @@ def self_test():
                 refused = False
             except _CanonError:
                 refused = True
+            check("hist-emit-direct-" + name + "-refused", refused)
+        # A direct call refuses, as the emitter's own ValueError subclass, a top-level key outside the
+        # format (never dropped), a non-string key and a lone surrogate (never a TypeError or an encoding
+        # error escaping).
+        for name, doc in (("extra-top-key", {"schema": HISTORY_SCHEMA, "source": {"path": "a"},
+                                             "release": [{"version": "1.0.0", "date": _DATE}], "summary": "x"}),
+                          ("non-string-key", {"schema": HISTORY_SCHEMA, "source": {"path": "a"},
+                                              "release": [{"version": "1.0.0", "date": _DATE, 1: "x"}]}),
+                          ("surrogate", {"schema": HISTORY_SCHEMA, "source": {"path": "a\ud800"},
+                                         "release": [{"version": "1.0.0", "date": _DATE}]})):
+            try:
+                emit_history(doc)
+                refused = False
+            except ValueError as exc:
+                refused = type(exc) is _CanonError
+            except Exception:  # noqa: BLE001  the wrong exception type is a failed check, not a harness error
+                refused = False
             check("hist-emit-direct-" + name + "-refused", refused)
         # The batch escape set applies: a raw C1 control in a string is refused non-canonical (its
         # canonical spelling is the escape), beside the source path grammar's own refusal.
