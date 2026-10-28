@@ -4077,6 +4077,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
+    "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
