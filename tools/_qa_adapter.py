@@ -1303,7 +1303,7 @@ def _self_test_isolated():
             _git("tag", "v-selftest")
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": cur}}}, gitrepo)
-            # 31a. DISCRIMINATING (finding-6a + finding-2-ii + finding-2c): a git PASS carries EXACTLY the
+            # 31a. DISCRIMINATING: a git PASS carries EXACTLY the
             #      two-element evidence vector [<repo-top>, refs/heads/<branch>@<sha>], asserted by EXACT
             #      VECTOR EQUALITY (==), not membership, against the REAL head_sha git reported. Removing the
             #      branch ref, self-constructing the sha (which then diverges from the real head_sha), OR
@@ -1322,7 +1322,7 @@ def _self_test_isolated():
                 failures.append("git surface on an existing protected branch expected PASS/available with "
                                 "evidence exactly {!r}, got {}/{} evidence={!r} ({})".format(
                                     [git_top, pass_ref], r["status"], r["kind"], r["evidence"], r["detail"]))
-            # 31a-2. DISCRIMINATING (finding-2-iii): a nonexistent protected branch is UNVERIFIABLE/
+            # 31a-2. DISCRIMINATING: a nonexistent protected branch is UNVERIFIABLE/
             #      required-unavailable carrying EXACTLY the repo-root evidence [<repo-top>]. Removing that
             #      [repo-root] evidence (returning []) fails the exact evidence assertion; a PASS fails the
             #      status. The evidence is compared by realpath so a symlinked tmp root still matches.
@@ -1334,7 +1334,7 @@ def _self_test_isolated():
                 failures.append("git surface on a nonexistent protected branch expected UNVERIFIABLE/"
                                 "required-unavailable carrying exactly the repo-root evidence, got {}/{} "
                                 "evidence={!r}".format(r["status"], r["kind"], r["evidence"]))
-            # 31a-3. DISCRIMINATING (finding-1: a protected-branch value carrying a REVISION SUFFIX is not a
+            # 31a-3. DISCRIMINATING (a protected-branch value carrying a REVISION SUFFIX is not a
             #      branch name): `<branch>~0`, `<branch>^{commit}`, and `<branch>@{0}` each resolve THROUGH a
             #      revision operator under `rev-parse --verify refs/heads/<value>` and would read PASS with the
             #      expression carried as evidence. Each must be UNVERIFIABLE/required-unavailable, rejected at
@@ -1362,7 +1362,7 @@ def _self_test_isolated():
             if os.path.exists("/bin/sh"):
                 decoy_bin = tmp / "decoybin"
                 decoy_bin.mkdir()
-                # 31a-4. DISCRIMINATING (finding-3: the resolved commit id must be a strict sha): a decoy
+                # 31a-4. DISCRIMINATING (the resolved commit id must be a strict sha): a decoy
                 #      `git` that emits a NON-SHA line for show-ref (while echoing the surface root as the
                 #      toplevel so the root-binding checks pass) must yield UNVERIFIABLE/required-unavailable,
                 #      the detail naming a non-sha commit id, never a PASS carrying garbage as the branch sha.
@@ -1391,7 +1391,7 @@ def _self_test_isolated():
                 finally:
                     this_mod._GIT = saved_git
 
-                # 31a-5. DISCRIMINATING (finding-1: the RETURNED ref field must equal the requested ref): a
+                # 31a-5. DISCRIMINATING (the RETURNED ref field must equal the requested ref): a
                 #      PRECISE-looking decoy `git` that emits a VALID-format sha but a MISMATCHED ref line
                 #      (refs/heads/main for a request of refs/heads/fabricated) must be UNVERIFIABLE, the
                 #      detail naming a mismatched ref, never a PASS on a self-constructed
@@ -1422,7 +1422,7 @@ def _self_test_isolated():
                 finally:
                     this_mod._GIT = saved_git
 
-                # 31a-6. DISCRIMINATING (finding-2b: show-ref matches a LITERAL ref and does NOT apply
+                # 31a-6. DISCRIMINATING (show-ref matches a LITERAL ref and does NOT apply
                 #      revision operators, unlike rev-parse): a decoy `git` that ACCEPTS the grammar (so the
                 #      value reaches resolution) and whose show-ref rejects a revision-suffix ref as a
                 #      non-existent literal (exit 1) while its rev-parse WOULD resolve it models the exact
@@ -1459,7 +1459,7 @@ def _self_test_isolated():
                 finally:
                     this_mod._GIT = saved_git
 
-                # 31a-7. DISCRIMINATING (finding-2a: a LEADING-DASH branch value is rejected UP FRONT, before
+                # 31a-7. DISCRIMINATING (a LEADING-DASH branch value is rejected UP FRONT, before
                 #      it can be handed to git as an option): a decoy `git` that ACCEPTS the grammar
                 #      (check-ref-format exit 0) and would emit a self-consistent line for refs/heads/-x is
                 #      used so that ONLY the leading-dash guard stands between the value and a PASS. With the
@@ -1491,7 +1491,7 @@ def _self_test_isolated():
                                             r["status"], r["kind"], r["detail"]))
                 finally:
                     this_mod._GIT = saved_git
-            # 31b. DISCRIMINATING (finding-3: protected-branch must be a BRANCH ref, not any commit-ish): a
+            # 31b. DISCRIMINATING (protected-branch must be a BRANCH ref, not any commit-ish): a
             #      raw SHA, a tag name, and HEAD each resolve to a commit but are NOT branch refs, so each is
             #      UNVERIFIABLE. Reverting the check to `rev-parse <value>^{commit}` accepts every one of
             #      them and reads PASS, failing these cases.
@@ -1501,7 +1501,7 @@ def _self_test_isolated():
                 if r["status"] != UNVERIFIABLE:
                     failures.append("git protected-branch given a {} ({!r}) that is not a branch expected "
                                     "UNVERIFIABLE, got {}".format(label, value, r["status"]))
-            # 31c. DISCRIMINATING (finding-4: git evidence bound to root, ambient GIT_* scrubbed): with root a
+            # 31c. DISCRIMINATING (git evidence bound to root, ambient GIT_* scrubbed): with root a
             #      NON-repo directory and ambient GIT_DIR/GIT_WORK_TREE redirected at the real repo, the scrub
             #      binds the probe to root (a non-repo) -> UNVERIFIABLE. Reverting the env scrub lets git
             #      honour the redirect and read PASS for the unrelated repo, failing this case.
@@ -1523,7 +1523,7 @@ def _self_test_isolated():
                         os.environ.pop(k, None)
                     else:
                         os.environ[k] = v
-            # 31d. DISCRIMINATING (finding-4: toplevel realpath-equal to root): root a SUBDIRECTORY of the
+            # 31d. DISCRIMINATING (toplevel realpath-equal to root): root a SUBDIRECTORY of the
             #      repo resolves a toplevel that differs from root -> UNVERIFIABLE. Removing the realpath
             #      equality check lets the subdirectory read PASS on the ancestor repo, failing this case.
             subdir = gitrepo / "sub"
@@ -1555,7 +1555,7 @@ def _self_test_isolated():
         except ValueError:
             pass
 
-        # 33b. DISCRIMINATING (finding-3: the result SCHEMA is validated): a result whose schema is
+        # 33b. DISCRIMINATING (the result SCHEMA is validated): a result whose schema is
         #      SUBSTITUTED, and one with NO schema field, are each rejected by validate_result/emit, for
         #      EVERY status (a PASS and a FAIL shown). Removing the schema-equality check lets a substituted
         #      or missing schema serialize as a clean line, failing these. The base object is otherwise
@@ -1654,7 +1654,7 @@ def _self_test_isolated():
         except ConfigError:
             pass
 
-        # 40. DISCRIMINATING (finding-1 + finding-2-i: canonical adapter-type substitution rejected): a config
+        # 40. DISCRIMINATING (canonical adapter-type substitution rejected): a config
         #     that binds a canonically-recognized surface to a DIFFERENT adapter than its canonical one
         #     resolves UNVERIFIABLE/adapter-mismatch carrying EXACTLY empty evidence ([]), never PASS and
         #     never a decoy evidence element, so a required surface cannot be rebound to the record-file
@@ -1679,7 +1679,7 @@ def _self_test_isolated():
             failures.append("backlog on its canonical adapter expected PASS, got {}/{}".format(
                 r["status"], r["kind"]))
 
-        # 41. DISCRIMINATING (finding-2: non-PASS malformed evidence rejected uniformly): evidence elements
+        # 41. DISCRIMINATING (non-PASS malformed evidence rejected uniformly): evidence elements
         #     must be NON-EMPTY strings for EVERY status, not only PASS. make_result(FAIL, evidence=[7]) and
         #     emit of a FAIL with evidence=[""] are each refused, and _surface handed [7] for an UNVERIFIABLE
         #     yields clean (no malformed-element) evidence. Reverting the uniform element check (keeping the
@@ -1700,7 +1700,7 @@ def _self_test_isolated():
         if any(not (isinstance(e, str) and e) for e in r["evidence"]):
             failures.append("_surface returned an UNVERIFIABLE with malformed evidence: {!r}".format(r["evidence"]))
 
-        # 41b. DISCRIMINATING (finding-2-iv: the non-empty-string provenance clause of _validate_probe_return):
+        # 41b. DISCRIMINATING (the non-empty-string provenance clause of _validate_probe_return):
         #      an available probe returning an EMPTY-STRING provenance element (True, "detail", [""], "t") is
         #      a MALFORMED probe, caught at the return-type gate, so it resolves UNVERIFIABLE/adapter-error
         #      with the malformed-probe detail (naming the provenance fault) rather than reaching the PASS
@@ -1721,7 +1721,7 @@ def _self_test_isolated():
         finally:
             del ADAPTERS["_selftest-emptyprov"]
 
-        # 42. DISCRIMINATING (finding-6d: record-file 'path' is type-checked): a record-file surface with a
+        # 42. DISCRIMINATING (record-file 'path' is type-checked): a record-file surface with a
         #     LIST-valued 'path' is a loud ConfigError, so the record-file adapter's path field cannot load
         #     wrong-typed and then read PASS. Removing "record-file": ("path",) from ADAPTER_STR_FIELDS lets
         #     the list-valued path load, failing this case.
@@ -1734,7 +1734,7 @@ def _self_test_isolated():
         except ConfigError:
             pass
 
-        # 43. DISCRIMINATING (finding-5: pinned config resolves BEFORE --self-test dispatch): a subprocess
+        # 43. DISCRIMINATING (pinned config resolves BEFORE --self-test dispatch): a subprocess
         #     given `--config <absent> --self-test`, or `AIQT_ASSURANCE_CONFIG="" --self-test`, exits 2 (the
         #     loud pinned-source resolution), never 0. Moving the resolve_config call back AFTER the
         #     --self-test dispatch lets the self-test run and exit 0 on a config the caller pinned, failing
@@ -1755,7 +1755,7 @@ def _self_test_isolated():
                 failures.append("present-but-empty AIQT_ASSURANCE_CONFIG did not exit 2 under --self-test, "
                                 "got {}".format(proc.returncode))
 
-        # 44. DISCRIMINATING (finding-1: broken-symlink fail-closed applied CLASS-WIDE): a BROKEN SYMLINK (a
+        # 44. DISCRIMINATING (broken-symlink fail-closed applied CLASS-WIDE): a BROKEN SYMLINK (a
         #     present dentry whose target is missing) that gates a result must FAIL CLOSED, never read as
         #     absent, at EVERY presence-gating site. os.symlink is needed; asserted only where it is
         #     available and creating a dangling symlink succeeds.
@@ -1801,7 +1801,7 @@ def _self_test_isolated():
                                 "UNVERIFIABLE (fail closed), got {} (a present-but-unreadable candidate must "
                                 "not be silently dropped with the roster still PASS)".format(r["status"]))
 
-        # 45. DISCRIMINATING (finding-2: result-contract structural completeness): validate_result enforces
+        # 45. DISCRIMINATING (result-contract structural completeness): validate_result enforces
         #     the mandatory identity fields present and typed, and the SKIP/required cross-field consistency,
         #     for every status, and make_result/emit route through it. A structurally-complete result is
         #     accepted; a SKIP marked required, a result missing a mandatory field, a wrong-typed identity
@@ -1843,7 +1843,7 @@ def _self_test_isolated():
         except ValueError:
             pass
 
-        # 46. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
+        # 46. DISCRIMINATING (an unknown option is a LOUD exit 2, never a silent default path): a
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
         #     running the default digest path (which would let --self-testx masquerade as --self-test in CI
         #     parity). Removing reject_unknown_options lets the unknown option fall through, failing this.
@@ -1857,7 +1857,7 @@ def _self_test_isolated():
                     failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
                         badarg, proc.returncode))
 
-        # 47. DISCRIMINATING (finding-4 + finding-5: strict commit-id and absolute git resolution):
+        # 47. DISCRIMINATING (strict commit-id and absolute git resolution):
         #     _is_commit_id accepts a strict 40-hex and 64-hex sha and rejects a hex-but-wrong-length value,
         #     a right-length-but-non-hex value, an uppercased hex, an empty string, and a non-string;
         #     _resolve_git absolutizes a relative which result and falls back to the bare name; and _GIT is an
@@ -1882,7 +1882,7 @@ def _self_test_isolated():
         if shutil.which("git") and not os.path.isabs(_GIT):
             failures.append("_GIT expected an absolute path when git is discoverable, got {!r}".format(_GIT))
 
-        # 48. DISCRIMINATING (finding-4: the show-ref line must have EXACTLY two fields): a decoy git emitting
+        # 48. DISCRIMINATING (the show-ref line must have EXACTLY two fields): a decoy git emitting
         #     a THREE-field show-ref line (a valid sha, the requested ref, and an extra token) with an
         #     accepting grammar is UNVERIFIABLE (a malformed line), never a PASS that reads only the first two
         #     fields. Removing the `len(fields) != 2` check lets fields[0]/fields[1] read the valid sha and
@@ -1915,7 +1915,7 @@ def _self_test_isolated():
             finally:
                 this_mod._GIT = saved_git
 
-        # 49. DISCRIMINATING (finding-2: every MANDATORY result key must be PRESENT): starting from a
+        # 49. DISCRIMINATING (every MANDATORY result key must be PRESENT): starting from a
         #     structurally-complete result, DELETING each mandatory key in turn is rejected. `surface` is the
         #     key this closes: it is legitimately None-valued, so a MISSING 'surface' key would otherwise read
         #     as surface=None and slip; `kind` on a FAIL is likewise otherwise-unconstrained. Removing the
@@ -1935,7 +1935,7 @@ def _self_test_isolated():
             except ValueError:
                 pass
 
-        # 50. DISCRIMINATING (finding-3: a SKIP carries EXACTLY the optional-disabled kind): a legit
+        # 50. DISCRIMINATING (a SKIP carries EXACTLY the optional-disabled kind): a legit
         #     optional SKIP (optional-disabled kind) is accepted; a SKIP wearing a required-unavailable,
         #     available, arbitrary, or NON-STRING kind is refused, and make_result routes through the same
         #     check. Removing the SKIP-kind clause lets an inconsistent SKIP kind through, failing this.
@@ -1957,7 +1957,7 @@ def _self_test_isolated():
         except ValueError:
             pass
 
-        # 51. DISCRIMINATING (finding-4: 'summary' is validated and the non-empty clause holds): a
+        # 51. DISCRIMINATING ('summary' is validated and the non-empty clause holds): a
         #     present-but-EMPTY or present-but-NON-STRING summary is rejected (so removing 'summary' from the
         #     ("audit", "summary") identity tuple fails a case), and a present-but-EMPTY audit and summary are
         #     each rejected (so removing the `or not value` non-empty clause, which lets an empty string pass
@@ -1977,7 +1977,7 @@ def _self_test_isolated():
             except ValueError:
                 pass
 
-        # 52. DISCRIMINATING (finding-1: a NON-REGULAR pinned --config FAILS CLOSED, never blocks on open): a
+        # 52. DISCRIMINATING (a NON-REGULAR pinned --config FAILS CLOSED, never blocks on open): a
         #     FIFO passed via --config is classified non-regular BEFORE any open, so a subprocess exits 2
         #     promptly rather than BLOCKING on open(FIFO) (which would time out). Reverting load_config to a
         #     bare read_bytes() (no _classify_presence guard) blocks on the FIFO and the subprocess times out,
@@ -2005,7 +2005,7 @@ def _self_test_isolated():
                 finally:
                     fifo.unlink()
 
-        # 53. DISCRIMINATING (finding-5: the module-level _GIT routes through _resolve_git): reverting the
+        # 53. DISCRIMINATING (the module-level _GIT routes through _resolve_git): reverting the
         #     global `_GIT = _resolve_git(shutil.which("git"))` to `shutil.which("git") or "git"` is invisible
         #     when git resolves to an ABSOLUTE path (os.path.abspath is idempotent), so this exercises the one
         #     case that separates them: a `git` reachable ONLY through a RELATIVE PATH component. In a child
@@ -2032,7 +2032,7 @@ def _self_test_isolated():
                                       capture_output=True, text=True, env=childenv)
                 out = proc.stdout.strip()
                 if proc.returncode != 0:
-                    failures.append("finding-5 _GIT probe subprocess failed: rc={} err={!r}".format(
+                    failures.append("_GIT probe subprocess failed: rc={} err={!r}".format(
                         proc.returncode, proc.stderr))
                 elif out != "git" and not os.path.isabs(out):
                     failures.append("module-level _GIT did not route through _resolve_git: a git reachable "

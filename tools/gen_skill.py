@@ -865,8 +865,8 @@ def plugin_identity(root, root_fd=None):
         # build_outputs surfaces as exit 2 and passes unchanged. tomllib raises RecursionError (a RuntimeError)
         # on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more than 1000 dotted
         # parts, and MemoryError on a many-part key under a memory limit; map each into that family
-        # (a bare parser error is not a TOMLDecodeError). A MemoryError is named as the resource failure it is, never as
-        # nesting.
+        # (RecursionError and MemoryError are not ValueErrors). A MemoryError is named as the resource failure it
+        # is, never as nesting.
         if isinstance(exc, ValueError):
             raise
         if isinstance(exc, MemoryError):

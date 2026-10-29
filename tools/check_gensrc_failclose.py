@@ -6,7 +6,7 @@ NOT prove the generator actually CONSULTS that target when checking: a generator
 its output (deriving a verdict from sources alone, or short-circuiting to exit 0) passes drift while
 silently failing to guard the shipped artefact. This gate closes that gap: for every
 entry in the .aiqt/gensrc.json registry it corrupts a throwaway copy of the target and asserts the
-generator's `--check` refuses to pass clean. The uniform invariant, the true anti-F-154 property, is a
+generator's `--check` refuses to pass clean. The uniform invariant, the true fail-closed property, is a
 single assertion for every corruption shape: a corrupted target yields a NON-ZERO `--check`. An exit 0 on
 a corrupt target is the violation; the exact non-zero code (drift, decode-error, crash) is not graded.
 
@@ -349,7 +349,7 @@ def _materialize_git(template, real_root):
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
     # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
-    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh (F-234a).
+    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
     probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
                             "--no-optional-locks", "ls-files", "-z"],
                            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
@@ -369,7 +369,7 @@ def _materialize_git(template, real_root):
         raise OSError("cannot git-add the tracked set into the failclose template")
     if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
         raise OSError("cannot commit the failclose sandbox template")
-    # The materialized index MUST equal real_root's tracked set (F-234b): any missing member is fail-closed.
+    # The materialized index MUST equal real_root's tracked set: any missing member is fail-closed.
     readback = git(template, "ls-files", "-z")
     if readback.returncode != 0:
         raise OSError("cannot read back the materialized template index (git ls-files exit {})"
@@ -1833,7 +1833,7 @@ def _self_test_main_isolated():
             expect_sweep(0, "git-reading generator: expected the sweep to pass (exit 0; the template "
                             "materializes a real git repo so the baseline git ls-files succeeds)"))
 
-        # (o) F-234a: a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
+        # (o) a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
         #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
         #     the hook and the marker is never written; the sweep still completes (the goodfile fixture is
         #     otherwise clean). Without the override git would run the hook (arbitrary code out of scope).
@@ -1858,7 +1858,7 @@ def _self_test_main_isolated():
 
         _run_vector(cannot, failures, "fsmonitor probe", _fsmonitor, _evaluate_fsmonitor)
 
-        # (p) F-234b: a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
+        # (p) a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
         #     exits nonzero) is cannot-evaluate (exit 2), NEVER a silent `git add -A` fallback that would
         #     certify a bogus baseline. Without the fix the old fallback would materialize a repo and the
         #     goodfile fixture would sweep to exit 0.
@@ -1872,7 +1872,7 @@ def _self_test_main_isolated():
                     expect_sweep(2, "forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
                                     "fallback), a nonzero real_root ls-files must fail closed"))
 
-        # (q) F-234b: a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
+        # (q) a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
         #     template) is detected as cannot-evaluate (exit 2). extra.txt is committed then deleted from
         #     disk, so copytree never copies it and the materialized template index lacks it. Without the
         #     equality guard the mismatch is unnoticed and the goodfile fixture sweeps to exit 0.

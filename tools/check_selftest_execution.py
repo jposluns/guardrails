@@ -1343,7 +1343,7 @@ def self_test():
         code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0)))
         expect("st/near-miss-twin-passes", code, 0)
 
-        # 17 (FIX 1): the static source-to-manifest reconcile refuses, BEFORE any launch, a source
+        # 17: the static source-to-manifest reconcile refuses, BEFORE any launch, a source
         # check absent from the manifest (even an unreachable one), a registered id with no source
         # site, a dead duplicate-id alias, and an unresolvable dynamic id; the loop-literal pattern
         # resolves, and a clean source==manifest twin still passes
@@ -1383,7 +1383,7 @@ def self_test():
         code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0)))
         expect("st/static-clean-twin-passes", code, 0)
 
-        # 18 (FIX 3): an exported copy of this gate run from outside a git checkout refuses to guess
+        # 18: an exported copy of this gate run from outside a git checkout refuses to guess
         # its target instead of validating whatever tree the cwd happens to sit in
         exported = base / "exported"
         exported.mkdir()
@@ -1397,7 +1397,7 @@ def self_test():
                "cannot confirm the gate's own repo root"
                in proc.stderr.decode("utf-8", errors="replace"), True)
 
-        # 19 (FIX 4): unavailable temp storage for the private report directory is cannot-evaluate,
+        # 19: unavailable temp storage for the private report directory is cannot-evaluate,
         # never a finding, and the child is never launched; the pinned tempdir is restored after
         root = build(_manifest_text(), _report_body(GOOD_IDS, 0))
         real_tempdir = tempfile.tempdir

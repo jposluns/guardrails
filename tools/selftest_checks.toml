@@ -508,7 +508,7 @@ expected-check-ids = [
   "stop/escape-spoof-artefact",
   "stop/escape-spoof-logged",
   "stop/symlink-escape-ignored",
-  # ---------- C.1 FIX 2: escape-path anchoring, symlink-component, hardlink hardening ----------
+  # ---------- C.1: escape-path anchoring, symlink-component, hardlink hardening ----------
   "stop/foreign-abs-escape-ignored",
   "stop/foreign-abs-escape-spoof",
   "stop/dotdot-escape-ignored",
@@ -1386,7 +1386,7 @@ expected-check-ids = [
   "recwrite6/earned-cap-relief-survives-a-failed-save",
   "recwrite7/state-dir-permission-sweep-matches-the-table",
   "recwrite10/forced-exit-recorded-at-and-above-the-bound-and-cap",
-  # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
+  # ---------- C.4: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",
   "forced5/deny-3",

@@ -450,7 +450,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):
                 failures.append("an empty artifacts table expected fail-closed exit 2")
 
             # 11. an unreadable (invalid-UTF-8) evidence.html -> exit 2, fail-closed, never an uncaught
-            #     traceback (the check-fails-closed-on-unreadable contract; the repo's F-142b convention).
+            #     traceback (the check-fails-closed-on-unreadable contract).
             r = _build(base_tmp / "evidence-badutf8", [("1.0.0", None)], _EVIDENCE_CLEAN, content)
             (r / EVIDENCE_PATH).write_bytes(b"<html>\xff\xfe pending</html>")
             if _run_quiet(r) != 2:

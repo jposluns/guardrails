@@ -359,7 +359,7 @@ def archive_file(archive_fd, data):
             if existing != data:
                 raise AdoptError("archive immutability violation: {}/payload already holds different bytes"
                                  .format(digest))
-            os.fsync(entry_fd)                            # fix #7: durable on the idempotent early-exists return
+            os.fsync(entry_fd)                            # durable on the idempotent early-exists return
             return digest
         _write_payload(entry_fd, digest, data)
         return digest
@@ -414,7 +414,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
         raise AdoptError("no legacy files under {}".format(legacy_root), exit_code=1)
     archive_rows, predecessor_rows, mapping_rows = [], [], []
     for f in files:
-        # fix #6: capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
+        # Capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
         # recorded owner cannot disagree with the archived payload. No O_NOFOLLOW here: legacy trees may
         # legitimately carry symlinked files that rglob(is_file) and the prior read_bytes both followed.
         fd = os.open(str(f), os.O_RDONLY)
@@ -940,7 +940,7 @@ def self_test():
                             "(a [[pointer-hint]] row lifted from the legacy bytes)")
         if 'semantic-verdict = ""' not in cand_text:
             failures.append("candidate mapping rows must carry EMPTY verdict fields (asserts nothing)")
-        # fix #6: the 8.2-required owner is captured from the source fd and emitted on the archive-file row.
+        # The 8.2-required owner is captured from the source fd and emitted on the archive-file row.
         if "owner = {}".format(os.getuid()) not in cand_text:
             failures.append("archive-file rows must carry the 8.2 owner captured from the source fd")
         # G-hardening: candidate predecessor rows now carry computable 7.2 spans (start-line/end-line).
@@ -1006,7 +1006,7 @@ def self_test():
             tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
-        # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
+        # Unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
         # its entry dir, publishes the exact bytes, and a same-bytes re-archive is idempotent.
         fresh = b"a distinct archive payload for the temp/link test\n"
         fdig = hashlib.sha256(fresh).hexdigest()
@@ -1025,7 +1025,7 @@ def self_test():
         if leftover:
             failures.append("archive_file must leave no temp files behind (found {})".format(leftover))
 
-        # (B1) post-publish verification: a payload SUBSTITUTED between the no-overwrite publish link and
+        # Post-publish verification: a payload SUBSTITUTED between the no-overwrite publish link and
         # the digest re-check is refused (fail-closed), never reported as a clean publish. The substitution
         # is injected by wrapping os.link so that immediately AFTER the real link publishes our temp inode,
         # <entry>/payload is repointed at DIFFERENT bytes (a distinct regular file); the post-publish
@@ -1047,7 +1047,7 @@ def self_test():
         os.link = _link_then_swap
         try:
             archive_file(b1fd, b1bytes)
-            failures.append("B1: a payload substituted after the publish link must be refused (fail-closed)")
+            failures.append("a payload substituted after the publish link must be refused (fail-closed)")
         except AdoptError:
             pass
         finally:

@@ -553,7 +553,7 @@ def self_test():
         # (Editing the tail row would NOT be detected: the tip is unprotected, the disclosed honesty limit.)
         # A pin-ABSENT history with a broken interior chain: state-completeness passes (history present,
         # no pin) and the chain break surfaces as a FAIL (exit 1). A pin PRESENT without its transition
-        # record is now MALFORMED (RB6), so this fixture omits the pin to isolate the chain-FAIL invariant.
+        # record is now MALFORMED, so this fixture omits the pin to isolate the chain-FAIL invariant.
         (broken / pin.HISTORY_REL).write_text(pin._render_history([r0, r1]), encoding="utf-8")
         rc = run(str(broken))
         check("a broken chain FAILs (exit 1)", rc == 1)

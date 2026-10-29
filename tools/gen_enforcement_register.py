@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Guardrail Enforcement Register (GER-1): ENFORCEMENT.md and site/enforcement.html.
+"""Generate the Guardrail Enforcement Register: ENFORCEMENT.md and site/enforcement.html.
 
 The register is the human-reviewable enforcement surface built ON the machine-readable enforceability
 ledger (.aiqt/enforceability.json, authored by tools/gen_enforceability.py). For every one of the pack's
@@ -506,7 +506,8 @@ def _enforced_cell_md(mechanisms, controls):
 # overclaim gate consumes) iterate the SAME field set and cannot fork on which fields ship: a field added
 # to the page is added here once and flows to both render and the source-side overclaim scan. The "entry"
 # field is the mechanism's entry point, which for a hook is "<event> on <matcher>", so the hook matcher is
-# a verbatim page-bound string carried through this field BY CONSTRUCTION, so it must be escaped like any page text.
+# a verbatim page-bound string carried through this field BY CONSTRUCTION (render_md writes it raw), so it
+# must be covered by the overclaim scan like any other shipped field (it once shipped unscanned).
 _MECH_FIELDS = (
     ("Platform", "platform"),
     ("Default", "default"),

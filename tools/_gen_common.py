@@ -98,8 +98,8 @@ def load_toml(path):
             # RuntimeError) on a deeply nested array or inline table and, from CPython 3.14.8, on a key of more
             # than 1000 dotted parts, and MemoryError on a many-part key under a memory limit; map each into
             # that family here, at the parse locus, so no caller's ValueError handler is bypassed
-            # (a bare ValueError from the parser is not a TOMLDecodeError). A MemoryError is named as the resource failure it is, never
-            # as nesting.
+            # (RecursionError and MemoryError are not ValueErrors). A MemoryError is named as the resource
+            # failure it is, never as nesting.
             if isinstance(exc, ValueError):
                 raise
             if isinstance(exc, MemoryError):

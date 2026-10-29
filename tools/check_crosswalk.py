@@ -9,7 +9,7 @@ experience report envelope (spec lines 1199 to 1202). The archive/quote chain (l
 self-certification property: a quote must be a verbatim substring of the successor clause's DECLARED
 canonical-text, whose predecessor mirror is span-consistent with the immutable archived bytes.
 
-CLASS-C RESIDUALS (disclosed, deferred to Step 7 / pin.py, post-1.0.0, out of the VC-6 slice):
+CLASS-C RESIDUALS (disclosed, deferred to Step 7 / pin.py, post-1.0.0, out of this slice):
   D5: the successor inventory is checked for clause-id uniqueness and per-row self-consistency (a declared
       span is 1-based with start <= end; a declared source-digest is 64-hex), and the quote is proven a
       verbatim substring of the row's DECLARED canonical-text. It is NOT resolved in the PINNED RELEASE, nor
@@ -63,7 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools")
 from _gen_common import repo_root  # noqa: E402
 import _journal  # noqa: E402
 # the SAME 9.1 component computation the engine binds cutovers to, and the SAME validated terminal
-# classification the engine uses (fix #3), so the gate never selects an invalid or non-cutover terminal.
+# classification the engine uses, so the gate never selects an invalid or non-cutover terminal.
 from migrate import components, _validated_completed_cutover  # noqa: E402
 
 MIGRATION_REL = ".aiqt/migration"
@@ -92,7 +92,7 @@ def _load_toml(path):
     except FileNotFoundError:
         raise GateError("required input {} is absent".format(path))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
-    # array or inline table; neither is a TOMLDecodeError.
+    # array or inline table, so a ValueError-only handler would miss it.
     except (OSError, ValueError, RecursionError, MemoryError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(path, exc))
 
@@ -115,7 +115,7 @@ def _validate_row_container(doc, where, keys):
 # --- legs (each returns a list of finding strings; a GateError is exit 2) ------------------------------
 
 def check_archive(cw, root):
-    """8.2 archive-row schema (fix #6), immutability, and predecessor-id type floor (fix #5, C5). Per
+    """8.2 archive-row schema, immutability, and predecessor-id type floor (C5). Per
     [[archive-file]] row: archive-sha256 is a 64-hex LOWERCASE digest resolving to <archive>/<sha>/payload
     whose recomputed digest equals it (immutability); the 8.2 REQUIRED fields legacy-path and owner are
     present and well-formed (8.2 spec: path, raw hash, predecessor-clause-ids, owner); a recorded size, when
@@ -474,7 +474,7 @@ def check_verdict(row):
 
 
 def check_inventory(inv_rows):
-    """D5 (spec 1193/1196), the CHEAP part fixed within the VC-6 slice: the successor inventory's clause-ids
+    """D5 (spec 1193/1196), the CHEAP part fixed within this slice: the successor inventory's clause-ids
     are UNIQUE (a duplicate is a finding, never silently deduped to last-wins), and each row is
     SELF-CONSISTENT: a non-empty clause-id and canonical-text; and, WHERE PRESENT, a valid 7.2 source span
     (start-line and end-line 1-based integers with start-line <= end-line) and a 64-hex lowercase
@@ -484,7 +484,7 @@ def check_inventory(inv_rows):
     verbatim substring of the row's DECLARED canonical-text and that the row is internally well-formed; it
     does NOT resolve the successor clause in the PINNED RELEASE, nor validate the row's span-and-digest
     against that release's sources. Binding the inventory to a pinned release identity is Step-7 (pin.py)
-    territory, OUT of the VC-6 slice, so an adopter who alters both a successor's canonical-text and the
+    territory, OUT of this slice, so an adopter who alters both a successor's canonical-text and the
     quote consistently is caught only by that pinned-release binding, a tracked post-1.0.0 hardening."""
     findings, seen = [], set()
     for i, row in enumerate(inv_rows):
@@ -590,7 +590,7 @@ def check_unit_coverage(root, cw):
         for entry in sorted(journal_root.iterdir()):
             if not entry.is_dir():
                 continue
-            # fix #3: route through the SINGLE validated classification. Only a genuinely COMPLETE cutover
+            # Route through the SINGLE validated classification. Only a genuinely COMPLETE cutover
             # ([INTENT, COMPLETE] AND header kind == "cutover") is coverage-gated; a mismatched-txn or
             # invalid-sequence journal fails closed (GateError), and a rolled-back, open, un-adopt, or
             # other non-cutover terminal is not mis-selected as a completed cutover.
@@ -610,7 +610,7 @@ def check_unit_coverage(root, cw):
                 findings.append("terminal transaction {} names unit {!r} which is not a connected "
                                 "component of the crosswalk (9.1)".format(entry.name, unit))
                 continue
-            # C7 (fix #4): the recorded predecessor AND successor sets must each be a list of strings that
+            # C7: the recorded predecessor AND successor sets must each be a list of strings that
             # equals the component's canonical mapped set. A split-component cutover that omits a successor
             # is caught here, not only a missing predecessor.
             recorded_p = header.get("component-predecessors")
@@ -637,7 +637,7 @@ def check_unit_coverage(root, cw):
 
 
 def _is_str_list(value):
-    """A list of strings (C7 fix #4 type-checked equality): a header field that is not a list of strings
+    """A list of strings (C7 type-checked equality): a header field that is not a list of strings
     cannot be trusted as a recorded component membership set."""
     return isinstance(value, list) and all(isinstance(x, str) for x in value)
 
@@ -645,7 +645,7 @@ def _is_str_list(value):
 # --- applicability + orchestration --------------------------------------------------------------------
 
 def _present_or_fail(path, expect_dir):
-    """fix #9: STRUCTURAL presence via os.lstat, never target-following .exists() (which reads a broken
+    """STRUCTURAL presence via os.lstat, never target-following .exists() (which reads a broken
     symlink, or a cannot-evaluate error, as absence). Returns True for a real (non-symlink) entry of the
     expected kind, False on genuine ENOENT (true structural absence). A symlink where a real dir/file is
     expected, an entry of the wrong kind, or any other OSError (permission / I/O: cannot-evaluate) is a
@@ -669,7 +669,7 @@ def _present_or_fail(path, expect_dir):
 
 
 def _migration_state_present(root):
-    """(migration_dir, archive_dir, pin) STRUCTURAL-presence booleans via os.lstat (fix #9). TOTAL absence
+    """(migration_dir, archive_dir, pin) STRUCTURAL-presence booleans via os.lstat. TOTAL absence
     of all three is NA; ANY present with the crosswalk missing is PARTIAL (exit 2). A broken symlink or a
     cannot-evaluate at any of the three fails closed (GateError), never NA (structural absence must be
     proven, not conflated with an unreadable or symlinked path)."""
@@ -695,7 +695,7 @@ def run(root):
     # state matrix: all three of (migration dir, archive, pin) absent is NA; a crosswalk present with the
     # archive absent is PARTIAL (exit 2). DISCLOSED RESIDUAL (class-c): this validates STRUCTURAL
     # completeness of the migration/archive state; it does NOT parse pin.toml for the migration MODE, which
-    # is Step-7 (pin.py) territory, deferred out of the VC-6 slice.
+    # is Step-7 (pin.py) territory, deferred out of this slice.
     if not arc:
         raise GateError("PARTIAL migration state: {} is present but the archive {} is structurally absent "
                         "(a crosswalk requires its immutable archive; partial state is malformed, never "
@@ -972,12 +972,12 @@ def self_test():
             # it; a plain match() would let it through (exit 0). tomllib parses the `\n` escape as a newline.
             ("trailing-LF 8.3 predecessor id",
              lambda t: t.replace(p1 + '"', p1 + '\\n"')),
-            # fix #5: a missing or out-of-range predecessor span (both would PASS the old substring check).
+            # A missing or out-of-range predecessor span (both would PASS the old substring check).
             ("missing predecessor span",
              lambda t: t.replace('start-line = 1\nend-line = 1\n', '', 1)),
             ("out-of-range predecessor span",
              lambda t: t.replace('start-line = 1\nend-line = 1', 'start-line = 5\nend-line = 9', 1)),
-            # fix #6: an omitted identity field must FAIL the floor before any distinctness check.
+            # An omitted identity field must FAIL the floor before any distinctness check.
             ("omitted mapping author",
              lambda t: t.replace('author = "carol"\n', '', 1)),
             ("omitted mapping author-family",
@@ -986,7 +986,7 @@ def self_test():
              lambda t: t.replace('reviewer-family = "gemini"\n', '', 1)),
             ("omitted completeness enumerator-family",
              lambda t: t.replace('enumerator-family = "claude"\n', '', 1)),
-            # fix #6: a mapping citing a nonexistent predecessor fails referential integrity (the other
+            # A mapping citing a nonexistent predecessor fails referential integrity (the other
             # direction from zero-unmapped; every real predecessor here stays mapped).
             ("mapping cites nonexistent predecessor",
              lambda t: t + ('\n[[mapping]]\npredecessor-clause-id = "pre-ffffffffffff.9"\n'
@@ -1002,7 +1002,7 @@ def self_test():
                 failures.append("{} expected FAIL (1)".format(label))
             n += 1
 
-        # fix #5: over a MULTI-LINE archived file, a canonical-text that is PRESENT in the file but NOT at
+        # Over a MULTI-LINE archived file, a canonical-text that is PRESENT in the file but NOT at
         # the declared whole-line span FAILs (the tightened window, not a mere substring); the same text at
         # its CORRECT span PASSes. This is the case the old substring check let through.
         multi = "First line of the legacy rule.\nSecond obligation line here.\nThird trailing line.\n"
@@ -1167,22 +1167,22 @@ def self_test():
         if run_quiet(c7part) != 1:
             failures.append("C7: a partial-component (missing predecessor) cutover expected FAIL (1)")
         n += 1
-        # fix #4: full predecessor set but a MISSING successor also FAILs (successors gated too).
+        # Full predecessor set but a MISSING successor also FAILs (successors gated too).
         c7succ = _build_install(tmp / "c7-succ", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         _write_journal_txn(c7succ, "txn.succ", {"unit": ukey, "kind": "cutover",
                                                 "component-predecessors": wpreds,
                                                 "component-successors": wsuccs[:-1]})
         if run_quiet(c7succ) != 1:
-            failures.append("fix #4: a cutover omitting a component successor expected FAIL (1)")
+            failures.append("a cutover omitting a component successor expected FAIL (1)")
         n += 1
-        # fix #4: a non-list component-successors header fails closed as a clean finding via the
+        # A non-list component-successors header fails closed as a clean finding via the
         # type-checked equality (without the _is_str_list guard, sorted() on a non-list would crash).
         c7type = _build_install(tmp / "c7-type", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         _write_journal_txn(c7type, "txn.type", {"unit": ukey, "kind": "cutover",
                                                 "component-predecessors": wpreds,
                                                 "component-successors": 5})
         if run_quiet(c7type) != 1:
-            failures.append("fix #4: a non-list component-successors header expected FAIL (1)")
+            failures.append("a non-list component-successors header expected FAIL (1)")
         n += 1
         c7unk = _build_install(tmp / "c7-unknown", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         _write_journal_txn(c7unk, "txn.unknown", {"unit": "not-a-component", "kind": "cutover",
@@ -1190,7 +1190,7 @@ def self_test():
         if run_quiet(c7unk) != 1:
             failures.append("C7: an unknown-unit cutover expected FAIL (1)")
         n += 1
-        # fix #3 (C2 in check_unit_coverage): a mismatched-txn terminal journal fails closed (exit 2),
+        # C2 in check_unit_coverage: a mismatched-txn terminal journal fails closed (exit 2),
         # routed through the same validated classification the engine uses, not a bare COMPLETE acceptance.
         c7mm = _build_install(tmp / "c7-mismatch", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         mmtd = c7mm / JOURNAL_REL / "txn.mismatch"
@@ -1204,9 +1204,9 @@ def self_test():
         finally:
             os.close(_mmjr)
         if run_quiet(c7mm) != 2:
-            failures.append("fix #3: a mismatched-txn terminal must fail the coverage leg closed (exit 2)")
+            failures.append("a mismatched-txn terminal must fail the coverage leg closed (exit 2)")
         n += 1
-        # fix #3: a completed NON-cutover terminal (kind != cutover) is NOT mis-gated as a cutover; it is
+        # A completed NON-cutover terminal (kind != cutover) is NOT mis-gated as a cutover; it is
         # simply not coverage-gated, so a whole-component real cutover alongside it still PASSes.
         c7nc = _build_install(tmp / "c7-noncutover", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         _write_journal_txn(c7nc, "txn.other", {"unit": "irrelevant", "kind": "un-adopt",
@@ -1215,7 +1215,7 @@ def self_test():
                                               "component-predecessors": wpreds,
                                               "component-successors": wsuccs})
         if run_quiet(c7nc) != 0:
-            failures.append("fix #3: a non-cutover terminal must not be mis-gated (real cutover PASSes)")
+            failures.append("a non-cutover terminal must not be mis-gated (real cutover PASSes)")
         n += 1
 
         # A non-dict row container is a GateError (exit 2), never an uncaught AttributeError.
@@ -1232,42 +1232,42 @@ def self_test():
             failures.append("a non-string successor-quote must fail closed (exit 2), not TypeError-crash")
         n += 1
 
-        # fix #5 (C5 type floor): a STRING predecessor-clause-ids (not a list) fails CLOSED (exit 2), so a
+        # C5 type floor: a STRING predecessor-clause-ids (not a list) fails CLOSED (exit 2), so a
         # bare "pre-<prefix>.1" can never satisfy the bidirectional membership check as a substring.
         str_pcids = base_text.replace('predecessor-clause-ids = ["{}"]'.format(p1),
                                       'predecessor-clause-ids = "{}"'.format(p1))
         if run_quiet(_build_install(tmp / "c5-str-pcids", str_pcids, [_LEGACY_ONE, _LEGACY_TWO], inv)) != 2:
-            failures.append("fix #5: a non-list predecessor-clause-ids must fail closed (exit 2)")
+            failures.append("a non-list predecessor-clause-ids must fail closed (exit 2)")
         n += 1
-        # fix #5: a PHANTOM id in the archive-file row (one no [[predecessor]] declares) fails the exact-set
+        # A PHANTOM id in the archive-file row (one no [[predecessor]] declares) fails the exact-set
         # equality; a MISSING id (a predecessor declaring the hash but absent from the row) fails too.
         phantom_id = base_text.replace('predecessor-clause-ids = ["{}"]'.format(p1),
                                        'predecessor-clause-ids = ["{}", "pre-000000000000.9"]'.format(p1))
         if run_quiet(_build_install(tmp / "c5-phantom", phantom_id, [_LEGACY_ONE, _LEGACY_TWO], inv)) != 1:
-            failures.append("fix #5: a phantom archive-file predecessor-clause-id must FAIL (1)")
+            failures.append("a phantom archive-file predecessor-clause-id must FAIL (1)")
         n += 1
         missing_id = base_text.replace('predecessor-clause-ids = ["{}"]'.format(p1),
                                        'predecessor-clause-ids = []')
         if run_quiet(_build_install(tmp / "c5-missing", missing_id, [_LEGACY_ONE, _LEGACY_TWO], inv)) != 1:
-            failures.append("fix #5: an archive-file row missing a declared predecessor id must FAIL (1)")
+            failures.append("an archive-file row missing a declared predecessor id must FAIL (1)")
         n += 1
-        # fix #6: an archive-file row missing the 8.2-required owner FAILs; a wrong recorded size FAILs.
+        # An archive-file row missing the 8.2-required owner FAILs; a wrong recorded size FAILs.
         no_owner = base_text.replace('owner = 0\n', '', 1)
         if run_quiet(_build_install(tmp / "c6-no-owner", no_owner, [_LEGACY_ONE, _LEGACY_TWO], inv)) != 1:
-            failures.append("fix #6: an archive-file row with no owner must FAIL (1)")
+            failures.append("an archive-file row with no owner must FAIL (1)")
         n += 1
         bad_size = base_text.replace('size = {}'.format(len(_LEGACY_ONE.encode())), 'size = 999999', 1)
         if run_quiet(_build_install(tmp / "c6-bad-size", bad_size, [_LEGACY_ONE, _LEGACY_TWO], inv)) != 1:
-            failures.append("fix #6: an archive-file recorded size that mismatches the payload must FAIL (1)")
+            failures.append("an archive-file recorded size that mismatches the payload must FAIL (1)")
         n += 1
 
-        # fix #9: NA proves STRUCTURAL absence. A BROKEN SYMLINK where .aiqt/migration is expected is a
+        # NA proves STRUCTURAL absence. A BROKEN SYMLINK where .aiqt/migration is expected is a
         # cannot-evaluate, not absence, so it fails closed (exit 2), never NA.
         brk = tmp / "brokenlink"
         (brk / ".aiqt").mkdir(parents=True)
         os.symlink(str(brk / "nonexistent-target"), str(brk / MIGRATION_REL))
         if run_quiet(brk) != 2:
-            failures.append("fix #9: a broken symlink at .aiqt/migration must fail closed (exit 2, never NA)")
+            failures.append("a broken symlink at .aiqt/migration must fail closed (exit 2, never NA)")
         n += 1
 
         # G7: the 7.2 tight window is an exact-ONCE SUBSTRING beginning on start-line and ending on end-line,

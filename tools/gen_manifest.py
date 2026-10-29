@@ -119,7 +119,7 @@ OWN_OUTPUTS_REL = (ATTRIBUTES_REL, MANIFEST_REL, ROOT_REL, SNIPPET_REL)
 GENERATED_OUTPUTS_REL = OWN_OUTPUTS_REL + (FROZEN_REL,)
 
 # The ONE shared release-order row schema (2.4/2.6/6.5), single source of truth for the three gates that
-# read releases.toml (VC-4 QA #6): read_genesis (needs only the row count, validates the two mandatory
+# read releases.toml: read_genesis (needs only the row count, validates the two mandatory
 # identity fields and ACCEPTS every documented field), check_release_build (the full per-field validator),
 # and check_release_delta (the delta consumer). RELEASE_ROW_MANDATORY is the identity pair every row
 # carries from birth; RELEASE_ROW_ALLOWED adds the anchor tag fields and the attestation fields a row
@@ -223,7 +223,7 @@ def load_ownership(root):
 
 def parse_ownership(data):
     """Validate an already-parsed ownership map. Split out from load_ownership so a predecessor ownership
-    map read via `git show <commit>:.aiqt/core/ownership.toml` (check_release_delta, VC-4 QA #11) runs the
+    map read via `git show <commit>:.aiqt/core/ownership.toml` (check_release_delta) runs the
     SAME validation as the working-tree loader, never a second parser. Returns (exclusions, release_rows,
     namespace_rows, binary_set); any schema violation raises GateError."""
     known_tables = {"format-version", "exclusion", "release-class", "namespace-class",
@@ -366,7 +366,7 @@ def classify(tracked, exclusions, release, namespace, root, assume_outputs=False
     is in scope while a MISSING output is never assumed and trips NO-STRAYS. Presence is read from the
     working tree by default; a caller classifying a git commit (not the checkout) passes outputs_present, a
     set of the OWN_OUTPUTS_REL that exist AT that commit, so root's filesystem is never consulted for a
-    predecessor tree (check_release_delta, VC-4 QA #11)."""
+    predecessor tree (check_release_delta)."""
     universe = set(tracked)
     for rel in GENERATED_OUTPUTS_REL:
         present = (rel in outputs_present) if outputs_present is not None else (root / rel).exists()
@@ -1287,7 +1287,7 @@ def _self_test_main_isolated():
         #     newly tracked .github/workflows/deploy.yml carries no reviewed exclusion and no class, so it
         #     trips COMPLETENESS (exit 2) and cannot silently escape NO-STRAYS. The contrasting glob case
         #     shows exactly what the fix removes: a pattern=".github/workflows/**" would swallow the new
-        #     workflow silently (exit 0), which is the escape this case closes.
+        #     workflow silently (exit 0), which is the escape the exact-literal exclusion closes.
         wf_files = {".github/workflows/currency.yml": "on: push\n",
                     ".github/workflows/quality.yml": "on: push\n",
                     ".github/workflows/deploy.yml": "on: push\n"}

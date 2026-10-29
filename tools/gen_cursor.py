@@ -170,8 +170,8 @@ def main():
 # One focused invariant (the sibling generators' idiom): an invalid-UTF-8 GENERATED .mdc TARGET fails
 # closed (exit 2) rather than a raw UnicodeDecodeError traceback. The reconcile loop reads each desired
 # target as UTF-8 (the drift compare), so a non-UTF-8 target must be caught by the widened (OSError,
-# UnicodeError) arm, so an unreadable target fails closed instead of crashing. A revert to the narrow OSError-only arm makes run() RAISE instead of
-# returning 2, so this case fails and guards the widening. Tempdir-only; never touches a real repo file.
+# UnicodeError) arm. A revert to the narrow OSError-only arm makes run() RAISE instead of returning 2,
+# so this case fails and guards the widening. Tempdir-only; never touches a real repo file.
 
 _RULE_SRC = """---
 corpus-id: selfc1
