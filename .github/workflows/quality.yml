@@ -362,6 +362,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
 
+      - name: OPF release import-history parser self-test (inert until the imported-release writer lands)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_release_history.py --self-test
+
       - name: OPF pack manifest parser self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_pack_manifest.py --self-test

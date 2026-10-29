@@ -160,6 +160,7 @@ _SUBSET = [
     ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
     ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
     ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]),
+    ("opf-release-history-selftest", "_opf_release_history.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -230,6 +231,12 @@ _SUBSET = [
 # One row comes from another run: opf-import-complete-selftest, a leg main added after that run, carries
 # main's 20 s figure, sized from three runs main measured on 2026-10-14 at another opf/ tree (2.3 to
 # 2.4 s), so INFERRED here.
+# One row comes from a later run: opf-release-history-selftest, a leg added after that run, carries 2 s,
+# from three runs MEASURED on 2026-10-28 at opf/ tree a01f2c2150c99349156aa5e05e93dabd11a950ec, each
+# as the gate runs it (python3 -I -B against a copy of opf/ alone, through _materialize and _run_one),
+# plain, one leg at a time, on a 24-CPU host: 1.48 to 1.51 s, each exit 0, load5 5.5 at each start,
+# rounded up. That load is lighter than the run above's (13.7 to 24.6), so the figure is INFERRED at a
+# heavier load, as at any other opf/ tree; the leg's bound is its 1260 s config-lane floor, not this.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -252,8 +259,8 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 90195 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 21153 s (A), 17800 s (B), 15810 s (C), 19930 s (D) and
+# limit): on this tree the whole roster's worst case is 92735 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 21153 s (A), 20340 s (B), 15810 s (C), 19930 s (D) and
 # 19302 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
 # _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term, opf-homes-selftest's
 # 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
@@ -314,6 +321,7 @@ _LEG_CEILING_S = {
     # opf-import-complete-selftest: the slowest run times 20 / 3 for load, 2.4 * 20 / 3 = 16.0, rounded up to
     # a multiple of 5, 20 s.
     "opf-import-complete-selftest": 20,  # INFERRED (main's row, measured 2026-10-14: 2.3 to 2.4 s, three runs)
+    "opf-release-history-selftest": 2,  # MEASURED at a01f2c21 (1.48 to 1.51 s at load5 5.5, three runs)
     "opf-pack-manifest-selftest": 17,  # INFERRED here (measured at 7bf8107f: 16.8 s at load5 21.7)
     "opf-adopt-observe-selftest": 284,  # INFERRED here (measured at 7bf8107f: 283.7 s at load5 21.9)
     "opf-adopt-discover-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.5 s at load5 23.9)
@@ -334,7 +342,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (28, "f0d1f4582b166a630e35f0f4540244968743eca4e9fbc9e9758a0d74da623eed")
+_ROSTER_PIN = (29, "de659c6cc4dbdd48fda1f84466b8555da068da3ff4f2c8cc200a9bc6e85393b8")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -349,7 +357,7 @@ _DRAIN_MARGIN_S = 10
 # exactly the floor. The former 120 s floor put the three-job split's job B over its 21600 s limit
 # (21986 s at a headroom of 3, before the config-lane floors); on this tree it would raise only
 # opf-prompt-pack's bound, the config-lane floors holding every lane-member leg above it, and move
-# only job B's worst case, from 17800 s to 17910 s. The reported 1348.7 s opf.py figure above is
+# only job B's worst case, from 20340 s to 20450 s. The reported 1348.7 s opf.py figure above is
 # covered at any multiplier on this tree: that leg's bound is set by its declared waits (4911 s), not
 # by the headroom term.
 _MIN_LEG_BOUND_S = 60
@@ -417,7 +425,7 @@ _MIN_LEG_BOUND_S = 60
 # from about 3773 to about 10038 checks) is NOT shown absorbed by this sizing: its lane time must be
 # re-measured and the lanes' deadline for the command re-sized, and once that deadline rises above
 # 1200 s, closure/leg-bound-reaches-the-lane-deadline refuses this floor until it is raised to match.
-# FIT: each of the 21 rows below raises its leg's bound, and the jobs those bounds fit are set out on
+# FIT: each of the 22 rows below raises its leg's bound, and the jobs those bounds fit are set out on
 # _CI_JOB_LEGS.
 # A row naming no subset leg, or a value that is not a positive int (a bool included), is refused
 # fail-closed (_leg_bounds): a stale row left behind by a leg rename would otherwise silently stop
@@ -432,6 +440,7 @@ _LEG_BOUND_FLOOR_S = {
     "opf-adopt-hook-selftest": 1260,
     "opf-import-batch-selftest": 1260,
     "opf-import-complete-selftest": 1260,
+    "opf-release-history-selftest": 1260,
     "opf-pack-manifest-selftest": 1260,
     "opf-adopt-observe-selftest": 1860,
     "opf-adopt-discover-selftest": 1260,
@@ -473,15 +482,17 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 89245 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 91785 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 6645 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 21153 s (A,
-# the flip's job), 17800 s (B), 15810 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
+# 9185 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 21153 s (A,
+# the flip's job), 20340 s (B), 15810 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
 # limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
 # its 1260 s config-lane floor adds 2540 s to a job's worst case (two sweeps and two cleanup
 # deadlines), which A and E cannot hold (nor could B while it held the store-upgrade gate's leg), and D,
 # unlike C, is not moved by the headroom multiplier
-# up to 5.412. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
+# up to 5.412. opf-release-history-selftest, added after it, sits in B: its 1260 s config-lane floor
+# adds the same 2540 s, which D (22470 s), A (23693 s) and E (21842 s) cannot hold, and B (20340 s),
+# like D, is not moved by the headroom multiplier up to 5.412. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
 # (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
 # opf-adopt-apply-selftest bound rose by 1206 s (2880 s to 4086 s) and the opf-tooling-selftest bound
 # by 1161 s (from 3660 s, set by its former floor row, to 4821 s), A, which had held
@@ -514,6 +525,7 @@ _CI_JOB_LEGS = {
         "opf-prompt-pack-selftest",
         "opf-prompt-pack",
         "opf-init-builders-selftest",
+        "opf-release-history-selftest",
     }),
     "opf-closure-c": frozenset({
         "opf-homes-selftest",
