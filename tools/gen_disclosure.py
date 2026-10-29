@@ -22,6 +22,15 @@ limitation and its pointer. The load step fails closed (exit 2) before anything 
   6. the literal placeholder marker "[[ARCHITECT" in any emitted text (defense in depth: unapproved
      scaffolding can never render to the public page);
   7. a `pending` key present but empty (a malformed row, not "no marker").
+  8. a missing or malformed [[code]]/[[noncode]] shipped-path declaration: both arrays required and
+     non-empty, every row a table with only its allowed keys and a non-empty whitespace-free prefix
+     that is unique across both arrays, and on a [[code]] row a guarded plain-language label;
+  9. a what-it-is-made-of claim without the [[CODE-PATHS]] marker, or the marker anywhere outside a
+     claim or limitation (title, note, site_base, topic, pending, evidence text and href, a declared
+     prefix, and a code label all refuse it, each asserted by a marker-naming diagnostic). The
+     marker renders to the shipped-code list built from the [[code]] labels
+     (declaration order, distinct labels once, joined with semicolons), so the public sentence and
+     the release accounting in tools/check_reference_facts.py share one declared source.
 
 Byte-reproducible: no wall-clock timestamp is embedded, so --check is a stable drift gate.
 
@@ -29,22 +38,46 @@ Byte-reproducible: no wall-clock timestamp is embedded, so --check is a stable d
   gen_disclosure.py --check    exit 1 if either is out of date; exit 2 on malformed input
   gen_disclosure.py --self-test  assert each fail-closed guard refuses its malformed fixture
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_disclosure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import html
 import re
-import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import is_external_url, repo_root, load_toml, replace_block, reconcile  # noqa: E402
+from _gen_common import (is_external_url, linked_dir_failures, repo_root, load_toml, replace_block,  # noqa: E402
+                         reconcile, target_dir_present)
 
 EN, EM = "–", "—"
 PLACEHOLDER = "[[ARCHITECT"
 ID_RE = re.compile(r"^[a-z0-9-]+$")
-ALLOWED_TOP = {"title", "note", "site_base", "row"}
+ALLOWED_TOP = {"title", "note", "site_base", "row", "code", "noncode"}
 ALLOWED_ROW = {"id", "topic", "claim", "limitation", "evidence", "pending"}
 ALLOWED_EV = {"text", "href"}
 DEFAULT_BASE = "https://aiqt.ai"
+
+# The what-it-is-made-of claim carries this marker; validate() replaces it with the shipped-code list
+# built from the [[code]] labels, so the public sentence and the release accounting share one declared
+# source (tools/check_reference_facts.py imports shipped_declaration below and checks the same rows
+# against the release manifest). The marker is REQUIRED in that claim, allowed in any claim or
+# limitation, and refused anywhere else.
+MARKER = "[[CODE-PATHS]]"
+CODE_ROW_ID = "what-it-is-made-of"
+ALLOWED_CODE = {"prefix", "label"}
+ALLOWED_NONCODE = {"prefix"}
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. site/disclosure.html is a generated block
@@ -126,6 +159,61 @@ def _check_href(href, where):
     return href
 
 
+def shipped_declaration(data):
+    """Validated ([[code]] rows, [[noncode]] rows) of the shipped-path declaration, or ValueError.
+    Each row carries a non-empty, whitespace-free path prefix, unique across BOTH arrays (a path is
+    classified by the LONGEST declared prefix that starts it, so declaring a tree and a subtree is
+    unambiguous and no ordering rule exists); each [[code]] row carries a plain-language label under
+    the _guard rules, with the marker itself refused. Both arrays are required and non-empty: the
+    public sentence renders from [[code]], and the release accounting needs both. Exercised directly
+    by --self-test and imported by tools/check_reference_facts.py, so the prose and the gate cannot
+    validate two different shapes."""
+    if not isinstance(data, dict):
+        raise ValueError("top level: expected a table")
+    out, seen = [], set()
+    for key, allowed in (("code", ALLOWED_CODE), ("noncode", ALLOWED_NONCODE)):
+        rows_in = data.get(key)
+        if not isinstance(rows_in, list) or not rows_in or not all(isinstance(r, dict) for r in rows_in):
+            raise ValueError("{}: expected a non-empty array of [[{}]] tables".format(key, key))
+        rows = []
+        for pos, row in enumerate(rows_in, 1):
+            where = "{} row {}".format(key, pos)
+            unknown = set(row) - allowed
+            if unknown:
+                raise ValueError("{}: unknown key(s): {}".format(where, ", ".join(sorted(unknown))))
+            prefix = row.get("prefix")
+            if not isinstance(prefix, str) or not prefix or any(ch.isspace() for ch in prefix):
+                raise ValueError("{}: prefix must be a non-empty string with no whitespace".format(where))
+            if MARKER in prefix:
+                raise ValueError("{}: the {} marker belongs only in a row claim or limitation".format(
+                    where, MARKER))
+            if prefix in seen:
+                raise ValueError("{}: duplicate prefix {!r}".format(where, prefix))
+            seen.add(prefix)
+            entry = {"prefix": prefix}
+            if key == "code":
+                label = _guard(row.get("label"), where + " label")
+                if MARKER in label:
+                    raise ValueError("{}: label contains the {} marker".format(where, MARKER))
+                entry["label"] = label
+            rows.append(entry)
+        out.append(rows)
+    return out[0], out[1]
+
+
+def code_paths_list(code_rows):
+    """The shipped-code list the marker renders to: the [[code]] labels in declaration order, each
+    distinct label once (two prefixes may share one label and read as one list item), joined with
+    semicolons because the labels themselves hold commas."""
+    labels = []
+    for row in code_rows:
+        if row["label"] not in labels:
+            labels.append(row["label"])
+    if len(labels) == 1:
+        return labels[0]
+    return "; ".join(labels[:-1]) + "; and " + labels[-1]
+
+
 def validate(data):
     """Return the validated (title, note, site_base, rows) or raise ValueError. rows is a list of dicts
     with a validated id/topic/claim/limitation, an evidence list of {text, href}, and an optional
@@ -179,6 +267,30 @@ def validate(data):
             pending = _guard(row.get("pending"), where + " pending")
         rows.append({"id": rid, "topic": topic, "claim": claim, "limitation": limitation,
                      "evidence": evidence, "pending": pending})
+    code_rows, _ = shipped_declaration(data)
+    listing = code_paths_list(code_rows)
+    for where, value in (("title", title), ("note", note), ("site_base", site_base)):
+        if MARKER in value:
+            raise ValueError("{}: the {} marker belongs only in a row claim or limitation".format(
+                where, MARKER))
+    made_of_has_marker = False
+    for row in rows:
+        for field in ("topic", "pending"):
+            if row[field] and MARKER in row[field]:
+                raise ValueError("row {} {}: the {} marker belongs only in a claim or limitation".format(
+                    row["id"], field, MARKER))
+        for ev in row["evidence"]:
+            if MARKER in ev["text"] or MARKER in ev["href"]:
+                raise ValueError("row {} evidence: the {} marker belongs only in a claim or "
+                                 "limitation".format(row["id"], MARKER))
+        if row["id"] == CODE_ROW_ID and MARKER in row["claim"]:
+            made_of_has_marker = True
+        row["claim"] = row["claim"].replace(MARKER, listing)
+        row["limitation"] = row["limitation"].replace(MARKER, listing)
+    if not made_of_has_marker:
+        raise ValueError("row {}: a claim carrying the {} marker is required, so the public "
+                         "shipped-code list renders only from the [[code]] declaration".format(
+                             CODE_ROW_ID, MARKER))
     return title, note, site_base, rows
 
 
@@ -228,13 +340,41 @@ def render_md(title, note, site_base, rows):
     return "\n".join(lines).rstrip() + "\n"
 
 
+# A well-formed disclosure.toml and page for the tree the linked-directory vectors render: the same
+# declaration as the in-memory good fixture below, in TOML.
+_TREE_TOML = (
+    'title = "T"\nnote = "N"\nsite_base = "https://aiqt.ai"\n\n'
+    '[[code]]\nprefix = "tools/"\nlabel = "the tooling under tools/"\n\n'
+    '[[code]]\nprefix = "site/"\nlabel = "the JavaScript under site/"\n\n'
+    '[[noncode]]\nprefix = "README.md"\n\n'
+    '[[row]]\nid = "what-it-is-made-of"\ntopic = "A"\nclaim = "C: ' + MARKER + '."\nlimitation = "L"\n'
+    'evidence = [{ text = "e", href = "/evidence#release" }]\n'
+)
+_TREE_PAGE = ("<main>\n      <!-- DISCLOSURE:BEGIN (generated) -->\n      placeholder\n"
+              "      <!-- DISCLOSURE:END -->\n</main>\n")
+
+
+def _write_tree(root):
+    """A synthetic tree with disclosure.toml and site/disclosure.html, for run(root, check)."""
+    root = Path(root)
+    (root / "disclosure.toml").write_text(_TREE_TOML, encoding="utf-8")
+    (root / "site").mkdir()
+    (root / "site" / "disclosure.html").write_text(_TREE_PAGE, encoding="utf-8")
+
+
 def _self_test():
     good = {
         "title": "T", "note": "N", "site_base": "https://aiqt.ai",
-        "row": [{"id": "a", "topic": "A", "claim": "C", "limitation": "L",
+        "code": [{"prefix": "tools/", "label": "the tooling under tools/"},
+                 {"prefix": "site/", "label": "the JavaScript under site/"}],
+        "noncode": [{"prefix": "README.md"}],
+        "row": [{"id": "what-it-is-made-of", "topic": "A", "claim": "C: " + MARKER + ".",
+                 "limitation": "L",
                  "evidence": [{"text": "e", "href": "/evidence#release"}]}],
     }
-    # (label, mutated data, must fail) for every guard class.
+    # (label, mutated data[, expected diagnostic substring]) for every guard class. Every marker
+    # vector carries a marker-naming expected substring, so the docstring claim that each marker
+    # refusal is asserted by a marker-naming diagnostic is pinned by the assertions themselves.
     bad = [
         ("unknown top key", {**good, "extra": 1}),
         ("unknown row key", {**good, "row": [{**good["row"][0], "limitations": "x"}]}),
@@ -258,14 +398,54 @@ def _self_test():
         ("placeholder", {**good, "row": [{**good["row"][0], "topic": PLACEHOLDER + "-D7]]"}]}),
         ("empty pending", {**good, "row": [{**good["row"][0], "pending": ""}]}),
         ("empty row array", {**good, "row": []}),
+        ("missing code declaration", {k: v for k, v in good.items() if k != "code"}),
+        ("empty code declaration", {**good, "code": []}),
+        ("non-table code row", {**good, "code": ["tools/"]}),
+        ("code row unknown key", {**good, "code": [{**good["code"][0], "extra": 1}, good["code"][1]]}),
+        ("code row empty prefix", {**good, "code": [{"prefix": "", "label": "x"}, good["code"][1]]}),
+        ("code row whitespace prefix", {**good, "code": [{"prefix": "to ols/", "label": "x"}, good["code"][1]]}),
+        ("code row missing label", {**good, "code": [{"prefix": "tools/"}, good["code"][1]]}),
+        ("code row dashed label", {**good, "code": [{"prefix": "tools/", "label": "a" + EN + "b"}, good["code"][1]]}),
+        ("marker inside a code label", {**good, "code": [{"prefix": "tools/", "label": "x " + MARKER}, good["code"][1]]},
+         "label contains the " + MARKER + " marker"),
+        ("duplicate prefix across arrays", {**good, "noncode": [{"prefix": "tools/"}]}),
+        ("missing noncode declaration", {k: v for k, v in good.items() if k != "noncode"}),
+        ("noncode row with a label", {**good, "noncode": [{"prefix": "README.md", "label": "x"}]}),
+        ("made-of claim without the marker", {**good, "row": [{**good["row"][0], "claim": "C"}]},
+         "a claim carrying the " + MARKER + " marker is required"),
+        ("marker in a topic", {**good, "row": [{**good["row"][0], "topic": "T " + MARKER}]},
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
+        ("marker in the note", {**good, "note": "N " + MARKER},
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
+        ("marker in the title", {**good, "title": "T " + MARKER},
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
+        ("marker in site_base", {**good, "site_base": "https://aiqt.ai/" + MARKER},
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
+        ("marker in a pending", {**good, "row": [{**good["row"][0], "pending": "P " + MARKER}]},
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
+        ("marker in an evidence text", {**good, "row": [{**good["row"][0], "evidence": [
+         {"text": "e " + MARKER, "href": "/evidence#release"}]}]},
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
+        ("marker in an evidence href", {**good, "row": [{**good["row"][0], "evidence": [
+         {"text": "e", "href": "/evidence" + MARKER}]}]},
+         "the " + MARKER + " marker belongs only in a claim or limitation"),
+        ("marker in a code prefix", {**good, "code": [{"prefix": "tools/" + MARKER, "label": "x"},
+         good["code"][1]]},
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
+        ("marker in a noncode prefix", {**good, "noncode": [{"prefix": "README.md" + MARKER}]},
+         "the " + MARKER + " marker belongs only in a row claim or limitation"),
     ]
     failures = []
-    for label, data in bad:
+    for entry in bad:
+        label, data = entry[0], entry[1]
+        expect = entry[2] if len(entry) > 2 else None
         try:
             validate(data)
             failures.append("MALFORMED INPUT ACCEPTED: {}".format(label))
-        except ValueError:
-            pass
+        except ValueError as exc:
+            if expect is not None and expect not in str(exc):
+                failures.append("{}: refused with {!r}; expected the diagnostic to say {!r}".format(
+                    label, str(exc), expect))
     # Positive cases: a good internal link and a good external https link must both validate.
     good_hrefs = [
         ("good internal link", "/evidence#release"),
@@ -281,24 +461,54 @@ def _self_test():
         title, note, site_base, rows = validate(good)
         render_site(rows)
         render_md(title, note, site_base, rows)
+        want = "C: the tooling under tools/; and the JavaScript under site/."
+        if rows[0]["claim"] != want or MARKER in rows[0]["claim"]:
+            failures.append("marker substitution rendered {!r}, expected {!r}".format(
+                rows[0]["claim"], want))
     except ValueError as exc:
         failures.append("well-formed fixture REFUSED: {}".format(exc))
+    # The limitation substitution is behaviour of its own: a limitation carrying the marker must
+    # render the same shipped-code list the claim does (deleting the limitation replace line is a
+    # mutant this case turns red).
+    try:
+        lim_fixture = {**good, "row": [{**good["row"][0], "limitation": "L: " + MARKER + "."}]}
+        _, _, _, lim_rows = validate(lim_fixture)
+        want_lim = "L: the tooling under tools/; and the JavaScript under site/."
+        if lim_rows[0]["limitation"] != want_lim or MARKER in lim_rows[0]["limitation"]:
+            failures.append("limitation marker substitution rendered {!r}, expected {!r}".format(
+                lim_rows[0]["limitation"], want_lim))
+    except ValueError as exc:
+        failures.append("a limitation carrying the marker REFUSED: {}".format(exc))
+    # site/ above the page symlinked outside the root fails closed (exit 2) in --check and write mode with the
+    # page there untouched and never read: the page there has no markers, and each run prints the link
+    # refusal, not the marker error. Symlinked inside the root, it is read and the page rewritten.
+    import shutil
+    import tempfile
+    try:
+        tmp = tempfile.mkdtemp(prefix="aiqt-gen-disclosure-selftest-")
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        failures.extend(linked_dir_failures(tmp, "site", _write_tree, run, "site", "site/disclosure.html",
+                                            unread=lambda p: p.write_text("no markers\n", encoding="utf-8")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     if failures:
         print("FAIL: gen_disclosure self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 1 happy path)".format(
-        len(bad), len(good_hrefs)))
+    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 2 happy paths, a site/ symlinked "
+          "outside the root refused unread and one inside it followed)".format(len(bad), len(good_hrefs)))
     return 0
 
 
-def main():
-    args = sys.argv[1:]
-    if "--self-test" in args:
-        return _self_test()
-    check = "--check" in args
-    root = repo_root()
+def run(root, check):
+    """Reconcile DISCLOSURE.md and the DISCLOSURE block on site/disclosure.html under root. Exit 0 in sync, 1
+    on drift (check mode), 2 on malformed input, a missing page or missing markers, or a site/ that cannot be
+    read as a directory inside the repository. Parameterized on root so the self-test drives it against
+    synthetic trees, never the real repo."""
     try:
         data = load_toml(root / "disclosure.toml")
     except (OSError, ValueError) as exc:
@@ -311,11 +521,15 @@ def main():
     except ValueError as exc:
         print("error: disclosure.toml: {}".format(exc), file=sys.stderr)
         return 2
+    page = root / "site" / "disclosure.html"
+    # The directory probe reconcile runs (target_dir_present), for the page before anything is written or read:
+    # a site/ that is there but cannot be read as a directory inside the repository exits 2 here, so the page
+    # is never read through it and DISCLOSURE.md is not rewritten either.
+    target_dir_present(page, root)
     drift = False
-    if reconcile(root / "DISCLOSURE.md", md, check):
+    if reconcile(root / "DISCLOSURE.md", md, check, root):
         print("drift: DISCLOSURE.md")
         drift = True
-    page = root / "site" / "disclosure.html"
     if not page.exists():
         print("error: site/disclosure.html not found (expected generated target)", file=sys.stderr)
         return 2
@@ -324,13 +538,20 @@ def main():
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if reconcile(page, new_html, check):
+    if reconcile(page, new_html, check, root):
         print("drift: site/disclosure.html")
         drift = True
     if check and drift:
         print("run tools/gen_disclosure.py to regenerate")
         return 1
     return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        return _self_test()
+    return run(repo_root(), "--check" in args)
 
 
 if __name__ == "__main__":

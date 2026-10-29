@@ -30,6 +30,7 @@
       "sources": [
         ".aiqt/core/rules/",
         ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/core/hooks/preview.toml",
         ".aiqt/core/gates/manifest.toml"
       ],
       "target": ".aiqt/enforceability.json"
@@ -73,6 +74,16 @@
         "CLAUDE.md"
       ],
       "target": ".aiqt/release/announce-snippet.txt"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_first_pin_demo.py",
+      "sources": [
+        "AGENTS.md",
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
+      ],
+      "target": ".aiqt/release/first-pin-demonstration.toml"
     },
     {
       "kind": "file",
@@ -120,6 +131,15 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        ".aiqt/core/hooks/manifest.toml"
+      ],
+      "target": ".claude/settings.json"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_worker_pack.py",
       "sources": [
         ".aiqt/core/profiles/worker-pack.md"
@@ -146,15 +166,25 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_adapters.py",
       "sources": [
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": ".github/copilot-instructions.md"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_char_policy.py",
+      "sources": [
+        "tools/check_no_dashes.py"
+      ],
+      "target": ".preview/char-policy-write.py"
     },
     {
       "kind": "file",
       "regenerate": "python3 tools/gen_agents.py",
       "sources": [
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": "AGENTS.md"
     },
@@ -196,7 +226,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_adapters.py",
       "sources": [
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": "GEMINI.md"
     },
@@ -208,6 +239,18 @@
         ".aiqt/standards/"
       ],
       "target": "NOTICE"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_reference_facts.py",
+      "sources": [
+        ".aiqt/core/rules/",
+        ".aiqt/core/gates/manifest.toml",
+        ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/standards/",
+        "ENFORCEMENT.md"
+      ],
+      "target": "README.md"
     },
     {
       "kind": "file",
@@ -226,13 +269,20 @@
       "target": "VERSION"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_secret_patterns.py",
+      "sources": [
+        "opf/enforcement/ci/github-actions.yml",
+        "opf/enforcement/ci/opf-ci.sh"
+      ],
+      "target": "opf/tools/_opf_adopt_complete.py"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
       "sources": [
         ".aiqt/core/hooks/manifest.toml",
-        ".aiqt/core/hooks/scripts/aiqt_hooks.py",
-        ".aiqt/core/hooks/scripts/clock-inject.py",
-        ".aiqt/core/hooks/scripts/future-stamp-write.py"
+        ".aiqt/core/hooks/scripts/aiqt_hooks.py"
       ],
       "target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
     },
@@ -241,9 +291,7 @@
       "regenerate": "python3 tools/gen_hooks.py",
       "sources": [
         ".aiqt/core/hooks/manifest.toml",
-        ".aiqt/core/hooks/scripts/aiqt_hooks.py",
-        ".aiqt/core/hooks/scripts/clock-inject.py",
-        ".aiqt/core/hooks/scripts/future-stamp-write.py"
+        ".aiqt/core/hooks/scripts/aiqt_hooks.py"
       ],
       "target": "plugin/aiqt-guardrails-hooks/hooks/"
     },

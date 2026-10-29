@@ -33,21 +33,42 @@ lifted from the archived preimage. There is therefore no section 8.6 residual to
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_crosswalk.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import hashlib
 import itertools
 import os
 import re
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_crosswalk.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 SCHEMA_REL = ".aiqt/core/migration/crosswalk-schema.toml"
 
@@ -122,9 +143,10 @@ def render_schema():
 
 
 def run_repo(root, check):
-    if not check:
-        (root / SCHEMA_REL).parent.mkdir(parents=True, exist_ok=True)
-    drifted = reconcile(root / SCHEMA_REL, render_schema(), check)   # fail-closes (exit 2) on I/O error
+    # make_parents: the schema's directory is created inside reconcile, after its directory probe, so a
+    # .aiqt/ that resolves outside the repository is refused before anything is made there. reconcile
+    # fail-closes (exit 2) on an I/O error too.
+    drifted = reconcile(root / SCHEMA_REL, render_schema(), check, root, make_parents=True)
     if not check:
         print("wrote {}".format(SCHEMA_REL))
         return 0
@@ -527,7 +549,7 @@ def _load_successor_inventory(path):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise AdoptError("successor inventory {} is not valid TOML ({}); fail-closed".format(path, exc))
     rows = doc.get("clause", [])
     if not isinstance(rows, list):
@@ -633,10 +655,12 @@ def _fdopen_vectors(base):
     exactly one vector red: PREFIX (the pre-fix `with os.fdopen(fd)`) leaks under EARLY, and EXCEPT (an
     os.close in an except around the fdopen call, which then owns the descriptor) closes it twice under LATE.
     Returns (failures, runs)."""
+    import errno
     import importlib.util
     import inspect
+    import _close_selftest
     base.mkdir()
-    real_open, real_fdopen = os.open, os.fdopen
+    real_open, real_fdopen, real_fstat = os.open, os.fdopen, os.fstat
     sent = MemoryError("injected fdopen failure")
 
     def early(fd, *args, **kwargs):
@@ -646,7 +670,7 @@ def _fdopen_vectors(base):
         real_fdopen(fd, *args, **kwargs).close()
         raise sent
 
-    def run(call, fault):
+    def run(call, fault, seam=None):
         opened = []
 
         def spy(*args, **kwargs):
@@ -668,11 +692,27 @@ def _fdopen_vectors(base):
             for fd in opened:
                 try:
                     os.fstat(fd)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    if exc.errno == errno.EBADF:          # only EBADF reads as closed; any other error raises
+                        continue
+                    raise _close_selftest._StCensusError(
+                        "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
-            if any(name.endswith(".tmp") for name in os.listdir(dfd)):
+            # F-JOURNAL-HELD-FD-LISTING: dfd was opened BEFORE the vector wrote through it, and a
+            # listing read through a held descriptor can miss every entry created since its open (on
+            # btrfs the kernel snapshots a readdir upper bound at open time), so a leftover temporary
+            # would escape this sweep; list through a FRESH "." descriptor opened beneath dfd (the
+            # same directory identity, no path re-resolution), closed on every path. Under the
+            # stale-listing seam (the HELDFD-SEAM leg) the open is recorded, so the seam can tell this
+            # fresh descriptor from dfd and its dups.
+            listing_open = real_open if seam is None else seam.recording(real_open)
+            lfd = listing_open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            try:
+                leftovers = os.listdir(lfd)
+            finally:
+                os.close(lfd)
+            if any(name.endswith(".tmp") for name in leftovers):
                 problems.append("TEMP")
         finally:
             os.close(dfd)
@@ -684,8 +724,8 @@ def _fdopen_vectors(base):
     def candidate(fns):
         return lambda dfd: fns["_write_candidate"](dfd, "candidate text\n")
 
-    def flipped(name, fd_name, mode):
-        source = inspect.getsource(globals()[name])
+    def flipped(target, fd_name, mode):
+        source = inspect.getsource(target)
         lines = [line for line in source.splitlines(True) if "closefd=False) as fh:" in line]
         close = "_close_fd_yielding({})".format(fd_name)
         if len(lines) != 1 or source.count(close) != 1:
@@ -701,7 +741,7 @@ def _fdopen_vectors(base):
         # The reverted writer is written to a scratch module and loaded over a copy of this module's globals.
         flip_dir = base.with_name(base.name + "-flips")
         flip_dir.mkdir(exist_ok=True)
-        flip_path = flip_dir / "{}_{}.py".format(name.lstrip("_"), mode.lower())
+        flip_path = flip_dir / "{}_{}.py".format(target.__name__.lstrip("_"), mode.lower())
         flip_path.write_text(source.replace(line, new).replace(close, "pass"), encoding="utf-8")
         spec = importlib.util.spec_from_file_location("_crosswalk_fdopen_flip_" + flip_path.stem, flip_path)
         reverted = importlib.util.module_from_spec(spec)
@@ -711,15 +751,15 @@ def _fdopen_vectors(base):
 
     failures = []
     runs = 0
-    for label, writer, name, fd_name in (("_write_payload", payload, "_write_payload", "tfd"),
-                                         ("_write_candidate", candidate, "_write_candidate", "fd")):
+    for label, writer, target, fd_name in (("_write_payload", payload, _write_payload, "tfd"),
+                                           ("_write_candidate", candidate, _write_candidate, "fd")):
         for fault_label, fault in (("EARLY", early), ("LATE", late)):
             problems = run(writer(globals()), fault)
             runs += 1
             if problems:
                 failures.append("fdopen vector {} {}: {}".format(label, fault_label, ", ".join(problems)))
         for mode, red_fault, red_by in (("PREFIX", "EARLY", "OPEN"), ("EXCEPT", "LATE", "RAISED")):
-            fns = flipped(name, fd_name, mode)
+            fns = flipped(target, fd_name, mode)
             if fns is None:
                 failures.append("fdopen flip {} {}: target not found once".format(label, mode))
                 continue
@@ -730,6 +770,85 @@ def _fdopen_vectors(base):
                 if problems != expected:
                     failures.append("fdopen flip {} {} under {}: expected {}, got {}".format(
                         label, mode, fault_label, expected or "green", problems or "green"))
+    # CENSUS: a recorded descriptor left open whose census fstat fails EIO must raise naming it (read as
+    # closed, the leak would pass). An independent fstat must still see it open, else the vector proves nothing.
+    kept = []
+
+    def leave_open(dfd):
+        kept.append(os.open(os.devnull, os.O_RDONLY))
+        raise sent
+
+    def unreadable(fd, *args, **kwargs):
+        if fd in kept:
+            raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(fd, *args, **kwargs)
+    os.fstat = unreadable
+    try:
+        run(leave_open, early)
+        got = "returned (the unreadable descriptor read as closed)"
+    except _close_selftest._StCensusError as exc:
+        got = "named" if kept and "descriptor {}:".format(kept[0]) in str(exc) else repr(exc)
+    finally:
+        os.fstat = real_fstat
+    runs += 1
+    for fd in kept:
+        try:
+            real_fstat(fd)
+        except OSError:
+            got = "the injected descriptor {} was not open".format(fd)
+        else:
+            os.close(fd)
+    if got != "named":
+        failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
+    # F-JOURNAL-HELD-FD-LISTING: the TEMP sweep must report a leftover temporary created AFTER the
+    # fixture descriptor was opened (the vector writes it through dfd and leaves it behind); a listing
+    # read through the held descriptor itself can miss every entry created since its open, so the
+    # sweep reads through a fresh descriptor. FILESYSTEM-DEPENDENT integration evidence: this native leg
+    # fails against that regression only where a held descriptor's listing is stale (btrfs, not tmpfs);
+    # the seam leg after it fails against it on any filesystem.
+
+    def leaves_tmp(dfd):
+        fd = os.open("late-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    problems = run(leaves_tmp, early)
+    runs += 1
+    if problems != ["TEMP"]:
+        failures.append("fdopen vector HELDFD TEMP sweep: a leftover temporary created after the "
+                        "fixture descriptor was opened must be reported (expected ['TEMP'], got "
+                        "{})".format(problems))
+    try:
+        os.unlink(str(base / "late-leftover.tmp"))
+    except FileNotFoundError:
+        pass
+    # HELDFD-SEAM: the same leftover under the stale-listing seam (_close_selftest._StStaleListing), with dfd
+    # held before the vector writes through it: the seam serves the stale view through dfd and any dup of
+    # it, and the current view only through a "." descriptor opened relative to it, so on ANY filesystem
+    # the sweep must list through a fresh descriptor and report TEMP. Then the seam's own vectors.
+    seam = _close_selftest._StStaleListing()
+
+    def leaves_tmp_held(dfd):
+        seam.hold(dfd)
+        fd = os.open("late-seam-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    with seam:
+        problems = run(leaves_tmp_held, early, seam)
+    runs += 1
+    if problems != ["TEMP"] or not seam.views or "stale" in seam.views:
+        failures.append("fdopen vector HELDFD-SEAM TEMP sweep: under the stale-listing seam a leftover "
+                        "temporary created after the fixture descriptor was opened must be reported through "
+                        "a fresh listing descriptor (expected ['TEMP'], got {}; listing views "
+                        "{})".format(problems, seam.views))
+    try:
+        os.unlink(str(base / "late-seam-leftover.tmp"))
+    except FileNotFoundError:
+        pass
+    seam_failures, seam_checks = _close_selftest._st_stale_listing_check(str(base))
+    failures.extend("fdopen vector " + failure for failure in seam_failures)
+    runs += 1 if seam_checks else 0                 # the seam's own vectors count as one run
     return failures, runs
 
 
@@ -766,11 +885,36 @@ def self_test():
         quiet(run_repo, good, False)
         if (good / SCHEMA_REL).read_text(encoding="utf-8") != first:
             failures.append("REPO mode is not deterministic")
+        # (a2) A tree with no .aiqt/ yet: write mode makes the schema's directories (make_parents, after the
+        #      directory probe) and writes it, exit 0.
+        fresh = tmp / "fresh"
+        fresh.mkdir()
+        got = quiet(run_repo, fresh, False)
+        if got != 0 or not (fresh / SCHEMA_REL).is_file():
+            failures.append("REPO generate in a tree without .aiqt/ expected exit 0 with the schema written there "
+                            "(its directories made after the probe), got exit {}".format(got))
 
         # (b) mutated schema -> exit 1.
         (good / SCHEMA_REL).write_text(first + "# tamper\n", encoding="utf-8")
         if quiet(run_repo, good, True) != 1:
             failures.append("a mutated schema reference expected exit 1 (drift)")
+
+        # (b2) .aiqt/ above the schema reference symlinked outside the root fails closed (exit 2) in --check and
+        #      write mode with the file there untouched; symlinked inside the root, it is read and rewritten. One
+        #      symlinked outside the root to an empty directory is exit 2 in write mode with nothing made there
+        #      (the schema's directory is created only after the probe).
+        def build_repo(base):
+            (base / ".aiqt" / "core" / "migration").mkdir(parents=True)
+        failures.extend(linked_dir_failures(tmp, "aiqt", build_repo, run_repo, ".aiqt", SCHEMA_REL))
+        bare, held = tmp / "bare-linked", tmp / "bare-held"
+        bare.mkdir()
+        held.mkdir()
+        (bare / ".aiqt").symlink_to(held)
+        got = quiet(run_repo, bare, False)
+        made = sorted(p.name for p in held.iterdir())
+        if got != "raised SystemExit(2)" or made:
+            failures.append("a .aiqt/ symlinked outside the root to an empty directory expected exit 2 with nothing "
+                            "made there, got exit {} and {}".format(got, made))
 
         # (c) ADOPTER archive-first: raw bytes under the sha256 dir name.
         legacy = tmp / "legacy"
@@ -826,27 +970,40 @@ def self_test():
         # makes tomllib raise a BARE ValueError (not TOMLDecodeError); the successor-inventory loader must
         # still refuse with AdoptError (exit 2), never let the ValueError escape. The digit limit is pinned to
         # the default 4300 (test-hermeticity) and restored in finally.
-        # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the same
-        # way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        # A parser overflow (tomllib raises RecursionError, not a ValueError) must be refused the same way,
+        # with the overflow in the refusal.
+        # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise
+        # valid input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+        # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an
+        # unrelated refusal) under another.
         prev_digits = sys.get_int_max_str_digits()
-        prev_reclimit = sys.getrecursionlimit()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
-                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            for big_label, big_value, big_needle in (("an over-long integer literal", "9" * 4400, ""),
+                                                     ("a parser overflow", "1  # injected-overflow",
+                                                      "injected parser overflow")):
                 big_inv = tmp / "bigint-inventory.toml"
                 big_inv.write_text("over-long = " + big_value + "\n", encoding="utf-8")
                 try:
                     _load_successor_inventory(big_inv)
                     failures.append("{} in the successor inventory must be refused (exit 2)".format(big_label))
-                except AdoptError:
-                    pass
+                except AdoptError as exc:
+                    if big_needle not in str(exc):
+                        failures.append("{} was refused without its finding ({})".format(big_label, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("{} let a bare {} escape the successor-inventory loader (exit 2 "
                                     "expected)".format(big_label, type(exc).__name__))
         finally:
-            sys.setrecursionlimit(prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
         # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
@@ -1038,12 +1195,17 @@ def self_test():
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_failures, close_runs = _close_vectors(tmp / "close")
-        failures.extend(close_failures)
-        # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or closed
-        # twice, each green and red under its flip.
-        fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
-        failures.extend(fdopen_failures)
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(tmp / "close")
+            failures.extend(close_failures)
+            # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or
+            # closed twice, each green and red under its flip.
+            fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
+            failures.extend(fdopen_failures)
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+            return 2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

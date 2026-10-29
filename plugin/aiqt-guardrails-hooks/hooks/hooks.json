@@ -100,13 +100,10 @@
             "command": "python3",
             "args": [
               "-I",
-              "-S",
-              "-B",
-              "-c",
-              "import sys\np = sys.argv[1] if len(sys.argv) > 1 else ''\nr = 1\nm = 'was given no script path'\ntry:\n    if p:\n        import runpy\n        sys.argv = [p]\n        runpy.run_path(p, run_name='__main__')\n        r = 0\nexcept SystemExit as e:\n    r = 0 if e.code is None or e.code == 0 else 1\n    m = 'exited %r' % (e.code,)\nexcept BaseException as e:\n    m = 'did not run: %s: %s' % (type(e).__name__, e)\nif r:\n    try:\n        sys.stderr.write('aiqt hook launcher: %s %s; reported as exit 1, never 2\\n' % (p, m))\n    except BaseException:\n        pass\nsys.exit(r)\n",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/future-stamp-write.py"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "future_stamp_write"
             ],
-            "timeout": 30
+            "timeout": 10
           }
         ]
       },
@@ -276,6 +273,36 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "review_dispatch_pin"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "review_workdir_hold"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Write|Edit|MultiEdit|Bash",
         "hooks": [
           {
@@ -315,11 +342,8 @@
             "command": "python3",
             "args": [
               "-I",
-              "-S",
-              "-B",
-              "-c",
-              "import sys\np = sys.argv[1] if len(sys.argv) > 1 else ''\nr = 1\nm = 'was given no script path'\ntry:\n    if p:\n        import runpy\n        sys.argv = [p]\n        runpy.run_path(p, run_name='__main__')\n        r = 0\nexcept SystemExit as e:\n    r = 0 if e.code is None or e.code == 0 else 1\n    m = 'exited %r' % (e.code,)\nexcept BaseException as e:\n    m = 'did not run: %s: %s' % (type(e).__name__, e)\nif r:\n    try:\n        sys.stderr.write('aiqt hook launcher: %s %s; reported as exit 1, never 2\\n' % (p, m))\n    except BaseException:\n        pass\nsys.exit(r)\n",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/clock-inject.py"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "clock_inject"
             ],
             "timeout": 10
           }
@@ -335,6 +359,21 @@
               "-I",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "orch_dispatch_ledger"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_lease_heartbeat_post"
             ],
             "timeout": 10
           }
@@ -367,6 +406,20 @@
               "-I",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "diff_wall_stop"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_lease_heartbeat_stop"
             ],
             "timeout": 10
           }

@@ -1,12 +1,18 @@
 # .aiqt/core/enforcement-roadmap.toml: the human enforcement DECISION for every rule (GER-1).
 #
-# One [[rule]] per corpus-id, in ascending corpus-id order. `status` is enforced, none, or pending.
-# enforced: the enforceability ledger links at least one shipped control to the rule; `mechanisms`
-#   RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is reviewable
-#   standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so the two
-#   can never fork. none: enforcement is not built yet. pending: not built yet, and `description` states
-#   the intended build. This file records the DECISION only; the linkage itself is authored in the gate
-#   and hook manifests and rendered into .aiqt/enforceability.json, never re-authored here.
+# One [[rule]] per corpus-id, in ascending corpus-id order. `status` is enforced, partial, none, or
+# pending. enforced: the enforceability ledger links at least one shipped control to the rule;
+#   `mechanisms` RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is
+#   reviewable standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so
+#   the two can never fork. A rule whose only linked controls are preview-channel hooks (the [[hook]] rows of
+#   .aiqt/core/hooks/preview.toml: standalone .preview/ files installed by hand, not in the plugin) is still
+#   enforced or partial here, by that linkage, and the register shows it as "Preview only". partial: the
+#   same linkage invariant as enforced, and the linked mechanisms are
+#   known to cover only part of the rule (their residues name what each does not catch, not every
+#   uncovered clause of every linked rule). none: enforcement is
+#   not built yet. pending: not built yet, and `description` states the intended build. This file records
+#   the DECISION only; the linkage itself is authored in the gate and hook manifests and rendered into
+#   .aiqt/enforceability.json, never re-authored here.
 # Verified by tools/gen_enforcement_register.py (schema and ledger contradictions are fail-closed exit 2).
 
 version = 1
@@ -18,8 +24,8 @@ mechanisms = ["hook:abs-paths", "hook:abs-paths-bash"]
 
 [[rule]]
 corpus-id = "actbef"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:release-cut"]
 
 [[rule]]
 corpus-id = "aitreg"
@@ -53,13 +59,13 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "brnrot"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
 
 [[rule]]
 corpus-id = "chgchk"
 status = "enforced"
-mechanisms = ["gate:selftest-execution"]
+mechanisms = ["gate:entry-guard", "gate:selftest-execution"]
 
 [[rule]]
 corpus-id = "chgtrk"
@@ -104,7 +110,7 @@ mechanisms = ["hook:commit-identity"]
 [[rule]]
 corpus-id = "cnclse"
 status = "enforced"
-mechanisms = ["hook:orch-resume-audit", "hook:orch-stop-guard"]
+mechanisms = ["hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop", "hook:orch-resume-audit", "hook:orch-stop-guard"]
 
 [[rule]]
 corpus-id = "cnsdif"
@@ -113,8 +119,8 @@ mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:constraint-reread"]
 
 [[rule]]
 corpus-id = "cntdef"
@@ -173,7 +179,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "exetgt"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:derived-command-parameters", "hook:write-scope"]
 
 [[rule]]
@@ -189,12 +195,12 @@ mechanisms = []
 [[rule]]
 corpus-id = "gatdis"
 status = "enforced"
-mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard"]
+mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-guard"]
 
 [[rule]]
 corpus-id = "gensrc"
 status = "enforced"
-mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
+mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
 
 [[rule]]
 corpus-id = "goalfd"
@@ -239,7 +245,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "mstreg"
 status = "enforced"
-mechanisms = ["gate:mistakes-register"]
+mechanisms = ["gate:mistakes-register", "gate:mistakes-register-append-selftest"]
 
 [[rule]]
 corpus-id = "mtchcd"
@@ -294,7 +300,7 @@ mechanisms = ["hook:orch-ask-unattended", "hook:orch-dispatch-ledger"]
 [[rule]]
 corpus-id = "recncl"
 status = "enforced"
-mechanisms = ["gate:record-drift", "gate:record-sections", "hook:orch-resume-audit", "hook:orch-resume-barrier"]
+mechanisms = ["gate:record-drift", "gate:record-sections", "hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop", "hook:orch-resume-audit", "hook:orch-resume-barrier"]
 
 [[rule]]
 corpus-id = "refcap"
@@ -313,8 +319,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rerunf"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:rerun-pass-check"]
 
 [[rule]]
 corpus-id = "rmvpth"
@@ -333,8 +339,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rvwpin"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:review-workdir-hold"]
 
 [[rule]]
 corpus-id = "secagt"
@@ -358,8 +364,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "seccet"
-status = "enforced"
-mechanisms = ["gate:hook-scripts", "gate:python-launcher-isolation"]
+status = "partial"
+mechanisms = ["gate:python-launcher-isolation"]
 
 [[rule]]
 corpus-id = "seccfg"
@@ -368,8 +374,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "seccry"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "secdrr"
@@ -378,8 +384,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secdsz"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "secegr"
@@ -413,8 +419,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secinp"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "seckey"
@@ -513,7 +519,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secsec"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:secrets-scan", "hook:secrets-shift-left"]
 
 [[rule]]
@@ -573,7 +579,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "septsk"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:write-scope"]
 
 [[rule]]
@@ -634,7 +640,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "tstamp"
 status = "enforced"
-mechanisms = ["gate:hook-scripts", "hook:clock-inject", "hook:future-stamp-write", "hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+mechanisms = ["hook:clock-inject", "hook:future-stamp-write", "hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "tsthrm"
@@ -653,8 +659,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "vfxcmt"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:review-dispatch-pin"]
 
 [[rule]]
 corpus-id = "vrfdiv"
@@ -668,5 +674,5 @@ mechanisms = ["hook:orch-truncation-guard"]
 
 [[rule]]
 corpus-id = "wowo01"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:write-scope"]

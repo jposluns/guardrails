@@ -15,11 +15,70 @@
 #                        Raised 112222 -> 128358 when the counting rule changed, not the content: the gate
 #                        began counting the modelled header of each of the 134 loaded files (16136 units;
 #                        rule files 111862 and managed block 360 unchanged; no .claude/CLAUDE.md).
-#   ceiling              the target PACK figure; reported, not enforced. Its value predates header counting,
-#                        which added 16136 units to PACK at the ratchet raise above; it was not raised with it.
+#                        Raised 128358 -> 128966 for content, with the maintainer's recorded approval of
+#                        2026-10-04: a new second paragraph in security-seci-fail-closed (608 units; rule
+#                        files 111862 -> 112470; headers 16136 and managed block 360 unchanged).
+#                        Raised 128966 -> 129060 for content, with the maintainer's second recorded approval
+#                        of 2026-10-04, for the measured extra: that paragraph reworded so the child-process
+#                        route can pass (94 units; rule files 112470 -> 112564; headers and managed block
+#                        unchanged).
+#                        Raised 129060 -> 129585 on 2026-10-04 when guard-input-soundness gained its paragraph
+#                        on a hand-kept list that selects a generated view (grdinp.12): rule files 112564 ->
+#                        113089 (+525 units); managed block 360 and file headers 16136 unchanged.
+#                        Raised 129585 -> 130209 on 2026-10-06 when guard-input-soundness gained its paragraph
+#                        on a check run ahead of an apply step (grdinp.13 to grdinp.15): rule files 113089 ->
+#                        113713 (+624 units); managed block 360 and file headers 16136 unchanged.
+#                        Raised 130209 -> 131592 on 2026-10-09 when workers-produce-inert-data gained its
+#                        paragraph on running a worker's code (wowo01.11 to wowo01.20): rule files 113713 ->
+#                        115096 (+1383 units); managed block 360 and file headers 16136 unchanged.
+#                        Raised 131592 -> 132021 for content, with the maintainer's recorded approval of
+#                        2026-10-09: continue-by-default gained its paragraph bounding an activity floor by
+#                        the actor's resource share (cntdef.11): rule files 115096 -> 115525 (+429 units);
+#                        managed block 360 and file headers 16136 unchanged.
+#                        Raised 132021 -> 132730 for content, within the maintainer's recorded approval of
+#                        2026-10-10 for 132732: preview-has-no-side-effects gained its passage on establishing
+#                        that an operation is a preview (secprv.5 to secprv.10) and its carve-out was reworded
+#                        (secprv.11): rule files 115525 -> 116234 (+709 units); managed block 360 and file
+#                        headers 16136 unchanged.
+#                        Raised 132730 -> 132775 for content, within the maintainer's decision of
+#                        2026-10-11 (a raise of at most 45 units): preview-has-no-side-effects names the user
+#                        as the recipient of the fallback's uncertainty disclosure (secprv.8, secprv.9) and
+#                        admits only reference docs produced and published independently of the assistant's
+#                        instances and agents (secprv.5), net of same-meaning cuts (secprv.1 to secprv.4): rule
+#                        files 116234 -> 116279 (+45 units); managed block 360 and file headers 16136 unchanged.
+#                        Raised 132775 -> 133280 on 2026-10-16 when evidence-grounded-completion gained its
+#                        example of a wording fix as a defect class, with its probe and its two named
+#                        exemptions (evgcmp.15): rule files 116279 -> 116784 (+505 units); managed block 360
+#                        and file headers 16136 unchanged. Recorded approval: the maintainer, 2026-10-16.
+#                        Raised 133280 -> 133620 on 2026-10-17 when completeness-claim-enumerates-its-set
+#                        gained its sentence on retiring, splitting, or merging a record that names more than
+#                        one item (setcmp.9): rule files 116784 -> 117124 (+340 units); managed block 360 and
+#                        file headers 16136 unchanged.
+#                        Raised 133620 -> 133863 on 2026-10-17 when that sentence was extended to removing
+#                        items from such a record, its reason was narrowed to say an id or count check can pass,
+#                        and the rule's scope paragraph excluded such a record change from the bounded-claim
+#                        exemption (setcmp.9, setcmp.10): rule files 117124 -> 117367 (+243 units); managed
+#                        block 360 and file headers 16136 unchanged. Recorded approval for this raise and
+#                        the one above: the maintainer, 2026-10-18.
+#                        Raised 133863 -> 134241 on 2026-10-18 when citation-from-opened-file gained its
+#                        sentence on re-opening each cited range before delivery to confirm that its stated
+#                        lines carry the cited content (citint.4) and read-before-characterizing gained its
+#                        sentence that a restatement keeps its source's force and scope (rdbchr.2): rule
+#                        files 117367 -> 117745 (+378 units); managed block 360 and file headers 16136
+#                        unchanged. Recorded approval: the maintainer, 2026-10-18.
+#                        Raised 134241 -> 134499 on 2026-10-18 when security-seci-dependency-provenance
+#                        gained its sentence that a tag or branch name is a movable label, not pinned
+#                        provenance, so a fetched source is pinned to the commit or digest the label
+#                        resolved to, and, where the fetched content declares its own version, a mismatch
+#                        with the version the label names is a changed entry (secsup.7): rule files
+#                        117745 -> 118003 (+258 units); managed block 360 and file headers 16136
+#                        unchanged. Recorded approval: the maintainer, 2026-10-18.
+#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#                        predates header counting, which added 16136 units to PACK at the 112222 ->
+#                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 128358
+ratchet = 134499
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

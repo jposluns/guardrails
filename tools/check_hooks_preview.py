@@ -68,6 +68,20 @@ Exit convention (matches the repo's gates):
   2  cannot-evaluate: a missing or unreadable required input, an unparseable table or SHA256SUMS line, a
      self-test that timed out or had no scratch directory, or an unrecognized argument
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_hooks_preview.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import hashlib
 import io
 import os
@@ -75,7 +89,6 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -688,7 +701,7 @@ def self_test_main():
         text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         row_end = text.index("\n", text.index("| `clock-inject.py` |"))
         (r / PREVIEW_DIR / README_NAME).write_text(
-            text[:row_end] + " | " + phantom + " |" + text[row_end:], encoding="utf-8")
+            text[:row_end] + "\u2028| " + phantom + " |" + text[row_end:], encoding="utf-8")
         case("README line separator U+2028", 2, r, needle="is not a line break")
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("fixture construction failed: {}".format(exc))

@@ -448,11 +448,16 @@ SKIPPED because its precondition cannot be built on this host), never a pass.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_oplock.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_oplock.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import errno
 import fcntl
@@ -984,7 +989,13 @@ def _validate_ctl_dir_fd(fd, label):
 
 
 def _open_dir_at(parent_fd, name, label):
-    """Open a directory component beneath an already-trusted dir fd, no-follow."""
+    """Open a directory component beneath an already-trusted dir fd, no-follow. The descriptor is
+    READABLE (_DIR_OPEN_FLAGS, O_RDONLY) on purpose, not the shared walk's traverse mode: every
+    _DIR_OPEN_FLAGS open (this one, the staging-leftover listing in _remove_staging_garbage, and
+    _opf_init_substrate._list_dir_fresh) runs beneath a root already trusted (the store, product,
+    control or git root) on a directory that is then listed, read or written beneath, validated as
+    a control directory, or confirmed by the open itself (the store root's .git directory), never an
+    out-of-store ancestor that is only traversed."""
     try:
         return os.open(name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
@@ -1001,6 +1012,19 @@ def _open_path_dir_nofollow(path, what):
     an OSError refuses, naming `what` and the path."""
     try:
         return _opf_store._open_dir_nofollow(path)
+    except OSError as exc:
+        raise OpLockError("cannot open {} {} no-follow ({})".format(what, path, exc))
+
+
+def _open_path_dir_traverse(path, what):
+    """_open_path_dir_nofollow in the shared walk's TRAVERSE mode: the final component too is opened
+    with search permission only (O_PATH where it exists; _opf_store._open_dir_nofollow traverse_only),
+    for a directory this acquisition only PROBES (fstat, dir_fd-relative no-follow lookups) and never
+    reads: an ancestor of the store, which the store's owner may not control and which may carry
+    search-but-no-read permission (mode 0711). The symlink refusal is identical; an OSError refuses,
+    naming `what` and the path."""
+    try:
+        return _opf_store._open_dir_nofollow(path, traverse_only=True)
     except OSError as exc:
         raise OpLockError("cannot open {} {} no-follow ({})".format(what, path, exc))
 
@@ -1060,7 +1084,7 @@ def _control_payload(document, closed_keys, label):
         reparsed = tomllib.loads(text)
     # Defensive: emit_checked already reparsed. RecursionError too: tomllib raises it (not a
     # ValueError) on deep nesting (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise OpLockError("emitted {} did not reparse ({})".format(label, exc))
     if set(reparsed) != set(closed_keys):
         raise OpLockError("{} top-level keys {} do not equal the closed set {}".format(
@@ -1105,7 +1129,7 @@ def _read_control_record(dir_fd, name, label):
         doc = tomllib.loads(bytes(data).decode("utf-8", errors="strict"))
     # RecursionError too: tomllib raises it (not a ValueError) on deep nesting
     # (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError, MemoryError) as exc:
         raise OpLockError("{} is not decodable UTF-8 TOML; refusing recovery ({})".format(label, exc))
     if not isinstance(doc, dict):
         raise OpLockError("{} is not a TOML table; refusing recovery".format(label))
@@ -1146,7 +1170,10 @@ def _classify_git_entry(store_root_fd, store_root):
 def _git_rev_parse_output(store_root, *options):
     """The whole decoded output of ONE git rev-parse invocation of `options` at `store_root`, asked
     of git itself with an explicit -C binding and a scrubbed environment (every GIT_* variable
-    removed, so an ambient GIT_DIR, GIT_COMMON_DIR, or GIT_WORK_TREE cannot redirect the answer).
+    removed, so an ambient GIT_DIR, GIT_COMMON_DIR, or GIT_WORK_TREE cannot redirect the answer),
+    with trace forced off through the GIT_TRACE2* / GIT_TRACE* variables, which outrank trace2.*
+    config, so an adopter's trace2.eventTarget cannot turn this read into a file write (the
+    toggles _opf_observe._TRACE_OFF pins for init's ignore probe).
     Any failure (missing git, launch failure, timeout, nonzero exit, or undecodable output)
     refuses; the control root is never guessed and never falls back to the repository root. The
     caller (_git_view) splits the output on its record terminators only."""
@@ -1156,6 +1183,8 @@ def _git_rev_parse_output(store_root, *options):
         raise OpLockError("git binary not found on PATH while the store or an enclosing directory "
                           "carries a .git entry; refusing (the control root is never guessed)")
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_TRACE="0", GIT_TRACE_PACKET="0", GIT_TRACE_PERFORMANCE="0", GIT_TRACE_SETUP="0",
+               GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
     try:
         proc = subprocess.run(
             [git, "--no-replace-objects", "-C", str(store_root), "rev-parse"] + list(options),
@@ -1177,10 +1206,13 @@ def _git_rev_parse_output(store_root, *options):
 def _enclosing_git_toplevel(store_root):
     """The NEAREST proper ancestor of `store_root` carrying a .git entry, as (its path, its
     (st_dev, st_ino) identity), or None when every ancestor up to the filesystem root GENUINELY
-    lacks one. Each ancestor is opened by the shared no-follow walk and its .git classified by the
-    same three-way no-follow classification the store root gets, nearest first, so a symlinked,
-    FIFO, or unreadable .git at ANY ancestor refuses: it is never skipped past to a higher
-    ancestor and never read as absence."""
+    lacks one. Each ancestor is opened by the shared no-follow walk in its TRAVERSE mode
+    (_open_path_dir_traverse: search permission only where O_PATH exists, since the ancestor is only
+    probed with dir_fd-relative no-follow lookups and an fstat, never read), so a search-only (0711)
+    ancestor such as a root-owned scratch root or /home/<user> is classified rather than refused
+    EACCES; its .git is classified by the same three-way no-follow classification the store root
+    gets, nearest first, so a symlinked, FIFO, or unreadable .git at ANY ancestor refuses: it is
+    never skipped past to a higher ancestor and never read as absence."""
     path = store_root
     while True:
         parent = os.path.dirname(path)
@@ -1188,7 +1220,7 @@ def _enclosing_git_toplevel(store_root):
             return None
         path = parent
         with _FdOwner() as owner:
-            fd = owner.adopt(_open_path_dir_nofollow(path, "store-root ancestor"))
+            fd = owner.adopt(_open_path_dir_traverse(path, "store-root ancestor"))
             if _classify_git_entry(fd, path) == "present":
                 st = _fstat_or_refuse(fd, "store-root ancestor {}".format(path))
                 return path, (st.st_dev, st.st_ino)
@@ -1332,7 +1364,10 @@ def _bind_repository_view(toplevel, ident, rel, store_ident):
     or normalization-insensitive filesystem a store addressed by any other spelling of that path
     refuses rather than keying a second home, whatever spelling getcwd gives git; and the
     components, opened no-follow beneath the toplevel, must lead to `store_ident`, the store root's
-    own identity."""
+    own identity. Residual (disclosed): a search-only directory BETWEEN the git toplevel and the
+    store refuses at the readable _open_dir_at in _bind_repository_view (listing it needs read
+    permission, so it is inherent); a directory above the toplevel and an own-repository store
+    below one both work."""
     with _FdOwner() as owner:
         fd = owner.adopt(_open_path_dir_nofollow(toplevel, "git toplevel"))
         st = _fstat_or_refuse(fd, "git toplevel {}".format(toplevel))
@@ -1844,8 +1879,10 @@ def _validate_recovery_lease(doc, active_doc):
 
 def _recorded_machine_store_present(machine):
     """D4: whether the machine store a stale active record names still exists. The recorded path is
-    walked no-follow from the filesystem root to its parent (_opf_store._open_dir_nofollow) and its
-    final component is stat'ed no-follow beneath that parent. Returns True when the recorded path
+    walked no-follow from the filesystem root to its parent (_opf_store._open_dir_nofollow in its
+    traverse mode: search permission only on every component where O_PATH exists, since the parent
+    is never read here) and its final component is stat'ed no-follow beneath that parent. Returns
+    True when the recorded path
     binds an object with the RECORDED (st_dev, st_ino): the paired lease may live there, so recovery
     from any other checkout must refuse. Returns False when the path is absent (ENOENT at any
     component) or binds an object with a different identity: the recorded machine store, and with it
@@ -1861,7 +1898,9 @@ def _recorded_machine_store_present(machine):
                           "absolute path, so whether its paired lease still exists cannot be "
                           "confirmed; refusing recovery (manual intervention required)".format(path))
     try:
-        parent_fd = _opf_store._open_dir_nofollow(parent)
+        # The parent is only TRAVERSED (one dir_fd-relative no-follow stat below), never read, so the
+        # shared walk's traverse mode applies: a search-only (0711) parent is probed, not EACCES-refused.
+        parent_fd = _opf_store._open_dir_nofollow(parent, traverse_only=True)
     except FileNotFoundError:
         return False
     except OSError as exc:
@@ -3749,9 +3788,12 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
             if not recover:
                 stale = ", ".join(n for n, s in ((ACTIVE_NAME, stale_active),
                                                  (_opf_check.LEASE_NAME, stale_lease)) if s)
+                # This refusal reaches the `opf init` command line, so it names the CLI flag
+                # --recover first; recover=True is the same switch at this API.
                 raise OpLockError(
                     "stale operation record(s) under a free anchor ({}); refusing without EXPLICIT "
-                    "recovery (recover=True), which itself proceeds only when the recorded holder "
+                    "recovery (--recover on the opf command line; recover=True from the API), "
+                    "which itself proceeds only when the recorded holder "
                     "is confirmed dead".format(stale))
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
                 _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
@@ -4720,31 +4762,41 @@ def _t_c6_diffinode(d, env):
 
 
 def _t_toml_class_read_control(d, env):
-    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record carrying a 1200-deep nested
-    array makes tomllib raise RecursionError (a RuntimeError, not a ValueError), and one carrying
-    an over-long integer literal a bare ValueError; _read_control_record must refuse both with
-    OpLockError, never let either escape. The recursion and digit limits are pinned to the
-    CPython defaults (test-hermeticity) and restored in finally."""
+    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record whose parse overflows (tomllib
+    raises RecursionError, a RuntimeError, not a ValueError), and one carrying an over-long integer
+    literal (a bare ValueError); _read_control_record must refuse both with OpLockError, never let
+    either escape. The overflow is INJECTED (tomllib.loads raises RecursionError on a marked, otherwise
+    valid record) rather than provoked by a deeply nested body: the depth at which tomllib overflows
+    is an interpreter limit, so a fixed body overflows under one recursion limit and parses under
+    another. The digit limit is pinned to the CPython default (test-hermeticity) and restored."""
     dirp = os.path.join(d, "ctl-toml-class")
     os.mkdir(dirp)
     dfd = os.open(dirp, os.O_RDONLY | os.O_DIRECTORY)
-    prev_rec, prev_dig = sys.getrecursionlimit(), sys.get_int_max_str_digits()
-    sys.setrecursionlimit(1000)
+    prev_dig = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(4300)
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
-        for name, body in (("deep.toml", "deep = " + "[" * 1200 + "]" * 1200 + "\n"),
-                           ("bigint.toml", "big = " + "9" * 4400 + "\n")):
+        for name, body, needle in (("deep.toml", "deep = 1  # injected-overflow\n", "injected parser overflow"),
+                                   ("bigint.toml", "big = " + "9" * 4400 + "\n", "")):
             with open(os.path.join(dirp, name), "w", encoding="utf-8") as fh:
                 fh.write(body)
             try:
                 _read_control_record(dfd, name, name)
             except OpLockError as exc:
-                assert "not decodable UTF-8 TOML" in str(exc), str(exc)
+                assert "not decodable UTF-8 TOML" in str(exc) and needle in str(exc), str(exc)
                 continue
             raise AssertionError("{} was not refused".format(name))
     finally:
+        tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(prev_dig)
-        sys.setrecursionlimit(prev_rec)
         os.close(dfd)
 
 
@@ -4970,6 +5022,40 @@ def _t_e3_enclosing_git_unreadable(d, env):
         os.chmod(pointer, 0o600)
     assert not os.path.exists(os.path.join(store, CONTROL_DIRNAME)), \
         "an unreadable enclosing .git must never fall back to the store root"
+
+
+def _t_travanc_search_only_ancestor(d, env):
+    """T-travanc: a store with NO .git beneath a SEARCH-ONLY ancestor (execute permission, no read;
+    the owner-bound spelling of the root-owned 0711 scratch shape is 0111) acquires and releases:
+    the ancestor sweep (_enclosing_git_toplevel) and the D4 recorded-machine-store probe open such
+    a directory in the shared walk's TRAVERSE mode (O_PATH, search permission only) instead of
+    refusing EACCES. FAILS WITHOUT THE FIX (the mutant: either walker reverted to the readable-final
+    walk raises EACCES at the shielded ancestor and the acquisition refuses). Needs a uid the mode
+    bits bind and os.O_PATH, so under uid 0 or without O_PATH it is SKIPPED (reported, and the run
+    ends INCOMPLETE, never a pass), as T-e3. The traverse mode's own symlink refusal is pinned by
+    the _opf_store self-test (the travanc-symlinked-* checks)."""
+    if os.geteuid() == 0:
+        raise _StSkip("uid 0 is not bound by a 0111 ancestor's mode bits, so the search-only "
+                      "vector cannot be built")
+    if not hasattr(os, "O_PATH"):
+        raise _StSkip("no os.O_PATH: the walk keeps the O_RDONLY-per-component fallback by design "
+                      "(disclosed residual), so a search-only ancestor still refuses EACCES")
+    shield = os.path.join(d, "shield")
+    store = os.path.join(shield, "store")
+    os.makedirs(store)
+    _st_store_tree(store)
+    os.chmod(shield, 0o111)
+    try:
+        cap = acquire_operation(store, "op")
+        release_operation(cap)
+        # The D4 probe: a recorded machine store directly beneath the search-only ancestor is still
+        # confirmed PRESENT (its parent is only traversed), never refused as unconfirmable.
+        st = os.stat(store)
+        assert _recorded_machine_store_present(
+            {"path": store, "dev": str(st.st_dev), "ino": str(st.st_ino)}) is True, \
+            "a recorded machine store beneath a search-only ancestor must be confirmed present"
+    finally:
+        os.chmod(shield, 0o755)
 
 
 def _t_e4_distinct_nested_stores(d, env):
@@ -5684,13 +5770,150 @@ def _st_staging_leftovers(dir_path, name):
 
 
 def _st_open_fds():
-    """The number of descriptors this process holds open (Linux /proc/self/fd, else /dev/fd). The
-    listing's own transient descriptor is present in every measurement alike, so a difference of
-    two readings is exactly the descriptors leaked in between."""
+    """The descriptors this process holds open (Linux /proc/self/fd, else /dev/fd) as a frozenset of
+    (number, identity) pairs, identity being (st_dev, st_ino, the file type bits of st_mode, access
+    mode). Each part stays fixed while a descriptor stays open: the permission bits are left out
+    because a chmod (_chmod_bound repairs modes through a descriptor) changes them under a kept
+    descriptor, and the access-mode bits are the F_GETFL bits F_SETFL cannot change. A number closed
+    and reopened on another file, or on the same file with another access mode, changes its pair; a
+    count sees neither.
+
+    Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
+    an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
+    closed and re-created at the same number reads as unchanged; so does the same file closed and
+    reopened at the same number with the same access mode; and so does a deleted file closed at a
+    number and a new file of the same type opened there with the same access mode after taking the
+    deleted file's freed inode number on the same device (st_ino names a file only while it exists,
+    and a filesystem may give a freed number to the next file it creates). The census looks no
+    further: the offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines
+    change under a kept descriptor that is read, written or given F_SETFL, so comparing them would
+    report a kept descriptor as a leak. A descriptor gained at a number that was free before is
+    always seen.
+
+    Only EBADF reads as closed (the listing's own transient descriptor is gone when it is read); any
+    other listing, fstat or flag failure fails the check naming the listing or the descriptor, never
+    a census that passes."""
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         if os.path.isdir(fd_dir):
-            return len(os.listdir(fd_dir))
-    raise AssertionError("no descriptor listing (/proc/self/fd or /dev/fd) to count leaks with")
+            break
+    else:
+        raise AssertionError("no descriptor listing (/proc/self/fd or /dev/fd) to count leaks with")
+    try:
+        names = os.listdir(fd_dir)
+    except OSError as exc:
+        raise AssertionError("descriptor census: cannot list {}: {}".format(fd_dir, exc)) from exc
+    access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
+    pairs = set()
+    for name in names:
+        fd = int(name)
+        try:
+            st = os.fstat(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise AssertionError("descriptor census: cannot read descriptor {}: {}".format(
+                fd, exc)) from exc
+        pairs.add((fd, (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), flags & access)))
+    return frozenset(pairs)
+
+
+def _st_fds_gained(baseline):
+    """How many descriptors are open now that were not in `baseline` (a _st_open_fds census), or None
+    when a baseline pair is gone: a baseline number closed and reopened on another file, or with
+    another access mode, does not balance a count. Within the coverage boundary _st_open_fds states
+    (an anonymous-inode descriptor re-created, the same file reopened with the same access mode, or
+    a new file that took a deleted file's freed inode number opened with the same access mode, at
+    the same number) the pair reads as kept, so such a reuse is not seen."""
+    now = _st_open_fds()
+    if not baseline <= now:
+        return None
+    return len(now - baseline)
+
+
+def _t_fd_census_pairs(d, env):
+    """T-fd-census: the leak census compares (number, identity) pairs of fixed identities and fails
+    closed. A number closed and reopened on a different file, or on the same file with another
+    access mode, between two censuses differs (a count does not) and is not a balanced gain; a chmod
+    of a kept descriptor changes nothing; an injected EIO on the listing, on one descriptor's fstat
+    or on its F_GETFL fails the census naming the listing or the descriptor; EBADF alone reads as
+    closed."""
+    path_a = os.path.join(d, "a")
+    path_b = os.path.join(d, "b")
+    for path in (path_a, path_b):
+        with open(path, "wb") as fh:
+            fh.write(b"x")
+    for second, mode in ((path_b, os.O_RDONLY), (path_a, os.O_RDWR)):
+        fd = os.open(path_a, os.O_RDONLY)
+        held = [fd]
+        try:
+            baseline = _st_open_fds()
+            os.close(held.pop())
+            held.append(os.open(second, mode))
+            assert held[0] == fd, "the reopen must take the number just closed ({} != {})".format(
+                held[0], fd)
+            assert _st_open_fds() != baseline, \
+                "a number reused for {} must change the census".format(
+                    "another file" if second == path_b else "another access mode")
+            assert _st_fds_gained(baseline) is None, "a reused number must not balance a count"
+        finally:
+            for value in held:
+                os.close(value)
+    kept = os.open(path_a, os.O_RDONLY)
+    try:
+        os.fchmod(kept, 0o644)   # an explicit starting mode: the chmod below then changes the
+                                 # permission bits whatever umask created the file
+        baseline = _st_open_fds()
+        os.fchmod(kept, 0o600)
+        assert stat.S_IMODE(os.fstat(kept).st_mode) == 0o600, \
+            "the chmod of a kept descriptor must change its mode from 0644 to 0600"
+        assert _st_open_fds() == baseline, "a chmod of a kept descriptor must not change the census"
+    finally:
+        os.close(kept)
+    saved_listdir, saved_fstat, saved_fcntl = os.listdir, os.fstat, fcntl.fcntl
+    probe = os.open(path_a, os.O_RDONLY)
+    try:
+        def eio_listdir(path=".", *args):
+            if str(path) in ("/proc/self/fd", "/dev/fd"):
+                raise OSError(errno.EIO, "EIO (self-test injected on the descriptor listing)")
+            return saved_listdir(path, *args)
+
+        def errno_fstat(code):
+            def fake(fd, *args):
+                if fd == probe:
+                    raise OSError(code, "self-test injected on descriptor {}".format(fd))
+                return saved_fstat(fd, *args)
+            return fake
+
+        def eio_fcntl(fd, cmd, *args):
+            if fd == probe and cmd == fcntl.F_GETFL:
+                raise OSError(errno.EIO, "self-test injected on the F_GETFL of descriptor {}".format(fd))
+            return saved_fcntl(fd, cmd, *args)
+
+        for target, attr, fake, needle in (
+                (os, "listdir", eio_listdir, "cannot list"),
+                (os, "fstat", errno_fstat(errno.EIO), "cannot read descriptor {}:".format(probe)),
+                (fcntl, "fcntl", eio_fcntl, "cannot read descriptor {}:".format(probe))):
+            setattr(target, attr, fake)
+            try:
+                try:
+                    _st_open_fds()
+                except AssertionError as exc:
+                    assert needle in str(exc), "the census refusal must name {!r}: {}".format(
+                        needle, exc)
+                else:
+                    raise AssertionError("an unreadable census ({} {}) must fail, never pass".format(
+                        attr, needle))
+            finally:
+                os.listdir, os.fstat, fcntl.fcntl = saved_listdir, saved_fstat, saved_fcntl
+        os.fstat = errno_fstat(errno.EBADF)
+        try:
+            census = _st_open_fds()
+        finally:
+            os.fstat = saved_fstat
+        assert probe not in {number for number, _ in census}, "EBADF reads as closed"
+    finally:
+        os.close(probe)
 
 
 def _st_crash_acquire(root):
@@ -7742,7 +7965,7 @@ def _st_f7_4_case(root, case):
     notes = " ".join(getattr(caught, "__notes__", ()))
     records = (os.path.exists(active), os.path.exists(lease))
     if case == "exit-entry":
-        assert _st_open_fds() - baseline == 5 and not _st_anchor_free(root), \
+        assert _st_fds_gained(baseline) == 5 and not _st_anchor_free(root), \
             "the interrupted exit retains the five descriptors and the lock (observed)"
         assert records == (False, False), records
         assert "released only in part: its records removed, the release of its hold on the lock " \
@@ -7758,7 +7981,7 @@ def _st_f7_4_case(root, case):
     elif case == "close-interrupted":
         assert held, "the record descriptor's close must have been interrupted"
         os.fstat(held[0])                 # observed OPEN: its close never ran
-        assert _st_open_fds() - baseline == 1 and records == (False, False), records
+        assert _st_fds_gained(baseline) == 1 and records == (False, False), records
         assert _st_anchor_free(root), "the anchor descriptor itself was closed"
         assert "released only in part" in notes and "UNCONFIRMED" in notes, notes
         assert "and its descriptors closed" not in notes, notes
@@ -8238,7 +8461,7 @@ def _st_f8_4_body(d):
             _FdOwner.transfer = saved
         notes = " ".join(getattr(caught, "__notes__", ()))
         os.fstat(seen["fd"])              # observed open: no close ran
-        assert _st_open_fds() - baseline == 1, "the hand-over descriptor is the one left open"
+        assert _st_fds_gained(baseline) == 1, "the hand-over descriptor is the one left open"
         assert "descriptor closed" not in notes and "was not closed and stays open" in notes, notes
         os.close(seen["fd"])
         # (B) a forked child of the publisher.
@@ -8905,7 +9128,7 @@ def _st_f8_4_interrupted_close(dir_fd):
     notes = " ".join(getattr(caught, "__notes__", ()))
     assert armed.get("fired"), "the cleanup's close must have been interrupted"
     os.fstat(armed["fd"])                 # observed OPEN: the close never ran
-    assert _st_open_fds() - baseline == 1, "the interrupted close leaves that one descriptor open"
+    assert _st_fds_gained(baseline) == 1, "the interrupted close leaves that one descriptor open"
     assert "descriptor closed" not in notes and "UNCONFIRMED" in notes, notes
     os.close(armed["fd"])
 
@@ -9598,6 +9821,8 @@ def self_test_isolated():
          _t_e2_enclosing_git_refusals),
         ("T-e3 an unreadable enclosing .git refuses, no store-root fallback",
          _t_e3_enclosing_git_unreadable),
+        ("T-travanc a search-only (0111) ancestor is traversed, not EACCES-refused (sweep and D4)",
+         _t_travanc_search_only_ancestor),
         ("T-e4 distinct stores nested in one repository hold distinct anchors",
          _t_e4_distinct_nested_stores),
         ("T-e5 a store nested in a submodule refuses, naming the submodule",
@@ -9716,6 +9941,8 @@ def self_test_isolated():
          _t_i4_crash_and_recovery),
         ("T-i5 the init holder is bound to its acquirer; a foreign lease is never adopted",
          _t_i5_holder_identity_bound),
+        ("T-fd-census the leak census sees a reused number and fails closed on a read error",
+         _t_fd_census_pairs),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))

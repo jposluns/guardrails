@@ -1,6 +1,6 @@
 # OPFiles at a glance
 
-Date: 2026-10-03 (UTC). The two-minute version of the OPFiles standard; the full specification
+Date: 2026-10-24 (UTC). The two-minute version of the OPFiles standard; the full specification
 lives in OPF-SPEC.md beside this file.
 
 ## What it is
@@ -60,15 +60,111 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 ## Getting started
 
-1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "opf"` in its `[opf]` table, plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
-   exempt ledger listed above, not an index); specification
-   sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+1. Create `.working/toml/` by hand with `manifest.toml` declaring `standard = "opf"`,
+   `spec_version = "2.0.0"` and `homes = 2` in its `[opf]` table, plus `counters.toml` (with the
+   imported counter row of each enabled type beside its clean row), `version.toml`,
+   `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
+   exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
+   `worklog.imported.toml`, all empty to start; specification sections 4, 8 and 9 give the full
+   file baseline. The reference tooling's `opf init` does not scaffold this store yet: its
+   scaffold still writes a 1.2.0 store, a format the specification's validation refuses
+   (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
-   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory): keep it, migrate it
-   for a later post-adoption import, move it, or retire it; nothing is absorbed or overwritten
-   silently.
+   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
+   `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
+   retire it; nothing is absorbed or overwritten silently. `opf init` writes the store under the
+   shared init operation lock (in the git directory's `opf-oplock/`, the lock adoption takes too),
+   holding the specification section 5.7 lease (`.working/toml/lease.toml`) while it writes, and
+   removes the lease and releases the lock before it reports success; while another OPF run holds
+   the lock, `opf init` refuses. A run that stopped partway can leave a partial `.working/` and
+   its lock record behind: once that `.working/` is moved aside, `opf init --recover` clears a
+   record whose holder is confirmed dead, and refuses a record whose holder may still be live.
+   `opf init` also refuses when the git
+   history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
+   never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
+   HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
+   is not detected. The scan also has a path limit: the scan checks the root's current path only
+   (a store committed under another directory, for example before a rename, is not detected).
+   `opf adopt` is the path for re-adopting any prior ancestry. When the scan does find a prior
+   store, the refusal also prints a `git checkout` command for restoring the store paths the
+   named commit holds, under `--no-replace-objects` (so a replacement ref cannot substitute
+   other bytes for that commit's) and `--literal-pathspecs`; when the store was deleted across
+   more than one commit, that commit holds only part of the store, so the first command is
+   labelled as restoring only the store paths its commit holds, and an additional command
+   restores the other named store path from its own commit. No printed command is ever
+   labelled as restoring the whole store: each restores the named paths as git checks them
+   out from that commit (the adopter's own attribute and filter configuration applies to a
+   checkout, so the written bytes need not equal the committed blob's). The scan treats a
+   first-level `.working` subdirectory as a machine store only when it directly holds
+   `manifest.toml` or `counters.toml`, in the restored tree or in the first-parent history
+   at or before the named commit; a store found either way is expected to hold both files,
+   and a subdirectory holding only other files or only deeper directories is neither
+   expected nor named; a structural file counts at its rename destination instead of its
+   old path only when the recorded destination blob id equals the source blob id (an exact
+   byte-identical move; git's similarity score of 100 alone does not prove that, since
+   reordered lines also score 100), no older first-parent record touched the destination,
+   and the renaming commit's tree holds no structural file under the source subdirectory,
+   so a machine subdirectory renamed whole with `git mv` is not reported as a PARTIAL
+   restore, while any other pairing git's similarity-based rename detection reports (for
+   example a store deleted beside a similar store created in the same commit, or a pairing
+   whose bytes were rearranged) reads as a deletion of its source, which stays expected,
+   fail-safe: the doubtful case is disclosed as missing, never silently absorbed. When the `.working`
+   tree a command restores lacks such an expected
+   structural file, the refusal says the restore is PARTIAL and names each missing path,
+   in words that state only that observed lack. A command is printed only when the
+   repository path and every restored path consist solely of the bare-command alphabet
+   (ASCII letters, digits, and `. / - _`); for any other value no command is printed at
+   all, and the refusal instead names the repository, commit, and paths in a rendered
+   form, for a restore performed by hand. Every value interpolated into init's output
+   (paths, rejected arguments, commit ids, exception text, and the JSON event lines
+   included) is rendered by one escaper with a fixed, narrow safe alphabet: ASCII
+   letters, digits, and `. / - _` render unchanged, and every other character (the
+   space included, both quote kinds, `!`, substitutions, separators, redirections,
+   glob characters, parentheses, braces, the tilde, the backslash, every control or
+   format character, and every non-ASCII character) is written as a backslash escape
+   of its code point. A rendered value is for reading and reconstruction by hand, not
+   for pasting into a shell, and readability is deliberately not a goal that widens
+   the alphabet: characters one shell merely groups are live syntax in another (bash
+   history expansion acts on `!` even inside double quotes; zsh glob qualifiers and
+   fish command substitution execute code). A failure of `opf init` itself is reported
+   the same way: one last-resort handler catches the exceptions the command lets
+   escape from init dispatch onward and prints only the rendered exception type and
+   text, so from that point `opf init` reports a rendered line rather than a Python
+   traceback, up to exactly three windows. Every fault raised while a helper module
+   is imported, a SyntaxError in an installed helper included, is mapped to a
+   rendered cannot-evaluate (exit 2) except a keyboard interrupt, as long as the
+   code opf loads neither ends the process itself nor replaces anything opf uses.
+   That code runs in opf's process with its privileges, at import, when called or
+   later (an atexit hook, a thread, a signal handler, a destructor, or a replaced
+   stream whose flush fails at shutdown, so that the process exits 120), and can do
+   both, so every exit status stated here holds only while it does neither. A
+   failure before init dispatch (a keyboard interrupt while a helper is imported,
+   or any interrupt before or during dispatch) is
+   outside that handler entirely; an interrupt landing in the boundary handler's own few
+   statements, after dispatch, escapes it; and an interrupt arriving after that
+   handler has returned, in the dispatcher's own return and exit statements, escapes
+   it too. Each of the three windows can surface as Python's own traceback or
+   signal. An interrupt in the boundary handler's own statements arrives while the
+   caught exception is still being handled, so its traceback can chain that
+   exception, with its raw, unrendered text; an interrupt after the handler has
+   returned interpolates no init value into its traceback; and a pre-dispatch
+   interrupt's traceback carries that interrupt's own text unrendered -- the stated
+   bootstrap residual. What the static route gate proves,
+   and the residual it cannot see (introspection reached at runtime through allowed
+   spellings, rendered-type constructions outside the scanned module, and the
+   sibling modules the init path calls into), is stated in the tooling docstrings.
+   What such code hands to init's own printed lines is covered at the output: every
+   value and exception text init renders or formats into a line, and every line it
+   writes, is first converted to an exact built-in string, as is each argument token
+   before the argument loop compares it, so a string subclass cannot change what is
+   rendered or printed; a JSON event line passes through unrendered only values that
+   are exactly integers, floats, booleans or null and renders any other value that is
+   not a list, tuple or mapping as text; the constructors format only registered
+   templates; and the refusal handler re-renders anything without its rendering proof. Output such code writes by itself, and in-process code that
+   rebinds init's own functions or forges the private rendering proof, are not
+   covered. The suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
+   cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.
@@ -80,13 +176,15 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack; until
 then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
-so. An implementation declares a conformance class: an upgrade-capable one carries older stores
-forward within its disclosed limits, and a fresh-only one supports one current format and refuses by
-name an older store or one in which its admission check detects an item on its closed legacy-state
-list (OPF-SPEC section 16.1). That check searches only the files section 16.1 permits and the list
-catches only what it lists, so legacy state the list omits, or that sits where the check does not
-search, goes undetected. The reference tooling targets the upgrade-capable class, but its upgrade
-into base 1.3.0 is still a target it does not yet perform.
+so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
+section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
+defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
+grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
+VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
+and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
+refuses every invocation with exit 2, reading and writing nothing.
+
+The reference tooling requires Python 3.14 or newer.
 
 ---
 
@@ -136,7 +234,7 @@ Superseded by the OPFiles identity fold (this revision):
 
 - The base discovery token is `opf`, carried in the `[opf]` base manifest table. This supersedes the
   earlier `aiqt-opf` token; the interim `devprocess` token and `[devprocess]` table are retired by the
-  OPFiles rebrand, and a legacy store still carrying them is migrated forward by `opf upgrade`.
+  OPFiles rebrand.
 - The base storage field `layout_profile` is renamed to `layout`, reserving the word "profile" for
   the base/profile mechanism (`[profiles.<name>]`).
 

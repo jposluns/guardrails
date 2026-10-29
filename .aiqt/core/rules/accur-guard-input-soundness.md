@@ -54,3 +54,16 @@ defect, such as a leaked secret, an invalid byte, or a forbidden character with 
 Where the string legitimately appears elsewhere, the invariant is asserted against the parsed or semantic
 state, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact
 string scan.
+
+A list kept by hand that selects what a generated view contains is itself such an input. Comparing the view
+with a fresh run of its generator shows that it is current, never that it is complete, since both read the
+list and an item the list omits is missing from each. A view that claims to cover a set checks, as it is
+generated, that each item of the authoritative set appears in it or is named in a recorded exclusion, and
+fails on an item in neither; a view that declares itself a curated selection makes no such claim.
+
+A check run ahead of an expensive apply step to report whether it will succeed is such a guard too and
+evaluates every condition the apply enforces, the expected state after the change as well as the state
+before it. An expensive apply and a check of whether it will succeed decide from one shared predicate, or,
+where the apply's predicate is out of reach, a test holds the check to failing on every input the apply
+rejects. A check of whether an expensive apply will succeed refuses an input the apply would refuse, such
+as a version or sequence number no greater than the last one consumed, before any long work begins.

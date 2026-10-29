@@ -7,13 +7,12 @@ unstaged. F19 is a separate hypothetical-membership predicate, not a v1 activati
 It covers literal source membership only; index modes, conflict stages, intent-to-add,
 expansion and installation require the later staging implementation.
 
-Compatibility checks cover supplied manifest/provenance bytes and snapshot deltas,
-not physical-store health or snapshot completeness. No CLI exit is promoted to an
-InitResult. Existing pure validators retain the detailed payload/schema authority.
+Compatibility checks cover supplied manifest/provenance bytes, not physical-store
+health. No CLI exit is promoted to an InitResult. Existing pure validators retain
+the detailed payload/schema authority.
 """
 import base64
 import binascii
-import copy
 import functools
 import sys
 import tomllib
@@ -116,7 +115,10 @@ def _membership(plan):
     _require(len(sets["E"]) <= 1 and all(e["path"] == operation.CHANGELOG_RELPATH
                                       for e in sets["E"]),
              "UNCLASSIFIED", "E", "only a preserved CHANGELOG.md is permitted")
-    roster = set(operation.BOOTSTRAP_SOURCE_ROSTER) | {operation.PROVENANCE_RELPATH}
+    # The roster of the plan's own generation: operation.plan_generation compares the manifest
+    # payload with the builders' bytes, so an unmatched or malformed one reads as generation 1.
+    roster = set(operation.bootstrap_source_roster(operation._plan_manifest_model(plan))) \
+        | {operation.PROVENANCE_RELPATH}
     if not sets["E"]:
         roster.add(operation.CHANGELOG_RELPATH)
     sources = [e["path"] for e in sets["S"]]
@@ -199,13 +201,55 @@ def validate_staging_membership(raw_plan, staged_paths):
 def _manifest(raw):
     _require(type(raw) is bytes and 0 < len(raw) <= store.MAX_STORE_READ_BYTES,
              "INPUT", "manifest", "expected bounded, non-empty bytes")
-    return tomllib.loads(raw.decode("utf-8", "strict"))
+    try:
+        return tomllib.loads(raw.decode("utf-8", "strict"))
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # A ValueError (undecodable bytes, a TOMLDecodeError, an over-long integer literal) passes unchanged
+        # to the @_validation wrapper, which refuses it as MALFORMED. tomllib raises RecursionError on deep
+        # nesting and (CPython 3.14.8 on) a 1001-part key, and MemoryError on a many-part key under a memory
+        # limit: each becomes that ValueError, with the same detail, so it is the same MALFORMED refusal.
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError(str(exc)) from exc
 
 
 def _compatibility(manifest, provenance):
-    _require(type(manifest.get("opf")) is dict
-             and manifest["opf"].get("spec_version") == "1.2.0",
-             "VERSION", "manifest", "requires spec_version 1.2.0; older stores need opf upgrade")
+    # The refusal is selected by the declared spec_version and always names the manifest path. Only
+    # a parseable declaration below 2.0.0 is an older store, so only it gets the hand step spec 9.2
+    # gives a tree under a refused older manifest (moved aside by hand, never by OPF); no store
+    # upgrade reaches spec_version 2.0.0 (spec 9.2 defines none), so that refusal offers none. A
+    # declaration of 2.0.0 or above marks a store at a later version, never foreign content (spec
+    # 9.2), and a missing or malformed declaration proves nothing about the store: neither is
+    # offered the hand step.
+    base = manifest.get("opf")
+    raw_version = base.get("spec_version") if type(base) is dict else None
+    declared = store._safe_display(raw_version)
+    parsed = store._parse(raw_version) if type(raw_version) is str else None
+    if type(base) is not dict:
+        raise _Refusal("VERSION", "manifest",
+                       "{} has no [opf] table; this bootstrap requires spec_version 1.2.0 "
+                       "(fail-closed)".format(MANIFEST_PATH))
+    if "spec_version" not in base:
+        raise _Refusal("VERSION", "manifest",
+                       "{} declares no spec_version; this bootstrap requires 1.2.0 "
+                       "(fail-closed)".format(MANIFEST_PATH))
+    if parsed is None:
+        raise _Refusal("VERSION", "manifest",
+                       "{} declares spec_version {}, which is not a bare SemVer; this bootstrap "
+                       "requires 1.2.0 (fail-closed)".format(MANIFEST_PATH, declared))
+    if parsed >= store._parse("2.0.0"):
+        raise _Refusal("VERSION", "manifest",
+                       "{} declares spec_version {}; this bootstrap requires 1.2.0: a store "
+                       "declaring 2.0.0 or above is a store at a later version, never foreign "
+                       "content; use the tooling that implements it (fail-closed)".format(
+                           MANIFEST_PATH, declared))
+    _require(raw_version == "1.2.0",
+             "VERSION", "manifest",
+             "{} declares spec_version {}; this bootstrap requires 1.2.0: no store upgrade reaches "
+             "spec_version 2.0.0, and this bootstrap does not operate on a store at another version; "
+             "to adopt its tree instead, first "
+             "move {} aside by hand: its files are then ordinary foreign content for a first "
+             "adoption".format(MANIFEST_PATH, declared, MANIFEST_PATH))
     _require(store.SUPPORTED_HOMES == 1 and store.homes_generation(manifest) == 1,
              "HOMES", "manifest", "this bootstrap keeps homes generation 1")
     checked = store.validate_manifest(manifest)
@@ -222,30 +266,3 @@ def _compatibility(manifest, provenance):
 def validate_compatibility(raw_manifest, *, provenance=None):
     """Absent provenance is valid. None explicitly denotes absence, not a failed read."""
     return _compatibility(_manifest(raw_manifest), provenance)
-
-
-def _snapshot(value, location):
-    _require(type(value) is dict and MANIFEST_PATH in value,
-             "INPUT", location, "expected a file snapshot containing the manifest")
-    _require(all(type(p) is str and contract._bad_relpath(p) is None
-                 and type(raw) is bytes for p, raw in value.items()),
-             "INPUT", location, "expected canonical relative paths mapped to bytes")
-
-
-@_validation
-def validate_upgrade_delta(before, after):
-    """Check a supplied 1.1.0 -> 1.2.0 snapshot delta; neither upgrade nor inventory I/O."""
-    _snapshot(before, "before")
-    _snapshot(after, "after")
-    old, new = _manifest(before[MANIFEST_PATH]), _manifest(after[MANIFEST_PATH])
-    _require(type(old.get("opf")) is dict
-             and old["opf"].get("spec_version") == "1.1.0",
-             "VERSION", "before", "expected the 1.1.0 upgrade origin")
-    expected = copy.deepcopy(old)
-    expected["opf"]["spec_version"] = "1.2.0"
-    _require(new == expected, "UPGRADE", "manifest", "only spec_version may change")
-    _require(set(before) == set(after)
-             and all(before[p] == after[p] for p in before if p != MANIFEST_PATH),
-             "UPGRADE", "files", "no files or counters may change; never invent init.toml")
-    _compatibility(new, after.get(operation.PROVENANCE_RELPATH))
-    return new

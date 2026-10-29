@@ -9,10 +9,15 @@ registration file as structured JSON, computes the merged model inserting exactl
 `plugin_entry`, re-emits deterministically, and returns (old_bytes, new_bytes, new_digest) with NO
 filesystem write, journal transaction, subprocess, or network use. The op wiring (verify old_digest
 against live bytes, require the produced bytes to hash to the plan's approval-bound new_digest,
-publish through the journal `write` primitive, reversal restoring the prior bytes) is the next slice.
+publish through the journal `write` primitive, reversal restoring the prior bytes) is the enable-hook
+handler of _opf_adopt_apply (PR3 slice 2).
 
-v1 registration family: the Claude Code `settings.json`-family shape ONLY (the canonical operand in
-_opf_adopt is `.claude/settings.json`). Any other format or shape refuses fail-closed; further
+v1 registration family: the Claude Code `settings.json`-family shape ONLY, and ONLY at the closed
+registration-path allowlist REGISTRATION_PATHS (exactly `.claude/settings.json`, the canonical operand
+in _opf_adopt): PATH IDENTITY selects the platform, never content shape, so an unrelated JSON file or
+another platform's settings file whose content happens to fit the recognized keyset still refuses, and
+the adopter's personal `.claude/settings.local.json` overlay is refused explicitly (see the allowlist
+comment). Any other format or shape refuses fail-closed; further
 platform adapters land with the enforcement pack only after their denial semantics are verified
 against official platform documentation at build time (the enforcement pack's build-time
 denial-verification rule: a platform whose semantics cannot be so verified gets no enable-hook write
@@ -24,9 +29,14 @@ THREAT MODEL (carried here per the op row's pin; the gates-manifest residue repe
 whatever the registration file registers executes with the adopter's FULL USER AUTHORITY on the
 platform's next load, and the file usually already carries the adopter's own security controls.
   1. Malicious or wrong registration content (privilege escalation). A plan row must never register
-     arbitrary command text. `plugin_entry` is a token naming a member of the digest-verified
-     installed pack (the plant-governance trust gate); the merge inserts exactly that pinned token
-     and nothing else; the exact post-merge bytes are pinned by the plan's `new_digest`, which the
+     arbitrary command text. The op-row grammar (`_opf_adopt._is_hook_entry`) admits exactly one
+     `plugin_entry`, `_opf_adopt.HOOK_COMMAND`: the isolated interpreter running the deny hook at
+     `_opf_adopt.HOOK_MEMBER`, whose path comes from the platform's project directory, so no other
+     repository file is chosen; the interpreter is the first python3 on PATH where the platform
+     runs the command, which this grammar does not pin; the plan validator refuses a registration
+     whose plan plants no file at HOOK_MEMBER, and plant-governance plants that file only from its own
+     digest-verified pack member (the trust gate); the merge inserts exactly that command and
+     nothing else; the exact post-merge bytes are pinned by the plan's `new_digest`, which the
      single approval binds transitively through `plan_digest`, so the adopter's one informed yes
      covers the precise executable registration byte-exact. The approval presentation must quote
      what will execute and when (on the platform's next load, not at apply).
@@ -108,11 +118,16 @@ Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a findi
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_adopt_hook.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_adopt_hook.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import json
@@ -147,6 +162,24 @@ HOOK_TYPES = ("command",)
 # would silently exempt tools and is a PR6 (enforcement-pack) decision, not this library's.
 ENTRY_EVENT = "PreToolUse"
 ENTRY_MATCHER = "*"
+
+# The closed v1 registration-path allowlist: the ONE adopter file of the supported family that may
+# take an enable-hook write. The platform is identified by PATH IDENTITY, decided before any read:
+# recognizing settings-shaped JSON content never admits a write, because an unrelated JSON file, or
+# another platform's settings file, can carry the same recognized keyset. `.claude/settings.local.json`
+# is refused EXPLICITLY: it is the adopter's personal, normally git-ignored overlay (it may carry env
+# secrets), never the shared project registration the one approval binds. Further platform adapters
+# widen this tuple only with the enforcement pack, after their deny semantics are verified against
+# official platform documentation at build time (above: an unverifiable platform gets no enable-hook
+# write at all).
+REGISTRATION_PATHS = (".claude/settings.json",)
+
+
+def supported_registration_path(path):
+    """Whether `path` is EXACTLY a supported v1 registration target, compared byte-for-byte with no
+    normalization (a differently cased, composed, re-rooted or trailing-slashed spelling refuses
+    fail-closed)."""
+    return isinstance(path, str) and path in REGISTRATION_PATHS
 
 # The closed v1 RECOGNIZED top-level keyset: `hooks` is the structured surface this library merges
 # into; the rest are recognized-opaque (preserved through the model, never interpreted). The set is
@@ -357,7 +390,11 @@ def _parse(raw):
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_pairs,
                           parse_constant=_no_constant, parse_float=_parse_number,
                           parse_int=_parse_number)
-    except (ValueError, RecursionError) as exc:  # ValueError covers JSONDecodeError/UnicodeDecodeError
+    # ValueError covers JSONDecodeError/UnicodeDecodeError. MemoryError is defence in depth: every
+    # parsed input (the old registration and the emitted bytes) is held to MAX_REGISTRATION_BYTES
+    # before it gets here, so the scanner cannot practically exhaust memory; if the host does, the
+    # parse is refused the same way rather than escaping as a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise _ParseRefusal("registration bytes are not strict JSON: {}".format(exc)) from None
 
 
@@ -796,7 +833,7 @@ def _entry_occurrences(model, plugin_entry):
 
 def merge_registration(old_bytes, plugin_entry):
     """Compute the merged registration for `old_bytes` + `plugin_entry`, purely. No filesystem write:
-    the caller (the enable-hook op wiring, next slice) publishes new_bytes through the journal only
+    the caller (the enable-hook handler of _opf_adopt_apply) publishes new_bytes through the journal only
     after the plan's approval-bound new_digest matches. THE ENTRY GATE comes first (fix 5: one
     gate per public function, never per-dunder hardening): old_bytes must be EXACTLY bytes and
     plugin_entry EXACTLY str, both by type identity, and anything else (a bytearray, a bytes or
@@ -989,7 +1026,7 @@ def self_test():
     old = _emit(canonical_registration())
 
     # 0: vocabulary and seam consistency. The insertion pins are inside their own closed sets, and the
-    # op row this library serves still declares exactly the inputs the wiring slice will bind.
+    # op row this library serves still declares exactly the inputs the apply engine's wiring binds.
     check("entry-event-in-vocab", ENTRY_EVENT in HOOK_EVENTS)
     check("events-unique", len(set(HOOK_EVENTS)) == len(HOOK_EVENTS))
     check("top-keys-unique-and-recognize-hooks",
@@ -1000,6 +1037,32 @@ def self_test():
     check("op-seam-journal-write", op.journal == ("write",))
     check("op-seam-canonical-operand",
           schema.canonical_op("enable-hook")["registration_path"] == ".claude/settings.json")
+    # QA round 1 blocker: the closed registration-path allowlist. PATH identity, never content
+    # shape, selects the platform: the canonical op row names a supported target, and the adopter's
+    # personal settings.local.json, another platform's settings file, an unrelated JSON file, a
+    # case variant, a re-rooted spelling and a non-string each refuse.
+    check("registration-path-allowlist-pinned", REGISTRATION_PATHS == (".claude/settings.json",))
+    check("registration-path-is-hook-registration", REGISTRATION_PATHS == (schema.HOOK_REGISTRATION,))
+    # The reviewed settings template (_opf_adopt.SETTINGS_TEMPLATE_MEMBER) is exactly this merge of the fixed
+    # command into an empty settings table, and merging the command into it again is the verified no-op.
+    # The template is read here, before the purity harness below is armed.
+    template_rel = schema.SETTINGS_TEMPLATE_MEMBER[len(schema.PACK_MIRROR_ROOT) + 1:]
+    try:
+        template = (Path(__file__).resolve().parent.parent / template_rel).read_bytes()
+    except OSError:
+        template = None
+    pinned = merge_registration(b"{}", schema.HOOK_COMMAND)
+    again = merge_registration(template, schema.HOOK_COMMAND) if template is not None else None
+    check("settings-template-pinned", template is not None and pinned.status is VALID
+          and template == pinned.new_bytes and again.status is VALID and again.changed is False
+          and again.new_bytes == template)
+    check("registration-path-canonical-op-supported",
+          supported_registration_path(schema.canonical_op("enable-hook")["registration_path"]))
+    for bad in (".claude/settings.local.json", ".gemini/settings.json", ".cursor/hooks.json",
+                ".codex/config.json", "config/application.json", ".Claude/settings.json",
+                "claude/settings.json", "x/.claude/settings.json", ".claude/settings.json/", "",
+                None):
+        check("registration-path-refused-{!r}".format(bad), not supported_registration_path(bad))
 
     # 1: the successful merge, computed under the refusing purity harness (the docstring above and
     # the module-level comment state its exact boundary; a denial is BOTH recorded and raised, so a
@@ -2130,23 +2193,71 @@ def self_test():
     # parses but exceeds the Python-level emission depth (roughly the interpreter recursion limit)
     # exhausts EMISSION on the changed-merge path (mapped by the merged-emission handler, whose
     # message never claims a verification ran); dropping either RecursionError handler turns
-    # its vector into an uncaught crash here.
-    deep_parse = b"[" * 100000 + b"]" * 100000
-    r = merge_registration(deep_parse, entry)
-    check("deep-nesting-parse-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
-    deep_env = b'{"env":' + b"[" * 2000 + b"]" * 2000 + b"}"
-    r = merge_registration(deep_env, entry)
+    # its vector red here. Both exhaustions are INJECTED (json.loads, then the emitter's value
+    # walk, raising RecursionError) rather than provoked by a fixed deep body: the depth at which
+    # the json scanner overflows depends on the build and its C stack, and the depth at which
+    # emission overflows depends on the recursion limit (at a higher limit a deep body reaches
+    # the emission byte bound first), so a fixed body can take another refusal path and the
+    # vector would stop exercising its handler. Each input merges cleanly without its injection
+    # and each finding is pinned to the injected text, so an injection that stops firing turns
+    # its vector red, never a false green.
+    def _merge_or_raised(raw):
+        try:
+            return merge_registration(raw, entry)
+        except (RecursionError, MemoryError):
+            return None
+
+    real_loads = json.loads
+    # The parse handler's MemoryError member gets the same injected vector (practically unreachable
+    # through real input under the byte bound; see _parse).
+    for parse_exc, parse_vector in ((RecursionError, "deep-nesting-parse-cannot-eval"),
+                                    (MemoryError, "parse-memory-exhaustion-cannot-eval")):
+        def _overflowing_loads(*args, _exc=parse_exc, **kwargs):
+            raise _exc("injected parser overflow")
+
+        json.loads = _overflowing_loads
+        try:
+            r = _merge_or_raised(b"{}")
+        finally:
+            json.loads = real_loads
+        check(parse_vector,
+              r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+              and r.findings == ["registration bytes are not strict JSON: injected parser overflow"])
+    real_emit_value = _emit_value
+
+    def _overflowing_emit_value(*args, **kwargs):
+        raise RecursionError("injected emission overflow")
+
+    try:
+        globals()["_emit_value"] = _overflowing_emit_value
+        r = _merge_or_raised(b"{}")
+    finally:
+        globals()["_emit_value"] = real_emit_value
     check("deep-nesting-emission-cannot-eval",
-          r.status is CANNOT_EVALUATE and r.new_bytes is None)
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None)
     # the emission refusal is reported as an emission refusal, never as a failed verification
     # (catching it in the verification handler turns this red).
     check("deep-nesting-emission-not-reported-as-verification",
-          len(r.findings) == 1
-          and r.findings[0].startswith("merged registration cannot be emitted: ")
-          and "verification" not in r.findings[0])
+          r is not None
+          and r.findings == ["merged registration cannot be emitted: injected emission overflow"])
+    # the byte-bound refusal of a nested body is its own vector: nesting kept far below any
+    # recursion limit (66 levels) under a wide array whose every element emits about 130 bytes
+    # of indentation, so emission always reaches the byte bound and never exhausts recursion.
+    # The bound message is pinned, so dropping the _EmitBoundRefusal handler (the refusal then
+    # falls to the emission handler) turns it red.
+    bound_env = (b'{"env":' + b"[" * 64 + b"[" + b"0," * 19999 + b"0]" + b"]" * 64 + b"}")
+    r = _merge_or_raised(bound_env)
+    check("deep-nesting-emission-byte-bound-refuses",
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and r.findings == ["merged registration would exceed {} bytes (the same bound the "
+                             "input is held to, refused by the emitter's running byte "
+                             "count so the over-bound output is never built and an "
+                             "accepted output always no-ops on its next merge)".format(
+                                 MAX_REGISTRATION_BYTES)])
     # a FINDING never recurses over adopter content either: exact bytes nesting an array in
-    # the entry type field just under the parser's own depth limit (found here by bisection,
-    # since the limit depends on the build and its stack) parse, then refuse on the type with
+    # the entry type field just under the parser's own depth limit or the input byte bound,
+    # whichever is lower (found here by bisection, since the parser limit depends on the build
+    # and its stack), parse, then refuse on the type with
     # the fixed array descriptor. A repr-based finding exhausts the stack on it on builds
     # whose repr overflows below the parser limit (round 7: from about 47,000 levels, against
     # a parser limit near 58,000, on CPython 3.14), an uncaught RecursionError.
@@ -2163,7 +2274,12 @@ def self_test():
             return False
         return True
 
-    low, high = 0, 100000
+    # the search is bounded by the input byte bound, not by a guessed depth, so it does not
+    # depend on the stack size: the deepest body merge_registration reads at all fills
+    # MAX_REGISTRATION_BYTES, and where the stack lets the parser accept that depth the vector
+    # uses it. The bisection assumes only that parsing is monotone in depth (a body that
+    # parses still parses with fewer levels).
+    low, high = 0, (MAX_REGISTRATION_BYTES - len(type_head) - len(type_tail)) // 2
     if _parses(_deep_type(high)):
         low = high
     while high - low > 1:
@@ -2281,15 +2397,24 @@ def self_test():
           and all(validate_registration_model(_timeout_model(good)).status is VALID
                   for good in ("60", "-0", "1.5E3", "1e-400")))
     # no FINDING path formats a caller value in a way that can raise: an exact int past the
-    # interpreter's digit limit and a code-built array nested far past any repr depth, each
-    # in the entry type field, refuse with a fixed descriptor (a repr-based finding raises
-    # ValueError on the first and RecursionError on the second).
-    deep_array = []
-    for _ in range(200000):
-        deep_array = [deep_array]
+    # interpreter's digit limit and a nested array whose repr overflows, each in the entry type
+    # field, refuse with a fixed descriptor (a repr-based finding raises ValueError on the first
+    # and RecursionError on the second). The array's repr overflow is INJECTED (its innermost
+    # _Number's repr raises RecursionError while the vector runs) rather than provoked by nesting
+    # far past a repr depth: that depth depends on the build and its C stack, so on a large enough
+    # stack a deep array's repr succeeds and the vector would stop exercising the never-raises
+    # rule. The array holds only types the entry gate admits, and every formatting of it (repr,
+    # str, format) reaches the injected repr, so a finding that formats it raises at any stack size.
+    deep_array = [[[_Number("1")]]]
+    real_number_repr = _Number.__dict__["__repr__"]
+
+    def _overflowing_number_repr(self):
+        raise RecursionError("injected repr overflow")
+
     for name, type_value, shown in (("huge-int", 10 ** 5000, _SHOWN_INT),
                                     ("int-in-array", [10 ** 5000], _SHOWN_ARRAY),
                                     ("deep-array", deep_array, _SHOWN_ARRAY)):
+        _Number.__repr__ = _overflowing_number_repr
         try:
             v = validate_registration_model({"hooks": {"Stop": [{"hooks": [
                 {"command": "x", "type": type_value}]}]}})
@@ -2298,7 +2423,21 @@ def self_test():
                     shown)]
         except (ValueError, RecursionError):
             refused = False
+        finally:
+            _Number.__repr__ = real_number_repr
         check("model-{}-type-refuses-never-raises".format(name), refused)
+    # the injection fires while installed and is gone after restore, so the vector above can
+    # never pass because the injected repr silently stopped raising
+    _Number.__repr__ = _overflowing_number_repr
+    try:
+        repr(deep_array)
+        injected = False
+    except RecursionError:
+        injected = True
+    finally:
+        _Number.__repr__ = real_number_repr
+    check("model-deep-array-repr-injection-fires",
+          injected and repr(deep_array) == "[[[" + repr(_Number("1")) + "]]]")
     del deep_array, type_value
 
     # 11: findings and refusal messages BOUND what they repeat (_shown): on every path that
@@ -2431,7 +2570,7 @@ def main():
     if "--self-test" in args or "--selftest" in args:
         return self_test()
     print("usage: _opf_adopt_hook.py --self-test (a pure library module; the enable-hook op wiring "
-          "is a later slice)", file=sys.stderr)
+          "is _opf_adopt_apply's)", file=sys.stderr)
     return 2
 
 

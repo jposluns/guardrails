@@ -9,6 +9,19 @@ The optional .aiqt/release-cut.toml has exactly five fields:
   base-changelog-sha256 = "<SHA-256 of the complete comparison-base blob>"
 Initialization instead requires operation = "initialize", previous-version = "",
 and base-changelog-sha256 = "absent", against proven absence only.
+The optional .aiqt/pending-fixes.toml binds a hand-kept pending-fix list to one
+cut: schema = 1, release = "<the version being cut>", and a fix array of
+tables, each carrying an id and a state from open, done and deferred; a
+deferred item also carries a rationale and target. Every id, rationale and
+target must be a string holding a non-whitespace character. Appending a
+release identity is refused while any listed item is open, naming each open
+item; a cut that removes a record still listing open items is refused the
+same way, naming them. A present record that is malformed, unreadable, or a
+symlink cannot be evaluated on any transition; the release binding is checked
+only on a cut, where a record bound to another release cannot be evaluated.
+When neither snapshot holds a record, nothing changes. The list is hand-kept,
+so it shows currency for the items it names, never completeness of what is
+wrong.
 
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
@@ -47,6 +60,20 @@ not transactionally; concurrent writers must be excluded by the caller.
 Usage: python3 -I -B tools/check_release_cut.py [--root DIR] [--protected REF] [--base OID]
        python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_release_cut.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import argparse
 import datetime
 import hashlib
@@ -55,7 +82,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -65,13 +91,16 @@ from _semver import _parse  # noqa: E402
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
-PATHS = (CHANGELOG, DECLARATION)
+PENDING = ".aiqt/pending-fixes.toml"
+PATHS = (CHANGELOG, DECLARATION, PENDING)
 TIMEOUT = 30
 OID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 DECL_KEYS = {
     "schema", "operation", "previous-version", "next-version",
     "base-changelog-sha256",
 }
+PENDING_KEYS = {"schema", "release", "fix"}
+PENDING_STATES = ("open", "done", "deferred")
 
 
 class CannotEvaluate(ValueError):
@@ -91,7 +120,7 @@ def document(raw, label):
     require(isinstance(raw, bytes), label + ": expected bytes")
     try:
         return tomllib.loads(raw.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate(label + ": invalid UTF-8/TOML: " + str(exc)) from exc
 
 
@@ -159,8 +188,37 @@ def parse_declaration(raw, label="declaration"):
     return dict(data)
 
 
+def parse_pending(raw, label="pending fixes"):
+    """Accept absent or TOML bytes for the optional pending-fix record; validate the whole record."""
+    if raw is None:
+        return None
+    data = document(raw, label)
+    require(isinstance(data, dict) and set(data) == PENDING_KEYS,
+            label + ": expected exactly the schema, release and fix fields")
+    require(type(data["schema"]) is int and data["schema"] == 1,
+            label + ": unsupported schema (expected integer 1)")
+    version(data["release"], label + ": release")
+    require(isinstance(data["fix"], list), label + ": fix must be an array of tables")
+    identifiers = set()
+    for index, item in enumerate(data["fix"]):
+        where = "{}: fix[{}]".format(label, index)
+        require(isinstance(item, dict), where + ": expected table")
+        require(item.get("state") in PENDING_STATES,
+                where + ": state must be open, done or deferred")
+        keys = {"id", "state", "rationale", "target"} if item["state"] == "deferred" else {"id", "state"}
+        require(set(item) == keys,
+                where + ": a deferred item carries exactly id, state, rationale and target;"
+                " an open or done item exactly id and state")
+        for key in keys - {"state"}:
+            require(isinstance(item[key], str) and bool(item[key].strip()),
+                    where + ": " + key + " must be a nonblank string")
+        require(item["id"] not in identifiers, where + ": duplicate fix id")
+        identifiers.add(item["id"])
+    return dict(data)
+
+
 def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
-                        base_decl, head_decl):
+                        base_decl, head_decl, base_pending=None, head_pending=None):
     """Return (exit_code, detail). Only the caller can prove that None is absence."""
     try:
         base = ([] if base_changelog_bytes_or_absent is None else
@@ -168,6 +226,8 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
         head = parse_changelog(head_changelog_bytes, "head changelog")
         base_decl = parse_declaration(base_decl, "base declaration")
         head_decl = parse_declaration(head_decl, "head declaration")
+        base_pending = parse_pending(base_pending, "base pending fixes")
+        head_pending = parse_pending(head_pending, "head pending fixes")
     except (CannotEvaluate, RecursionError) as exc:
         return 2, "cannot evaluate: " + str(exc)
     # Parse every document before deciding policy, including present stale declarations.
@@ -194,6 +254,21 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
     )
     if not authorized:
         return 1, "missing, unchanged or mismatched release declaration"
+    if head_pending is not None:
+        # The record proves currency only for the one cut it names, never completeness.
+        if head_pending["release"] != after[-1]:
+            return 2, ("cannot evaluate: pending fixes: record is bound to release "
+                       + head_pending["release"] + ", not to the appended " + after[-1])
+        open_items = [item["id"] for item in head_pending["fix"] if item["state"] == "open"]
+        if open_items:
+            return 1, "pending fixes still open: " + ", ".join(open_items)
+    elif base_pending is not None:
+        # Removing the record does not resolve its items: a cut that deletes a
+        # record still listing open items is refused like one that leaves them open.
+        removed_open = [item["id"] for item in base_pending["fix"] if item["state"] == "open"]
+        if removed_open:
+            return 1, ("pending fixes still open: " + ", ".join(removed_open)
+                       + " (record removed, not resolved)")
     # Diagnostics must remain total even when a policy guard is mutated away.
     return 0, "release transition accepted"
 
@@ -518,7 +593,7 @@ def local_report(root, protected=None, before=None):
     comparisons.extend((name, snapshot_base, binding["head_tree"]) for name in names)
     for name, base_tree, head_tree in comparisons:
         try:
-            base = ((None, None) if base_tree is None else
+            base = ((None,) * len(PATHS) if base_tree is None else
                     tuple(tree_blob(root, base_tree, path) for path in PATHS))
             if name == "HEAD" or name.startswith("commit:"):
                 candidate = tuple(tree_blob(root, head_tree, path) for path in PATHS)
@@ -526,13 +601,16 @@ def local_report(root, protected=None, before=None):
                 candidate = index_snapshot(root)
             else:
                 candidate = tuple(working_blob(root, path) for path in PATHS)
-            code, detail = evaluate_transition(base[0], candidate[0], base[1], candidate[1])
+            code, detail = evaluate_transition(base[0], candidate[0], base[1], candidate[1],
+                                               base[2], candidate[2])
             results.append({
                 "snapshot": name, "code": code, "detail": detail,
                 "base_changelog_sha256": digest(base[0]),
                 "head_changelog_sha256": digest(candidate[0]),
                 "base_declaration_sha256": digest(base[1]),
                 "head_declaration_sha256": digest(candidate[1]),
+                "base_pending_fixes_sha256": digest(base[2]),
+                "head_pending_fixes_sha256": digest(candidate[2]),
             })
         except (OSError, ValueError, RecursionError) as exc:
             results.append({"snapshot": name, "code": 2, "detail": str(exc)})
@@ -561,6 +639,15 @@ def fixture_declaration(base, previous="1.0.0", following="1.1.0", **changes):
     return ("\n".join(key + " = " + json.dumps(value) for key, value in data.items()) + "\n").encode()
 
 
+def fixture_pending(release="1.1.0", *items):
+    text = "schema = 1\nrelease = " + json.dumps(release) + "\n"
+    if not items:
+        return (text + "fix = []\n").encode()
+    for item in items:
+        text += "\n[[fix]]\n" + "".join(key + " = " + json.dumps(value) + "\n" for key, value in item)
+    return text.encode()
+
+
 def test_cases():
     """Transition policy, local ancestry, PR merge binding and explicit push refs."""
     base = fixture_changelog(["1.0.0"])
@@ -569,9 +656,10 @@ def test_cases():
     history = fixture_declaration(base, **{"base-changelog-sha256": "f" * 64})
     cases = {}
 
-    def add(name, expected, before=base, after=base, old=None, new=None, tweak=None):
+    def add(name, expected, before=base, after=base, old=None, new=None,
+            fixes=None, base_fixes=None, tweak=None):
         require(name not in cases, "duplicate self-test ID: " + name)
-        cases[name] = (expected, before, after, old, new, tweak)
+        cases[name] = (expected, before, after, old, new, fixes, base_fixes, tweak)
 
     add("ordinary-content", 0)
     add("notes", 0, after=fixture_changelog(["1.0.0"], "curated note"))
@@ -623,6 +711,31 @@ def test_cases():
     add("declaration-only", 1, new=declaration)
     add("declaration-delete", 1, old=history)
     add("bad-base-order", 1, before=fixture_changelog(["1.1.0", "1.0.0"]))
+    open_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "open")))
+    done_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "done")))
+    deferred_fix = fixture_pending("1.1.0", (("id", "loose-end"), ("state", "deferred"),
+                                             ("rationale", "waiting on the next cycle"),
+                                             ("target", "1.2.0")))
+    add("pending-open", 1, after=cut, new=declaration, fixes=open_fix)
+    add("pending-open-second", 1, after=cut, new=declaration,
+        fixes=fixture_pending("1.1.0", (("id", "groundwork"), ("state", "done")),
+                              (("id", "loose-end"), ("state", "open"))))
+    add("pending-open-initialize", 1, before=None,
+        new=fixture_declaration(None, following="1.0.0"),
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "open"))))
+    add("pending-done-initialize", 0, before=None,
+        new=fixture_declaration(None, following="1.0.0"),
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
+    add("pending-bound-elsewhere", 2, after=cut, new=declaration,
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
+    add("pending-done", 0, after=cut, new=declaration, fixes=done_fix)
+    add("pending-deferred", 0, after=cut, new=declaration, fixes=deferred_fix)
+    add("pending-empty", 0, after=cut, new=declaration, fixes=fixture_pending())
+    add("pending-open-no-cut", 0, fixes=open_fix)
+    add("pending-progress", 0, base_fixes=open_fix, fixes=done_fix)
+    add("pending-open-removed", 1, after=cut, new=declaration, base_fixes=open_fix)
+    add("pending-done-removed", 0, after=cut, new=declaration, base_fixes=done_fix)
+    add("pending-symlink", 2, tweak="pending-symlink")
     bad_logs = {
         "toml": b"[",
         "utf8": b"\xff",
@@ -656,6 +769,31 @@ def test_cases():
     for label, raw in bad_declarations.items():
         add("head-decl-" + label, 2, new=raw)
         add("base-decl-" + label, 2, old=raw)
+    bad_pending = {
+        "toml": b"[", "utf8": b"\xff", "empty": b"",
+        "schema": done_fix.replace(b"schema = 1", b"schema = 2"),
+        "boolean": done_fix.replace(b"schema = 1", b"schema = true"),
+        "release": done_fix.replace(b'"1.1.0"', b'"01.1.0"'),
+        "unknown": b"extra = 1\n" + done_fix,
+        "item-unknown": done_fix + b"extra = 1\n",
+        "state": done_fix.replace(b'"done"', b'"fixed"'),
+        "blank-id": done_fix.replace(b'"loose-end"', b'""'),
+        "typed-id": done_fix.replace(b'"loose-end"', b"7"),
+        "space-id": done_fix.replace(b'"loose-end"', b'" "'),
+        "duplicate-id": done_fix + b'\n[[fix]]\nid = "loose-end"\nstate = "done"\n',
+        "missing-fix": b'schema = 1\nrelease = "1.1.0"\n',
+        "typed-fix": b'schema = 1\nrelease = "1.1.0"\nfix = 7\n',
+        "typed-item": b'schema = 1\nrelease = "1.1.0"\nfix = [7]\n',
+        "extra-field": done_fix + b'target = "1.2.0"\n',
+        "missing-rationale": deferred_fix.replace(b'rationale = "waiting on the next cycle"\n', b""),
+        "missing-target": deferred_fix.replace(b'target = "1.2.0"\n', b""),
+        "blank-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'""'),
+        "space-rationale": deferred_fix.replace(b'"waiting on the next cycle"', b'" "'),
+        "space-target": deferred_fix.replace(b'"1.2.0"', b'" "'),
+    }
+    for label, raw in bad_pending.items():
+        add("head-fix-" + label, 2, fixes=raw)
+        add("base-fix-" + label, 2, base_fixes=raw)
     for name in ("missing-head", "missing-object", "broken-ancestry", "unreadable",
                  "head-symlink", "head-gitlink", "working-symlink", "working-directory",
                  "parent-symlink", "unmerged-index", "unresolved-base", "ambiguous-base",
@@ -726,7 +864,7 @@ def fixture_environment(home):
 
 
 def fixture_repo(parent, name, case, env):
-    expected, before, after, old, new, tweak = case
+    expected, before, after, old, new, fixes, base_fixes, tweak = case
     root = parent / name
     root.mkdir()
 
@@ -740,8 +878,8 @@ def fixture_repo(parent, name, case, env):
                 name + ": fixture git failed: " + result.stderr.decode("utf-8", "replace"))
         return result.stdout.strip().decode("ascii")
 
-    def write(log, decl):
-        for path, data in ((CHANGELOG, log), (DECLARATION, decl)):
+    def write(log, decl, pending=None):
+        for path, data in ((CHANGELOG, log), (DECLARATION, decl), (PENDING, pending)):
             target = root / path
             if data is None:
                 target.unlink(missing_ok=True)
@@ -762,12 +900,12 @@ def fixture_repo(parent, name, case, env):
     (root / "seed.txt").write_text("fixture\n", encoding="utf-8")
     (root / ".aiqt").mkdir()
     if tweak in ("root", "push-root"):
-        write(after, new)
+        write(after, new, fixes)
         head = commit("initialized")
         command("update-ref", "refs/remotes/origin/main", head)
         command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
         return root
-    write(before, old)
+    write(before, old, base_fixes)
     base = commit("base")
     command("update-ref", "refs/remotes/origin/main", base)
     command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
@@ -780,13 +918,13 @@ def fixture_repo(parent, name, case, env):
         # The target advanced, but the candidate declares against the old tracking tip.
         write(fixture_changelog(["1.0.0", "1.1.0"]), None)
         first_parent = commit("advanced target")
-    write(after, new)
+    write(after, new, fixes)
     (root / "consumer.txt").write_text("ordinary consumer edit\n", encoding="utf-8")
     if tweak == "squash":
         # A preparation commit exists, but the reviewed endpoint is one squashed commit.
-        write(after, old)
+        write(after, old, base_fixes)
         commit("preparation")
-        write(after, new)
+        write(after, new, fixes)
     head = commit("candidate")
     tree = command("rev-parse", head + "^{tree}")
     if binding_fixture:
@@ -841,7 +979,7 @@ def fixture_repo(parent, name, case, env):
                   fixture_declaration(after, previous="1.1.0", following="1.2.0"))
             head = commit("second declared cut")
         elif tweak == "push-repaired":
-            write(before, old)
+            write(before, old, base_fixes)
             head = commit("revert undeclared cut")
         elif tweak in ("push-base-second-parent", "push-base-unrelated"):
             other = command("commit-tree", tree, payload=b"other root\n")
@@ -869,6 +1007,9 @@ def fixture_repo(parent, name, case, env):
             (root / CHANGELOG).symlink_to("seed.txt")
         if tweak == "head-symlink":
             commit("symlink changelog")
+    elif tweak == "pending-symlink":
+        (root / PENDING).symlink_to("seed.txt")
+        commit("symlink pending fixes")
     elif tweak == "parent-symlink":
         (root / ".aiqt").rmdir()
         (root / "outside").mkdir()
@@ -1159,6 +1300,80 @@ import os
 import sys
 
 '''
+
+
+def _close_census_eio(harness, seam="fstat", code=None):
+    """The copy's descriptor census fails closed: a held /dev/null descriptor is listed by
+    harness._st_fd_table; with its census read failing errno `code` (EIO by default; os.<seam>: its fstat, or
+    the readlink of its /proc/self/fd link) the table must raise harness._StCensusError naming it, never omit
+    it as closed. The one exception is ENOENT on the link read (the number has no entry), where the table must
+    list the descriptor with no kind (None). An independent fstat must still see it open afterwards, else the
+    check proves nothing."""
+    import errno
+    code = errno.EIO if code is None else code
+    fd = os.open(os.devnull, os.O_RDONLY)
+    real_fstat, real_readlink = os.fstat, os.readlink
+    real_seam = real_readlink if seam == "readlink" else real_fstat
+
+    def failing(number, *args, **kwargs):
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
+            raise OSError(code, "injected census read failure")
+        return real_seam(number, *args, **kwargs)
+    try:
+        listed = fd in harness._st_fd_table()
+        if seam == "readlink":
+            os.readlink = failing
+        else:
+            os.fstat = failing
+        try:
+            table = harness._st_fd_table()
+            got = "omitted" if fd not in table else "no-kind" if table[fd][2] is None else "kind"
+        except harness._StCensusError as exc:
+            got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
+        finally:
+            os.fstat, os.readlink = real_fstat, real_readlink
+        try:
+            real_fstat(fd)
+            still_open = True
+        except OSError:
+            still_open = False
+    finally:
+        os.close(fd)
+    want = "no-kind" if (seam, code) == ("readlink", errno.ENOENT) else "raised"
+    return listed and still_open and got == want
+
+
+def _close_anon_reuse_close_fault(harness):
+    """The copy's harness._st_anon_reuse leaves no descriptor open when its epoll's close raises. select.epoll
+    is wrapped so close() closes the real epoll and then raises OSError(EIO); the call must raise that error,
+    and harness._st_fd_table must read as it did before the call. None where there is no epoll or eventfd."""
+    import errno
+    import select
+    if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
+        return None
+    real_epoll = select.epoll
+
+    class RaisingEpoll:
+        def __init__(self):
+            self.real = real_epoll()
+
+        def fileno(self):
+            return self.real.fileno()
+
+        def close(self):
+            self.real.close()
+            raise OSError(errno.EIO, "injected epoll close failure")
+
+    before = harness._st_fd_table()
+    select.epoll = RaisingEpoll
+    try:
+        harness._st_anon_reuse(harness._st_fd_table)
+        raised = False
+    except OSError as exc:
+        raised = exc.errno == errno.EIO
+    finally:
+        select.epoll = real_epoll
+    return raised and harness._st_fd_table() == before
 
 
 def _close_harness_in_step(journal, copy):
@@ -1724,6 +1939,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
      _CS_LEGS.format("_open_dir_nofollow")),
+    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 1,
+     "false positive: _close_held and _close_held_into pop each number out of the list before its one close, "
+     "so the final close-out's pass over a list the release path already emptied closes none twice"),
     ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
      "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
      "later close never runs after it"),
@@ -1758,9 +1976,33 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
                    "an absent component left fd None), never prev")),
+    ("tools/orch_register.py", "_dirs_created", "TRY", "prev", "dir_fd", 1,
+     _CS_P1.format("prev, dir_fd = dir_fd, nxt runs before os.close(prev), so the handler closes nxt, never "
+                   "prev")),
+    ("tools/orch_register.py", "_dirs_created", "AFTER", "dir_fd", "dir_fd", 1,
+     "false positive: the unwind handler's wrapped close (its OSError suppressed so the in-flight refusal "
+     "wins) sits in a handler whose own block ends in a raise, so the wrapped close after the try never "
+     "runs after it"),
+    ("tools/orch_register.py", "_made_dirs_swept", "REBIND", "prev", "", 2,
+     _CS_P1.format("the sweep's every close is _swept_closed(prev, ...), and prev joins cur_fd and nxt_fd; "
+                   "each of these two body closes (the descent handoff and the stopped-descent release) "
+                   "runs only after the statement that took its number OUT of the slots (cur_fd, cur_on, "
+                   "nxt_fd, nxt_on = nxt_fd, nxt_on, None, None, or prev, nxt_fd = nxt_fd, None), so no "
+                   "slot holds the closed number even when the close raises any exception class, and each "
+                   "later re-binding of prev takes a different, still-open number out of a slot")),
+    ("tools/orch_register.py", "_made_dirs_swept", "TRY", "prev", "prev", 4,
+     _CS_P1.format("the three body closes (descent handoff, stopped-descent release, climb handoff) each "
+                   "close a number already re-bound out of both slots, and the finally closes only what a "
+                   "slot still holds, clearing that slot first (prev, nxt_fd = nxt_fd, None in the nested "
+                   "try, prev, cur_fd = cur_fd, None in its finally), so the finally never reaches a number "
+                   "a body close closed, and its nxt_fd close (the fourth line) and cur_fd close are two "
+                   "slots, the second attempted even when the first raises")),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),
+    ("tools/_adapter_compose.py", "_target_dir_fd", "TRY", "parent", "directory", 1,
+     _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally (guarded "
+                   "by handed, which a successful hand-over sets) closes child, never parent")),
     ("tools/pin.py", "do_recover", "TRY", "fd", "root_fd", 4,
      _CS_P1.format("each fd, root_fd = root_fd, None runs before os.close(fd), so the handler's `if root_fd is "
                    "not None` guard never reaches the closed number")),
@@ -2199,6 +2441,168 @@ def _close_sweep_check(root):
     return failures
 
 
+# A census read error injected through a tool's own self-test: a held /dev/null descriptor whose fstat fails
+# EIO when the descriptor census (_st_fd_table) reads it, and only when the census runs under the function
+# named by the second argument ("*": any census). The real self-test runs as __main__; the held number is
+# printed first so the report can be matched to it.
+CENSUS_DRIVER = """
+import errno, os, runpy, sys
+path, target = sys.argv[1], sys.argv[2]
+held = os.open(os.devnull, os.O_RDONLY)
+real_fstat = os.fstat
+def failing(number, *args, **kwargs):
+    frame = sys._getframe(1)
+    if number == held and frame.f_code.co_name == "_st_fd_table":
+        while frame is not None and target not in ("*", frame.f_code.co_name):
+            frame = frame.f_back
+        if frame is not None:
+            raise OSError(errno.EIO, "injected census read failure")
+    return real_fstat(number, *args, **kwargs)
+print("census-held " + str(held), file=sys.stderr, flush=True)
+os.fstat = failing
+sys.argv = [path] + sys.argv[3:]
+sys.path.insert(0, os.path.dirname(path))
+runpy.run_path(path, run_name="__main__")
+"""
+
+# Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
+# caller that reaches its clause: (path, census caller, self-test arguments).
+_CENSUS_MAPPINGS = (
+    ("tools/check_footer.py", "*", ("--self-test",)),
+    ("tools/check_overclaim.py", "*", ("--self-test",)),
+    ("tools/check_gensrc_failclose.py", "*", ("--self-test",)),
+    ("tools/gen_crosswalk.py", "*", ("--self-test",)),
+    ("tools/import_cwe.py", "*", ("--self-test",)),
+    ("opf/tools/_journal.py", "*", ("--self-test",)),                     # the close-vector clause
+    ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",)),      # the descriptor-helper clause
+)
+
+
+def _census_mapping_check(root):
+    """Each self-test in _CENSUS_MAPPINGS, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
+    report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
+    never a traceback (exit 1) or a pass. Returns (failures, runs)."""
+    failures = []
+    for rel, target, argv in _CENSUS_MAPPINGS:
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
+                                capture_output=True, timeout=TIMEOUT * 4)
+        err = result.stderr.decode("utf-8", "replace")
+        held = re.match(r"census-held (\d+)\n", err)
+        want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
+                         + ": OSError(5, 'injected census read failure')")
+        if result.returncode != 2 or not want or want not in err or "Traceback" in err:
+            failures.append("%s (census under %s): expected exit 2 with its cannot-evaluate report, got exit %d: %s"
+                            % (rel, target, result.returncode, err.strip().splitlines()[-1:]))
+    return failures, len(_CENSUS_MAPPINGS)
+
+
+def _close_harness_checks(parent, script):
+    """The close-vector, close-harness and close-sweep checks of the self-test (run through _close_stage)."""
+    import _close_selftest
+    close_failures, close_runs = _close_vectors(parent / "close")
+    for failure in close_failures:
+        print("FAIL " + failure, file=sys.stderr)
+    check("close-vectors", not close_failures)
+    print("PASS close-vectors runs=" + str(close_runs))
+    journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
+    copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
+    check("close-harness-in-step", _close_harness_in_step(journal, copy))
+    check("close-harness-census-eio", _close_census_eio(_close_selftest))
+    check("close-harness-census-readlink-eio", _close_census_eio(_close_selftest, "readlink"))
+    # Every other read error fails closed too (each seam's one tolerated errno included for the other seam), and
+    # ENOENT on the link read alone lists the descriptor with no kind.
+    import errno
+    for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                        ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF, errno.ENOENT))):
+        for code in codes:
+            check("close-harness-census-{}-{}".format(seam, errno.errorcode[code].lower()),
+                  _close_census_eio(_close_selftest, seam, code))
+    # An eventfd put at an epoll descriptor's number reads as a change by its anonymous-inode kind; the flip, a
+    # table of (st_dev, st_ino) alone, reads it as unchanged wherever the two share an inode.
+    anon = _close_selftest._st_anon_reuse(_close_selftest._st_fd_table)
+    if anon is not None:
+        check("close-harness-anon-reuse", anon[0])
+        stat_only = _close_selftest._st_anon_reuse(
+            lambda: dict((fd, ident[:2]) for fd, ident in _close_selftest._st_fd_table().items()))
+        check("close-harness-anon-reuse-flip-red", not anon[1] or not stat_only[0])
+        check("close-harness-anon-reuse-close-fault", _close_anon_reuse_close_fault(_close_selftest))
+    require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
+    check("close-harness-drift-red",
+          not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
+    require(copy.count("\nimport sys\n") == 1, "close harness: preamble flip anchor is not unique")
+    check("close-harness-preamble-red", not _close_harness_in_step(
+        journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
+    drop_failures, drop_runs = _close_selftest._st_watch_drop_check()
+    for failure in drop_failures:
+        print("FAIL " + failure, file=sys.stderr)
+    check("close-harness-watch-drop-red", not drop_failures)
+    print("PASS close-harness-in-step watch-drop-runs=" + str(drop_runs))
+    sweep_failures = _close_sweep_check(script.parents[1])
+    for failure in sweep_failures:
+        print("FAIL " + failure, file=sys.stderr)
+    check("close-sweep", not sweep_failures)
+    print("PASS close-sweep shapes={} corpus={} recorded={}".format(
+        len(_CLOSE_SWEEP_SHAPES), len(_CLOSE_SWEEP_CORPUS), len(_CLOSE_SWEEP_DISPOSITIONS)))
+
+
+def _close_stage(parent, script):
+    """The close-harness checks, with a descriptor census that cannot read a descriptor anywhere in them (the
+    close vectors, the census EIO case's own unpatched read, the watch-drop check) mapped to CannotEvaluate,
+    which main() reports as exit 2."""
+    import _close_selftest
+    try:
+        _close_harness_checks(parent, script)
+    except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+        raise CannotEvaluate(str(exc)) from exc
+
+
+def _close_stage_leg(parent, script, target):
+    """One leg of _close_stage_mapping_check: the census read of a held descriptor fails EIO only while the
+    census runs under `target`. Returns the failure, or None."""
+    import errno
+    import io
+    this = sys.modules[__name__]
+    stage = parent / ("census-" + target)
+    stage.mkdir()
+    held = os.open(os.devnull, os.O_RDONLY)
+    real_fstat, real_self_test, real_stdout = os.fstat, this.self_test, sys.stdout
+
+    def failing(number, *args, **kwargs):
+        frame = sys._getframe(1)
+        if number == held and frame.f_code.co_name == "_st_fd_table":
+            while frame is not None and frame.f_code.co_name != target:
+                frame = frame.f_back
+            if frame is not None:
+                raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(number, *args, **kwargs)
+    captured = io.StringIO()
+    try:
+        os.fstat, sys.stdout = failing, captured
+        this.self_test = lambda red_on_revert: _close_stage(stage, script)
+        code = main(["--self-test"])
+        got = json.loads(captured.getvalue().splitlines()[-1])   # the report follows the stage's PASS lines
+    except Exception as exc:  # noqa: BLE001 - the verdict channel
+        code, got = None, dict(detail="escaped: " + repr(exc))
+    finally:
+        os.fstat, this.self_test, sys.stdout = real_fstat, real_self_test, real_stdout
+        os.close(held)
+    named = "descriptor census cannot evaluate descriptor %d:" % held
+    if code != 2 or got.get("code") != 2 or named not in got.get("detail", ""):
+        return ("census error under %s: expected exit 2 with the cannot-evaluate report, got %r %r"
+                % (target, code, got))
+    return None
+
+
+def _close_stage_mapping_check(parent, script):
+    """This tool's own mapping, in process: with the census read of a held descriptor failing EIO under each
+    of _close_vectors, _close_census_eio (its first, unpatched read) and _st_watch_drop_check, main() run over
+    _close_stage must return 2 with the cannot-evaluate report naming that descriptor; an escaping exception
+    (a census error read past the mapping) is a failure. Returns the failures."""
+    legs = [_close_stage_leg(parent, script, target)
+            for target in ("_close_vectors", "_close_census_eio", "_st_watch_drop_check")]
+    return [failure for failure in legs if failure]
+
+
 def self_test(red_on_revert):
     """Isolate fixture git calls, including in-process production helpers."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2263,37 +2667,31 @@ def _self_test_isolated(red_on_revert):
                 check("staged-hidden-snapshots",
                       [(r["snapshot"], r["code"]) for r in report["snapshots"]]
                       == [("HEAD", 0), ("index", 1), ("working", 0)])
+            if case_id in ("pending-open", "pending-open-second", "pending-open-initialize",
+                           "pending-open-removed"):
+                check(case_id + "-names-open-items",
+                      any("pending fixes still open: " in row["detail"]
+                          and "loose-end" in row["detail"] and "groundwork" not in row["detail"]
+                          for row in report["snapshots"]))
+            if case_id == "pending-bound-elsewhere":
+                check(case_id + "-binding",
+                      any("bound to release 1.0.0, not to the appended 1.1.0" in row["detail"]
+                          for row in report["snapshots"]))
             if case_id == "unreadable":
                 check("unreadable-read-boundary",
                       any("injected unreadable working file" in row["detail"]
                           for row in report["snapshots"]))
             print("PASS " + case_id)
-        close_failures, close_runs = _close_vectors(parent / "close")
-        for failure in close_failures:
+        _close_stage(parent, script)
+        stage_failures = _close_stage_mapping_check(parent, script)
+        for failure in stage_failures:
             print("FAIL " + failure, file=sys.stderr)
-        check("close-vectors", not close_failures)
-        print("PASS close-vectors runs=" + str(close_runs))
-        journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
-        copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
-        check("close-harness-in-step", _close_harness_in_step(journal, copy))
-        require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
-        check("close-harness-drift-red",
-              not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
-        require(copy.count("\nimport sys\n") == 1, "close harness: preamble flip anchor is not unique")
-        check("close-harness-preamble-red", not _close_harness_in_step(
-            journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
-        import _close_selftest
-        drop_failures, drop_runs = _close_selftest._st_watch_drop_check()
-        for failure in drop_failures:
+        check("close-stage-census-mapping", not stage_failures)
+        mapping_failures, mapping_runs = _census_mapping_check(script.parents[1])
+        for failure in mapping_failures:
             print("FAIL " + failure, file=sys.stderr)
-        check("close-harness-watch-drop-red", not drop_failures)
-        print("PASS close-harness-in-step watch-drop-runs=" + str(drop_runs))
-        sweep_failures = _close_sweep_check(script.parents[1])
-        for failure in sweep_failures:
-            print("FAIL " + failure, file=sys.stderr)
-        check("close-sweep", not sweep_failures)
-        print("PASS close-sweep shapes={} corpus={} recorded={}".format(
-            len(_CLOSE_SWEEP_SHAPES), len(_CLOSE_SWEEP_CORPUS), len(_CLOSE_SWEEP_DISPOSITIONS)))
+        check("census-mapping", not mapping_failures)
+        print("PASS census-mapping runs=" + str(mapping_runs) + " close-stage-legs=3")
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."
@@ -2346,6 +2744,28 @@ def _self_test_isolated(red_on_revert):
                  'for parent, revision in binding["transitions"][-1:]:', "push-noop-undeclared", 0),
                 ("ci-event", 'require(event in ("pull_request", "push"),',
                  "require(True,", "event-dispatch", 0),
+                ("pending-open-items", "if open_items:", "if False:", "pending-open", 0),
+                ("pending-binding", 'if head_pending["release"] != after[-1]:', "if False:",
+                 "pending-bound-elsewhere", 0),
+                ("pending-head-input",
+                 'head_pending = parse_pending(head_pending, "head pending fixes")',
+                 "head_pending = None", "head-fix-toml", 0),
+                ("pending-base-input",
+                 'base_pending = parse_pending(base_pending, "base pending fixes")',
+                 "base_pending = None", "base-fix-toml", 0),
+                ("pending-removed", "elif base_pending is not None:",
+                 "elif False:", "pending-open-removed", 0),
+                ("pending-top-keys",
+                 "require(isinstance(data, dict) and set(data) == PENDING_KEYS,",
+                 "require(isinstance(data, dict) and set(data) >= PENDING_KEYS,",
+                 "head-fix-unknown", 0),
+                ("pending-item-strings",
+                 "require(isinstance(item[key], str) and bool(item[key].strip()),",
+                 "require(True,", "head-fix-typed-id", 0),
+                ("pending-item-blank",
+                 "require(isinstance(item[key], str) and bool(item[key].strip()),",
+                 "require(isinstance(item[key], str) and bool(item[key]),",
+                 "head-fix-space-id", 0),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:

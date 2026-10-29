@@ -26,6 +26,20 @@ Exit: 0 clean or printed NOT APPLICABLE; 1 a content finding (drift, a failed ve
 mismatch, chronology violation, a lightweight tag, a genesis violation, an ordering gap); 2 an
 unreachable store, an unresolvable tag or SHA, unreadable records, or a git failure.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_release_build.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import hashlib
 import io
 import json
@@ -33,15 +47,22 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_release_build.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_release_build.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
@@ -52,6 +73,10 @@ from _release_schema import SchemaError       # noqa: E402  (round-2 findings 4)
 
 RELEASES_REL = ".aiqt/core/releases.toml"
 MANIFEST_REL = ".aiqt/manifest.toml"
+# The LIVE generator the fixture helpers launch against a --root fixture, addressed absolutely from
+# this file's own directory: the launch must not depend on the caller's working directory (a self-test
+# run from outside the repository root reached a path that did not exist and failed as fixture setup).
+GEN_MANIFEST_PATH = str(Path(__file__).resolve().parent / "gen_manifest.py")
 FAMILIES = ("claude", "codex", "gemini")
 # The keys this gate validates for a release-order row: the four anchor fields plus the three attestation
 # fields a row gains once QA'd. A self-test binds this to gen_manifest.RELEASE_ROW_ALLOWED so the full
@@ -157,7 +182,7 @@ def _show_toml(root, ref, path):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("{} at {} does not parse: {}".format(path, ref, exc))
 
 
@@ -362,7 +387,7 @@ def qa_layers(qa_path, qa_sha256, expect_candidate_sha):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("QA attestation does not parse: {}".format(exc))
     return validate_qa_obj(obj, expect_candidate_sha)
 
@@ -407,9 +432,12 @@ def _pin_fixture_version(repo, failures, env, version="1.0.0"):
     correctly fails ("tag points at a tree whose manifest release-version is ..."), masking the fixture's
     intended assertion. Writes VERSION + the changelog source at `version`, git-inits and stages the tree
     under the caller's neutralized `env`, then regenerates the fixture manifest via gen_manifest --root
-    (gen_manifest enumerates the tracked surface via `git ls-files`, so the tree is init + add'd first). A
+    (gen_manifest enumerates the tracked surface via `git ls-files`, so the tree is init + add'd first;
+    the generator is launched by its absolute path, GEN_MANIFEST_PATH, so the self-test does not depend
+    on the caller's working directory). A
     gen_manifest FAILURE is a real fixture-setup failure that FAILS the self-test (never a silent pass): it
-    appends to `failures` (which makes self_test_main return nonzero) and returns False. Returns True on
+    appends to `failures` (which makes self_test_main return nonzero, with the child's stderr retained in
+    the failure entry) and returns False. Returns True on
     success, with the tree staged and the regenerated manifest ready for the caller to commit."""
     (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
     (repo / "changelog.toml").write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
@@ -418,26 +446,32 @@ def _pin_fixture_version(repo, failures, env, version="1.0.0"):
             failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
                             "version pinning; the archive-backed case cannot be normalized".format(repo.name))
             return False
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
-                      capture_output=True, env=env).returncode != 0:
+    gen = subprocess.run(["python3", GEN_MANIFEST_PATH, "--root", str(repo)],
+                         capture_output=True, env=env)
+    if gen.returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
                         "gen failure FAILS the self-test rather than silently passing as the intended "
-                        "assertion".format(repo.name, version))
+                        "assertion (stderr: {})".format(
+                            repo.name, version, gen.stderr.decode("utf-8", "replace").strip()[-300:]))
         return False
     return True
 
 
 def _regen_fixture_manifest(root, case, failures, env):
-    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP, failing CLOSED on a
+    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP (launched by its
+    absolute path, GEN_MANIFEST_PATH, as _pin_fixture_version does), failing CLOSED on a
     nonzero gen exactly as _pin_fixture_version does. A setup gen-failure is a real fixture-setup failure:
-    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` and returns
+    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` (the child's
+    stderr retained) and returns
     False, so the affected fixture does NOT proceed to its verdict assertion, where a coincidental exit
     could otherwise be misread (or misattributed to the behaviour under test) as the intended gate verdict.
     Returns True only when the manifest was actually regenerated."""
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
-                      capture_output=True, env=env).returncode != 0:
+    gen = subprocess.run(["python3", GEN_MANIFEST_PATH, "--root", str(root)],
+                         capture_output=True, env=env)
+    if gen.returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
-                        "the self-test rather than silently passing as the intended assertion".format(case))
+                        "the self-test rather than silently passing as the intended assertion "
+                        "(stderr: {})".format(case, gen.stderr.decode("utf-8", "replace").strip()[-300:]))
         return False
     return True
 
@@ -541,6 +575,8 @@ def _recompute_branch_integrity(root, commit_oid):
 
 # The ONLY paths the post-tag attestation commit may change from the tagged candidate (round-8 #4): the
 # appended release row (releases.toml) and the three regenerated branch-integrity artifacts.
+# changelog.toml (the tag key) is deliberately absent: it lands after the attestation commit (RELEASING
+# step 6b), so a tag-key commit between the tag and the attestation row is an out-of-scope delta.
 ALLOWED_ATTESTATION_DELTA = frozenset({RELEASES_REL, MANIFEST_REL, gen_manifest.ROOT_REL,
                                        gen_manifest.SNIPPET_REL})
 
@@ -869,6 +905,8 @@ FIRST_PIN_EVIDENCE_KEYS = frozenset({"candidate-sha", "observed-measurement", "c
 FIRST_PIN_DEMO_KEYS = frozenset({"agents-sha256", "delivered-prefix-obligations",
                                  "floor-profile-obligations"})
 CAP_BYTES = 32768  # the documented Codex default project_doc_max_bytes cap (VER-CORE-SPEC.md:1019)
+# The ONLY demonstration path pre-tag accepts: the file tools/gen_first_pin_demo.py derives and CI drift-gates.
+FIRST_PIN_DEMO_REL = ".aiqt/release/first-pin-demonstration.toml"
 
 
 def _show_bytes(root, ref, path):
@@ -922,12 +960,16 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     and its digest and byte count RECOMPUTED: agents-sha256 must equal the recomputed digest;
     observed-measurement must equal the recomputed byte count; cap-bytes must be the documented default
     (CAP_BYTES); the recomputed size must exceed the cap; prefix-superset must be a real boolean true; and
-    the demonstration reference must resolve in the candidate tree and its superset be RECOMPUTED via
-    _demo_superset_findings. An unreadable/unparseable evidence artifact, an AGENTS.md not retrievable from
-    the candidate, or a demonstration that resolves but is not offline-evaluable (does not parse) is exit 2.
-    DISCLOSED RESIDUAL (disclose-guard-residuals): the obligation lists inside a well-formed demonstration
-    are taken as authored (the pack does not itself re-derive the default-cap prefix from AGENTS.md bytes);
-    URL reachability is not tested offline."""
+    the demonstration reference must be EXACTLY FIRST_PIN_DEMO_REL (any other path is a finding), resolve
+    in the candidate tree, and have its superset RECOMPUTED via _demo_superset_findings. An
+    unreadable/unparseable evidence artifact, an AGENTS.md not retrievable from the candidate, or a
+    demonstration that resolves but is not offline-evaluable (does not parse) is exit 2.
+    DISCLOSED RESIDUAL (disclose-guard-residuals): the obligation lists in FIRST_PIN_DEMO_REL are DERIVED by
+    tools/gen_first_pin_demo.py from the AGENTS.md bytes and rule corpus of the tree it runs on, and its
+    --check drift gate fails when the committed file differs from a fresh derivation. Pre-tag itself does
+    not re-run that derivation on the candidate: it checks the path, the key set, the digest binding and the
+    superset, and takes the obligation lists inside the committed file as authored. URL reachability is not
+    tested offline."""
     if evidence is None:
         return ["first-pin: --evidence is REQUIRED in --first-pin mode (the first-pin precondition is owed "
                 "delivered evidence, not asserted; L1034)"]
@@ -955,7 +997,7 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("first-pin: evidence artifact {} does not parse ({}); fail-closed".format(
             evidence, exc))
     agents = _show_bytes(root, candidate_sha, "AGENTS.md")
@@ -996,6 +1038,11 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     if not isinstance(demo_ref, str) or not demo_ref:
         findings.append("first-pin: demonstration must be a non-empty reference")
     else:
+        if demo_ref != FIRST_PIN_DEMO_REL:
+            # Fail closed: only the generated, drift-gated file is a derived demonstration. The referenced
+            # file is still evaluated below so every defect is reported in one run.
+            findings.append("first-pin: demonstration must be the generated {} (tools/gen_first_pin_demo.py), "
+                            "not {!r}".format(FIRST_PIN_DEMO_REL, demo_ref))
         demo_bytes = _show_bytes(root, candidate_sha, demo_ref)
         if demo_bytes is None:
             findings.append("first-pin: the demonstration reference {} does not resolve in the candidate "
@@ -1006,7 +1053,7 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
             # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
             # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
             # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError):
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
                 raise GateError("first-pin: the demonstration {} resolves but is not offline-evaluable "
                                 "(does not parse); adopter-owned evidence that cannot be evaluated is "
                                 "exit 2".format(demo_ref))
@@ -1703,17 +1750,20 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             (fp / "AGENTS.md").write_bytes(agents_bytes)
             a_sha = hashlib.sha256(agents_bytes).hexdigest()
             a_len = len(agents_bytes)
-            (fp / "qa" / "demo.toml").write_text(
-                'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2"]\n'
-                'floor-profile-obligations = ["ob1", "ob2", "ob3"]\n'.format(a_sha), encoding="utf-8")
+            good_demo = ('agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2"]\n'
+                         'floor-profile-obligations = ["ob1", "ob2", "ob3"]\n'.format(a_sha))
+            (fp / FIRST_PIN_DEMO_REL).parent.mkdir(parents=True, exist_ok=True)
+            (fp / FIRST_PIN_DEMO_REL).write_text(good_demo, encoding="utf-8")
+            # The same well-formed content at a path other than the generated one (MINOR-1 of PR #454 QA).
+            (fp / "qa" / "demo.toml").write_text(good_demo, encoding="utf-8")
             (fp / "qa" / "badsuperset.toml").write_text(
                 'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2", "obX"]\n'
                 'floor-profile-obligations = ["ob1", "ob2"]\n'.format(a_sha), encoding="utf-8")
             # An integer literal past CPython's 4300-digit int-string limit (F-TOML-BARE-VALUEERROR-CLASS).
             big_text = "over-long = " + "9" * 4400 + "\n"
             (fp / "qa" / "bigint.toml").write_text(big_text, encoding="utf-8")
-            # A 1200-deep nested array: tomllib raises RecursionError (a RuntimeError, not a ValueError).
-            deep_text = "deep = " + "[" * 1200 + "]" * 1200 + "\n"
+            # A marked, otherwise valid TOML: the self-test's injected tomllib raises RecursionError on it.
+            deep_text = "deep = 1  # injected-overflow\n"
             (fp / "qa" / "deep.toml").write_text(deep_text, encoding="utf-8")
             _write_records(fp, "format-version = 1\n")
             _commit(fp, "candidate with AGENTS.md + demonstration")
@@ -1723,7 +1773,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             def _ev(**over):
                 body = {"candidate-sha": '"{}"'.format(fp_commit), "observed-measurement": str(a_len),
                         "cap-bytes": "32768", "prefix-superset": "true",
-                        "demonstration": '"qa/demo.toml"', "agents-sha256": '"{}"'.format(a_sha)}
+                        "demonstration": '"{}"'.format(FIRST_PIN_DEMO_REL),
+                        "agents-sha256": '"{}"'.format(a_sha)}
                 body.update(over)
                 p = fp / "ev-{}.toml".format(len(list(fp.glob("ev-*.toml"))))
                 p.write_text("".join("{} = {}\n".format(k, v) for k, v in body.items()), encoding="utf-8")
@@ -1747,6 +1798,12 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             if not any("documented default cap" in f for f in _first_pin_evidence_findings(
                     fp, fp_commit, _ev(**{"cap-bytes": "1"}))):
                 failures.append("first-pin evidence: cap-bytes must equal the documented default (finding 5)")
+            # A well-formed demonstration at any path other than the generated one is a finding: pre-tag
+            # accepts only the derived, drift-gated FIRST_PIN_DEMO_REL.
+            if not any("must be the generated" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"demonstration": '"qa/demo.toml"'}))):
+                failures.append("first-pin evidence: a demonstration path other than {} must be caught (fail "
+                                "closed)".format(FIRST_PIN_DEMO_REL))
             if not any("does not resolve" in f for f in _first_pin_evidence_findings(
                     fp, fp_commit, _ev(**{"demonstration": '"qa/nonexistent.toml"'}))):
                 failures.append("first-pin evidence: a nonexistent demonstration reference must be caught "
@@ -1769,38 +1826,51 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             # must still fail closed as GateError (exit 2); narrowing any one back to (UnicodeDecodeError,
             # TOMLDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
             # (test-hermeticity) and restored in finally.
-            # The same four sites must fail closed on the class's RecursionError member (a 1200-deep nested
-            # array); the recursion limit is pinned to the CPython default 1000 for the same reason.
+            # The same four sites must fail closed on the class's RecursionError member (a parser overflow), and the
+            # refusal must come from that site's parse handler (its message, or the overflow it interpolates).
+            # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+            # otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+            # overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+            # (or trips an unrelated refusal) under another.
             big_cases = []
             for kind, text, rel in (("over-long integer", big_text, "qa/bigint.toml"),
-                                    ("deep nesting", deep_text, "qa/deep.toml")):
+                                    ("parser overflow", deep_text, "qa/deep.toml")):
                 ev_path = fp / "{}-evidence.toml".format(rel[3:-5])
                 ev_path.write_text(text, encoding="utf-8")
                 ev_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                needle = "injected parser overflow" if text is deep_text else ""
                 big_cases += [
-                    (kind + " evidence artifact",
+                    (kind + " evidence artifact", needle,
                      lambda ev_path=ev_path: _first_pin_evidence_findings(fp, fp_commit, str(ev_path))),
-                    (kind + " demonstration", lambda rel=rel: _first_pin_evidence_findings(
-                        fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
-                    (kind + " QA attestation",
+                    (kind + " demonstration", needle and "is not offline-evaluable (does not parse)",
+                     lambda rel=rel: _first_pin_evidence_findings(fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
+                    (kind + " QA attestation", needle,
                      lambda ev_path=ev_path, ev_sha=ev_sha: qa_layers(str(ev_path), ev_sha, fp_commit)),
-                    (kind + " git-shown TOML", lambda rel=rel: _show_toml(fp, fp_commit, rel))]
+                    (kind + " git-shown TOML", needle, lambda rel=rel: _show_toml(fp, fp_commit, rel))]
             prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
             sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
             try:
-                for big_label, big_call in big_cases:
+                for big_label, big_needle, big_call in big_cases:
                     try:
                         big_call()
                         failures.append("{}: expected GateError (exit 2), got a result".format(big_label))
-                    except GateError:
-                        pass
+                    except GateError as exc:
+                        if big_needle not in str(exc):
+                            failures.append("{}: GateError without the parse handler's finding ({})".format(big_label, exc))
                     except (ValueError, RecursionError) as exc:
                         failures.append("{}: a bare {} escaped the parse (exit 2 expected)".format(
                             big_label, type(exc).__name__))
             finally:
-                sys.setrecursionlimit(prev_reclimit)
+                tomllib.loads, tomllib.load = real_loads, real_load
                 sys.set_int_max_str_digits(prev_digits)
 
             # (round-4 finding 7) _show_bytes distinguishes a genuinely ABSENT path (None) from a git
@@ -1886,7 +1956,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             ce_agents = ("A" * 40000).encode("utf-8")
             (ce / "AGENTS.md").write_bytes(ce_agents)
             ce_sha = hashlib.sha256(ce_agents).hexdigest()
-            (ce / "qa" / "demo.toml").write_text(
+            (ce / FIRST_PIN_DEMO_REL).parent.mkdir(parents=True, exist_ok=True)
+            (ce / FIRST_PIN_DEMO_REL).write_text(
                 'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1"]\n'
                 'floor-profile-obligations = ["ob1"]\n'.format(ce_sha), encoding="utf-8")
             (ce / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
@@ -1899,8 +1970,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             ce_ev = ce / "ev.toml"
             ce_ev.write_text(
                 'candidate-sha = "{}"\nobserved-measurement = 40000\ncap-bytes = 32768\n'
-                'prefix-superset = true\ndemonstration = "qa/demo.toml"\nagents-sha256 = "{}"\n'.format(
-                    ce_commit, ce_sha), encoding="utf-8")
+                'prefix-superset = true\ndemonstration = "{}"\nagents-sha256 = "{}"\n'.format(
+                    ce_commit, FIRST_PIN_DEMO_REL, ce_sha), encoding="utf-8")
             try:
                 _first_pin_findings(ce, ce_commit, str(ce_ev))
                 failures.append("first-pin: a check_clauses cannot-evaluate (child exit 2) must raise "
@@ -2235,7 +2306,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                 failures.append("(finding 4) a release tag whose annotated object targets a tree must fail "
                                 "closed exit 2 (it cannot peel to a commit), not a clean audit")
 
-            # (finding 6) THE ATTESTATION-COMMIT MODEL (Architect-approved): tag the pre-attestation release
+            # (finding 6) THE ATTESTATION-COMMIT MODEL (maintainer-approved): tag the pre-attestation release
             # tree (immutable ROOT), then in a FOLLOW-UP commit append the attestation row AND regenerate the
             # branch-integrity manifest/root/snippet. Confirm gen_manifest --check AND check_manifest are
             # GREEN on that attestation commit (the required commit merges through the normal gates), and
@@ -2307,7 +2378,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                         # was actually regenerated; a setup gen-failure is recorded DISTINCTLY above and must
                         # NOT be misattributed here as a finding-6 non-green result.
                         if base_ok:
-                            gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
+                            gmc = subprocess.run(["python3", GEN_MANIFEST_PATH, "--check", "--root",
                                                   str(ac)], capture_output=True)
                             cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
                                                  capture_output=True)
@@ -2318,6 +2389,76 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                             if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
                                 failures.append("post-tag must validate the regenerated attestation-commit "
                                                 "artifacts, exit 0 (round-7 finding 6)")
+
+                            # (RELEASING steps 6a/6b) THE RELEASE ORDER. The changelog tag key may land only
+                            # AFTER the attestation commit has merged. (i) The old documented order put a
+                            # changelog.toml tag-key commit between the tag and the attestation row, so the
+                            # attestation delta from the tagged candidate includes changelog.toml, which is
+                            # outside ALLOWED_ATTESTATION_DELTA -> post-tag exit 1 naming changelog.toml.
+                            # Mutation: adding changelog.toml to ALLOWED_ATTESTATION_DELTA turns (i) green.
+                            # (ii) The documented order: the tag-key commit on top of the attestation commit
+                            # passes the tag-monotonicity gate against the attestation commit as its base,
+                            # ARMED (one tagged release verified); deleting the referenced tag is exit 2.
+                            tagged_changelog = '[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                            a_row = subprocess.run(["git", "-C", str(ac), "show", a_oid + ":" + RELEASES_REL],
+                                                   capture_output=True, text=True, env=ge).stdout
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_csha],
+                                           capture_output=True, env=ge)
+                            (ac / "changelog.toml").write_text(tagged_changelog, encoding="utf-8")
+                            old_ok = _regen_fixture_manifest(ac, "old-order tag-key commit", failures, ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-a", "-m",
+                                            "old order: tag key before attestation", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            (ac / RELEASES_REL).write_text(a_row, encoding="utf-8")
+                            old_ok = old_ok and _regen_fixture_manifest(ac, "old-order attestation commit",
+                                                                        failures, ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-a", "-m",
+                                            "old order: attestation row", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            old_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                     capture_output=True, text=True, env=ge).stdout.strip()
+                            if old_ok:
+                                old_delta = _attestation_delta_findings(ac, a_csha, old_oid)
+                                if (_run_post_tag_quiet(ac, old_oid, str(a_qa)) != 1
+                                        or not any("changelog.toml" in f for f in old_delta)):
+                                    failures.append("(release order) a changelog.toml tag-key commit before the "
+                                                    "attestation row (the old RELEASING order) must make "
+                                                    "post-tag exit 1 with an attestation-delta finding naming "
+                                                    "changelog.toml (RELEASING step 6b)")
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                           capture_output=True, env=ge)
+                            (ac / "changelog.toml").write_text(tagged_changelog, encoding="utf-8")
+                            new_ok = _regen_fixture_manifest(ac, "new-order tag-key commit", failures, ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-a", "-m",
+                                            "new order: tag key after attestation", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            if new_ok:
+                                mono = subprocess.run(
+                                    ["python3", str(ac / "tools" / "check_version_monotonicity.py"),
+                                     "--base", a_oid], cwd=str(ac), capture_output=True, text=True, env=ge)
+                                if (mono.returncode != 0 or "tag-monotonicity: PASS (1 tagged release(s) "
+                                                            "verified)" not in mono.stdout):
+                                    failures.append("(release order) the tag-key commit on top of the attestation "
+                                                    "commit (RELEASING step 6b) must pass "
+                                                    "check_version_monotonicity --base <attestation commit> "
+                                                    "ARMED, exit 0 with 'tag-monotonicity: PASS (1 tagged "
+                                                    "release(s) verified)' (got rc={}: {})".format(
+                                                        mono.returncode, (mono.stdout + mono.stderr).strip()))
+                                # Negative control: the same commit with the referenced tag deleted is exit 2.
+                                # The tag object stays in the object store, so update-ref restores the ref.
+                                subprocess.run(["git", "-C", str(ac), "tag", "-d", "v1.0.0"],
+                                               capture_output=True, env=ge)
+                                mono_neg = subprocess.run(
+                                    ["python3", str(ac / "tools" / "check_version_monotonicity.py"),
+                                     "--base", a_oid], cwd=str(ac), capture_output=True, text=True, env=ge)
+                                subprocess.run(["git", "-C", str(ac), "update-ref", "refs/tags/v1.0.0", a_tobj],
+                                               capture_output=True, env=ge)
+                                if mono_neg.returncode != 2:
+                                    failures.append("(release order) with the referenced tag v1.0.0 deleted, the "
+                                                    "tag-key commit must fail check_version_monotonicity exit 2 "
+                                                    "(got rc={})".format(mono_neg.returncode))
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                           capture_output=True, env=ge)
 
                             # === ROUND-8 archive-based post-tag cases (need a full pack tree for the #2
                             # branch-integrity recompute) ================================================
@@ -2615,7 +2756,11 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "attestation commit not descending from the tagged candidate is exit 1 (#4), --pre-tag rejects "
               "an already-tagged candidate (#5), and the tag kind/peel/chronology are taken from the RECORDED "
               "immutable tag_object_sha, never a re-read of the mutable ref (#6)), plus the archive-based "
-              "post-tag digest-mismatch and chronology-forge cases on a full pack tree) hold".format(core))
+              "post-tag digest-mismatch and chronology-forge cases on a full pack tree); and the release-"
+              "order cases (RELEASING steps 6a/6b: a changelog tag-key commit before the attestation row "
+              "makes post-tag exit 1 naming changelog.toml, the tag-key commit after the attestation commit "
+              "passes check_version_monotonicity ARMED with one tagged release verified, and the same commit "
+              "with the referenced tag deleted is exit 2) hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))

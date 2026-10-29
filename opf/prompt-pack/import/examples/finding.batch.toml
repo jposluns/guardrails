@@ -1,0 +1,14 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-review.md"
+
+[[record]]
+key = "stale-cache"
+type = "finding"
+created_at = "2019-06-17T08:05:00Z"
+history = [{field = "updated_at", value = "2019-06-20T10:00:00Z"}, {field = "updated_at", value = "2019-06-21T14:30:00Z"}]
+severity = "high"
+status = "fixed"
+title = "Report cache served stale totals after a backfill"
+unrecorded = [{field = "updated_at", reason = "conflicting"}]
