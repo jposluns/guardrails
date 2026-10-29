@@ -5128,7 +5128,7 @@ def _dispatch(argv):
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. The self-test reads child exit statuses
-# (git, its own direct launch and check_clauses.py), so under an ignored SIGCHLD a failing child would read
+# (git and its own direct launch), so under an ignored SIGCHLD a failing child would read
 # as a pass; the guard runs at the entry line, before main() dispatches any mode.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
