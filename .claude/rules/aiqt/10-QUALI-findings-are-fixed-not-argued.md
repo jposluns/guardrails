@@ -17,4 +17,6 @@ map-iso-42001-broad: [A.6.2.4]
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
 finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
-explicitly reclassifies it with a recorded rationale.
+explicitly reclassifies it with a recorded rationale. A refutation by observation rules out only the
+causes its probes exercised, so every cause of the condition the finding names is probed or the finding
+stays open for the rest.

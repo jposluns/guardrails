@@ -218,8 +218,7 @@ zero sits in a total as though it were measured. Any figure derived from an esti
 percentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one.
 
 This does not forbid estimates, forecasts, or a combined figure whose composition is stated, such as a
-measured 40 plus an estimated 25 reported as roughly 65. It forbids the unlabelled blend: an estimate
-folded into a measured total, the whole presented as measured. The label is the release. A figure that
+measured 40 plus an estimated 25 reported as roughly 65. A figure that
 carries its grade honestly is sound however uncertain; one that hides it misreports precision it does
 not have.
 
@@ -241,8 +240,7 @@ Either observe the behaviour and quote what you saw, or state the claim as an in
 configuration it rests on and the observation that would confirm it. The same holds for a status a document,
 test, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the
 system, or generate it from an observation, and refresh it before relying on it as current; hand-written
-prose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact. A
-confident assertion of unobserved behaviour is not made.
+prose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact.
 
 A claim that a shared or external resource has failed, or that you are blocked because it has, is a
 behavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed
@@ -711,7 +709,9 @@ keeps a borrower's restore from silently moving or losing the deadline the calle
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
 finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
-explicitly reclassifies it with a recorded rationale.
+explicitly reclassifies it with a recorded rationale. A refutation by observation rules out only the
+causes its probes exercised, so every cause of the condition the finding names is probed or the finding
+stays open for the rest.
 
 ## Goal fidelity across a long trajectory
 

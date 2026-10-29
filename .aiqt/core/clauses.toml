@@ -491,7 +491,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 14
 end-line = 15
 canonical-text = "A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an\nestimated, inferred, or self-reported one into a single number presented as a measurement."
-source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[clause]]
 clause-id = "estsep.2"
@@ -500,7 +500,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 15
 end-line = 17
 canonical-text = "The two grades of\nfigure are reported in labelled separation, so a reader can see which part was measured and which was\nestimated."
-source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[clause]]
 clause-id = "estsep.3"
@@ -509,7 +509,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 17
 end-line = 18
 canonical-text = "A quantity that is not known is reported as unknown, never silently entered as zero, because a\nzero sits in a total as though it were measured."
-source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[clause]]
 clause-id = "estsep.4"
@@ -518,7 +518,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 18
 end-line = 19
 canonical-text = "Any figure derived from an estimate, including a ratio, a\npercentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one."
-source-digest = "db62251a587299acc3f46798ea524819a3c898ea04b1c4e357ff29bbd8e2f16f"
+source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
 
 [[clause]]
 clause-id = "nofabr.1"
@@ -545,7 +545,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 13
 end-line = 14
 canonical-text = "Do not assert what a system shows, renders, prints, outputs, or does in its live state unless you observed\nthat behaviour directly."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.2"
@@ -554,7 +554,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 17
 end-line = 19
 canonical-text = "A claim that a system is launch-ready,\nlive, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and\nobserved the expected result, not on a static check that the configuration or registration looks correct."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.3"
@@ -563,7 +563,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.4"
@@ -572,7 +572,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.5"
@@ -581,7 +581,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.6"
@@ -590,7 +590,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.7"
@@ -599,7 +599,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.8"
@@ -608,7 +608,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.9"
@@ -617,16 +617,16 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "obsbeh.10"
 corpus-id = "obsbeh"
 source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
-start-line = 30
-end-line = 33
+start-line = 29
+end-line = 32
 canonical-text = "You read the\nresource's own state, the host's available capacity, and your own footprint directly before asserting\nsuch a failure or reporting it onward; absent that reading the condition resolves to a local error to\ninvestigate while work continues, never a stop or a resource-wide alarm."
-source-digest = "fe0a1a84405cc627cb79cfb092ee2fcf6ef7cfb21ef946a278c9f0df7cf0fcdc"
+source-digest = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
 
 [[clause]]
 clause-id = "rdbchr.1"
@@ -2057,7 +2057,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 18
 canonical-text = "A finding raised by an adversarial verification pass is fixed, not argued away."
-source-digest = "2422f9568c606f4e9f286c4f5b6c19e842fdee78b5a5e948cf4c71854dded45d"
+source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
 
 [[clause]]
 clause-id = "fndfix.2"
@@ -2066,7 +2066,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "2422f9568c606f4e9f286c4f5b6c19e842fdee78b5a5e948cf4c71854dded45d"
+source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
 
 [[clause]]
 clause-id = "fndfix.3"
@@ -2075,7 +2075,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "2422f9568c606f4e9f286c4f5b6c19e842fdee78b5a5e948cf4c71854dded45d"
+source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
 
 [[clause]]
 clause-id = "fndfix.4"
@@ -2084,7 +2084,16 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "2422f9568c606f4e9f286c4f5b6c19e842fdee78b5a5e948cf4c71854dded45d"
+source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
+
+[[clause]]
+clause-id = "fndfix.5"
+corpus-id = "fndfix"
+source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
+start-line = 20
+end-line = 22
+canonical-text = "A refutation by observation rules out only the\ncauses its probes exercised, so every cause of the condition the finding names is probed or the finding\nstays open for the rest."
+source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
 
 [[clause]]
 clause-id = "goalfd.1"

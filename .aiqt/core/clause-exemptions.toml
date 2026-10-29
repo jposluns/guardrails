@@ -119,16 +119,6 @@ reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obl
 
 [[exempt]]
 corpus-id = "estsep"
-text = "It forbids the unlabelled blend: an estimate\nfolded into a measured total, the whole presented as measured."
-reason = "Restates estsep.1; it adds no obligation."
-
-[[exempt]]
-corpus-id = "estsep"
-text = "The label is the release."
-reason = "Summary of estsep.2; it adds no obligation."
-
-[[exempt]]
-corpus-id = "estsep"
 text = "A figure that\ncarries its grade honestly is sound however uncertain; one that hides it misreports precision it does\nnot have."
 reason = "Rationale for estsep.2; no obligation of its own."
 
@@ -141,11 +131,6 @@ reason = "Rationale for obsbeh.1; no obligation of its own."
 corpus-id = "obsbeh"
 text = "This differs from reading a file for its static contents, where the reading is\nitself the observation; here the observation is the rendered output."
 reason = "Scope note separating a static read from the behavioural claim obsbeh.1 governs; no obligation of its own."
-
-[[exempt]]
-corpus-id = "obsbeh"
-text = "A\nconfident assertion of unobserved behaviour is not made."
-reason = "Closing restatement of obsbeh.1; it adds no obligation."
 
 [[exempt]]
 corpus-id = "obsbeh"
