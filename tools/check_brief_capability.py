@@ -18,18 +18,26 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        and an input by a relative path: a token with a slash whose last component has a file
                        suffix (`tools/t.py`, `.aiqt/core/x.toml`), or that opens with `./` or `../`. A relative
                        path resolves against the worker's own scratch (its working directory), not the workdir.
-  P2 outside workdir   HARD. The family's row says reads-outside-workdir = "no", the brief declares a workdir
-                       (the first absolute path after the word workdir on its line), and it names an absolute
-                       path that is neither that workdir nor under it, read lexically (`..` folded, no link
-                       followed: /w/repo/x is under /w/repo, /w/repository is not). "undeclared" and "yes" never
-                       fire, and with no declared workdir the rule does not fire.
+  P2 outside workdir   HARD. The family's row says reads-outside-workdir = "no", the brief declares a workdir,
+                       and it names an absolute path that is neither that workdir nor under it, read lexically
+                       (`..` folded, no link followed: /w/repo/x is under /w/repo, /w/repository is not). A
+                       declaration is a line that opens (once markup is skipped) with Workdir, The workdir or Your
+                       workdir (or work dir, working directory), then optionally is or a colon, then one absolute
+                       path, quoted with " or ` when it holds a space (Workdir /w/repo (read-only). The workdir
+                       is /w/repo. workdir:/w/repo); a line that is only such a lead takes its path from the next
+                       line. A path after the word workdir anywhere else (Do not read outside the workdir, such
+                       as /etc/x) declares nothing. Two declarations of different workdirs, a declaration whose
+                       path is followed by a word (an unquoted space), or a bare lead with no path on the next
+                       line is CANNOT_EVALUATE (exit 2). "undeclared" and "yes" never fire, and with no declared
+                       workdir the rule does not fire. A quoted absolute path that holds a space is read whole.
   P3 missing at pin    HARD. A line that opens (once markup is skipped) with REVIEWED HEAD or BRIEF-PIN and a
                        commit of 7 to 40 hex digits pins a revision, and a relative path the brief names (`./`
                        dropped; `../` paths are not repository-relative and are skipped) does not exist at it in
                        the repository the lint is pointed at (--repo, default this repository), read with
                        `git cat-file -e <commit>:<path>` from the object store, never the working tree. A pin
                        that does not resolve to one commit (unknown, ambiguous), a git that cannot be launched or
-                       times out, or a pin with no repository to read is CANNOT_EVALUATE, never a pass.
+                       times out, or a pin with no repository to read is CANNOT_EVALUATE, never a pass, whether
+                       or not the brief names a relative path.
   P4 no hand-back      ADVISORY. The family's row says handback = "yes", a sentence holds a delivery verb (return,
                        paste, print, send, show, include, quote, ...) not negated and a large output (a whole,
                        entire, full or complete file, source, diff, log or output; a diff; a patch), and no line
@@ -1418,6 +1426,8 @@ def cancel_demotion(finding):
 # ---------- preflight: the input paths a brief names ----------
 
 WORKDIR_WORD_RE = re.compile(r"(?<![\w-])(?:workdir|work\s+dir|working\s+directory)(?![\w-])", re.I)
+WORKDIR_LEAD_RE = re.compile(r"(?:(?:the|your)\s++)?+(?:workdir|work\s++dir|working\s++directory)(?![\w-])", re.I)
+QUOTED_ABS_PATH_RE = re.compile(r"\"(/[^\"\n]*+)\"|`(/[^`\n]*+)`")
 ABS_PATH_RE = re.compile(r"(?<![\w.~/:@%-])/[\w.@+-]++(?:/[\w.@+-]++)*+/?+")
 REL_PATH_RE = re.compile(r"(?<![\w.~/:@%-])(?:\.\.?/)?+\.?+[\w@+-][\w.@+-]*+(?:/[\w.@+-]++)++/?+")
 FILE_SUFFIX_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,11}\Z")
@@ -1439,8 +1449,8 @@ def _path_token(token):
 
 class PreflightText:
     """The paths a brief names, found once: [(line, path)] for absolute paths, for relative paths that name a
-    file (a last component with a suffix such as `.py`) or open with `./` or `../`, the declared workdirs (the
-    first absolute path after the word workdir on its line), the pinned revisions (a line that opens, once markup
+    file (a last component with a suffix such as `.py`) or open with `./` or `../`, the declared workdirs (see
+    _declaration_rest) and the declarations that name none clearly, the pinned revisions (a line that opens, once markup
     is skipped, with REVIEWED HEAD or BRIEF-PIN and a commit of 7 to 40 hex digits), and whether a hand-back file
     is named (the words hand-back file or path and an absolute path on one line)."""
 
@@ -1448,24 +1458,79 @@ class PreflightText:
         self.text = text
         self.names_workdir = bool(WORKDIR_WORD_RE.search(text))
         self.absolute, self.relative, self.workdirs, self.pins = [], [], [], []
+        self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
         self.handback_named = False
+        bare = None   # the line of a bare Workdir (or Workdir:) whose path is on the next line
         for number, line in enumerate(text.split("\n"), 1):
             line = line.rstrip("\r")
-            found = [(match.start(), _path_token(match.group(0))) for match in ABS_PATH_RE.finditer(line)]
-            self.absolute.extend((number, path) for _, path in found)
+            quoted = [match for match in QUOTED_ABS_PATH_RE.finditer(line) if any(
+                character.isspace() for character in match.group(1) or match.group(2))]
+            inside = lambda start: any(span.start() <= start < span.end() for span in quoted)  # noqa: E731
+            found = [(match.start(), _path_token(match.group(0))) for match in ABS_PATH_RE.finditer(line)
+                     if not inside(match.start())]
+            found.extend((match.start(), match.group(1) or match.group(2)) for match in quoted)
+            self.absolute.extend((number, path) for _, path in sorted(found))
             for match in REL_PATH_RE.finditer(line):
                 path = _path_token(match.group(0))
+                if inside(match.start()):
+                    continue
                 if path.startswith(("./", "../")) or FILE_SUFFIX_RE.search(path.rstrip("/").rsplit("/", 1)[-1]):
                     self.relative.append((number, path))
-            for word in WORKDIR_WORD_RE.finditer(line):
-                after = [path for start, path in found if start >= word.end()]
-                if after:
-                    self.workdirs.append(after[0])
-            pin = PIN_RE.match(line, MarkupEnds(line)(0))
+            start = MarkupEnds(line)(0)
+            if bare is not None:
+                self._declare(line[start:], number)
+            bare, rest = None, _declaration_rest(line, start)
+            if rest is not None and not rest[MarkupEnds(rest)(0):]:
+                bare = number
+            elif rest is not None:
+                self._declare(rest, number)
+            pin = PIN_RE.match(line, start)
             if pin:
                 self.pins.append((number, pin.group(1)))
             if found and HANDBACK_NAMED_RE.search(line):
                 self.handback_named = True
+        if bare is not None:
+            self.unclear.append((bare, "a bare workdir declaration with no line after it"))
+
+    def _declare(self, rest, number):
+        """Record the workdir a declaration names on `rest`: one absolute path that opens it, quoted when it
+        holds a space; any other shape is unclear, never a workdir."""
+        rest = rest[MarkupEnds(rest)(0):]
+        if rest[:1] in ('"', "`"):
+            end = rest.find(rest[0], 1)
+            path = rest[1:end] if end > 0 else ""
+            if path.startswith("/"):
+                self.workdirs.append(path)
+                return
+        else:
+            match = ABS_PATH_RE.match(rest)
+            if match:
+                tail, ends_sentence = rest[match.end():], _path_token(match.group(0)) != match.group(0)
+                # a word after the path may be the rest of a path with a space in it, so it is unclear
+                if ends_sentence or not tail.strip() or tail[0] in ".,;:)*_`" or tail.lstrip()[0] == "(":
+                    self.workdirs.append(_path_token(match.group(0)))
+                    return
+        self.unclear.append((number, "the declared workdir is not one absolute path (quote a path that holds "
+                             "a space)"))
+
+
+def _declaration_rest(line, start):
+    """The text after a workdir declaration that opens `line` at `start`, or None when the line is not one. A
+    declaration is Workdir, The workdir or Your workdir (or work dir, working directory), then optionally is or
+    a colon, then an absolute path, plain or quoted, or nothing (the path is then on the next line). A path
+    anywhere else after the word, as in prose about the workdir, declares nothing."""
+    lead = WORKDIR_LEAD_RE.match(line, start)
+    if not lead:
+        return None
+    rest = line[lead.end():].lstrip()
+    if rest[:1] == ":":
+        rest = rest[1:].lstrip()
+    elif rest[:2].lower() == "is" and rest[2:3].isspace():
+        rest = rest[2:].lstrip()
+    opens = rest[MarkupEnds(rest)(0):]
+    if not opens or opens[:1] == "/" or (opens[:1] in ('"', "`") and opens[1:2] == "/"):
+        return rest
+    return None
 
 
 def under_workdir(path, workdirs):
@@ -1539,8 +1604,17 @@ def rule_p1(names, row, repo):
 
 def rule_p2(names, row, repo):
     """P2 HARD: the family declares reads-outside-workdir = "no" and the brief names an absolute path that is
-    not under a declared workdir."""
-    if row["reads-outside-workdir"] != "no" or not names.workdirs:
+    not under the declared workdir. Two declarations that name different workdirs, or one whose workdir cannot
+    be read, leave the boundary open: CannotEvaluate, never a pass."""
+    if row["reads-outside-workdir"] != "no":
+        return []
+    if names.unclear:
+        line, reason = names.unclear[0]
+        raise CannotEvaluate("line {}: {}".format(line, reason))
+    if len(set(posixpath.normpath(path) for path in names.workdirs)) > 1:
+        raise CannotEvaluate("the brief declares {} different workdirs ({}); declare exactly one".format(
+            len(set(posixpath.normpath(path) for path in names.workdirs)), ", ".join(sorted(set(names.workdirs)))))
+    if not names.workdirs:
         return []
     return [("P2", "HARD", line, "absolute path outside the declared workdir ({}), which this family cannot "
              "read".format(", ".join(sorted(set(names.workdirs)))), _excerpt(path))
@@ -1549,19 +1623,18 @@ def rule_p2(names, row, repo):
 
 def rule_p3(names, row, repo):
     """P3 HARD: the brief pins a revision and a repository-relative path it names does not exist at that
-    revision in `repo`. A pin that does not resolve, or no repository to read, is CannotEvaluate."""
+    revision in `repo`. A pin that does not resolve, or no repository to read, is CannotEvaluate, whether or not
+    the brief names a relative path."""
     if not names.pins:
-        return []
-    paths = [(line, path[2:] if path.startswith("./") else path) for line, path in names.relative
-             if not path.startswith("../")]
-    paths = [(line, path.rstrip("/")) for line, path in _first_seen(paths) if path.rstrip("/")]
-    if not paths:
         return []
     if repo is None:
         raise CannotEvaluate("the brief pins a revision but no repository was given to read it from")
+    commits = [(rev, resolve_revision(repo, rev)) for _, rev in names.pins]
+    paths = [(line, path[2:] if path.startswith("./") else path) for line, path in names.relative
+             if not path.startswith("../")]
+    paths = [(line, path.rstrip("/")) for line, path in _first_seen(paths) if path.rstrip("/")]
     findings = []
-    for _, rev in names.pins:
-        commit = resolve_revision(repo, rev)
+    for rev, commit in commits:
         for line, path in paths:
             if not exists_at_revision(repo, commit, path):
                 findings.append(("P3", "HARD", line, "path does not exist at the pinned revision {}".format(rev),
@@ -1787,6 +1860,29 @@ def _patched(**replacements):
                 del names[name]
             else:
                 names[name] = value
+
+
+@contextlib.contextmanager
+def _environ(**values):
+    """Set environment variables for the duration of the block, then restore or remove them."""
+    saved = dict((name, os.environ.get(name)) for name in values)
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _git_outcome(fn, *args):
+    """A git read's result, or "CannotEvaluate"."""
+    try:
+        return fn(*args)
+    except CannotEvaluate:
+        return "CannotEvaluate"
 
 
 def _outcome(text, family="gamma", scoped=True, repo=None):
@@ -2100,6 +2196,20 @@ P1_NOT_A_PATH = "The workdir is /w/repo.\nAnswer yes/no on read/write access und
 P2_BRIEF = "The workdir is /w/repo.\nRead {} before you answer.\n"
 P2_OUTSIDE = P2_BRIEF.format("/etc/other/notes.md")
 P2_NO_WORKDIR = "Read /etc/other/notes.md before you answer.\n"
+# prose that mentions the workdir before a path declares nothing; each read outside the one declaration
+P2_SUCH_AS = ("Workdir /w/repo (read-only).\nDo not read outside the workdir, such as /etc/x.md.\n"
+              "Read /etc/x.md before you answer.\n")
+P2_OR_PATH = "Workdir /w/repo.\nKeep paths inside your workdir or /dev/shm/hb.\nRead /dev/shm/hb/x.md now.\n"
+P2_ALSO = "Workdir /w/repo.\nThe workdir is also /etc for this task.\nRead /etc/shadow.md before you answer.\n"
+# two different declarations, an unquoted space, a bare lead at the end: the boundary is open
+P2_TWO = "Workdir /w/repo.\nThe workdir is /etc.\nRead /etc/shadow.md before you answer.\n"
+P2_SPACE_UNQUOTED = "Workdir /w/my repo\nRead /w/my other/x.md before you answer.\n"
+P2_BARE_END = "Read /w/repo/x.md before you answer.\nWorkdir:\n"
+P2_SAME_TWICE = "Workdir /w/repo.\nThe workdir is /w/repo/.\nRead /w/repo/a.md before you answer.\n"
+P2_QUOTED = "Workdir \"/w/my repo\".\nRead {} before you answer.\n"
+P2_NEXT_LINE = "Workdir\n/w/repo\nRead {} before you answer.\n"
+P2_COLON = "workdir:/w/repo\nRead {} before you answer.\n"
+P3_PIN_ONLY = "BRIEF-PIN {}\nAnswer the question.\n"
 P3_BRIEF = "REVIEWED HEAD: {} (main).\nRead {} before you answer.\n"
 P3_MID_LINE = "Name a REVIEWED HEAD: 0123456789ab line.\nRead docs/absent.md before you answer.\n"
 P4_WHOLE_FILE = "Paste the whole file in your reply.\n"
@@ -3173,6 +3283,16 @@ def self_test(report_path=None):
           [0, 0, 0, 1, 1])
     check("preflight/p2-clean-quiet", (p2("/w/repo/docs/notes.md"), _outcome(P2_NO_WORKDIR),
                                        _outcome(P2_OUTSIDE, "alpha"), _outcome(P2_OUTSIDE, "beta")), ((0, []),) * 4)
+    check("preflight/p2-declaration-prose-hard", [_outcome(text) for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO)],
+          [(1, [("P2", "HARD")])] * 3)
+    check("preflight/p2-declaration-unclear-cannot-evaluate",
+          [_outcome(text) for text in (P2_TWO, P2_SPACE_UNQUOTED, P2_BARE_END)] + [_outcome(P2_TWO, "beta")],
+          ["CannotEvaluate"] * 3 + [(0, [])])
+    check("preflight/p2-declaration-forms",
+          [_outcome(form.format(path))[0] for form, inside, outside in (
+              (P2_QUOTED, "\"/w/my repo/x.md\"", "/w/my other/x.md"), (P2_NEXT_LINE, "/w/repo/a.md", "/etc/x.md"),
+              (P2_COLON, "/w/repo/a.md", "/etc/x.md")) for path in (inside, outside)] + [_outcome(P2_SAME_TWICE)[0]],
+          [0, 1] * 3 + [0])
     check("preflight/p4-whole-file-advisory", _outcome(P4_WHOLE_FILE, "alpha"), (0, [("P4", "ADVISORY")]))
     check("preflight/p4-clean-quiet", [_outcome(P4_NAMED, "alpha"), _outcome(P4_NEGATED, "alpha"),
                                        _outcome(P4_WHOLE_FILE, "beta")], [(0, [])] * 3)
@@ -3196,6 +3316,30 @@ def self_test(report_path=None):
         check("preflight/p3-unresolved-pin-cannot-evaluate", (p3("docs/present.md", "0123456789ab"),
                                                               p3("docs/present.md", "f" * 40)),
               ("CannotEvaluate", "CannotEvaluate"))
+        # a pin is resolved even when the brief names no relative path to read at it
+        check("preflight/p3-unresolved-pin-no-path-cannot-evaluate",
+              (_outcome(P3_PIN_ONLY.format("0123456789ab"), "alpha", True, repo),
+               _outcome(P3_PIN_ONLY.format(head), "alpha"), _outcome(P3_PIN_ONLY.format(head), "alpha", True, repo)),
+              ("CannotEvaluate", "CannotEvaluate", (0, [])))
+
+        def under_foreign_git_env():
+            """A caller's GIT_DIR and GIT_OBJECT_DIRECTORY point elsewhere; the read still uses `repo`."""
+            with _environ(GIT_DIR=str(base / "elsewhere"), GIT_OBJECT_DIRECTORY=str(base / "elsewhere")):
+                return p3("docs/present.md"), p3("docs/absent.md")
+
+        def git_failures():
+            """A git read that times out or cannot be launched, at rev-parse and at cat-file."""
+            out = []
+            with _patched(GIT_READ_TIMEOUT=1e-9):
+                out += [_git_outcome(resolve_revision, repo, head),
+                        _git_outcome(exists_at_revision, repo, head, "docs/absent.md")]
+            with _environ(PATH=str(base / "no-git-here")):
+                out += [_git_outcome(resolve_revision, repo, head),
+                        _git_outcome(exists_at_revision, repo, head, "docs/absent.md")]
+            return out
+
+        check("preflight/p3-git-env-scrubbed", under_foreign_git_env(), ((0, []), (1, [("P3", "HARD")])))
+        check("preflight/p3-git-failure-cannot-evaluate", git_failures(), ["CannotEvaluate"] * 4)
         with open(base / "brief.md", "w", encoding="utf-8") as handle:
             handle.write(P3_BRIEF.format(head[:12], "docs/absent.md"))
         with open(base / "table.toml", "w", encoding="utf-8") as handle:
@@ -3216,18 +3360,54 @@ def self_test(report_path=None):
         check("revert/p2-family-gate-red", *flip([lambda: _outcome(P2_OUTSIDE, "beta")[0]], [1],
                                                  rule_p2=lambda names, row, repo: real_p2(
                                                      names, dict(row, **{"reads-outside-workdir": "no"}), repo)))
+
+        def path_after_word(line, start):
+            """The previous parser: the first absolute path after the word workdir anywhere on the line."""
+            word = WORKDIR_WORD_RE.search(line)
+            found = word and ABS_PATH_RE.search(line, word.end())
+            return _path_token(found.group(0)) if found else None
+
+        def union_p2(names, row, repo):
+            """The previous rule: every declared path is a workdir, with no ambiguity refused."""
+            if row["reads-outside-workdir"] != "no" or not names.workdirs:
+                return []
+            return [("P2", "HARD", line, "", path) for line, path in names.absolute
+                    if not under_workdir(path, names.workdirs)]
+
+        check("revert/p2-declaration-red", *flip(
+            [lambda text=text: _outcome(text)[0] for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO, P2_TWO,
+                                                                P2_SPACE_UNQUOTED)],
+            [0] * 5, _declaration_rest=path_after_word, rule_p2=union_p2))
         check("revert/p3-red", *flip([lambda: p3("docs/absent.md")[0]], [0], rule_p3=nothing))
         check("revert/p3-cat-file-red", *flip([lambda: p3("docs/untracked.md")[0]], [0],
                                               exists_at_revision=lambda repo, commit, path: os.path.lexists(
                                                   os.path.join(str(repo), path))))
         check("revert/p3-unresolved-red", *flip([lambda: p3("docs/present.md", "0123456789ab")], [(1, [("P3", "HARD")])],
                                                 resolve_revision=lambda repo, rev: rev))
+        check("revert/p3-git-env-red", *flip([lambda: under_foreign_git_env()[0]], ["CannotEvaluate"],
+                                             _git_read_env=lambda: dict(os.environ)))
+        real_resolve, real_exists = resolve_revision, exists_at_revision
+
+        def resolve_or_pass(repo, rev):
+            try:
+                return real_resolve(repo, rev)
+            except CannotEvaluate:
+                return rev
+
+        def exists_or_pass(repo, commit, path):
+            try:
+                return real_exists(repo, commit, path)
+            except CannotEvaluate:
+                return True
+
+        check("revert/p3-git-failure-red", *flip([git_failures], [[head, True, head, True]],
+                                                 resolve_revision=resolve_or_pass, exists_at_revision=exists_or_pass))
         check("revert/p4-red", *flip([lambda: _outcome(P4_WHOLE_FILE, "alpha")], [(0, [])], rule_p4=nothing))
         check("revert/p4-named-red", *flip([lambda: _outcome(P4_NAMED, "alpha")], [(0, [("P4", "ADVISORY")])],
                                            HANDBACK_NAMED_RE=never))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 86)
+    check("revert/every-flip-ran", len(flipped), 89)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
