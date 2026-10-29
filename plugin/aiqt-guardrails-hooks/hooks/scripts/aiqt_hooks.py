@@ -11267,12 +11267,17 @@ _RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 # Recognized/apparent commits deny unless that evidence carries an A-D certificate.
 #
 # Certificate contract:
-# A: plain session commit, intact absolute session binding, validated non-protected HEAD.
+# A: plain commit (no -C) with no switch postcondition for its worktree, run in the
+#    operand of the latest preceding admitted cd/pushd, else in the absolute session
+#    cwd (a cd/pushd operand with a '.' or '..' component leaves it unresolved);
+#    validated non-protected HEAD there.
 # B: exact absolute -C commit, proved target identity, applicable non-protected HEAD.
 # C: admitted switch and commit have equal worktree identities; the uninterrupted &&
 #    chain gates the commit on switch success; the conditional branch is non-protected.
-# D: exactly one plain session commit, valid protected local HEAD, and remote probe
-#    result exactly False. D is a policy exemption, NOT non-protected branch evidence.
+# D: the command's only commit, plain (in the directory A would use) or exact absolute
+#    -C, with no switch postcondition and every other step an admitted cd/pushd;
+#    valid protected local HEAD of that target, and its remote probe result exactly
+#    False. D is a policy exemption, NOT non-protected branch evidence.
 #
 # Every certificate additionally requires complete admitted syntax, literal arguments,
 # no redirects/wrappers/assignments, acceptable ambient environment, and successful
@@ -11282,8 +11287,11 @@ _COMMIT_CERTIFICATE_SHAPES = frozenset(("A", "B", "C", "D"))
 _COMMIT_MAX_COMMAND = 65536
 _COMMIT_MAX_SEGMENTS = 64
 
-# target is None for a session-bound Git command, otherwise the exact absolute -C
-# operand. branch is a literal switch operand, NOT a validated reference.
+# For a "cd" step (an admitted cd or pushd), target is its absolute operand, where
+# later plain steps run. For a Git step, target is None without -C (it runs in the
+# latest preceding cd/pushd operand, else the session cwd), otherwise the exact
+# absolute -C operand. An "inert" step has no target. branch is a literal switch
+# operand, NOT a validated reference.
 _CommitStep = collections.namedtuple(
     "_CommitStep", ("kind", "target", "branch", "segment"))
 

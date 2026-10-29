@@ -10781,8 +10781,10 @@ def _main_isolated(monitor):
         # `git remote add && commit` adds the remote AFTER the probe ran), so a compound /
         # multi-segment / redirected commit is handled EXACTLY as before the exemption: DENY when
         # it lands on a protected branch. Each DENY below runs from a no-remote main-HEAD session cwd (nr_none),
-        # so it is fail-to-pass under a revert - reverting the lone_direct restriction makes the exemption
-        # (nr_none has no remote) ALLOW these compound/redirected commits (the over-fire the finding reported).
+        # so it is fail-to-pass under a revert - reverting the lone-commit restriction (the _commit_syntax grammar,
+        # which admits only literal redirect-free segments in an uninterrupted && chain, and the _commit_issue
+        # condition on certificate D: one commit, no switch, only admitted cd/pushd steps beside it) makes the
+        # exemption (nr_none has no remote) ALLOW these compound/redirected commits (the over-fire the finding reported).
         # nr_all1/nr_all2 exercise the remote-spelling coverage: a remote-backed repo in ANY spelling still
         # DENIES a lone protected commit (the exemption must not weaken it). Judged by the structured verdict. ==
         nr_upstream = _init_repo(tmp / "pl-nr-upstream")   # main HEAD, a remote named 'upstream'
@@ -10823,7 +10825,7 @@ def _main_isolated(monitor):
         # nested git) before git runs, so the pre-command no-remote probe is stale. The exemption must
         # require the commit segment be FREE of such substitution (opaque_shell False). Each DENY below
         # runs from a no-remote main-HEAD cwd (nr_none) and is fail-to-pass under a revert: dropping the
-        # opaque_shell qualifier from lone_direct_commit re-ALLOWS these substitution-bearing commits
+        # opaque_shell qualifier from _commit_literal_segment re-ALLOWS these substitution-bearing commits
         # (the bypass the finding reported). The positive control (pl-fr1-0 above) proves the exemption
         # still ALLOWS the genuine lone bare commit, so these denials are the substitution, not the repo.
         pexpect("(pl-fr4-1) 'git commit -m \"$(git remote add ...)\"' DENIES (command substitution in "
