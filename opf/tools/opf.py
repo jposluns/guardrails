@@ -2,50 +2,46 @@
 """opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
+  opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; local runner)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
 self-test wired in; store verbs that have not yet landed are recognized names that report
 NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub can never read as a
-passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
+passing operation. `render` HAS landed: the `opf render` CLI requires exactly one of
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
-(forwarding to the U4 engine) and `--write` (VC-4/PR-C) is the mutating half: it gathers the inert git-derived
-observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
-`validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
-checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
+(forwarding to the views engine, `_opf_views.render`) and `--write` is the mutating half: it gathers the
+inert git-derived observations caller-side (_opf_observe.gather) and hands them to the same engine, which
+composes the EXISTING doctor `validate_store` store-integrity gate and permits writing when source
+integrity holds. Post-write validation checks source integrity and regenerated outputs; other
+deliverable failures can remain. `doctor` HAS landed: `opf doctor
 [--root DIR] [--require-store]` RESOLVES the store, gathers the inert git-derived observations
 (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
 over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
 with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
 repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
-observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent
-upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 schema delta changes only spec_version; declared views
-are then regenerated, so a stale committed view can change. The 1.0.0 path also applies the earlier
-schema delta
-(base-table and discovery-token rename, decision_support retirement, type and view declarations,
-DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
-It refuses a store above the tooling spec. When migrating a 1.0.0 or 1.1.0 store, its preconditions
-include readable, canonical manifest/counters matching a recognised origin shape, cleanliness over
-planned schema/render destinations and index collision candidates (including ignored files there),
-and acquisition of its lease. An untracked or ignored lease is excepted from the cleanliness check
-and handled separately by lease acquisition. It then applies the schema delta,
-renders declared views, and requires a full doctor VALID before offering the uncommitted change for
-review and merge. A store already at the
-tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
-NOT APPLICABLE and exits 0. `import`'s former
+observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
+recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
+every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
+`import`'s former
 modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
 (--decisions FILE | --interactive) | --apply <run-id>)`, are RETIRED (spec 14.1) and their engine is
 removed: the verb refuses every argument list on every root, a NOT-ADOPTED one included, at exit 2 with a
 pointer to adoption and the prompt pack, parsing no argument, reading no input file and writing nothing.
 
-`init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
-`CHANGELOG.md` when none exists, without git writes or rendering.
+`init` HAS landed: `opf init [--root DIR] [--recover]` creates validated store sources, a pointer, and a
+starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 lease, without rendering or
+git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
-`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
-author one change (with its own worklog entry, and for done-with-receipt the one-to-one done receipt)
-through one journaled publication, then render and require doctor VALID, leaving the change uncommitted.
+`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, `receipt-repair`, and
+`worklog-append` author one change (with its own worklog entry, and for done-with-receipt the one-to-one done
+receipt) through one journaled publication, then render and require doctor VALID, leaving the change
+uncommitted. `receipt-repair BI-ID --actor maintainer[:ID] --reason S` adds the missing receipt of an item a
+committed reviewed edit put at done, claiming its id through a homes-2 id reservation; it refuses at homes 1,
+so while this build activates homes 1 only it refuses on every store (exit 2, recording nothing; like every
+subcommand, on a homes-1 store it first reconciles any interrupted earlier run, and that recovery, where one
+is needed, writes the store before the run refuses).
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.
@@ -58,9 +54,12 @@ nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readines
 the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
 `opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
 and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed. `complete`
-and `reconcile` are recognized and refuse (exit 2) until the completion and recovery stages land in a later
-PR.
+refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed.
+`opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
+alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
+own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
+safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -107,17 +106,64 @@ def _bootstrap():
     (ImportError) or read (OSError) -- maps to a located cannot-evaluate (EXIT_MALFORMED / 2), never an
     uncaught ImportError that Python would surface as its default exit 1 and that a direct `opf render
     --check` would then read as a false DRIFT (the exit-1=drift conflation, reached here BEFORE the render
-    dispatcher's own fail-closed handler). Only ImportError and OSError (the broken/partial-install signals)
-    are caught; a broader error propagates rather than being masked as bootstrap. The imports moved OFF module
-    top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
+    dispatcher's own fail-closed handler). Every exception raised while a helper is imported maps to
+    EXIT_MALFORMED except a KeyboardInterrupt, which is re-raised unchanged (one whose class also derives
+    from ImportError or OSError is caught by that arm first and maps as that arm does), because exit 1 is
+    the drift or finding code and this function exists to keep an import fault from reaching it; this, like
+    every guarantee opf states, holds only within the residual stated below. An `except KeyboardInterrupt`
+    arm follows the OSError arm and re-raises what it catches; the interpreter matches it through the
+    type's mro(), calling neither issubclass nor type. The broader arm is an `except BaseException as exc`,
+    where the interpreter binds what it caught, and it tests the real type again as a second check. A bare
+    except follows it, because `except BaseException` matches through the class's mro(), which a metaclass
+    can make leave BaseException out, so such a class would escape that arm (one whose mro() names
+    KeyboardInterrupt is re-raised by the interrupt arm first and never reaches the bare one). The bare arm
+    never asks what it caught (sys.exception() is a function code opf loads can replace) and never
+    re-raises: it prints the fixed cannot-bootstrap line and the fixed line naming no cause, then returns
+    EXIT_MALFORMED. The handlers that guard a description are bare excepts as well, and read no exception.
+    ImportError and OSError (the broken/partial-install signals) keep their own arms and messages, and every
+    other exception the broader arm catches, an Exception subclass included (a SyntaxError in an installed
+    helper, a ValueError at import) and a SystemExit (sys.exit(0) and a bare sys.exit() included, which
+    would otherwise end any verb at exit 0, read as success), maps to a located diagnostic naming the
+    helper (the module running in the outermost
+    module frame of the traceback, or only "a helper module" when the traceback holds no module frame, as
+    for a SyntaxError in the helper, whose own text names its file; and the innermost one's module when
+    another module raised it) and the cause (its type and text), rendered through _init_inert. An error
+    raised after a helper is imported, outside this function, is not mapped here. The imports moved OFF
+    module top for exactly this reason -- an eager top-level import failed before main()'s contract could
+    apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
-    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
-    that could not be brought in; the variable parts of that diagnostic (the helper name or the read
-    error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
-    printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
-    SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
-    runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
-    OPF-QUICKSTART state. Both mapped arms render their variable parts AT this print (the init suite
+    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a cannot-bootstrap diagnostic (the
+    ImportError arm's line names the module its error names, which need not be a helper, or else gives the
+    error's text); every variable part of a diagnostic (a module name, the cause's type or text) is
+    rendered through _init_inert, the one init escaper, so no raw, shell-live value is printed on the way
+    to any verb. Describing a cause runs code the cause controls (its __str__, a name that is not a str,
+    its type's __name__ under a hostile metaclass), so no description may escape: the ImportError and
+    OSError arms build their one line inside a guard, and the broader arm runs no code the cause controls
+    before it prints a fixed cannot-bootstrap line, and then describes the helper and the cause inside a
+    guard; a description that raises anything (a SystemExit or a ValueError included) falls back to a line
+    naming only the cause's type, or to a fixed line naming nothing, and every arm still returns
+    EXIT_MALFORMED (that fallback's own print is guarded too, so a stream raising there leaves the fixed
+    line and the status). Whether a cause is a KeyboardInterrupt is decided by its real type: first by the
+    `except KeyboardInterrupt` arm, then by the broader arm's issubclass(type(exc), KeyboardInterrupt),
+    never by isinstance, which reads the cause's own __class__ when its type is not one: a __class__
+    property raising SystemExit(0) would escape this function before it prints a line, and one returning
+    KeyboardInterrupt would be re-raised as if it were one. Both tests follow the type's mro(), so a class
+    whose metaclass's mro() names KeyboardInterrupt is an interrupt here and is re-raised, by design, by
+    the interrupt arm whether or not that mro() names BaseException. A
+    KeyboardInterrupt re-raised here surfaces as Python's own traceback: it runs before init dispatch and
+    outside _cmd_init's rendering boundary, a window _cmd_init and OPF-QUICKSTART state. No in-process code
+    can close one residual: code opf loads (a helper, or a module a helper imports) runs in this process
+    with its privileges, at import, when called or later (an atexit hook, a thread, a signal handler, a
+    destructor, or a replaced stream whose failing flush at shutdown ends the process at exit 120),
+    and can end the process with any status or replace anything opf uses (a builtins name such as print,
+    type, SystemExit or KeyboardInterrupt, a sys function such as sys.exception, a stream such as
+    sys.stderr, a module global such as EXIT_MALFORMED), so every guarantee opf states (the exit guarantees
+    here, in _main_exit and in OPF-QUICKSTART included) holds only while that code does neither. A
+    replaced issubclass is no longer a route by which a real interrupt is mapped instead of re-raised: the
+    interrupt arm re-raises it before issubclass is called. The second check still calls issubclass, so a
+    replacement that answers yes for another cause re-raises that cause (a SystemExit(0) then ends the
+    process at exit 0), which is within this residual too. Every mapped arm renders its variable parts
+    AT this print (the init suite
     drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
     and requires each printed line inert, QA round 13 C)."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
@@ -134,7 +180,7 @@ def _bootstrap():
         import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
-        import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
+        import _opf_observe     # caller-side git-derived observations for the doctor verb (validate_store)
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
@@ -142,16 +188,292 @@ def _bootstrap():
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
-        print("opf: cannot bootstrap: {} (cannot evaluate)".format(
-            _init_inert(exc.name or str(exc))), file=sys.stderr)
+        try:
+            line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
+        except:  # noqa: E722  a cause that cannot be described is still a cannot-evaluate
+            line = _bootstrap_undescribed(exc)
+        print(line, file=sys.stderr)
         return EXIT_MALFORMED
     except OSError as exc:
-        print("opf: cannot bootstrap: a helper module could not be read "
-              "({}: {}) (cannot evaluate)".format(
-                  _init_inert(type(exc).__name__), _init_inert(str(exc))),
+        try:
+            line = ("opf: cannot bootstrap: a helper module could not be read "
+                    "({}: {}) (cannot evaluate)".format(
+                        _init_inert(type(exc).__name__), _init_inert(str(exc))))
+        except:  # noqa: E722  a cause that cannot be described is still a cannot-evaluate
+            line = _bootstrap_undescribed(exc)
+        print(line, file=sys.stderr)
+        return EXIT_MALFORMED
+    except KeyboardInterrupt:  # matched through the type's mro(), no issubclass or type call: re-raised unchanged
+        raise
+    except BaseException as exc:  # an import-time fault is a cannot-evaluate, never exit 0 or 1
+        # The interpreter binds exc, and the real type decides again, as a second check: isinstance would read
+        # the cause's own __class__, code the cause controls.
+        if issubclass(type(exc), KeyboardInterrupt):
+            raise
+        # The fixed line first: describing the cause runs its code, whose own failure must not erase this one.
+        print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
               file=sys.stderr)
+        try:
+            # The helper is the module running in the outermost module frame of the traceback (the one this
+            # function's import statement was bringing in); the innermost one, when another, raised the cause.
+            modules, tb = [], exc.__traceback__
+            while tb is not None:
+                if tb.tb_frame.f_code.co_name == "<module>":
+                    modules.append(_init_inert(tb.tb_frame.f_globals.get("__name__", "?")))
+                tb = tb.tb_next
+            helper = "helper " + modules[0] if modules else "a helper module"
+            inner = ", in module " + modules[-1] if len(modules) > 1 and modules[-1] != modules[0] else ""
+            print("opf: cannot bootstrap: {} raised {} ({}) while being imported{} (cannot evaluate)".format(
+                helper, _init_inert(type(exc).__name__), _init_inert(str(exc)), inner), file=sys.stderr)
+        except:  # noqa: E722  a cause that cannot be described is still a cannot-evaluate
+            try:
+                print(_bootstrap_undescribed(exc), file=sys.stderr)
+            except:  # noqa: E722  the fixed line and the exit status still carry the fault
+                pass
+        return EXIT_MALFORMED
+    except:  # noqa: E722  a class whose metaclass's mro() leaves out BaseException and KeyboardInterrupt
+        # is a cannot-evaluate too. Never asks what it caught (sys.exception() can be replaced) and never
+        # re-raises: fixed lines only.
+        print("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)",
+              file=sys.stderr)
+        print("opf: cannot bootstrap: the cause could not be described (cannot evaluate)", file=sys.stderr)
         return EXIT_MALFORMED
     return EXIT_OK
+
+
+def _bootstrap_undescribed(exc):
+    """The cannot-bootstrap line for a cause whose description raised: it names only the cause's type
+    (rendered through _init_inert), or nothing when even that cannot be rendered. Never raises."""
+    try:
+        return "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)".format(
+            _init_inert(type(exc).__name__))
+    except:  # noqa: E722  a type name that cannot be rendered still leaves a fixed line
+        return "opf: cannot bootstrap: the cause could not be described (cannot evaluate)"
+
+
+# The lines _bootstrap_exit_findings expects, each a (template, raw parts) pair whose parts are rendered
+# through _init_inert: the broader arm's fixed first line, its located description, the ImportError and
+# OSError arms' one line, and the line for a cause whose description raised.
+_BOOT_FAILED = ("opf: cannot bootstrap: a helper module failed while being imported (cannot evaluate)", ())
+_BOOT_RAISED = "opf: cannot bootstrap: helper _opf_worklog raised {} ({}) while being imported (cannot evaluate)"
+_BOOT_MISSING = "opf: cannot bootstrap: {} (cannot evaluate)"
+_BOOT_UNREAD = "opf: cannot bootstrap: a helper module could not be read ({}: {}) (cannot evaluate)"
+_BOOT_UNDESCRIBED = "opf: cannot bootstrap: the cause ({}) could not be described (cannot evaluate)"
+_BOOT_NAMELESS = ("opf: cannot bootstrap: the cause could not be described (cannot evaluate)", ())
+
+# Stand-in prefixes defining HelperExit, a SystemExit subclass whose metaclass's mro() leaves BaseException out,
+# so `except BaseException` never matches it: _BOOT_MRO_KEEP's mro() is (cls, SystemExit, object), so uncaught
+# it ends the process at its code as a SystemExit does (exit 0 for HelperExit(0)); _BOOT_MRO_DROP's is (cls,
+# object). Raised at import, either reaches only the bare arm, which maps it without describing it.
+_BOOT_MRO_KEEP = ("class SkipBase(type):\n    def mro(cls):\n        return (cls, SystemExit, object)\n\n\n"
+                  "class HelperExit(SystemExit, metaclass=SkipBase):\n    pass\n\n\n")
+_BOOT_MRO_DROP = ("class SkipAll(type):\n    def mro(cls):\n        return (cls, object)\n\n\n"
+                  "class HelperExit(SystemExit, metaclass=SkipAll):\n    pass\n\n\n")
+# A stand-in prefix replacing sys.exception with a function that reports a KeyboardInterrupt whatever is in flight,
+# so a handler that asks sys.exception() what it caught re-raises an exit or an error as an interrupt.
+_BOOT_CLAIMS_INTERRUPT = "import sys\n\nsys.exception = lambda: KeyboardInterrupt()\n"
+# A stand-in prefix defining Unwritable, a stream whose every write raises HelperExit(0) (so _BOOT_MRO_KEEP first).
+_BOOT_UNWRITABLE = "import sys\n\n\nclass Unwritable:\n    def write(self, text):\n        raise HelperExit(0)\n\n\n"
+# A stand-in prefix defining HelperExit, a SystemExit subclass whose metaclass's mro() is (cls, KeyboardInterrupt,
+# object): `except KeyboardInterrupt` matches it and `except BaseException` does not. Its str() is object's, as
+# BaseException is not on that mro(), so it names an address and is not compared.
+_BOOT_MRO_INTERRUPT = ("class Liar(type):\n    def mro(cls):\n        return (cls, KeyboardInterrupt, object)\n\n\n"
+                       "class HelperExit(SystemExit, metaclass=Liar):\n    pass\n\n\n")
+# A stand-in prefix replacing builtins.issubclass with a function that answers no whenever it is asked about
+# KeyboardInterrupt, so a handler that decides the interrupt by calling issubclass maps a real one as a fault.
+_BOOT_HIDES_INTERRUPT = ("import builtins\n\nreal_issubclass = builtins.issubclass\nbuiltins.issubclass = lambda cls, "
+                         "classinfo: classinfo is not KeyboardInterrupt and real_issubclass(cls, classinfo)\n")
+
+# The import-time faults _bootstrap_exit_findings raises from a stand-in for the first helper _bootstrap
+# imports: (label, the stand-in's source, the exception type the call must let escape unchanged, the name of a
+# class the stand-in defines that must escape, or None, then the escaping exception's text (None when it is not
+# compared), or else the exact lines the call must print as it returns EXIT_MALFORMED).
+_BOOTSTRAP_EXIT_CASES = (
+    ("systemexit-0", "raise SystemExit(0)\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+    ("bare-sys-exit", "import sys\nsys.exit()\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "")))),
+    ("systemexit-1", "raise SystemExit(1)\n", None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "1")))),
+    ("custom-baseexception",
+     "class HelperHalt(BaseException):\n    pass\n\n\nraise HelperHalt('halted at $(import)')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperHalt", "halted at $(import)")))),
+    ("keyboardinterrupt", "raise KeyboardInterrupt('stop')\n", KeyboardInterrupt, "stop"),
+    ("broader-error", "raise ValueError('not an exit')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("ValueError", "not an exit")))),
+    ("helper-syntaxerror", "return 1\n",
+     None, (_BOOT_FAILED, ("opf: cannot bootstrap: a helper module raised {} ({}) while being imported (cannot "
+                           "evaluate)", ("SyntaxError", "'return' outside function (_opf_worklog.py, line 1)")))),
+    ("str-raises-systemexit-0",
+     "class HelperFault(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n\n\nraise HelperFault()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperFault",)))),
+    ("str-raises-valueerror",
+     "class HelperHalt(BaseException):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
+     "raise HelperHalt()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperHalt",)))),
+    ("class-raises-systemexit-0",
+     "class HelperFault(Exception):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperFault('class raises')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperFault", "class raises")))),
+    ("class-claims-keyboardinterrupt",
+     "class HelperFault(Exception):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperFault('class claims')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("HelperFault", "class claims")))),
+    ("importerror-str-raises-systemexit-0",
+     "class HelperMissing(ImportError):\n    def __str__(self):\n        raise SystemExit(0)\n\n\n"
+     "raise HelperMissing()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperMissing",)),)),
+    ("importerror-class-raises-systemexit-0",
+     "class HelperMissing(ImportError):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperMissing('class raises', name='_opf_missing')\n",
+     None, ((_BOOT_MISSING, ("_opf_missing",)),)),
+    ("importerror-class-claims-keyboardinterrupt",
+     "class HelperMissing(ImportError):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperMissing('class claims', name='_opf_missing')\n",
+     None, ((_BOOT_MISSING, ("_opf_missing",)),)),
+    ("oserror-str-raises-valueerror",
+     "class HelperUnread(OSError):\n    def __str__(self):\n        raise ValueError('undescribable')\n\n\n"
+     "raise HelperUnread()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+    ("oserror-class-raises-systemexit-0",
+     "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
+     "        raise SystemExit(0)\n\n\nraise HelperUnread('class raises')\n",
+     None, ((_BOOT_UNREAD, ("HelperUnread", "class raises")),)),
+    ("oserror-class-claims-keyboardinterrupt",
+     "class HelperUnread(OSError):\n    @property\n    def __class__(self):\n"
+     "        return KeyboardInterrupt\n\n\nraise HelperUnread('class claims')\n",
+     None, ((_BOOT_UNREAD, ("HelperUnread", "class claims")),)),
+    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n", None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n", None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("str-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class HelperFault(Exception):\n    def __str__(self):\n        raise HelperExit(0)\n\n\n"
+     "raise HelperFault()\n",
+     None, (_BOOT_FAILED, (_BOOT_UNDESCRIBED, ("HelperFault",)))),
+    ("type-name-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class Nameless(type):\n    @property\n    def __name__(cls):\n"
+     "        raise HelperExit(0)\n\n\nclass HelperFault(Exception, metaclass=Nameless):\n    pass\n\n\n"
+     "raise HelperFault()\n",
+     None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("importerror-str-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class HelperMissing(ImportError):\n    def __str__(self):\n"
+     "        raise HelperExit(0)\n\n\nraise HelperMissing()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperMissing",)),)),
+    ("oserror-str-raises-mro-exit",
+     _BOOT_MRO_KEEP + "class HelperUnread(OSError):\n    def __str__(self):\n        raise HelperExit(0)\n\n\n"
+     "raise HelperUnread()\n",
+     None, ((_BOOT_UNDESCRIBED, ("HelperUnread",)),)),
+    ("fallback-print-raises-mro-exit",
+     _BOOT_MRO_KEEP + _BOOT_UNWRITABLE + "class HelperFault(Exception):\n    def __str__(self):\n"
+     "        sys.stderr = Unwritable()\n        raise ValueError('undescribable')\n\n\nraise HelperFault()\n",
+     None, (_BOOT_FAILED,)),
+    ("replaced-sys-exception-systemexit-0", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(0)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+    ("replaced-sys-exception-systemexit-1", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(1)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "1")))),
+    ("replaced-sys-exception-valueerror", _BOOT_CLAIMS_INTERRUPT + "raise ValueError('helper')\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("ValueError", "helper")))),
+    ("replaced-sys-exception-mro-exit", _BOOT_CLAIMS_INTERRUPT + _BOOT_MRO_KEEP + "raise HelperExit(0)\n",
+     None, (_BOOT_FAILED, _BOOT_NAMELESS)),
+    ("replaced-sys-exception-keyboardinterrupt",
+     "import sys\n\nsys.exception = lambda: None\nraise KeyboardInterrupt('stop')\n", KeyboardInterrupt, "stop"),
+    ("mro-names-keyboardinterrupt", _BOOT_MRO_INTERRUPT + "raise HelperExit(0)\n", "HelperExit", None),
+    ("replaced-issubclass-keyboardinterrupt", _BOOT_HIDES_INTERRUPT + "raise KeyboardInterrupt('stop')\n",
+     KeyboardInterrupt, "stop"),
+    ("replaced-issubclass-systemexit-0", _BOOT_HIDES_INTERRUPT + "raise SystemExit(0)\n",
+     None, (_BOOT_FAILED, (_BOOT_RAISED, ("SystemExit", "0")))),
+)
+
+
+def _bootstrap_exit_findings(bootstrap=None):
+    """Drive each case of _BOOTSTRAP_EXIT_CASES through `bootstrap` (default _bootstrap) and return the
+    failures, empty when every case holds. Each case writes a stand-in _opf_worklog.py into a fresh temporary
+    directory put first on sys.path and takes the loaded _opf_worklog out of sys.modules for the call; the
+    loaded module, sys.path, sys.exception, builtins.issubclass and the path importer cache are restored after
+    it. An import-time
+    fault other than a KeyboardInterrupt (a SystemExit of 0, of None from a bare sys.exit(), of 1, a BaseException
+    subclass that is not an Exception, a ValueError, a SyntaxError in the helper) must return EXIT_MALFORMED,
+    raise nothing, and print exactly the fixed cannot-bootstrap line and then one line naming the helper and
+    the cause's type and text, rendered inert. A cause whose __str__ raises (SystemExit(0) or a ValueError),
+    in the broader arm or in the ImportError or OSError arm, must still return EXIT_MALFORMED, its
+    description falling back to a line naming only its type. A cause whose __class__ is a property raising
+    SystemExit(0) or returning KeyboardInterrupt, in each arm, must return EXIT_MALFORMED and print exactly
+    the lines that arm prints for its real type. A SystemExit subclass whose metaclass's mro() leaves out
+    BaseException and KeyboardInterrupt, raised at import (its mro() keeping SystemExit or not), from the
+    cause's __str__ in each arm, or from the cause's type's __name__, must return EXIT_MALFORMED and print
+    exactly the expected lines. One whose mro() names KeyboardInterrupt and leaves out BaseException, raised
+    at import, must escape, judged by its class (the stand-in's own HelperExit), as its str() names an address.
+    A cause whose __str__ replaces sys.stderr with a stream raising such a class must leave the fixed line and
+    EXIT_MALFORMED. A stand-in that replaces sys.exception with a function reporting a KeyboardInterrupt, then
+    raises SystemExit(0), SystemExit(1), a ValueError or such a class, must map as it would without the
+    replacement, and one that replaces it with a function reporting nothing, then raises a KeyboardInterrupt,
+    must let that interrupt escape. A stand-in that replaces builtins.issubclass with a function answering no
+    whenever it is asked about KeyboardInterrupt, then raises a KeyboardInterrupt, must let that interrupt
+    escape, and one that then raises SystemExit(0) must map as it would without the replacement. A
+    KeyboardInterrupt must escape unchanged. Each call is judged under a
+    bare except, so an escape of any class is that case's failure. With the broader arm narrowed back to exits
+    only (`except SystemExit as exc` and no bare arm), the ValueError and SyntaxError cases escape the call
+    and fail; with the bare arm removed, the three mro() cases raised at import whose mro() leaves out
+    KeyboardInterrupt escape the call and fail; with the `except KeyboardInterrupt` arm removed, the mro()
+    case naming KeyboardInterrupt returns EXIT_MALFORMED from the bare arm and the replaced-issubclass
+    interrupt case returns it from the broader arm, and each fails; with
+    the bare arm asking sys.exception() what it caught and re-raising the interrupt it reports, the
+    replaced-sys.exception mro() case escapes the call and fails; with the broader arm deciding the interrupt
+    from sys.exception() in place of exc, the replaced-sys.exception exit and error cases escape the call and
+    fail (its interrupt case is re-raised by the interrupt arm first); with a description guard, or
+    _bootstrap_undescribed's own,
+    reverted to `except BaseException`, that guard's mro() case escapes the call or loses its line and fails;
+    with the guard around the fallback's print removed or reverted to `except BaseException`, the
+    fallback-print case escapes the call and fails;
+    with any arm reverted to describing its cause in its one unguarded print, that arm's __str__ cases
+    escape the call and fail; with the broader arm's interrupt test reverted to isinstance, its two __class__
+    cases escape the call and fail, and an isinstance interrupt test put first in the ImportError or OSError
+    arm makes that arm's two fail the same way. The replaced-issubclass SystemExit(0) case pins the exit-2
+    outcome under a replaced issubclass, and no revert of an interrupt arm or test turns it red: the
+    replacement answers otherwise than the real issubclass only when asked whether a KeyboardInterrupt class
+    is one, and SystemExit is not, so an interrupt test that asks about the caught type reads the same with
+    it or without it. With an `except SystemExit: raise` arm put ahead of the broader arm, that case escapes
+    the call and fails, as does every other case that raises a SystemExit at import (an mro() that keeps
+    SystemExit included)."""
+    import builtins
+    import contextlib
+    import io
+    import tempfile
+    from unittest.mock import patch
+    bootstrap = _bootstrap if bootstrap is None else bootstrap
+    failures = []
+    for label, source, escapes, want in _BOOTSTRAP_EXIT_CASES:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="opf-boot-exit-") as tmp:
+            (Path(tmp) / "_opf_worklog.py").write_text(source, encoding="utf-8")
+            loaded = sys.modules.pop("_opf_worklog", None)
+            try:
+                with patch.object(sys, "path", [tmp] + sys.path), patch.object(sys, "dont_write_bytecode", True):
+                    # A stand-in may replace sys.exception, which the verdict below calls, or builtins.issubclass:
+                    # each restored on the way out.
+                    with patch.object(sys, "exception", sys.exception), \
+                            patch.object(builtins, "issubclass", builtins.issubclass):
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                            rc = bootstrap()
+            except:  # noqa: E722  an escape is this case's verdict, judged below, whatever its class
+                rc = sys.exception()
+            finally:
+                sys.path_importer_cache.pop(tmp, None)
+                sys.modules.pop("_opf_worklog", None)
+                if loaded is not None:
+                    sys.modules["_opf_worklog"] = loaded
+        if escapes is not None:
+            # A str names a class the stand-in defines, which is judged by its module and name.
+            if isinstance(escapes, str):
+                escaped = (type(rc).__module__, type(rc).__qualname__) == ("_opf_worklog", escapes)
+            else:
+                escaped = type(rc) is escapes
+            if not escaped or (want is not None and str(rc) != want):
+                failures.append("bootstrap {}: {!r} (expected the {} to escape unchanged)".format(
+                    label, rc, getattr(escapes, "__name__", escapes)))
+            continue
+        want = "".join(template.format(*map(_init_inert, parts)) + "\n" for template, parts in want)
+        if type(rc) is not int or rc != EXIT_MALFORMED or out.getvalue() != want:
+            failures.append("bootstrap {}: returned {!r} printing {!r} (expected exit {} printing {!r})".format(
+                label, rc, out.getvalue(), EXIT_MALFORMED, want))
+    return failures
+
 
 # F-SELFTEST-NO-MAIN: the one entry a module that binds self_test must carry, matched by AST structure (so
 # spacing, quoting, parentheses and comments do not matter). _ENTRY_TEST is the only accepted test of the entry
@@ -944,6 +1266,57 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
+def _self_test_group_probe(registry):
+    """Flip the group partition and the selector. Each synthetic grouping of the live registry must yield its
+    fault; over a synthetic registry of recording callables, a group runs exactly its own labels in registry
+    order and forwards the worst outcome, a broken partition and an unknown name return 2 having run nothing,
+    and main() hands `--self-test-group NAME` to the selector. Returns a list of the discrepancies."""
+    from unittest.mock import patch
+    misses = []
+    groups = SELF_TEST_GROUPS
+    first, last = groups[0], groups[-1]
+    cases = (
+        ("a leg left out", registry, groups[:-1] + ((last[0], last[1][1:]),),
+         last[1][0] + " is in no group (left out)"),
+        ("a leg doubled", registry, ((first[0], first[1] + last[1][:1]),) + groups[1:],
+         last[1][0] + " is grouped 2 times (doubled)"),
+        ("an unregistered label", registry, ((first[0], first[1] + ("synthetic-stale",)),) + groups[1:],
+         "synthetic-stale is grouped, but no registry entry has that label"),
+        ("an empty group", registry, groups + (("synthetic-empty", ()),), "group synthetic-empty is empty"),
+        ("a group named twice", registry, groups + ((first[0], ()),), "group {} is named 2 times".format(first[0])),
+        ("a label registered twice", registry + registry[:1], groups,
+         "{} is registered 2 times".format(registry[0][0])),
+    )
+    for label, table, grouping, want in cases:
+        if want not in _self_test_group_faults(table, grouping):
+            misses.append("group case {!r} not named".format(label))
+    ran = []
+
+    def leg(label, code):
+        def run():
+            ran.append(label)
+            return code
+        return run
+
+    table = (("one", leg("one", 0)), ("two", leg("two", 1)), ("three", leg("three", 0)))
+    split = (("odd", ("three", "one")), ("even", ("two",)))
+    for name, grouping, want in (("odd", split, (0, ["one", "three"])), ("even", split, (1, ["two"])),
+                                 ("synthetic-unknown", split, (2, [])),
+                                 ("odd", (("odd", ("one", "three")),), (2, [])),
+                                 ("odd", split + (("again", ("one",)),), (2, []))):
+        del ran[:]
+        got = (run_self_test_group(name, grouping, table), list(ran))
+        if got != want:
+            misses.append("group selector over {!r} with {!r}: got {!r}, expected {!r}".format(
+                name, grouping, got, want))
+    handed = []
+    with patch.object(sys.modules[__name__], "run_self_test_group", lambda name: handed.append(name) or 0):
+        got = (main(["--self-test-group", "synthetic-name"]), handed)
+    if got != (EXIT_OK, ["synthetic-name"]):
+        misses.append("main() does not hand --self-test-group NAME to the selector: got {!r}".format(got))
+    return misses
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
@@ -954,7 +1327,9 @@ def _aggregator_self_test():
     module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
     (_self_test_floor) requires every module whose self_test is registered below and fails on an empty
     registry, an empty scan, or a registered callable that is not its module's self_test and not exempt; and
-    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is."""
+    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is. It
+    holds SELF_TEST_GROUPS to a partition of the registry (_self_test_group_faults) and flips the partition, the
+    group selector and its main() wiring (_self_test_group_probe)."""
     import tempfile
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
@@ -962,13 +1337,16 @@ def _aggregator_self_test():
     registry = _self_tests()
     required, faults = _self_test_floor(registry, here, _ENTRY_FLOOR_EXEMPT)
     gaps, exposers = _self_test_entry_gaps(here, required)
+    group_faults = _self_test_group_faults(registry, SELF_TEST_GROUPS)
     with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
-        missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
-    if gaps or faults or missed:
+        missed = (_self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+                  + _self_test_group_probe(registry))
+    if gaps or faults or missed or group_faults:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
-              "registry floor faults: {}; synthetic probe discrepancies: {})".format(
+              "registry floor faults: {}; self-test group faults: {}; synthetic probe discrepancies: {})".format(
                   "; ".join("{} ({})".format(k, v) for k, v in sorted(gaps.items())) or "none",
-                  "; ".join(faults) or "none", "; ".join(missed) or "none"), file=sys.stderr)
+                  "; ".join(faults) or "none", "; ".join(group_faults) or "none", "; ".join(missed) or "none"),
+              file=sys.stderr)
         return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
@@ -988,8 +1366,9 @@ def _aggregator_self_test():
               file=sys.stderr)
         return EXIT_FINDING
     print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
-          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
-              len(exposers), len(required)))
+          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry; the {} "
+          "named groups hold the {} registered self-tests exactly once)".format(
+              len(exposers), len(required), len(SELF_TEST_GROUPS), len(registry)))
     return EXIT_OK
 
 
@@ -5463,7 +5842,7 @@ def _watchdog_completion_case(mode, tree=None):
         assert not kill.called
     elif mode == "overdue-success":
         import time
-        # QA16 F1: an exit first observed after the deadline is TIMEOUT, whatever
+        # An exit first observed after the deadline is TIMEOUT, whatever
         # order the guardian and the collector were scheduled in. The guardian
         # stops itself before supervision; the collector is gated before its
         # first poll; the subject finishes only after the recorded deadline has
@@ -5559,7 +5938,7 @@ def _watchdog_completion_case(mode, tree=None):
                 "an overdue completion was accepted as success: " + repr(outcome))
     elif mode == "launch-ownership":
         import time
-        # QA16 F2 / QA17 F3: fork-to-ownership is uninterruptible by interpreter
+        # Fork-to-ownership is uninterruptible by interpreter
         # construction -- the fork runs on a private launcher thread, where CPython
         # never raises asynchronous signal exceptions -- so a cancellation delivered
         # at ANY caller-side bytecode still reaps the guardian to ECHILD. The old
@@ -5767,7 +6146,7 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "fd-hygiene-total":
         import errno
         import time
-        # QA16 MINOR-1 + QA17 F4/MINOR-2: EVERY undeclared caller descriptor is
+        # EVERY undeclared caller descriptor is
         # closed before a subject can run -- a bare pipe, a plain open file, an
         # UNSTARTED sibling call's endpoints (the construction window: there is no
         # publication step left to race), and a started sibling's -- while this
@@ -5826,7 +6205,7 @@ def _watchdog_completion_case(mode, tree=None):
                 os.close(fd)
     elif mode == "nested-keep":
         import time
-        # QA17 F2, migrated to the explicit-contract refusal: a caller descriptor a
+        # Migrated to the explicit-contract refusal: a caller descriptor a
         # NESTED run_bounded thunk relies on is a deterministic ERROR:OSError unless
         # declared through keep_fds, in which case it works -- never a
         # sometimes-working reuse of a stale registry entry.
@@ -5926,12 +6305,12 @@ def _watchdog_completion_case(mode, tree=None):
             assert emit.run_bounded(probe, timeout_s=10) == "GC-OFF"
     elif mode == "guardian-preload":
         import time
-        # QA18 codex F5: the guardian forks from the launcher thread, so a cold
+        # The guardian forks from the launcher thread, so a cold
         # guardian-side import could block on an import or module lock some other
         # caller thread held at fork time. Construction preloads the whole guardian
         # dependency set, making every guardian-side import a lock-free
         # sys.modules hit; the documented restriction that remains is thunk-side.
-        # QA19 F4: socket.send_fds/recv_fds cold-import array inside their own
+        # Likewise socket.send_fds/recv_fds cold-import array inside their own
         # bodies (importing socket alone does not load it), so the receipt path
         # needs array preloaded too.
         def pop_cold():
@@ -7031,7 +7410,7 @@ def _watchdog_completion_case(mode, tree=None):
                 raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
     elif mode == "escalation-subject":
         import time
-        # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
+        # Cancelling a wedged guardian is bounded AND kills
         # and observes the receipt-identified subject tree -- freeze the guardian,
         # then the subject's group and pidfd, then the guardian -- never a stranded
         # sleeper the test has to clean up. The same-group descendant must die with
@@ -7291,7 +7670,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "poll-collected":
         import time
-        # QA19 F1: a guardian failure FIRST collected by poll() -- the layer's
+        # A guardian failure FIRST collected by poll() -- the layer's
         # primary collection path (run_bounded and _run_fixture_process poll on
         # every loop iteration) -- must still get close()'s receipt kill,
         # disappearance proof and loud refusal: poll() records the failure and
@@ -7441,8 +7820,7 @@ def _watchdog_completion_case(mode, tree=None):
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "close-cancel":
         import time
-        # QA19 F2 + QA20 codex F2 / gemini / claude F2 + QA21 claude
-        # F1/F3/F4 (masked design, fix 2w/2x): a real SIGINT landing anywhere
+        # Masked design: a real SIGINT landing anywhere
         # inside close()'s ownership decision, transfer, collection or
         # cleanup stays PENDING (SIGINT and SIGTERM are blocked as the FIRST
         # statement of close()'s restoring try, and the launcher thread is
@@ -7865,7 +8243,7 @@ def _watchdog_completion_case(mode, tree=None):
         import time
         from contextlib import ExitStack
         caller = os.getpid()
-        # QA19 F3: with no pidfd available the escalation can neither freeze the
+        # With no pidfd available the escalation can neither freeze the
         # guardian nor address the pid-only receipt's subject, so the refusal
         # must say guardian-only/unverified -- never claim a frozen guardian or
         # a killed subject tree it could not address.
@@ -11380,13 +11758,19 @@ def _watchdog_completion_case(mode, tree=None):
                             "a pending cancellation (fix 7, QA28 codex "
                             "BLOCKER 1)", key, ast.dump(call.func))
 
-        # Leg 11 NEGATIVE VECTORS (fix 10, QA31; fix 11, QA32): each
-        # reproduces an in-memory QA mutation and must be REJECTED by
+        # Leg 11 NEGATIVE VECTORS: each reproduces an in-memory
+        # mutation and must be REJECTED by
         # the structural machinery above -- by its named check, never
-        # accepted and never a crash. Every QA31 vector was verified
-        # ACCEPTED (red) by the fix-9 machinery at 7df50fda; every
-        # QA32 vector was verified ACCEPTED (red) by the fix-10
-        # machinery at 7182a86e.
+        # accepted and never a crash. The swapped boundary argument,
+        # AnnAssign rebinding, hidden finalbody, shadowed import and
+        # module-poisoning vectors below were verified ACCEPTED (red)
+        # by the machinery at 7df50fda; the capturing-try finally,
+        # nested default, two capture-alias forms, nonlocal
+        # reach-back, inverted and swapped-guard conditional, and
+        # yield and await vectors were verified ACCEPTED (red) by the
+        # machinery at 7182a86e. The class-width walrus companion and
+        # every acceptance or over-rejection pin are outside both
+        # claims.
         def leg11_vector(source):
             function = _optlevel.parse(textwrap.dedent(source)).body[0]
             capturing = next(node for node in function.body
@@ -11399,10 +11783,10 @@ def _watchdog_completion_case(mode, tree=None):
             except AssertionError:
                 return
             raise AssertionError((
-                "a QA31/QA32 mutation vector was ACCEPTED by leg 11 "
-                "(fix 10/11)", label))
+                "a mutation vector that leg 11 must reject was ACCEPTED "
+                "(the pending-cancellation tripwire went quiet)", label))
 
-        # QA31 codex BLOCKER 1, mutation 1: the abandonment boundary's
+        # Swapped boundary argument: the abandonment boundary's
         # pending argument swapped off the captured name -- while the
         # capture may be pending, a boundary call that passes ANY
         # other name must be rejected.
@@ -11423,16 +11807,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex mutation 1: boundary pending argument swapped to "
+            "boundary vector: pending argument swapped to "
             "another name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex-1"),
-                    "interrupted", "vector:codex-1"))
+                                     "vector:swapped-boundary"),
+                    "interrupted", "vector:swapped-boundary"))
 
-        # QA31 codex BLOCKER 1, mutation 2: an AnnAssign rebinds the
+        # AnnAssign rebinding: an AnnAssign rebinds the
         # captured name after the capture -- every assignment form
         # that can touch the captured name is a FAILURE.
         function, capturing = leg11_vector("""
@@ -11446,15 +11830,15 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex mutation 2: AnnAssign rebinds the captured name",
+            "AnnAssign vector: AnnAssign rebinds the captured name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex-2"),
-                    "interrupted", "vector:codex-2"))
+                                     "vector:annassign-rebind"),
+                    "interrupted", "vector:annassign-rebind"))
 
-        # Class-width companion (fix 10): a walrus hidden inside the
+        # Class-width companion: a walrus hidden inside the
         # boundary call's own arguments rebinds the captured name with
         # zero calls for the old scan to see.
         function, capturing = leg11_vector("""
@@ -11478,7 +11862,7 @@ def _watchdog_completion_case(mode, tree=None):
                                      "vector:walrus"),
                     "interrupted", "vector:walrus"))
 
-        # QA31 gemini BLOCKER b: a zero-call finally after the capture
+        # Hidden finalbody: a zero-call finally after the capture
         # rebinds the captured name and raises a bare exception class
         # over the in-flight re-raise.
         function, capturing = leg11_vector("""
@@ -11494,21 +11878,21 @@ def _watchdog_completion_case(mode, tree=None):
                     raise Exception
             """)
         leg11_vector_rejected(
-            "gemini finally mutation: rebinding and foreign raise "
+            "finalbody vector: rebinding and foreign raise "
             "hidden in a finalbody",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:gemini-b"),
-                    "captured", "vector:gemini-b"))
+                                     "vector:finalbody-rebind"),
+                    "captured", "vector:finalbody-rebind"))
 
-        # QA31 codex BLOCKER 2: a local rebinding shadows an imported
+        # Shadowed import: a local rebinding shadows an imported
         # module name -- the receiver is NOT the module, and the
         # origin proof must FAIL it, never clear it as external.
         shadowing = _optlevel.parse(textwrap.dedent("""
             def mutant(self):
-                os = _qa31_object
+                os = _shadowing_object
                 os.poll()
             """)).body[0]
         vector_kinds, vector_value_kind = local_value_kinds(shadowing)
@@ -11517,17 +11901,17 @@ def _watchdog_completion_case(mode, tree=None):
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute))
         leg11_vector_rejected(
-            "codex receiver mutation: shadowed import cleared as "
+            "receiver vector: shadowed import cleared as "
             "external",
             lambda call=shadowed_call, kinds=vector_kinds,
                    value_kind=vector_value_kind:
-                resolve_call(call.func, "vector:codex-receiver",
+                resolve_call(call.func, "vector:shadowed-receiver",
                              set(), kinds, value_kind))
         assert vector_value_kind(shadowed_call) is None, (
             "value_kind cleared a call through a shadowed import as "
-            "external (fix 10, QA31 codex BLOCKER 2)")
+            "external")
 
-        # QA31 gemini BLOCKER c: an attribute assignment (and a
+        # Module poisoning: an attribute assignment (and a
         # setattr) on an imported module poisons the NAME module-wide
         # -- module-owned cleanup monkey-patched onto os must never
         # clear as external.
@@ -11546,19 +11930,19 @@ def _watchdog_completion_case(mode, tree=None):
         assert "os" not in external_import_names(poisoned_tree), (
             "an attribute assignment on an imported module did not "
             "poison the imported name: module-owned cleanup can hide "
-            "on the module object (fix 10, QA31 gemini BLOCKER c)")
+            "on the module object")
         setattr_tree = _optlevel.parse(textwrap.dedent("""
             import os
             setattr(os, "sneak_cleanup", _fixture_signal)
             """))
         assert "os" not in external_import_names(setattr_tree), (
             "a setattr on an imported module did not poison the "
-            "imported name (fix 10, QA31 gemini BLOCKER c)")
+            "imported name")
         assert "os" in imported_modules, (
             "the emit module itself poisons os: the disclosed os-level "
-            "primitives would fail closed, not clear (fix 10)")
+            "primitives would fail closed, not clear")
 
-        # QA32 codex BLOCKER 1: the capturing try's OWN finally is a
+        # Capturing-try finally: the capturing try's OWN finally is a
         # successor -- a boundary call there with a swapped pending
         # argument must be rejected while the capture may be pending.
         function, capturing = leg11_vector("""
@@ -11575,16 +11959,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 finally vector: swapped pending argument in "
+            "finally vector: swapped pending argument in "
             "the capturing try's own finalbody",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex32-1"),
-                    "interrupted", "vector:codex32-1"))
+                                     "vector:finally-swap"),
+                    "interrupted", "vector:finally-swap"))
 
-        # QA32 codex BLOCKER 2: a nested def's parameter DEFAULT
+        # Nested default: a nested def's parameter DEFAULT
         # executes at the definition, right after the capture.
         function, capturing = leg11_vector("""
             def mutant(self):
@@ -11598,16 +11982,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 default vector: unprotected cleanup in a "
+            "default vector: unprotected cleanup in a "
             "nested def's default after a capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex32-2"),
-                    "interrupted", "vector:codex32-2"))
+                                     "vector:nested-default"),
+                    "interrupted", "vector:nested-default"))
 
-        # QA32 codex BLOCKER 3, form 1: the capture target collides
+        # Capture alias, form 1: the capture target collides
         # with the handler's own `as` name -- Python deletes that
         # binding at handler exit, so the later re-raise reads an
         # unbound name and the cancellation is lost.
@@ -11622,12 +12006,12 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA32 as-name vector: capture reuses the handler's "
+            "as-name vector: capture reuses the handler's "
             "bound name",
             lambda handler=capturing.handlers[0]:
                 capture_shape(handler.body, handler.name))
 
-        # QA32 codex BLOCKER 3, form 2: an overwrite between the
+        # Capture alias, form 2: an overwrite between the
         # capture alias and the final raise -- ends_in_raise must
         # discard the overwritten alias, never keep trusting it.
         function, capturing = leg11_vector("""
@@ -11642,9 +12026,9 @@ def _watchdog_completion_case(mode, tree=None):
         overwriting = capturing.handlers[0]
         assert not ends_in_raise(overwriting.body, overwriting.name), (
             "a handler that overwrites its capture alias before the "
-            "final raise was accepted (fix 11, QA32 codex BLOCKER 3)")
+            "final raise was accepted")
 
-        # QA32 claude BLOCKER 1: a pre-capture nested def -- usable as
+        # Nonlocal reach-back: a pre-capture nested def -- usable as
         # a boundary step -- reaches the captured name back through
         # nonlocal and rebinds it with zero post-capture binding
         # leaves and zero calls for the old scans to see.
@@ -11665,16 +12049,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 nonlocal vector: a nested def rebinds the "
+            "nonlocal vector: a nested def rebinds the "
             "captured name through nonlocal",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-1"),
-                    "interrupted", "vector:claude32-1"))
+                                     "vector:nonlocal"),
+                    "interrupted", "vector:nonlocal"))
 
-        # QA32 claude BLOCKER 2: the pending argument at ANY boundary
+        # Boundary pending shapes: the pending argument at ANY boundary
         # call must be a recognized shape. The two real shapes stay
         # accepted; the inverted conditional and a conditional
         # guarding a DIFFERENT name are rejected.
@@ -11686,33 +12070,33 @@ def _watchdog_completion_case(mode, tree=None):
             _cleanup_boundary(
                 exc if isinstance(exc, _PENDING_CANCELLATIONS)
                 else None, release_launcher, "parked launcher release")
-            """), "vector:claude32-2-accept")
+            """), "vector:accepted-shape")
         boundary_pending_shape(vector_pending_arg("""
             _cleanup_boundary(
                 tail_exc if isinstance(tail_exc,
                                        _PENDING_CANCELLATIONS)
                 else pending, close_report, "report channel close")
-            """), "vector:claude32-2-accept")
+            """), "vector:accepted-shape")
         leg11_vector_rejected(
-            "claude QA32 inversion vector: inverted conditional "
+            "inversion vector: inverted conditional "
             "pending argument",
             lambda arg=vector_pending_arg("""
                 _cleanup_boundary(
                     None if isinstance(exc, _PENDING_CANCELLATIONS)
                     else exc, release_launcher,
                     "parked launcher release")
-                """): boundary_pending_shape(arg, "vector:claude32-2a"))
+                """): boundary_pending_shape(arg, "vector:inverted-guard"))
         leg11_vector_rejected(
-            "claude QA32 swapped-guard vector: the conditional guards "
+            "swapped-guard vector: the conditional guards "
             "a different name than it passes",
             lambda arg=vector_pending_arg("""
                 _cleanup_boundary(
                     pending if isinstance(exc, _PENDING_CANCELLATIONS)
                     else None, release_launcher,
                     "parked launcher release")
-                """): boundary_pending_shape(arg, "vector:claude32-2b"))
+                """): boundary_pending_shape(arg, "vector:swapped-guard"))
 
-        # QA32 claude MINOR 2: a call-free suspension point after a
+        # Suspension pair: a call-free suspension point after a
         # capture parks the function while the capture is pending -- a
         # dropped generator or coroutine would swallow the
         # cancellation without any call for the walk to see.
@@ -11727,14 +12111,14 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 yield vector: call-free suspension after a "
+            "yield vector: call-free suspension after a "
             "capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-3"),
-                    "interrupted", "vector:claude32-3"))
+                                     "vector:yield"),
+                    "interrupted", "vector:yield"))
         function, capturing = leg11_vector("""
             async def mutant(self):
                 try:
@@ -11746,16 +12130,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "claude QA32 await vector: call-free suspension after a "
+            "await vector: call-free suspension after a "
             "capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:claude32-4"),
-                    "interrupted", "vector:claude32-4"))
+                                     "vector:await"),
+                    "interrupted", "vector:await"))
 
-        # QA32 codex MINOR (over-rejection pin): a bare annotation
+        # Over-rejection pin: a bare annotation
         # with no value binds nothing at runtime -- it must be
         # ACCEPTED, with the guarded re-raise still discharging the
         # capture.
@@ -11772,10 +12156,10 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex32-minor"),
-            "interrupted", "vector:codex32-minor")
+                             "vector:bare-annotation"),
+            "interrupted", "vector:bare-annotation")
 
-        # QA33 codex MAJOR (fix 12): applying a BARE decorator right
+        # Bare decorator: applying a BARE decorator right
         # after the capture calls it with the function -- with no
         # ast.Call node anywhere in the tree -- so the
         # definition-time work check must model the application
@@ -11793,16 +12177,16 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA33 decorator vector: a bare decorator applied "
+            "decorator vector: a bare decorator applied "
             "after a capture",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex33-major"),
-                    "interrupted", "vector:codex33-major"))
+                                     "vector:bare-decorator"),
+                    "interrupted", "vector:bare-decorator"))
 
-        # QA33 codex MINOR (fix 12, over-rejection pins): a LOCAL
+        # Over-rejection pins: a LOCAL
         # annotation never evaluates its annotation expression, so a
         # call spelled inside a bare AnnAssign's annotation runs
         # nothing and must be ACCEPTED; a yield inside a NESTED def
@@ -11822,8 +12206,8 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex33-minor-annotation"),
-            "interrupted", "vector:codex33-minor-annotation")
+                             "vector:local-annotation-call"),
+            "interrupted", "vector:local-annotation-call")
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
@@ -11838,11 +12222,14 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex33-minor-yield"),
-            "interrupted", "vector:codex33-minor-yield")
+                             "vector:nested-generator"),
+            "interrupted", "vector:nested-generator")
 
-        # QA34 codex/claude MAJOR (fix 13, a fix-12 regression): a
-        # nested def's or lambda's parameter DEFAULT is
+        # Definition-time defaults (a regression the exemption of a
+        # whole nested def or lambda at f4200b43 introduced, which
+        # b84a21fa narrowed to the nested body): a nested def's or
+        # lambda's
+        # parameter DEFAULT is
         # definition-time work -- it evaluates in the ENCLOSING
         # function, and a yield spelled there generator-converts
         # THAT function, so its body (every boundary and re-raise
@@ -11886,7 +12273,7 @@ def _watchdog_completion_case(mode, tree=None):
         ):
             function, capturing = leg11_vector(source)
             leg11_vector_rejected(
-                "codex/claude QA34 " + label + " vector: a yield in "
+                label + " vector: a yield in "
                 "a nested definition-time default suspends the "
                 "enclosing function",
                 lambda function=function, capturing=capturing,
@@ -11895,15 +12282,15 @@ def _watchdog_completion_case(mode, tree=None):
                         function,
                         successors_after(
                             function, capturing,
-                            "vector:codex34-major-" + label),
+                            "vector:definition-time-" + label),
                         "interrupted",
-                        "vector:codex34-major-" + label))
+                        "vector:definition-time-" + label))
 
-        # Companion rejection pin (fix 13): a walrus in that same
+        # Companion rejection pin: a walrus in that same
         # definition-time default binds in the ENCLOSING scope, so
         # the nested-body walrus exemption must not cover it either
         # (already rejected at f4200b43; this pins the seam between
-        # the two fix-13 exemptions).
+        # the two exemptions added at b84a21fa).
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
@@ -11916,17 +12303,17 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "fix 13 companion: a walrus in a nested definition-time "
+            "companion vector: a walrus in a nested definition-time "
             "default rebinds the captured name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(
                         function, capturing,
-                        "vector:codex34-walrus-default"),
-                    "interrupted", "vector:codex34-walrus-default"))
+                        "vector:walrus-default"),
+                    "interrupted", "vector:walrus-default"))
 
-        # QA34 codex MINOR (fix 13, over-rejection pin): a walrus in
+        # Over-rejection pin: a walrus in
         # a nested def's own BODY binds that function's local -- it
         # cannot rebind the enclosing captured name without a
         # nonlocal/global reach-back, which stays rejected
@@ -11946,10 +12333,10 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex34-minor-walrus-local"),
-            "interrupted", "vector:codex34-minor-walrus-local")
+                             "vector:walrus-nested-body"),
+            "interrupted", "vector:walrus-nested-body")
 
-        # QA34 codex MINOR (fix 13, over-rejection pin): a LOCAL
+        # Over-rejection pin: a LOCAL
         # annotation expression never executes, so a walrus spelled
         # inside it -- reachable only through a nested lambda's body
         # on this Python -- binds nothing and must be ACCEPTED.
@@ -11967,10 +12354,10 @@ def _watchdog_completion_case(mode, tree=None):
             function,
             successors_after(
                 function, capturing,
-                "vector:codex34-minor-walrus-annotation"),
-            "interrupted", "vector:codex34-minor-walrus-annotation")
+                "vector:walrus-local-annotation"),
+            "interrupted", "vector:walrus-local-annotation")
 
-        # QA34 gemini a (fix 13, acceptance pin): a bare local
+        # Acceptance pin: a bare local
         # annotation nested inside the guard body after the capture
         # is dispatched by walk_block's own AnnAssign arm -- never a
         # whole-block call scan -- and stays ACCEPTED.
@@ -11987,14 +12374,14 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:gemini34-annotation-in-if"),
-            "interrupted", "vector:gemini34-annotation-in-if")
+                             "vector:annotation-in-guard"),
+            "interrupted", "vector:annotation-in-guard")
 
-        # QA35 codex/claude MINOR (fix 14, acceptance pin): under
+        # Acceptance pin: under
         # PEP 649 a nested def's parameter and return annotations
         # are deferred -- nothing spelled inside one runs at
         # definition time -- so an otherwise-harmless annotated def
-        # after the capture must be ACCEPTED (the fix-13 scanner
+        # after the capture must be ACCEPTED (the earlier scanner
         # modeled the annotations as immediate calls and rejected
         # it naming `type`).
         function, capturing = leg11_vector("""
@@ -12011,24 +12398,24 @@ def _watchdog_completion_case(mode, tree=None):
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex35-annotated-def"),
-            "interrupted", "vector:codex35-annotated-def")
+                             "vector:annotated-def"),
+            "interrupted", "vector:annotated-def")
 
-        # QA35 gemini (fix 14, rejection pin): the interpreter pin
+        # Rejection pin: the interpreter pin
         # is a named FAILURE, never a silent model mismatch -- a
         # pre-3.14 version tuple must be refused.
         leg11_vector_rejected(
-            "gemini QA35 interpreter vector: leg 11 ran on a "
+            "interpreter vector: leg 11 ran on a "
             "pre-PEP-649 interpreter without failing closed",
             lambda: leg11_interpreter_pinned((3, 13, 0)))
 
-        # QA36 codex MAJOR (fix 15): the PEP 649 deferral has an
+        # Annotation read: the PEP 649 deferral has an
         # execution point -- READING the annotated def's
         # __annotations__ invokes its generated __annotate__ and
         # runs the module-owned cleanup spelled in the annotation,
         # with no ast.Call anywhere at the read site. The read after
         # the capture must be rejected while the UNREAD annotated
-        # def (the fix-14 acceptance pin above) stays accepted.
+        # def (the annotated-def acceptance pin above) stays accepted.
         function, capturing = leg11_vector("""
             def mutant(self):
                 try:
@@ -12042,17 +12429,17 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """)
         leg11_vector_rejected(
-            "codex QA36 annotation-read vector: reading a nested "
+            "annotation-read vector: reading a nested "
             "def's __annotations__ after a capture evaluates its "
             "deferred annotation",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
                     function,
                     successors_after(function, capturing,
-                                     "vector:codex36-annotation-read"),
-                    "interrupted", "vector:codex36-annotation-read"))
+                                     "vector:annotation-read"),
+                    "interrupted", "vector:annotation-read"))
 
-        # QA37 codex MINOR (fix 16, over-rejection pin): a LOCAL
+        # Over-rejection pin: a LOCAL
         # AnnAssign's annotation expression never evaluates on the
         # pinned interpreter, so a deferred-read spelling inside it
         # runs nothing and must be ACCEPTED -- while the same
@@ -12064,7 +12451,7 @@ def _watchdog_completion_case(mode, tree=None):
             """)).body[0]
         assert not list(annotation_reads(unevaluated.body)), (
             "an unevaluated local annotation was scanned as a "
-            "deferred-annotation READ (fix 16, QA37 codex MINOR)")
+            "deferred-annotation READ")
         evaluated = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = step.__annotations__
@@ -12073,9 +12460,9 @@ def _watchdog_completion_case(mode, tree=None):
                 in annotation_reads(evaluated.body)] \
             == ["__annotations__"], (
             "an annotation READ in an AnnAssign VALUE executes at "
-            "the statement and must stay rejected (fix 15/16)")
+            "the statement and must stay rejected")
 
-        # QA38 codex/claude MINOR (fix 17, over-rejection pin): the
+        # Over-rejection pin: the
         # CALL scan holds the same region -- direct_calls used to
         # walk the AnnAssign annotation annotation_reads skips, so a
         # call spelled in an unevaluated local annotation
@@ -12089,8 +12476,7 @@ def _watchdog_completion_case(mode, tree=None):
             """)).body[0]
         assert not list(direct_calls(unevaluated_call.body)), (
             "a call inside an unevaluated local annotation was "
-            "scanned as an executing call (fix 17, QA38 "
-            "codex/claude MINOR)")
+            "scanned as an executing call")
         evaluated_call = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = getattr(step, "__annotations__")
@@ -12099,14 +12485,14 @@ def _watchdog_completion_case(mode, tree=None):
                 in direct_calls(evaluated_call.body)] \
             == [("name", "getattr")], (
             "a call in an AnnAssign VALUE executes at the statement "
-            "and must stay seen (fix 17)")
+            "and must stay seen")
 
-        # QA37 codex/claude MAJOR (fix 16): DISCLOSED-RESIDUAL pins.
-        # Under PD-335-TAIL option 2 and the fix-16 scope decision,
-        # leg 11 is a tripwire over an OPEN grammar and the two
-        # QA37 classes are disclosed, not enforced (scanner
-        # hardening for them is recorded follow-up work in the
-        # maintainer backlog, not a fix-16 change). Each pin
+        # DISCLOSED-RESIDUAL pins. Under the maintainer's recorded
+        # scope decisions, leg 11 is a tripwire over an OPEN grammar
+        # and the two classes pinned here are disclosed, not enforced
+        # (scanner hardening for them is recorded follow-up work in
+        # the maintainer backlog, not part of the change that added
+        # these pins). Each pin
         # therefore proves BOTH halves of the disclosure: the
         # mutation shape is ACCEPTED by this leg's machinery (the
         # tripwire does not see it), and executing that shape with
@@ -12145,22 +12531,21 @@ def _watchdog_completion_case(mode, tree=None):
                     raise interrupted
             """
 
-        # ACCEPTED by leg 11 (claude QA37): the PEP 695 lazy read is
+        # ACCEPTED by leg 11: the PEP 695 lazy read is
         # attribute-shaped but spells neither recognized name, and
         # the type parameter's bound is walked by no call scan, so
         # the successor walk accepts the whole shape.
         function, capturing = leg11_vector(pep695_read_source)
         assert not list(annotation_reads(function.body)), (
             "the PEP 695 lazy read is expected to evade "
-            "annotation_reads -- it is DISCLOSED, not enforced "
-            "(fix 16, QA37 claude MAJOR)")
+            "annotation_reads -- it is DISCLOSED, not enforced")
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:claude37-pep695-read"),
-            "interrupted", "vector:claude37-pep695-read")
+                             "vector:pep695-read"),
+            "interrupted", "vector:pep695-read")
 
-        # ACCEPTED by leg 11 (codex QA37): the handler is the
+        # ACCEPTED by leg 11: the handler is the
         # RECOGNIZED capture shape -- exactly that recognition
         # exempts its boundary-call arguments from the handler-body
         # call scan, so the indirect reader spelled there is never
@@ -12171,18 +12556,18 @@ def _watchdog_completion_case(mode, tree=None):
             "the indirect reader in the boundary-call arguments is "
             "expected to evade annotation_reads -- it is a call, "
             "not a recognized attribute read; DISCLOSED, not "
-            "enforced (fix 16, QA37 codex MAJOR)")
+            "enforced")
         assert capture_shape(handler.body, handler.name) \
             == "interrupted", (
             "the mutated handler must still be the RECOGNIZED "
             "capture shape: that recognition is what exempts its "
             "boundary-call arguments from the handler-body call "
-            "scan (fix 16, QA37 codex MAJOR)")
+            "scan")
         deferred_capture_sound(
             function,
             successors_after(function, capturing,
-                             "vector:codex37-handler-args"),
-            "interrupted", "vector:codex37-handler-args")
+                             "vector:handler-args"),
+            "interrupted", "vector:handler-args")
 
         # CAUGHT by leg 19: run each accepted shape for real, the
         # way the behavioural matrix drives a site -- a cancellation
@@ -12206,24 +12591,23 @@ def _watchdog_completion_case(mode, tree=None):
                 "release_launcher": lambda: None,
             }
             exec(compile(textwrap.dedent(source),
-                         "<leg 11 QA37 vector>", "exec"), namespace)
+                         "<leg 11 disclosed vector>", "exec"), namespace)
             try:
                 namespace["mutant"](None)
             except BaseException as exc:
                 return exc
             raise AssertionError(
-                "the disclosed QA37 mutation shape completed "
-                "without raising (fix 16)")
+                "the disclosed mutation shape completed "
+                "without raising")
 
         for label, source in (
-                ("claude37-pep695-read", pep695_read_source),
-                ("codex37-handler-args", handler_argument_source)):
+                ("pep695-read", pep695_read_source),
+                ("handler-args", handler_argument_source)):
             outward = displaced_outward(source)
             assert (type(outward) is RuntimeError
                     and str(outward) == "injected cleanup fault"), (
-                "a disclosed QA37 residual shape did not reproduce "
-                "the displacement leg 19 catches (fix 16, QA37 "
-                "codex/claude MAJOR)", label, repr(outward))
+                "a disclosed residual shape did not reproduce "
+                "the displacement leg 19 catches", label, repr(outward))
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
@@ -16520,7 +16904,7 @@ def _cmd_render(rest):
 
     The READ-ONLY `--check` half forwards to the U4 engine `_opf_views.render`, whose 0/1/2 contract is
     exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE
-    and exits 0, the pack's own `--root .` case). The mutating `--write` half (VC-4/PR-C) gathers the inert
+    and exits 0, the pack's own `--root .` case). The mutating `--write` half gathers the inert
     git-derived observations caller-side (_opf_observe.gather over the RESOLVED store, exactly as doctor does)
     and hands them to the same engine, which composes the store-integrity gate and permits the write only
     when source integrity is sound, printing the findings/cannot-evaluates and returning 2 (writing nothing)
@@ -16887,69 +17271,48 @@ def _init_untracked(git, repo, root, paths):
 
 
 def _init_unignored(git, repo, root, paths):
-    """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered.
+    """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered
+    (OPF spec 5.1). The decision is _opf_write_guard.init_ignore_refusal, the ONE shared ignore preflight
+    (moved there, not copied), which the init operation (run_init_operation, composed by adoption's
+    init-store) calls too. This adapter raises its message unchanged as the RuntimeError _cmd_init has
+    always reported, so the plain command's refusals keep their wording. An ignored destination and a
+    check that cannot evaluate (git could not run, an unexpected check-ignore rc, an unavailable indexed
+    .gitignore blob in a partial clone) both refuse; a cannot-evaluate never reads as not ignored. The
+    probe contract and its disclosed residual are stated on init_ignore_refusal."""
+    refusal = _opf_write_guard.init_ignore_refusal(git, repo, root.relative_to(repo), paths)
+    if refusal is not None:
+        raise RuntimeError(refusal[1])
 
-    check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
-    with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
-    are passed as arguments (git check-ignore accepts neither -z without --stdin, which the run helper has
-    no channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
-    given a literal "./" prefix so a leading colon or other pathspec-magic sigil in an adopter-supplied
-    --root prefix is read as a path, not as magic: without it a ":name/..." prefix has its colon consumed
-    as an empty magic signature and the check silently bypasses (rc 1, the store looks unignored), while a
-    recognized short-magic letter over-refuses (rc >= 128). The prefix is a plain string because Path
-    would normalize "./x" back to "x". The output is then one path per line over the controlled,
-    newline-free internal destinations.
 
-    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which lets git DISCOVER the
-    adopter's real global and system configuration through its default locations (unlike the default scrubbed
-    observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
-    core.excludesFile is caught here, matching what the adopter's own `git add` would honour
-    (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
-    reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
-    forced off so a missing indexed ignore blob cannot trigger a promisor fetch that would reach
-    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this rc-only check reads ignore rules
-    exactly as git add does when git add can read them too. For an ignore input git cannot READ (a
-    permission-denied core.excludesFile, ~/.config/git/ignore, or .git/info/exclude), git add is equally unable
-    to read it and stages the destination, so reading not-ignored here matches git add and the store is never
-    silently ignored. The one input where that parity BREAKS is a skip-worktree (or otherwise unmaterialized)
-    .gitignore whose blob is absent in a partial clone: this probe forces lazy fetch off and reads no-rule, but
-    the adopter's own git add fetches the blob and can then ignore the store. That case is NOT left as a
-    residual: after an rc-1 result the availability of every applicable indexed .gitignore blob is checked
-    (_opf_observe.indexed_ignore_availability), and an unavailable one is a cannot-evaluate that REFUSES rather
-    than passing (guard-input-soundness). A fail-closed treatment of the unreadable-FILE arms above is
-    deliberately not attempted, because git and the caller resolve config paths differently and refusing there
-    would over-refuse a case git add itself skips. Called directly
-    (not via _init_git, which raises on rc != 0) because rc 1 is the success case here; a timeout, launch
-    failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git diagnostic on an
-    rc-1 (not-ignored) result is not itself a refusal.
-    """
-    prefix = root.relative_to(repo)
-    scoped = sorted("./" + str(prefix / path) for path in paths)
-    result = _opf_observe._run_git_config_discovery(
-        git, repo, ["check-ignore", "--"] + scoped)
-    if not result.completed:
-        raise RuntimeError(
-            "git preflight: could not evaluate ignore status for planned destinations ({})".format(
-                result.err))
-    if result.rc == 0:
-        ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
-        raise RuntimeError("planned destination is git-ignored: {!r}".format(ignored))
-    if result.rc != 1:
-        raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
-            result.rc, result.err))
-    # rc 1 (not ignored) is sound only when every applicable .gitignore is answerable WITHOUT a promisor
-    # fetch. In a partial clone a skip-worktree (or otherwise unmaterialized) .gitignore whose blob is absent
-    # reads as no-rule here (lazy fetch is forced off), yet the adopter's own `git add` fetches that blob and
-    # can then silently ignore the store; an available blob is read identically by both (parity) and a
-    # checked-out .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate
-    # we refuse, not a clean pass (guard-input-soundness).
-    unavailable = _opf_observe.indexed_ignore_availability(
-        git, repo, _opf_write_guard._ignore_file_candidates(root.relative_to(repo), paths))
-    if unavailable:
-        raise RuntimeError(
-            "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
-            "status cannot be determined; `git add` would fetch it and could silently ignore the store "
-            "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
+def _init_homes_gitignore_inspect(root, payload):
+    """Generation 2 only: the read-only .working/.gitignore installation inspection the init
+    operation runs before it writes (_opf_init_operation._inspect_homes_gitignore; spec 4.2: the
+    effective ignore rules and the index are inspected first). Plain init is create-only, so any hold
+    refuses, naming each, and so does an inspection that does not plan exactly `payload` for an
+    absent file. A state the inspection cannot evaluate refuses too, never read as clear."""
+    try:
+        planned, holds, prestate = _opf_write_guard.inspect_homes_gitignore(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RuntimeError("the .working/.gitignore inspection cannot evaluate: {}".format(exc))
+    if holds:
+        raise RuntimeError("the .working/.gitignore installation is held: {}".format(
+            "; ".join(holds)))
+    if prestate is not None or planned != payload:
+        raise RuntimeError("the .working/.gitignore inspection did not plan the bootstrap block "
+                           "for an absent file; init is create-only")
+
+
+def _init_homes_gitignore_verify(root):
+    """Generation 2 only: the post-write effectiveness re-check of the installed managed block
+    (_opf_write_guard.verify_homes_gitignore_effective, spec 4.2), run while the init mutex is
+    held. Any finding refuses, naming each; a state the check cannot evaluate refuses too."""
+    try:
+        findings = _opf_write_guard.verify_homes_gitignore_effective(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RuntimeError("the .working/.gitignore verification cannot evaluate: {}".format(exc))
+    if findings:
+        raise RuntimeError("the installed .working/.gitignore is not effective: {}".format(
+            "; ".join(findings)))
 
 
 def _init_glob_escape(text):
@@ -18250,12 +18613,30 @@ def _init_observed(root_fd, directories, payloads):
 
 
 def _init_main(rest):
-    """Create validated store sources and a pointer, without git writes or rendering.
+    """Create validated store sources and a pointer under the init mutex and lease, without rendering.
 
-    Preflight is read-only. Publication is create-only and deliberately not transactional: a
-    later failure reports observed planned paths and leaves them for review. Enumeration, root
-    identity checks, and final rereads do not serialize concurrent writers or directory renames.
-    No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
+    Preflight is read-only. Only once it passes does init take the shared init operation mutex
+    (_opf_oplock.acquire_init_operation: the anchor the coupled init and adoption take for this
+    root, spec 9), whose operation-lock home is the one place init writes under the git directory,
+    and re-run the absence checks under it with the preflight's wording: the root deliverables,
+    every planned destination, the local pointer, the index, the ignore check, the generation-2
+    .working/.gitignore inspection and the history scan. The store directories are then created,
+    the spec 5.7 lease (.working/toml/lease.toml beside its active record) is attached, the payloads
+    are published, and the lease is detached before the final observation, which runs with the
+    mutex still held, as does a generation-2 run's post-write .gitignore effectiveness check; the
+    mutex is released before the success report. --recover passes explicit recovery to the acquisition, which
+    clears a dead run's leftover records only once their holder is confirmed dead. Publication is
+    create-only and deliberately not transactional: a later failure reports observed planned
+    paths and leaves them for review. A failure releases whatever is still held in a finally
+    inside the handled try, so before either handler below prints; a release failure there prints
+    its own rendered line ahead of the failure report and never replaces it, while an interrupt
+    landing in that release replaces the failure being unwound, which the handlers then report
+    instead. The mutex excludes cooperating OPF writers only: enumeration, root identity checks,
+    and final rereads do not serialize other writers or directory renames. A product root nested
+    in a repository whose git toplevel grants search but not read permission passes the preflight
+    and is refused at the mutex, which lists that toplevel to bind the nested path (the residual
+    _opf_oplock._bind_repository_view discloses). No rollback, adoption policy, or whole-store
+    success verdict is supplied here.
     Every failure path prints rendered text through the two handlers below; the second catches
     BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
     publication started) still reports the partial-publication disclosure before returning rendered (QA
@@ -18285,6 +18666,7 @@ def _init_main(rest):
     QUICKSTART.
     """
     root = None
+    recover = False
     i = 0
     while i < len(rest):
         # Each token is read as its exact str before it is compared or gated (QA
@@ -18311,6 +18693,12 @@ def _init_main(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
+        elif tok == "--recover":
+            if recover:
+                _init_echo("opf init: --recover given more than once", err=True)
+                return EXIT_MALFORMED
+            recover = True
+            i += 1
         else:
             _init_echo("opf init: unrecognized argument, inert-escaped: {}".format(
                 _init_inert(tok)), err=True)
@@ -18319,10 +18707,13 @@ def _init_main(rest):
     root_fd = None
     directories = []
     payloads = {}
+    holder = cap = back = None
     publishing = False
     stage = "preflight"
     try:
+        import uuid
         import _opf_init
+        import _opf_oplock
 
         journal = _opf_store._journal
         journal.require_containment()
@@ -18360,26 +18751,42 @@ def _init_main(rest):
             # The resolver also refuses an existing, empty .working directory. Do not reinterpret a
             # CANNOT-EVALUATE result as permission to initialize a partial store.
             raise RuntimeError("store resolution refused: {}".format(res.detail))
+        # A pre-existing root deliverable is undispositioned content plain init never keeps (spec
+        # 14.2): the declared CHANGELOG.md, and the product-root VERSION spec 14 names beside the
+        # declared destinations. lstat, so a symlink there is refused, never followed. Both run
+        # after the store checks (an initialized root still names its existing pointer first) and
+        # before the history scan (a deleted store whose CHANGELOG.md stayed is refused here). The
+        # same table is read again under the init operation mutex below.
+        deliverables = (
+            ("CHANGELOG.md", "an existing CHANGELOG.md sits at the declared deliverable "
+                             "destination; plain opf init never keeps undispositioned content "
+                             "(spec 14.2); give it a disposition with opf adopt, or move it "
+                             "aside and retry"),
+            ("VERSION", "an existing VERSION sits at the product-root VERSION deliverable "
+                        "path (spec 14); plain opf init never keeps undispositioned "
+                        "content (spec 14.2); give it a disposition with opf adopt, or "
+                        "move it aside and retry"),
+        )
+        for name, refusal in deliverables:
+            if journal._lstat_at(root_fd, name) is not None:
+                raise RuntimeError(refusal)
 
         stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
-        documents = [
-            (_opf_store.MANIFEST_NAME, _opf_init.build_manifest()),
-            (_opf_check.COUNTERS_NAME, _opf_init.build_counters()),
-            (_opf_check.VERSION_NAME, _opf_init.build_version()),
-            (_opf_check.WORKLOG_NAME, _opf_init.build_worklog()),
-        ]
-        documents.extend(
-            (name + _opf_check.INDEX_SUFFIX, _opf_init.build_index(name))
-            for name in _opf_init.INDEX_TYPES)
-        payloads = {
-            machine + "/" + name: text.encode("utf-8") for name, text in documents
-        }
+        # The one bootstrap builder the init operation also uses, over the manifest model of the
+        # homes generation this tooling activates. A generation-2 model adds .working/.gitignore as
+        # the FIRST payload, so its ignore rules exist before any store file (spec 4.2).
+        model = _opf_init._manifest_model(homes2=_opf_store.SUPPORTED_HOMES >= 2)
+        gitignore = None
+        if _opf_store.homes_generation(model) == 2:
+            gitignore = working + "/.gitignore"
+            payloads[gitignore] = _opf_store.render_homes_gitignore().encode("utf-8")
+        for name, text in _opf_init.bootstrap_documents(model).items():
+            payloads[machine + "/" + name] = text.encode("utf-8")
         payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
             {"store": {"target": "dir:."}}).encode("utf-8")
-        if journal._lstat_at(root_fd, "CHANGELOG.md") is None:
-            payloads["CHANGELOG.md"] = b"# Changelog\n"
+        payloads["CHANGELOG.md"] = b"# Changelog\n"
         directories = [working, machine]
 
         stage = "checking-the-destination-inventory"
@@ -18392,49 +18799,115 @@ def _init_main(rest):
         index_paths = set(payloads) | {working, _opf_store.LOCAL_POINTER_REL}
         _init_untracked(git, repo, root, index_paths)
         # The ignore check is scoped to the destinations init actually CREATES (store dirs plus the
-        # committed pointer, the machine sources, and the optional CHANGELOG); the local pointer that
+        # committed pointer, the machine sources, and the fresh CHANGELOG); the local pointer that
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
+        if gitignore is not None:
+            stage = "inspecting-the-homes-gitignore"
+            _init_homes_gitignore_inspect(root, payloads[gitignore])
         stage = "checking-git-history-for-a-prior-store"
         _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
 
-        publishing = True
-        for relpath in directories:
-            stage = "creating-directory-" + relpath
-            pfd, name = journal._open_parent(root_fd, relpath)
-            try:
-                os.mkdir(name, 0o755, dir_fd=pfd)
-                os.fsync(pfd)
-            finally:
-                _opf_store._close_fd_exc_safe(pfd)
-        for relpath, data in payloads.items():
-            stage = "creating-" + relpath
+        # The shared init operation mutex (spec 9: one global store lock serializes writers) is
+        # taken only now, so every preflight refusal above keeps its wording and writes nothing
+        # under the git directory. Its anchor is the one the coupled init and adoption take for
+        # this root, so the absence checks run again under it in the preflight's words: whatever a
+        # cooperating writer published between the preflight and the acquisition is refused here,
+        # never overwritten. VERSION is no payload, so the deliverable table re-reads it beside
+        # CHANGELOG.md. The acquisition sits inside the try, so the unwind below covers every line
+        # after it.
+        try:
+            stage = "taking-the-init-operation-mutex"
+            holder = _opf_oplock.acquire_init_operation(str(root), "opf-init-plain", recover=recover)
+            stage = "re-checking-the-destinations-under-the-mutex"
+            for name, refusal in deliverables:
+                if journal._lstat_at(root_fd, name) is not None:
+                    raise RuntimeError(refusal)
+            for relpath in directories + list(payloads):
+                if journal._lstat_contained(root_fd, relpath) is not None:
+                    raise RuntimeError("destination already exists: {!r}".format(relpath))
+            if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
+                raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
+            _init_untracked(git, repo, root, index_paths)
+            _init_unignored(git, repo, root, set(directories) | set(payloads))
+            if gitignore is not None:
+                stage = "inspecting-the-homes-gitignore"
+                _init_homes_gitignore_inspect(root, payloads[gitignore])
+            stage = "checking-git-history-for-a-prior-store"
+            _init_no_prior_store(git, repo, root)
             _init_same_root(root, root_fd)
-            _init_create(root_fd, relpath, data)
 
-        stage = "observing-published-source-paths"
-        observed = _init_observed(root_fd, directories, payloads)
-        if any(row["state"] != (
-                "directory" if row["path"] in directories else "matches-payload")
-               for row in observed):
-            raise RuntimeError("published paths do not match the validated payloads")
-        final_inventory = _init_inventory(root_fd)
-        expected_working = {machine} | {
-            path for path in payloads if path.startswith(working + "/")
-        }
-        if (not final_inventory["complete"]
-                or {row["path"] for row in final_inventory["entries"]} != expected_working):
-            _init_echo(json.dumps(_init_inert_json(dict(final_inventory,
-                                                        event="post-publish-inventory",
-                                                        root=str(root))),
-                                  sort_keys=True))
-            raise RuntimeError("working inventory changed during publication")
-        if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
-            raise RuntimeError("local pointer appeared during publication")
-        _init_same_root(root, root_fd)
-        _init_untracked(git, repo, root, index_paths)
+            publishing = True
+            for relpath in directories:
+                stage = "creating-directory-" + relpath
+                pfd, name = journal._open_parent(root_fd, relpath)
+                try:
+                    os.mkdir(name, 0o755, dir_fd=pfd)
+                    os.fsync(pfd)
+                finally:
+                    _opf_store._close_fd_exc_safe(pfd)
+            # Spec 5.7: the lease is held while the store is mutated. It lives in the machine
+            # store, so it is attached once that directory exists, before the first source.
+            stage = "attaching-the-init-lease"
+            cap = _opf_oplock.attach_init_lease(holder, str(uuid.uuid4()))
+            for relpath, data in payloads.items():
+                stage = "creating-" + relpath
+                _init_same_root(root, root_fd)
+                _init_create(root_fd, relpath, data)
+            # The lease and its active record are removed with the mutex kept, so the final
+            # observation still excludes cooperating writers and finds no lease.toml beside the
+            # published sources.
+            stage = "detaching-the-init-lease"
+            back = _opf_oplock.detach_init_lease(cap)
+
+            stage = "observing-published-source-paths"
+            observed = _init_observed(root_fd, directories, payloads)
+            if any(row["state"] != (
+                    "directory" if row["path"] in directories else "matches-payload")
+                   for row in observed):
+                raise RuntimeError("published paths do not match the validated payloads")
+            final_inventory = _init_inventory(root_fd)
+            expected_working = {machine} | {
+                path for path in payloads if path.startswith(working + "/")
+            }
+            if (not final_inventory["complete"]
+                    or {row["path"] for row in final_inventory["entries"]} != expected_working):
+                _init_echo(json.dumps(_init_inert_json(dict(final_inventory,
+                                                            event="post-publish-inventory",
+                                                            root=str(root))),
+                                      sort_keys=True))
+                raise RuntimeError("working inventory changed during publication")
+            if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
+                raise RuntimeError("local pointer appeared during publication")
+            _init_same_root(root, root_fd)
+            _init_untracked(git, repo, root, index_paths)
+            if gitignore is not None:
+                stage = "verifying-the-homes-gitignore"
+                _init_homes_gitignore_verify(root)
+            stage = "releasing-the-init-operation-mutex"
+            _opf_oplock.release_init_holder(back)
+        finally:
+            # The unwind releases what a failure left held, the capability before the holders
+            # (the coupled init's order). Each release failure is reported on its own rendered
+            # line, never in place of the failure being unwound. A success leaves nothing here:
+            # the detach spent the capability and the holder it returned is released above.
+            unwind = []
+            if cap is not None and not cap._released:
+                try:
+                    _opf_oplock.release_operation(cap)
+                except _opf_oplock.OpLockError as release_exc:
+                    unwind.append(release_exc)
+            for held in (back, holder):
+                if held is not None and not held._released and not held._spent:
+                    try:
+                        _opf_oplock.release_init_holder(held)
+                    except _opf_oplock.OpLockError as release_exc:
+                        unwind.append(release_exc)
+            for release_exc in unwind:
+                _init_echo("opf init: releasing the operation lock failed while this failure "
+                           "unwound: {}".format(_init_inert(str(release_exc))), err=True)
 
         _init_echo("opf init: store SOURCES created and {} pointer written.".format(
             _init_inert(_opf_store.POINTER_REL)))
@@ -18598,15 +19071,19 @@ def _cmd_init(rest):
     CHAINS that exception (its type and its raw, unrendered text, then "During
     handling of the above exception, another exception occurred"; QA round 14
     C), so this window can print an init value raw; any failure BEFORE
-    init dispatch is outside this boundary entirely (a bootstrap fault other than
-    the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
-    example a SyntaxError in an installed helper, or an interrupt before or during
-    dispatch, surfaces as Python's own traceback or signal); and an interrupt
-    AFTER this function returns, in the dispatcher's own return and sys.exit
-    statements, escapes as Python's traceback of those dispatcher lines (that
-    traceback shows the dispatcher's source lines and the interrupt type; by
-    then no exception is being handled, so it interpolates no init value: this
-    qualifier holds for this post-return window only). What a static scan
+    init dispatch is outside this boundary entirely (_bootstrap maps every fault
+    raised while a helper is imported, a SyntaxError in an installed helper
+    included, to a rendered cannot-evaluate, exit 2, except a KeyboardInterrupt,
+    within the residual _bootstrap states for code opf loads; that interrupt, or
+    any interrupt before or during dispatch, surfaces as
+    Python's own traceback or signal); and an interrupt
+    AFTER this function returns, in the dispatcher's own return statement or in
+    _main_exit, the entry's wrapper, which re-raises an interrupt and ends the
+    process by raising SystemExit itself (main() calls no sys.exit), escapes as
+    Python's traceback of those lines (that traceback shows their source lines
+    and the interrupt type; by then no exception is being handled, so it
+    interpolates no init value: this qualifier holds for this post-return
+    window only). What a static scan
     still cannot prove is stated in _init_echo's docstring (its RESIDUAL paragraph)."""
     try:
         return _init_main(rest)
@@ -18622,873 +19099,22 @@ def _cmd_init(rest):
         return EXIT_MALFORMED
 
 
-# --- opf upgrade: the store-schema upgrade to the tooling spec_version (spec 9.2) ---------------------
+# --- opf upgrade: this tooling defines no store upgrade ------------------------------------------------
 
-# The single 1.0.0 -> 1.1.0 upgrade this build implements. maintainer_decision and preference_pattern
-# baseline (they were module-tier in 1.0.0); contribution is net-new; the decision_support module is
-# retired (spec 8.1 note, spec 9.2). The delta is enumerated so the postcondition can assert the model
-# diff equals EXACTLY it and nothing else (fail-closed on any stray change).
-# _UPGRADE_TO is the literal the tooling implements; _cmd_upgrade asserts it equals the live
-# _opf_store.SUPPORTED_SPEC_VERSION (bound only after _bootstrap), so a future spec bump cannot let this
-# constant silently drift from the roster.
-_UPGRADE_FROM = "1.0.0"
-# OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 5): base spec 1.2.0 admits the managed bootstrap provenance
-# `.working/toml/init.toml` a coupled init writes. The 1.1.0 -> 1.2.0 schema delta is the spec_version
-# bump ALONE: a 1.1.0 (D2a) store gains no init.toml (no provenance is ever fabricated for it), and a 1.0.0
-# store takes the full 1.0.0 schema delta straight to 1.2.0. Declared views are then regenerated.
-_UPGRADE_MID = "1.1.0"
-_UPGRADE_TO = "1.2.0"
-_UPGRADE_NEW_TYPES = ("contribution", "maintainer_decision", "preference_pattern")
-_UPGRADE_RETIRED_MODULE = "decision_support"
-_UPGRADE_NEW_VIEWS = ("CONTRIBUTIONS.md", "DECISIONS.toml")
-# The 1.0.0 -> 1.1.0 delta also WIDENS the existing DECISIONS.md composed view's source set: the two new
-# baseline decision types join the two 1.0.0 sources, so the migrated view matches the 1.1.0 required set
-# (spec 9.2). Without this, a genuine 1.0.0 store's 2-source DECISIONS.md stays 2-source after the delta and
-# fails the render/doctor gate. DECISIONS.toml is a NET-NEW view (in _UPGRADE_NEW_VIEWS) and already carries
-# the full four-source set from NAMED_VIEWS.
-_UPGRADE_WIDENED_VIEW = "DECISIONS.md"
-_UPGRADE_VIEW_FROM_SOURCES = ("pending_decision", "autonomous_decision")
-
-# FIX5 forward-drift PIN (guard-input-soundness): the 1.0.0-valid [modules] vocabulary is the four 1.0.0
-# baseline modules PLUS the one module this 1.0.0 -> 1.1.0 delta retires (decision_support); their union is
-# exactly the merge-base (1c90fbb) _opf_store.KNOWN_MODULES. _upgrade_plan DERIVES that set from the LIVE
-# _opf_store.KNOWN_MODULES at the point of use, which is correct today but UNPINNED: a future KNOWN_MODULES
-# edit would silently shift what counts as a valid 1.0.0 module. This FROZEN set pins the intended 1.0.0
-# vocabulary (a plain literal, since _opf_store is bound only after _bootstrap); _upgrade_plan reconciles
-# the live derivation against it and fails closed on any divergence, and check_opf_upgrade.py binds the two,
-# so a future drift fails a gate rather than re-vocabularying the check unseen.
-_VALID_1_0_0_MODULES = frozenset({
-    "governance", "delivery_assurance", "operational_policy", "concurrent_operation", "decision_support"})
-
-
-class _UpgradeError(Exception):
-    """A fail-closed upgrade refusal carrying the operator-facing reason (mapped to exit 2)."""
-
-
-def _upgrade_read_bytes(root_fd, relpath, control=False):
-    """Read a contained store file's raw bytes no-follow; None when the path is absent. A control file
-    (the manifest) is read singly-linked (a hardlink to an out-of-tree victim is refused)."""
-    journal = _opf_store._journal
-    try:
-        data, _st = journal._read_contained(root_fd, relpath, require_single_link=control)
-    except journal.JournalError as exc:
-        text = str(exc)
-        if "cannot read contained file" in text and ("No such file" in text or "FileNotFound" in text):
-            return None
-        raise _UpgradeError("cannot read {!r} ({})".format(relpath, exc))
-    return data
-
-
-def _upgrade_replace(root_fd, relpath, data):
-    """Atomically replace an EXISTING contained regular file with `data` (bytes), no-follow, preserving
-    the destination's mode: a fresh O_EXCL temp beneath the same parent fd is written and atomically
-    renamed over the entry (never an O_TRUNC of the name), the same reopen-TOCTOU-safe idiom as the U4
-    view writer, minus its render write-gate flag (this is the schema-upgrade writer, not a render)."""
-    journal = _opf_store._journal
-    pfd, name = journal._open_parent(root_fd, relpath)
-    try:
-        st = journal._lstat_at(pfd, name)
-        if st is None or not stat.S_ISREG(st.st_mode):
-            raise _UpgradeError("refusing to rewrite {!r}: destination is not an existing regular file "
-                                "(a symlink or special file is never followed; fail-closed)".format(relpath))
-        tmpname = ".{}.opf-upgrade.{}.{}".format(name, os.getpid(), os.urandom(8).hex())
-        fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
-        renamed = False
-        try:
-            try:
-                os.fchmod(fd, stat.S_IMODE(st.st_mode))
-                journal._write_all(fd, data)
-                os.fsync(fd)
-            finally:
-                _opf_store._close_fd_exc_safe(fd)
-            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
-            renamed = True
-            os.fsync(pfd)
-        finally:
-            if not renamed:
-                try:
-                    os.unlink(tmpname, dir_fd=pfd)
-                except OSError:
-                    pass
-    finally:
-        _opf_store._close_fd_exc_safe(pfd)
-
-
-def _upgrade_create_index(root_fd, relpath, data):
-    """Create a missing empty index file create-only (O_EXCL, no-follow); an already-present index is
-    LEFT untouched (governance-enabled MD/PP whose records are preserved byte-for-byte, spec 9.2).
-    Returns True when this call created the file, False when it already existed."""
-    journal = _opf_store._journal
-    pfd, name = journal._open_parent(root_fd, relpath)
-    try:
-        if journal._lstat_at(pfd, name) is not None:
-            return False
-        journal._recreate_file(pfd, name, data, 0o644)
-        os.fsync(pfd)
-        return True
-    finally:
-        _opf_store._close_fd_exc_safe(pfd)
-
-
-def _upgrade_plan(manifest_model, counters_model):
-    """Apply EXACTLY the spec-9.2 1.0.0 -> 1.1.0 allowed delta to the parsed manifest and counters models,
-    returning (new_manifest, new_counters, added_namespaces, origin). It validates UP FRONT the 1.0.0-shape
-    preconditions it can cheaply check on the PARSED models -- the required/optional table shapes, the base
-    table token and spec_version, KNOWN module keys with boolean values, the module<->baseline-type coupling,
-    and the pre-declared type/view rows -- and REFUSES any that fail (a _UpgradeError, fail-closed). It is NOT
-    a complete 1.0.0 doctor: a 1.0.0 store invalid in a way these preconditions do not inspect (e.g. a missing
-    type row, or a type carrying a wrong or non-normative namespace) is caught AFTER mutation by the render /
-    final-doctor gate; recovery restores tracked paths from HEAD and removes upgrade-created files
-    within the checked scope -- the no-complete-pre-doctor
-    residual disclosed on _cmd_upgrade. It is ORIGIN-AWARE: a governance-
-    or decision_support-enabled 1.0.0 store already declares maintainer_decision / preference_pattern as a
-    module-tier row (G1/G2), so the delta ADDS only the now-baseline types not already present and preserves
-    a pre-declared row untouched; DECISIONS.md and the decision_support [modules] key are both OPTIONAL at
-    1.0.0 (G3/G4), so an origin that omits them is migrated without inventing them. `_upgrade_postcondition`
-    asserts the manifest AND counters model diffs equal EXACTLY the allowed delta (value-exact), so a stray
-    mutation, a flipped retained boolean, a mutated retained row, or a lost high-water can never slip
-    through."""
-    import copy
-    # The 1.0.0 input carries the RETIRED base table [devprocess] (PRIOR_STANDARD_TOKEN); the OPFiles
-    # rebrand (1.1.0) renames it to [opf] (STANDARD_TOKEN) as part of this same allowed delta (spec 9.2).
-    _prior_base = _opf_store.PRIOR_STANDARD_TOKEN
-    # [devprocess] and [types] are REQUIRED for a migratable 1.0.0 store. [modules] and [views] are
-    # OPTIONAL at 1.0.0: the merge-base doctor grades an ABSENT table valid-empty (_validate_modules(None)
-    # / _validate_views(None) return CLEAN), so an origin that omits either migrates AS IF EMPTY rather
-    # than being refused; a PRESENT-but-not-a-dict table stays a malformed refusal.
-    for table in (_prior_base, "types"):
-        if not isinstance(manifest_model.get(table), dict):
-            raise _UpgradeError("manifest [{}] table is missing or malformed; not a store this "
-                                "upgrade can migrate (fail-closed)".format(table))
-    for table in ("modules", "views"):
-        present = manifest_model.get(table)
-        if present is not None and not isinstance(present, dict):
-            raise _UpgradeError("manifest [{}] table is present but malformed (not a table); not a store "
-                                "this upgrade can migrate (fail-closed)".format(table))
-    if _opf_store.STANDARD_TOKEN in manifest_model:
-        raise _UpgradeError("manifest already carries the renamed base table [{}]; store is not a clean "
-                            "1.0.0 baseline (fail-closed)".format(_opf_store.STANDARD_TOKEN))
-    if manifest_model[_prior_base].get("spec_version") != _UPGRADE_FROM:
-        raise _UpgradeError("manifest spec_version is not {!r}; no known upgrade path".format(_UPGRADE_FROM))
-    if manifest_model[_prior_base].get("standard") != _prior_base:
-        raise _UpgradeError("manifest [{}].standard is not {!r}; not a store this upgrade migrates "
-                            "(fail-closed)".format(_prior_base, _prior_base))
-    if not isinstance(counters_model.get("counters"), dict):
-        raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
-
-    modules = manifest_model.get("modules") or {}
-    types = manifest_model["types"]
-    views = manifest_model.get("views") or {}
-
-    # --- ORIGIN FACTS (G1-G4): what this specific 1.0.0 origin family already carries. ---------------
-    pre_declared = frozenset(t for t in _UPGRADE_NEW_TYPES if t in types)
-    ds_key_present = _UPGRADE_RETIRED_MODULE in modules
-    decisions_declared = _UPGRADE_WIDENED_VIEW in views
-    origin = {"pre_declared": pre_declared, "ds_key_present": ds_key_present,
-              "decisions_declared": decisions_declared}
-
-    # --- PRECONDITIONS: refuse only a genuinely INVALID 1.0.0 input, fail-closed. --------------------
-    # [modules] keys are OPTIONAL at 1.0.0 (default off, G3), so decision_support MAY be absent. Every
-    # PRESENT module value must be a boolean: the merge-base doctor's _validate_modules grades a non-boolean
-    # module value 1.0.0-INVALID, so a non-boolean on ANY module (not only the retired decision_support --
-    # e.g. governance = "x") is refused upfront, fail-closed, keeping the docstring's up-front-validation
-    # claim honest rather than silently carrying it through to a post-mutation
-    # doctor failure. A doctor-VALID 1.0.0 store has only boolean module values, so this never rejects valid
-    # input; every module key otherwise rides through untouched (the postcondition asserts value-exact).
-    # Every [modules] KEY must be a KNOWN 1.0.0 module name (matching the merge-base _validate_modules, which
-    # grades an unknown module key 1.0.0-INVALID). The 1.0.0-valid module vocabulary is the CURRENT baseline
-    # module set PLUS the one module this delta RETIRES (decision_support), whose union is exactly the merge-
-    # base KNOWN_MODULES; derived from the authoritative KNOWN_MODULES (guard-input-soundness), never a hard-
-    # coded list. An unknown key (e.g. [modules].unknown_present) is refused UPFRONT, fail-closed, rather than
-    # carried through to a post-mutation doctor failure -- keeping the docstring's up-front-validation claim
-    # honest (a MISSING type row or WRONG namespace stays the render/doctor gate's job, disclosed on _cmd_upgrade).
-    # FIX5: reconcile the LIVE derivation against the frozen pin (forward-drift guard). A KNOWN_MODULES edit
-    # that shifts the 1.0.0 module vocabulary fails HERE (fail-closed), rather than silently re-scoping this
-    # 1.0.0-validity check; the pin, not the live union, is then the vocabulary the check uses.
-    _derived_1_0_0_modules = frozenset(_opf_store.KNOWN_MODULES) | {_UPGRADE_RETIRED_MODULE}
-    if _derived_1_0_0_modules != _VALID_1_0_0_MODULES:
-        raise _UpgradeError(
-            "the derived 1.0.0 module vocabulary {} drifted from the pinned set {}; reconcile "
-            "_VALID_1_0_0_MODULES with _opf_store.KNOWN_MODULES before upgrading (forward-drift pin, "
-            "fail-closed)".format(sorted(_derived_1_0_0_modules), sorted(_VALID_1_0_0_MODULES)))
-    _valid_1_0_0_modules = _VALID_1_0_0_MODULES
-    for _mname in sorted(modules):
-        if _mname not in _valid_1_0_0_modules:
-            raise _UpgradeError("manifest [modules].{} is not a known 1.0.0 module (known: {}); not a valid "
-                                "1.0.0 store (fail-closed)".format(
-                                    _mname, ", ".join(sorted(_valid_1_0_0_modules))))
-        if not isinstance(modules[_mname], bool):
-            raise _UpgradeError("manifest [modules].{} is not a boolean; not a valid 1.0.0 store "
-                                "(fail-closed)".format(_mname))
-    # A now-baseline type PRE-DECLARED by a 1.0.0 module tier (G1/G2). contribution: no 1.0.0 tier
-    # introduced it, so its presence is an impossible 1.0.0 shape -> always refuse. maintainer_decision:
-    # only a governance-enabled store carried it; preference_pattern: only a decision_support-enabled
-    # store; a pre-declared row whose gating module is not enabled is a module-inconsistent (1.0.0-INVALID)
-    # shape, so refusing it keeps fail-closed on genuinely-invalid input. Each pre-declared row must be
-    # EXACTLY {namespace = <normative>} (the 1.0.0 closed TYPE_KEYS + normative-namespace rule, G2).
-    _pre_gate = {"contribution": None, "maintainer_decision": "governance",
-                 "preference_pattern": _UPGRADE_RETIRED_MODULE}
-    for tname in sorted(pre_declared):
-        gate = _pre_gate[tname]
-        if gate is None:
-            raise _UpgradeError("manifest pre-declares baseline type {!r}, which no 1.0.0 module tier "
-                                "introduced; an impossible 1.0.0 shape (fail-closed)".format(tname))
-        if modules.get(gate) is not True:
-            raise _UpgradeError("manifest declares type {!r} while its 1.0.0 module {!r} is not enabled; "
-                                "a module-inconsistent 1.0.0 shape (fail-closed)".format(tname, gate))
-        if types.get(tname) != {"namespace": _opf_store.BASELINE_TYPES[tname]}:
-            raise _UpgradeError("manifest [types.{}] is not the exact 1.0.0 baseline row (namespace = "
-                                "{!r}); not a clean 1.0.0 shape (fail-closed)".format(
-                                    tname, _opf_store.BASELINE_TYPES[tname]))
-    # SYMMETRIC module-coupling precondition (C-ROSTER, mirroring the merge-base 1.0.0 doctor). The loop
-    # above refuses a DECLARED now-baseline type whose gating 1.0.0 module is not enabled; this refuses the
-    # CONVERSE -- a 1.0.0 module that gates a now-baseline type (maintainer_decision<-governance,
-    # preference_pattern<-decision_support) is ENABLED while that type's [types] row is ABSENT. Such an
-    # origin is module-inconsistent, so the merge-base 1.0.0 doctor grades it NOT-VALID; without this the
-    # delta would SILENTLY CURE it by adding the now-baseline row and exit 0, contradicting the docstring's
-    # up-front-validation claim (this coupling IS one of the cheap parsed-model checks it promises). Refuse
-    # it upfront, unmutated.
-    for tname, gate in sorted(_pre_gate.items()):
-        if gate is not None and modules.get(gate) is True and tname not in pre_declared:
-            raise _UpgradeError("manifest enables 1.0.0 module {!r} but omits its required type {!r}; a "
-                                "module-inconsistent 1.0.0 shape the delta must not silently cure "
-                                "(fail-closed)".format(gate, tname))
-    # The two NET-NEW 1.1.0 views could not exist at 1.0.0 (no 1.0.0 view renderer), so a store
-    # pre-declaring either is 1.0.0-INVALID; refuse.
-    for vname in _UPGRADE_NEW_VIEWS:
-        if vname in views:
-            raise _UpgradeError("manifest already declares view {!r}; store is not a clean 1.0.0 "
-                                "baseline (fail-closed)".format(vname))
-    # DECISIONS.md is OPTIONAL at 1.0.0 (G4): a store may omit it and stay valid, so an absent view is
-    # neither widened nor created (M2). When DECLARED, its sources must be EXACTLY the two 1.0.0 decision
-    # sources as a LIST with no duplicates and all strings (a doctor-VALID 1.0.0 store may order the pair
-    # either way but never duplicates it, G4).
-    if decisions_declared:
-        _dv_old = views.get(_UPGRADE_WIDENED_VIEW)
-        _srcs = _dv_old.get("sources") if isinstance(_dv_old, dict) else None
-        if not (isinstance(_dv_old, dict) and isinstance(_srcs, list)
-                and all(isinstance(s, str) for s in _srcs)
-                and len(_srcs) == len(set(_srcs))
-                and set(_srcs) == set(_UPGRADE_VIEW_FROM_SOURCES)):
-            raise _UpgradeError("manifest [views.{!r}] is not the 1.0.0 baseline composed view (sources "
-                                "must be the two 1.0.0 decision sources {}, no duplicates); not a clean "
-                                "1.0.0 baseline (fail-closed)".format(
-                                    _UPGRADE_WIDENED_VIEW, sorted(_UPGRADE_VIEW_FROM_SOURCES)))
-
-    # --- DELTA APPLICATION (spec 9.2). --------------------------------------------------------------
-    new_manifest = copy.deepcopy(manifest_model)
-    # Rename the base table [devprocess] -> [opf] and its discovery token, and bump spec_version, all in
-    # the one allowed delta (spec 9.2). The table body is otherwise carried over unchanged.
-    _base = new_manifest.pop(_prior_base)
-    _base["standard"] = _opf_store.STANDARD_TOKEN
-    _base["spec_version"] = _UPGRADE_TO
-    new_manifest[_opf_store.STANDARD_TOKEN] = _base
-    if ds_key_present:
-        del new_manifest["modules"][_UPGRADE_RETIRED_MODULE]
-    for tname in _UPGRADE_NEW_TYPES:
-        if tname not in pre_declared:
-            new_manifest["types"][tname] = {"namespace": _opf_store.BASELINE_TYPES[tname]}
-    # An origin that OMITTED [views] entirely (R2) migrates AS IF EMPTY: the table is created here to
-    # carry the two net-new 1.1.0 views (an absent [modules] stays absent -- the delta only ever REMOVES a
-    # modules key, so migrate-as-empty is a no-op there and no empty table is invented).
-    new_manifest.setdefault("views", {})
-    for vname in _UPGRADE_NEW_VIEWS:
-        kind, sources, _renderer = _opf_views.NAMED_VIEWS[vname]
-        new_manifest["views"][vname] = {
-            "kind": kind,
-            "sources": list(sources),
-            "target": "{}/{}".format(_opf_store.WORKING_DIRNAME, vname),
-        }
-    # Widen the existing DECISIONS.md composed view to the 1.1.0 required source set ONLY when it is
-    # declared (spec 9.2 widens "the existing DECISIONS.md composed view"; an absent view has no existence
-    # to widen, G4). Set `sources` to the canonical ordered required set from NAMED_VIEWS so the migrated
-    # row is byte-identical to a freshly initialized 1.1.0 store's row.
-    if decisions_declared:
-        new_manifest["views"][_UPGRADE_WIDENED_VIEW]["sources"] = list(
-            _opf_views.NAMED_VIEWS[_UPGRADE_WIDENED_VIEW][1])
-
-    new_counters = copy.deepcopy(counters_model)
-    added = []
-    for tname in _UPGRADE_NEW_TYPES:
-        ns = _opf_store.BASELINE_TYPES[tname]
-        if ns not in new_counters["counters"]:
-            new_counters["counters"][ns] = 0
-            added.append(ns)
-
-    # POSTCONDITION (spec 9.2), value-exact: the manifest AND counters model diffs equal EXACTLY the
-    # allowed delta and nothing else. Factored pure so it is directly unit-testable (m1).
-    _upgrade_postcondition(manifest_model, new_manifest, counters_model, new_counters, origin)
-    return new_manifest, new_counters, added, origin
-
-
-def _upgrade_postcondition(old_manifest, new_manifest, old_counters, new_counters, origin):
-    """The spec-9.2 upgrade postcondition, factored PURE so it is directly unit-testable (m1). It recomputes
-    the EXPECTED new models from the OLD models plus the origin facts and compares wholesale, value-exact,
-    with a per-table failure message for diagnosability. Raises _UpgradeError (fail-closed) on any
-    divergence, so a stray mutation, a flipped retained module boolean, a mutated retained [types] row, a
-    reordered or duplicated view source, or a lowered/raised/lost counter high-water can never slip through
-    (fixes the set-only / key-set-only comparisons this replaced)."""
-    import copy
-    _prior_base = _opf_store.PRIOR_STANDARD_TOKEN
-    _tok = _opf_store.STANDARD_TOKEN
-    pre_declared = origin["pre_declared"]
-    ds_key_present = origin["ds_key_present"]
-    decisions_declared = origin["decisions_declared"]
-
-    # Base table: renamed [devprocess] -> [opf], standard token flipped and spec_version bumped, every
-    # other base key carried over value-exact.
-    if _prior_base in new_manifest or _tok not in new_manifest:
-        raise _UpgradeError("upgrade postcondition failed: base table not renamed [{}] -> [{}]".format(
-            _prior_base, _tok))
-    expected_base = dict(old_manifest[_prior_base])
-    expected_base["standard"] = _tok
-    expected_base["spec_version"] = _UPGRADE_TO
-    if new_manifest.get(_tok) != expected_base:
-        raise _UpgradeError("upgrade postcondition failed: base table [{}] changed beyond the standard-"
-                            "token rename and spec_version bump".format(_tok))
-
-    # [modules]: exactly the retired decision_support key removed when it was present, every other key
-    # (name AND boolean value) carried over value-exact -- so a flipped retained boolean now refuses.
-    expected_modules = {k: v for k, v in (old_manifest.get("modules") or {}).items()
-                        if not (ds_key_present and k == _UPGRADE_RETIRED_MODULE)}
-    if new_manifest.get("modules", {}) != expected_modules:
-        raise _UpgradeError("upgrade postcondition failed: [modules] is not exactly the origin table with "
-                            "the retired {!r} key removed".format(_UPGRADE_RETIRED_MODULE))
-
-    # [types]: exactly the origin rows plus the now-baseline rows NOT already pre-declared, value-exact --
-    # so a mutated namespace or a stray key in a retained row now refuses, and a pre-declared row is
-    # admitted exactly.
-    expected_types = dict(old_manifest["types"])
-    for tname in _UPGRADE_NEW_TYPES:
-        if tname not in pre_declared:
-            expected_types[tname] = {"namespace": _opf_store.BASELINE_TYPES[tname]}
-    if new_manifest["types"] != expected_types:
-        raise _UpgradeError("upgrade postcondition failed: [types] is not exactly the origin rows plus the "
-                            "added baseline rows")
-
-    # [views]: origin rows, plus the two constructed new rows, plus (when declared) DECISIONS.md with its
-    # sources replaced by the exact canonical ordered required list; value-exact, so the sources assertion
-    # is order- AND duplicate-exact.
-    expected_views = copy.deepcopy(old_manifest.get("views") or {})
-    for vname in _UPGRADE_NEW_VIEWS:
-        kind, sources, _renderer = _opf_views.NAMED_VIEWS[vname]
-        expected_views[vname] = {
-            "kind": kind,
-            "sources": list(sources),
-            "target": "{}/{}".format(_opf_store.WORKING_DIRNAME, vname),
-        }
-    if decisions_declared:
-        expected_views[_UPGRADE_WIDENED_VIEW] = dict(expected_views[_UPGRADE_WIDENED_VIEW])
-        expected_views[_UPGRADE_WIDENED_VIEW]["sources"] = list(
-            _opf_views.NAMED_VIEWS[_UPGRADE_WIDENED_VIEW][1])
-    if new_manifest["views"] != expected_views:
-        raise _UpgradeError("upgrade postcondition failed: [views] is not exactly the origin rows plus the "
-                            "two new views and the widened DECISIONS.md")
-
-    # Every OTHER top-level table (store, providers, deliverables, archive, unmanaged, vendors, profiles,
-    # ...) is byte-identical: value-exact deep equality over the whole remaining table set.
-    _handled = {"modules", "types", "views", _prior_base, _tok}
-    for table in set(old_manifest) | set(new_manifest):
-        if table in _handled:
-            continue
-        if old_manifest.get(table) != new_manifest.get(table):
-            raise _UpgradeError("upgrade postcondition failed: table [{}] changed but is not in the allowed "
-                                "delta (fail-closed)".format(table))
-
-    # Counters (m1): every existing high-water preserved value-exact, EXACTLY the CN/MD/PP namespaces
-    # ABSENT from the origin added as zeros, the schema key and any other content untouched.
-    if not isinstance(old_counters.get("counters"), dict):
-        raise _UpgradeError("upgrade postcondition failed: origin counters [counters] table malformed")
-    expected_counters = copy.deepcopy(old_counters)
-    for tname in _UPGRADE_NEW_TYPES:
-        ns = _opf_store.BASELINE_TYPES[tname]
-        if ns not in expected_counters["counters"]:
-            expected_counters["counters"][ns] = 0
-    if new_counters != expected_counters:
-        raise _UpgradeError("upgrade postcondition failed: counters is not exactly the origin high-waters "
-                            "with the missing CN/MD/PP namespaces added as zeros")
-
-
-def _upgrade_plan_minor(manifest_model, counters_model):
-    """The 1.1.0 -> 1.2.0 allowed delta (spec 9.2, OPF-D2B PR3a): the [opf].spec_version bump ALONE.
-    Preconditions (fail-closed): the current [opf] base table (never the retired [devprocess]) declaring
-    standard "opf" and spec_version 1.1.0, and a [counters] table. No init.toml provenance is created
-    (none is ever fabricated for an existing store), no type, view, module, index, or counter changes,
-    and the postcondition asserts the manifest diff is EXACTLY the version field and the counters model
-    is unchanged. Returns (new_manifest, new_counters, added_namespaces, origin) like _upgrade_plan."""
-    import copy
-    base = manifest_model.get(_opf_store.STANDARD_TOKEN)
-    if not isinstance(base, dict) or _opf_store.PRIOR_STANDARD_TOKEN in manifest_model:
-        raise _UpgradeError("manifest carries no [{}] base table (or still carries the retired [{}]); "
-                            "not a {} store this upgrade migrates (fail-closed)".format(
-                                _opf_store.STANDARD_TOKEN, _opf_store.PRIOR_STANDARD_TOKEN,
-                                _UPGRADE_MID))
-    if base.get("standard") != _opf_store.STANDARD_TOKEN or base.get("spec_version") != _UPGRADE_MID:
-        raise _UpgradeError("manifest [{}] is not a {} base; no known upgrade path (fail-closed)".format(
-            _opf_store.STANDARD_TOKEN, _UPGRADE_MID))
-    if not isinstance(counters_model.get("counters"), dict):
-        raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
-    new_manifest = copy.deepcopy(manifest_model)
-    new_manifest[_opf_store.STANDARD_TOKEN]["spec_version"] = _UPGRADE_TO
-    new_counters = copy.deepcopy(counters_model)
-    expected = copy.deepcopy(manifest_model)
-    expected[_opf_store.STANDARD_TOKEN] = dict(expected[_opf_store.STANDARD_TOKEN],
-                                               spec_version=_UPGRADE_TO)
-    if new_manifest != expected or new_counters != counters_model:
-        raise _UpgradeError("upgrade postcondition failed: the {} -> {} delta is the spec_version bump "
-                            "alone".format(_UPGRADE_MID, _UPGRADE_TO))
-    origin = {"pre_declared": frozenset(), "ds_key_present": False, "decisions_declared": None,
-              "from": _UPGRADE_MID}
-    return new_manifest, new_counters, [], origin
+# The refusal opf upgrade prints for every argument list. It names no store format, version or migration
+# route, because this tooling has none to offer.
+UPGRADE_NONE = "this tooling defines no store upgrade; nothing was read or written"
 
 
 def _cmd_upgrade(rest):
-    """`opf upgrade [--root DIR]`: the in-place, additive, idempotent store-schema upgrade to the tooling
-    spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} schema
-    delta, changing only spec_version (no init.toml provenance is fabricated); a 1.0.0 store takes the
-    full schema delta below, straight to {to}. Declared views are then regenerated, so a stale
-    committed view can change.
-    It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating a 1.0.0
-    or 1.1.0 store, its preconditions include readable, canonical manifest/counters matching a recognised
-    origin shape, cleanliness over planned schema/render destinations and index collision candidates
-    (including ignored files there), and acquisition of its lease. An untracked or ignored lease is
-    excepted from the cleanliness check and handled separately by lease acquisition.
-    It then applies EXACTLY the allowed delta as
-    a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
-    decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
-    row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
-    composed view WHERE DECLARED; extend counters with zeros for any missing CN/MD/PP namespace,
-    preserving existing high-waters; create the missing empty indexes, skipping any that already exist),
-    RENDERS the declared views, and requires a full doctor VALID before offering the uncommitted change. It is
-    ORIGIN-AWARE: a governance- or decision_support-enabled 1.0.0 store, and a store that omits the
-    optional decision_support key or the DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4).
-    Before ANY write it enforces two fail-closed preconditions:
-    PLANNED-DESTINATION CLEANLINESS (store and product roots), including ignored files, over planned
-    destinations and collisions (HEAD preserves pre-existing tracked content,
-    SECA-verified-restore-path), with an untracked or ignored lease handled separately, and a
-    SINGLE-WRITER LEASE it claims atomically and holds across the mutation, render, and final doctor (spec
-    5.7). It NEVER commits: the adopter reviews and merges. A store already at {to} returns without those
-    migration preconditions: doctor-VALID yields a byte no-op (exit 0), otherwise it exits 2 without
-    writing. A NOT-ADOPTED root is NOT APPLICABLE (exit 0), any other non-resolved status a located
-    cannot-evaluate (exit 2). Two disclosed residuals: a killed run leaves the lease, which is
-    spec-conformant (present only while held; a leftover is released through operator reconciliation, spec
-    5.7) and is what the EEXIST refusal covers; and the lease is not made observable at a sync target
-    before writes (spec 5.7) because this build has no sync runtime, so the guarantee is single-host
-    single-writer. A third disclosed residual: this build has no pre-doctor for a 1.0.0 or 1.1.0 origin,
-    so an older store invalid in a way the origin preconditions do not inspect fails only AFTER mutation
-    (at the render or the final doctor). Under the single-writer contract, recovery restores pre-existing
-    tracked content from HEAD and removes upgrade-created files within the checked store/product scope;
-    pre-existing untracked or ignored content in that scope refuses before mutation.""".format(
-        to=_UPGRADE_TO)
-    root = None
-    i = 0
-    while i < len(rest):
-        tok = rest[i]
-        if tok == "--root":
-            if i + 1 >= len(rest):
-                print("opf upgrade: --root requires a directory argument", file=sys.stderr)
-                return EXIT_MALFORMED
-            if root is not None:
-                print("opf upgrade: --root given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            val = rest[i + 1]
-            if val == "" or val.startswith("-"):
-                print("opf upgrade: --root requires a non-empty directory argument, not {!r}".format(val),
-                      file=sys.stderr)
-                return EXIT_MALFORMED
-            root = val
-            i += 2
-        else:
-            print("opf upgrade: unrecognized argument {!r}".format(tok), file=sys.stderr)
-            return EXIT_MALFORMED
-    root = root if root is not None else "."
-    try:
-        return _upgrade_run(root)
-    except (_UpgradeError, _opf_write_guard.WriteGuardError) as exc:
-        print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
-        return EXIT_MALFORMED
-    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
-        print("opf upgrade: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
-              file=sys.stderr)
-        return EXIT_MALFORMED
-
-
-def _upgrade_doctor(root):
-    """Resolve the store at `root`, gather its git-derived observations, and run the full offline doctor
-    (`validate_store`). Returns the _opf_check validate result (its `.status` is `_opf_store.VALID` on a
-    clean store). Raises _UpgradeError, fail-closed, when the store no longer resolves."""
-    dres = _opf_store.resolve_store(Path(os.path.abspath(root)))
-    if dres.status != _opf_store.RESOLVED:
-        raise _UpgradeError("the store at {!r} no longer resolves ({}); fail-closed".format(root, dres.detail))
-    dobs, _dnotes = _opf_observe.gather(dres)
-    return _opf_check.validate_store(dres, observations=dobs)
-
-
-# --- STEP 3/4 upgrade preconditions: store cleanliness and the single-writer lease -------------------
-
-_UPGRADE_NO_WHOLE_TREE = ("Never run a whole-tree restore (git restore . / git reset --hard): it would "
-                          "destroy unrelated uncommitted work. Scope every recovery to the affected "
-                          "store and product paths.")
-# The planned scope the shared cleanliness gate names in its dirty-tree refusal (_opf_write_guard.check_clean).
-_UPGRADE_CLEAN_SCOPE = "schema and render destinations and index collision candidates"
-
-
-def _upgrade_partial_recovery_text(res, manifest_model):
-    """A previous interrupted run has no trustworthy write plan in this process. Inspect under the
-    resolved store root, but do not prescribe a subtree restore: it could discard unmanaged owner work."""
-    import shlex
-    r = shlex.quote(str(res.store_root))
-    w = shlex.quote(_opf_store.WORKING_DIRNAME)
-    try:
-        scope = _upgrade_write_scope(res.machine_rel, manifest_model, True, _UPGRADE_NEW_TYPES)
-        candidates = "Candidate store destinations under {} (current manifest; inspect only): {}.".format(
-            r, " ".join(shlex.quote(p) for p in scope["store"]))
-        if scope["product"]:
-            product_root = res.product_root if res.product_root is not None else res.store_root
-            candidates += "\nCandidate product destinations under {} (inspect only): {}.".format(
-                shlex.quote(str(product_root)), " ".join(shlex.quote(p) for p in scope["product"]))
-    except Exception as exc:  # Candidate advice must not hide the doctor findings.
-        candidates = "Cannot derive candidate destinations from the current manifest: {}.".format(exc)
-    return ("Inspect the store subtree (git -C {r} --literal-pathspecs status --ignored=matching "
-            "--untracked-files=all -- {w}). Identify the earlier run's planned destinations and reconcile "
-            "intervening owner edits before restoring individual tracked paths or removing files proven "
-            "upgrade-created. Exclude unmanaged paths and the lease; reconcile a leftover lease only after "
-            "confirming no run is live (spec 5.7). Reconcile product targets separately, then re-run. "
-            "{no}\n{candidates} These candidates do not prove the earlier write scope or which files were "
-            "created; reconcile them against the earlier run and owner edits before recovery.".format(
-                r=r, w=w, no=_UPGRADE_NO_WHOLE_TREE, candidates=candidates))
-
-
-def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths, store_relpaths):
-    """Recovery advice for a post-mutation failure (render or doctor): the planned set is KNOWN, and with the
-    step-3 cleanliness precondition (including ignored files) and the single-writer contract, HEAD
-    preserves pre-existing tracked content in the checked scope; remove upgrade-created files to recover
-    previously absent paths. Inspect first for intervening owner edits. The DISTINCT roots are threaded
-    (explicit-binding-over-ambient-context): tracked store paths
-    in the explicit plan, and the upgrade-created untracked files, are recovered under the STORE root (where
-    `.working` lives); a declared product-scope target rendered this run is recovered under the PRODUCT root.
-    The two roots differ for a RELOCATED store (the pointer resolves `.working` to a store separate from the
-    product tree), where using one root for both would aim the `.working` restore at the wrong repository.
-    Never a whole-tree restore."""
-    import shlex
-    r = shlex.quote(str(store_root))
-    w = " ".join(shlex.quote(p) for p in sorted(store_relpaths))
-    tracked = " ".join(shlex.quote(p) for p in sorted(set(store_relpaths) - set(created_relpaths)))
-    lines = ["opf upgrade: the uncommitted change is left for review; recover it scoped to the paths this run "
-             "planned (tracked content was clean against HEAD; untracked and ignored content was refused). "
-             "Confirm no opf run is live (spec 5.7), then inspect for intervening owner edits:"]
-    if tracked:
-        lines.append("  restore tracked store paths: git -C {} --literal-pathspecs restore --staged "
-                     "--worktree -- {}".format(r, tracked))
-    if created_relpaths:
-        lines.append("  remove only these previously absent files if this run created them: rm -- " + " ".join(
-            shlex.quote(os.path.join(str(store_root), p)) for p in sorted(created_relpaths)))
-    pr = shlex.quote(str(product_root))
-    for p in sorted(product_relpaths):
-        lines.append("  product target rendered: git -C {} --literal-pathspecs restore --staged --worktree "
-                     "-- {} (or remove it if this run created it)".format(pr, shlex.quote(p)))
-    lines.append("  inspect first: git -C {} --literal-pathspecs status --ignored=matching "
-                 "--untracked-files=all -- {}".format(r, w))
-    lines.append("  " + _UPGRADE_NO_WHOLE_TREE)
-    return "\n".join(lines)
-
-
-def _upgrade_write_scope(machine_rel, manifest_model, counters_changed, index_types):
-    """Plan the destinations of the schema delta and the subsequent declared-view render.
-    Index candidates are included for collision checks even when create-only will leave them alone.
-    Use the POST-delta manifest: it includes newly introduced views. The shared planner
-    (_opf_write_guard.plan_write_scope) adds every declared render destination and refuses a declaration
-    colliding with a managed destination before mutation, rather than licensing an overwrite. The lease
-    is checked separately and is never a restore/staging target."""
-    store = ["{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)]
-    if counters_changed:
-        store.append("{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME))
-    indexes = tuple("{}/{}{}".format(machine_rel, t, _opf_check.INDEX_SUFFIX) for t in index_types)
-    store.extend(indexes)
-    scope = _opf_write_guard.plan_write_scope(machine_rel, manifest_model, store, "upgrade")
-    scope["indexes"] = indexes
-    return scope
-
-
-def _upgrade_run(root):
-    import shlex
-    import tomllib
-    if _UPGRADE_TO != _opf_store.SUPPORTED_SPEC_VERSION:
-        raise _UpgradeError("upgrade target {!r} does not match the tooling spec_version {!r}; refusing to "
-                            "run a stale upgrade path (fail-closed)".format(
-                                _UPGRADE_TO, _opf_store.SUPPORTED_SPEC_VERSION))
-    try:
-        # `opf upgrade` is the ONE caller that also accepts the retired 1.0.0 discovery token, so a legacy
-        # [devprocess] store still resolves for migration (spec 9.2); every other tool keeps the sole
-        # current-token discovery.
-        res = _opf_store.resolve_store(
-            Path(os.path.abspath(root)),
-            accept_tokens=(_opf_store.STANDARD_TOKEN, _opf_store.PRIOR_STANDARD_TOKEN))
-    except Exception as exc:  # noqa: BLE001  a resolver escape is cannot-evaluate, never a mutation
-        raise _UpgradeError("unexpected error resolving the store at {!r} ({!r})".format(root, exc))
-    if res.status == _opf_store.NOT_ADOPTED:
-        print("opf upgrade: NOT APPLICABLE ({})".format(res.detail))
-        return EXIT_OK
-    if res.status != _opf_store.RESOLVED:
-        print("opf upgrade: cannot evaluate: {}".format(res.detail), file=sys.stderr)
-        return EXIT_MALFORMED
-
-    machine_rel = res.machine_rel
-    manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
-    counters_rel = "{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME)
-    root_fd = _opf_store._open_dir_nofollow(res.store_root)
-    recovery = None
-    try:
-        manifest_bytes = _upgrade_read_bytes(root_fd, manifest_rel, control=True)
-        counters_bytes = _upgrade_read_bytes(root_fd, counters_rel)
-        if manifest_bytes is None or counters_bytes is None:
-            raise _UpgradeError("store manifest or counters is absent; not a resolvable store to upgrade")
-        try:
-            manifest_model = tomllib.loads(manifest_bytes.decode("utf-8"))
-            counters_model = tomllib.loads(counters_bytes.decode("utf-8"))
-        except (ValueError, RecursionError, MemoryError) as exc:
-            # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
-            # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part
-            # key under a memory limit.
-            raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
-
-        # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
-        # single known 1.0.0 origin proceeds. The base table is [opf] on an already-migrated store and the
-        # retired [devprocess] on a legacy 1.0.0 store, so read whichever the manifest carries.
-        _base_model = manifest_model.get(_opf_store.STANDARD_TOKEN)
-        if not isinstance(_base_model, dict):
-            _base_model = manifest_model.get(_opf_store.PRIOR_STANDARD_TOKEN)
-        # Worklog activation is independent of spec_version. Refuse before even
-        # the cleanliness probe or lease can write; a later render fence is too late.
-        # Normalize only the retired base-table name for the shared loader check.
-        try:
-            _opf_worklog.generation({"opf": _base_model})
-        except _opf_worklog.WorklogError as exc:
-            raise _UpgradeError(str(exc)) from exc
-        sv = _base_model.get("spec_version") if isinstance(_base_model, dict) else None
-        if sv == _UPGRADE_TO:
-            # F2: a store already at the target is a no-op ONLY when it is genuinely doctor-VALID at 1.1.0.
-            # A partial or interrupted migration leaves spec_version == 1.1.0 with an incomplete delta;
-            # trusting the version marker alone would report false success over a broken store. Re-validate
-            # and fail closed on anything short of VALID, so a partial migration is never reported complete.
-            result = _upgrade_doctor(root)
-            if result.status == _opf_store.VALID:
-                print("opf upgrade: store is already at spec_version {} and doctor-VALID; nothing to "
-                      "upgrade (no-op).".format(_UPGRADE_TO))
-                return EXIT_OK
-            print("opf upgrade: store declares spec_version {} but is NOT doctor-VALID: a partial or "
-                  "interrupted migration is never reported complete (fail-closed, spec 9.2). {} Run "
-                  "`opf doctor --root {}` for the findings, exit 2.".format(
-                      _UPGRADE_TO, _upgrade_partial_recovery_text(res, manifest_model), root), file=sys.stderr)
-            _doctor_report(result)
-            return EXIT_MALFORMED
-        try:
-            sv_tuple = tuple(int(p) for p in sv.split(".")) if isinstance(sv, str) else None
-        except ValueError:
-            sv_tuple = None
-        if sv_tuple is not None and sv_tuple > tuple(int(p) for p in _UPGRADE_TO.split(".")):
-            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} upgrade target; opf upgrade "
-                                "never downgrades a store and performs no homes migration (fail-closed)".format(
-                                    sv, _UPGRADE_TO))
-        minor = sv == _UPGRADE_MID
-
-        # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
-        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing. A file
-        # an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic string still passes when
-        # that is its only difference (_opf_emit.matches_store_bytes); the rewrite re-spells it.
-        if not _opf_emit.matches_store_bytes(
-                manifest_bytes, _opf_emit.emit_checked(manifest_model).encode("utf-8")):
-            raise _UpgradeError("manifest is not in canonical new-document form (hand-edited or comment-"
-                                "bearing); refusing a model rewrite that could lose content (fail-closed)")
-        if not _opf_emit.matches_store_bytes(
-                counters_bytes, _opf_emit.emit_checked(counters_model).encode("utf-8")):
-            raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
-
-        new_manifest, new_counters, added_ns, origin = (
-            _upgrade_plan_minor if minor else _upgrade_plan)(manifest_model, counters_model)
-        origin_version = _UPGRADE_MID if minor else _UPGRADE_FROM
-        new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
-        new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
-        empty_index = _opf_emit.emit_checked(
-            {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
-
-        # PRECONDITION (store-read cap): every store file this upgrade would publish must stay readable
-        # by the store reader, which refuses any store file LARGER than _opf_store.MAX_STORE_READ_BYTES
-        # (a file of exactly that size still reads, so only a larger emission refuses here). Re-spelling
-        # a literal U+2028/U+2029 as its six-byte escape, like the schema delta itself, grows the
-        # emission, so a legacy file near the cap could otherwise be rewritten into one the reader then
-        # refuses, leaving a store that no longer resolves. Refuse BEFORE the cleanliness probes, the
-        # lease, and any write, so the store is left byte-for-byte unchanged (fail-closed).
-        for publish_rel, publish_bytes in ((manifest_rel, new_manifest_bytes),
-                                           (counters_rel, new_counters_bytes),
-                                           ("an upgrade-created empty index", empty_index)):
-            if len(publish_bytes) > _opf_store.MAX_STORE_READ_BYTES:
-                raise _UpgradeError(
-                    "upgraded {} would be {} bytes, over the {}-byte store-read cap its reader "
-                    "enforces; refusing before any write, the store is unchanged (fail-closed)".format(
-                        publish_rel, len(publish_bytes), _opf_store.MAX_STORE_READ_BYTES))
-
-        # STEP 3: derive the scope from this delta and its POST-delta render declarations. The same
-        # destinations drive the cleanliness gate, index creation, recovery, and staging advice.
-        write_scope = _upgrade_write_scope(
-            machine_rel, new_manifest, new_counters_bytes != counters_bytes,
-            () if minor else _UPGRADE_NEW_TYPES)
-        _opf_write_guard.check_clean(res, write_scope, "upgrade", _UPGRADE_CLEAN_SCOPE)
-        product_targets = write_scope["product"]
-        created_relpaths = []
-        for relpath in write_scope["store"]:
-            pfd, name = _opf_store._journal._open_parent(root_fd, relpath)
-            try:
-                entry = _opf_store._journal._lstat_at(pfd, name)
-                if entry is None:
-                    created_relpaths.append(relpath)
-                elif not stat.S_ISREG(entry.st_mode):
-                    raise _UpgradeError("upgrade destination {!r} is not a regular file "
-                                        "(fail-closed)".format(relpath))
-            finally:
-                _opf_store._close_fd_exc_safe(pfd)
-        # DISTINCT roots for the recovery/staging advice (R1): `.working` lives under the STORE root, product-
-        # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
-        recovery_store_root = res.store_root
-        recovery_product_root = res.product_root if res.product_root is not None else res.store_root
-        absent_product_targets = []
-        for relpath in product_targets:
-            try:
-                os.lstat(os.path.join(str(recovery_product_root), relpath))
-            except FileNotFoundError:
-                absent_product_targets.append(relpath)
-        _opf_write_guard.check_ignored(recovery_store_root, created_relpaths, "upgrade")
-        _opf_write_guard.check_ignored(recovery_product_root, absent_product_targets, "upgrade")
-        # STEP 4 (M4): claim the single-writer lease atomically, then hold it across mutation, render, and
-        # the final doctor; release it in the finally covering every exit after acquisition, EXCEPT the
-        # success path releases FIRST (R5) so no success is reported over a still-held / failed-to-release
-        # lease. `released` records that the success path already released, so the finally does not re-release.
-        lease_payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, "upgrade")
-        recovery = (recovery_store_root, recovery_product_root, created_relpaths,
-                    product_targets, write_scope["store"])
-        released = False
-        propagating = False
-        try:
-            # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes. The
-            # 1.1.0 origin rewrites the manifest alone (its delta is the spec_version bump).
-            _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
-            if new_counters_bytes != counters_bytes:
-                _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
-            created_indexes = []
-            for idx_rel in write_scope["indexes"]:
-                if _upgrade_create_index(root_fd, idx_rel, empty_index):
-                    created_indexes.append(Path(idx_rel).name[:-len(_opf_check.INDEX_SUFFIX)])
-
-            # Render the declared views (materializes the two new views and re-renders DECISIONS.md), then
-            # require a full doctor VALID before offering the uncommitted change. Both run over the mutated
-            # (uncommitted) tree, under the held lease (containment-clean; the mid-run doctor stays VALID).
-            render_argv = ["--root", root, "--write"]
-            try:
-                rres = _opf_store.resolve_store(Path(os.path.abspath(root)))
-                robs, _notes = _opf_observe.gather(rres) if rres.status == _opf_store.RESOLVED else (None, [])
-                rc = _opf_views.render(render_argv, observations=robs)
-            except Exception as exc:  # noqa: BLE001  a render escape must not read as a clean upgrade
-                raise _UpgradeError("view render after the schema delta failed ({!r}); the uncommitted change is "
-                                    "left for review".format(exc))
-            if rc != EXIT_OK:
-                print("opf upgrade: cannot evaluate: view render after the schema delta did not complete "
-                      "cleanly (rc={}); exit 2.".format(rc), file=sys.stderr)
-                print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
-                                             product_targets, write_scope["store"]), file=sys.stderr)
-                recovery = None  # Already printed, even if the finally's lease release fails.
-                return EXIT_MALFORMED
-
-            result = _upgrade_doctor(root)
-            if result.status != _opf_store.VALID:
-                print("opf upgrade: the upgraded store is NOT doctor-VALID; refusing to offer the change "
-                      "(fail-closed, spec 9.2). Run `opf doctor --root {}` for the findings, exit 2.".format(
-                          root), file=sys.stderr)
-                print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
-                                             product_targets, write_scope["store"]), file=sys.stderr)
-                recovery = None  # Already printed, even if the finally's lease release fails.
-                _doctor_report(result)
-                return EXIT_MALFORMED
-
-            # R5: release the single-writer lease BEFORE emitting the success report. A release failure
-            # surfaces as exit 2 (never swallowed), and success is never printed over a still-held lease.
-            # `released` is set FIRST so the finally never double-releases (a failed release legitimately
-            # leaves the lease as a spec-conformant leftover for operator reconciliation).
-            released = True
-            # Doctor has validated the payload. A failed release can mean another holder is live;
-            # automatic rollback advice is unsafe and is not required to make this payload valid.
-            recovery = None
-            try:
-                _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
-            except BaseException:
-                print("opf upgrade: the store reached doctor-VALID before lease release, but release "
-                      "failed. Confirm no opf run is live (spec 5.7) and reconcile the lease before "
-                      "any further action; no restore/removal commands are offered.", file=sys.stderr)
-                raise
-            print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (uncommitted, NOT staged or committed)."
-                  .format(origin_version, _UPGRADE_TO))
-            print(json.dumps({
-                "event": "upgraded", "root": str(root), "from": origin_version, "to": _UPGRADE_TO,
-                "created_indexes": sorted(created_indexes), "added_counters": sorted(added_ns),
-                "pre_declared_types": sorted(origin["pre_declared"]),
-                "decisions_view": "unchanged" if minor else (
-                    "widened" if origin["decisions_declared"] else "not-declared")},
-                sort_keys=True))
-            print("opf upgrade: regenerated views reflect working-tree store content, including uncommitted "
-                  "source edits outside the cleanliness scope. Before committing, review those edits and "
-                  "commit the intended sources with their views, or set them aside and regenerate the views.")
-            print("opf upgrade: review the uncommitted changes, then stage and commit the planned destinations "
-                  "(never `add -A`, which would sweep in unrelated work). The commands use -f for "
-                  "these named destinations because the safety probes neutralize global/system config "
-                  "and core.excludesFile (including default HOME/XDG global ignores). They read "
-                  "working-tree .gitignore files and .git/info/exclude; the absent-path probe does "
-                  "not read indexed ignore rules:")
-            print("  git -C {} --literal-pathspecs add -f -- {}".format(
-                shlex.quote(str(recovery_store_root)),
-                " ".join(shlex.quote(p) for p in write_scope["store"])))
-            for _pt in product_targets:
-                print("  git -C {} --literal-pathspecs add -f -- {}".format(
-                    shlex.quote(str(recovery_product_root)), shlex.quote(_pt)))
-            print("opf upgrade: exit 0 means the store is valid at {}; committing is the adopter's own "
-                  "step.".format(_UPGRADE_TO))
-            return EXIT_OK
-        except BaseException:
-            # Only THIS frame's own escape sets the flag: sys.exc_info() in the finally would also report an
-            # exception a CALLER is handling, and would swallow a release failure on a return path.
-            propagating = True
-            raise
-        finally:
-            if not released:
-                # R5/FIX1: release the lease on every non-success exit. When a mid-run failure is ALREADY
-                # propagating (a render/doctor escape after the manifest+counters were rewritten, which
-                # carries its own "uncommitted change is left for review" recovery advice) and the release then
-                # ALSO fails (its lease-replaced never-seize WriteGuardError), the release error must NOT
-                # DISPLACE that original exception: the operator still needs the mid-run recovery advice, so
-                # the lease-replaced note is surfaced ALONGSIDE it, never in place of it (exit 2 preserved,
-                # peer lease left, never seized). A propagating KeyboardInterrupt/SystemExit is likewise not
-                # masked by a release failure.
-                if not propagating:
-                    # A `return` (or normal fall-through) is passing through with no in-flight exception: a
-                    # release failure legitimately becomes the surfaced outcome (exit 2), exactly as before.
-                    _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
-                else:
-                    try:
-                        _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
-                    except (KeyboardInterrupt, SystemExit):
-                        raise
-                    except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original
-                        print("opf upgrade: additionally, releasing the upgrade lease failed ({}); the peer "
-                              "lease is LEFT in place (never seized, spec 5.7) and the original failure above "
-                              "still governs (exit 2).".format(rel_exc), file=sys.stderr)
-                        # returning from the except lets the original resume propagating (the finally completes
-                        # without raising a new exception), so _cmd_upgrade surfaces the original refusal.
-    except BaseException:
-        # Cover every escape after acquisition, including writes, render/doctor and lease release.
-        # Preserve the original exception and the existing never-seize release handling.
-        if recovery is not None:
-            print(_upgrade_recovery_text(*recovery), file=sys.stderr)
-        raise
-    finally:
-        _opf_store._close_fd_exc_safe(root_fd)
+    """`opf upgrade ...`: the store-schema upgrade verb. This tooling defines no store upgrade, so the verb
+    prints UPGRADE_NONE and exits 2 for EVERY argument list, whether none, `--help`, `--root DIR` or any
+    other token. No argument is parsed or validated, the root is never resolved, nothing is read and
+    nothing is written, so a NOT-ADOPTED root refuses the same way (an upgrade is a REQUESTED operation,
+    so its refusal is fail-closed, never the NOT-APPLICABLE exit 0 that doctor and render report on a
+    non-adopter root). _upgrade_self_test observes this behaviour."""
+    print("opf upgrade: " + UPGRADE_NONE, file=sys.stderr)
+    return EXIT_MALFORMED
 
 
 # Spec 14.1: the former --scan, --plan, --review and --apply modes refuse with a pointer to adoption and the
@@ -19509,7 +19135,7 @@ def _cmd_import(rest):
     the pointer. Nothing reads the clock, stdin, a named file or the store, and nothing is written. The
     root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (D7: import is a
     REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
-    doctor/render/upgrade report on a non-adopter root).
+    doctor/render report on a non-adopter root).
 
     The CLI self-test checks this two ways. The verb's runtime behaviour, exit 2 with the pointer for
     every representative argument list, is what the RUNTIME probe observes; the STRUCTURAL checks are a
@@ -19815,10 +19441,10 @@ def _import_namespace_findings(func):
 
 def _cmd_record(rest):
     """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create`, `transition`,
-    `done-with-receipt`, and `worklog-append` run the shared journaled operation sequence in _opf_record
-    (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta postcondition,
-    cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease release before
-    the report). The final doctor's one exception is a status change (transition or done-with-receipt),
+    `done-with-receipt`, `receipt-repair`, and `worklog-append` run the shared journaled operation sequence
+    in _opf_record (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta
+    postcondition, cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease
+    release before the report). The final doctor's one exception is a status change (transition or done-with-receipt),
     which may leave only doctor's cannot-evaluate for exactly that record and from/to pair, never a finding;
     doctor keeps reporting it until the change is committed. Exit 0 recorded (left uncommitted), exit 2
     every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe siblings a
@@ -19952,10 +19578,16 @@ def _adopt_read_inputs(path):
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
     vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
-    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, and `complete` and `reconcile`
-    refuse fail-closed (exit 2) until the completion and recovery stages land, so a stub can never read as
-    a passing operation. plan, approve and apply each refuse over a non-clean adoption journal (an open
-    transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything else is read.
+    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, `reconcile` runs the journal-only
+    recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
+    never read as a passing operation. plan, approve and apply each refuse over a non-clean adoption
+    journal (an open transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything
+    else is read; `reconcile` is how that journal is made clean again. On base 2.0.0
+    (_opf_adopt_apply.adoption_journal_fenced; never at this build's SUPPORTED_HOMES 1) that journal,
+    a homes-1 location under .aiqt, is not read: apply refuses with exit 2 before it reads its inputs
+    and reconcile before any .aiqt access; plan, approve and status report its unknown state as
+    cannot-evaluate (exit 2, _opf_adopt_apply.JOURNAL_UNREAD) before they read any file, so approve
+    issues no approval there.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19984,11 +19616,45 @@ def _cmd_adopt(rest):
       apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
           (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
           live tree and its observed revision, then in the run's one journaled base transaction persist the
-          plan and the approval in its evidence bundle, dispatch every plan op in the apply stage and compose
+          plan, the approval and the sealed planning inventory re-derivation reproves (the bytes the plan's
+          inventory_digest binds, which the completion check reads) in its evidence bundle, dispatch every
+          plan op in the apply stage and compose
           the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
           stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
           written, which in this build is every plan. Exit 0: applied
           (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
+      reconcile [--root DIR] : the EXPLICIT recovery of an interrupted adoption transaction
+          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE: the store is never
+          resolved (spec 14.2), and no reconcile-first gate runs (this IS the reconcile). Each open
+          transaction rolls FORWARD when every poststate already verifies, else BACK from its durable
+          preimages, under the journal lock, and a confirmed-dead run's journal lock is broken only
+          through the journal's stale-lock arbitration. The interrupted run is never resumed. Exit 0:
+          each recovered transaction printed with its outcome (rolled-back or rolled-forward) and a
+          released dead-run lock named; or "nothing to reconcile": with no journal, or no open transaction
+          and no lock, NOTHING is written; when the journal lock was taken and every transaction was
+          already terminal (a concurrent reconcile recovered it first), it says so, and that no recovery
+          write was made. Beside an open transaction other than an init-store one, reconcile takes the
+          adoption journal lock, then the single-writer store lease of every machine subdirectory under
+          `.working/` (the apply's order: init-store takes the journal lock, then its substrate's lease),
+          before any recovery write, and releases only those leases, after the journal lock. Exit 2 is
+          printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
+          product files and every transaction as found, and releases any lock or lease it took; its message
+          names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
+          creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
+          seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
+          classify, a stray or wrong-type journal entry, or a transaction renamed or replaced after the
+          listing), store-lease-held (a store pointer at the product root, or a store lease present, or
+          claimed by another writer, in a machine subdirectory, beside an open transaction other than
+          init-store's), init-store-reversal-unproven (the reversal could remove content the operation
+          did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
+          began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
+          recovery-failed (files already restored or frames already published stay, the transaction stays
+          open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
+          never reported recovered), or store-lease-release-failed (the recovery finished,
+          but a store lease this run took could not be released and stays, named). Also exit 2: a
+          cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
+          lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
+          not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -20008,7 +19674,7 @@ def _cmd_adopt(rest):
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("complete", "reconcile")
+    deferred = ("complete",)
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -20016,8 +19682,8 @@ def _cmd_adopt(rest):
     if sub in deferred:
         # Refused BEFORE any parse or filesystem read, so a deferred subcommand can never write; the
         # message names no command that does not exist (the K9b engine lands these).
-        print("opf adopt {}: not yet available in this build (fail-closed); the completion and recovery "
-              "stages land in a later PR".format(sub), file=sys.stderr)
+        print("opf adopt {}: not yet available in this build (fail-closed); the completion stage lands "
+              "in a later PR".format(sub), file=sys.stderr)
         return EXIT_MALFORMED
     if sub not in subcommands:
         print("opf adopt: unknown subcommand {!r}; subcommands: {}".format(
@@ -20025,9 +19691,9 @@ def _cmd_adopt(rest):
         return EXIT_MALFORMED
 
     root = None
-    # The value flags each subcommand takes, each required exactly once (status takes none).
+    # The value flags each subcommand takes, each required exactly once (status and reconcile take none).
     takes = dict(plan=("--inputs",), approve=("--inputs", "--plan", "--actor"),
-                 apply=("--inputs", "--plan", "--approval"), status=())[sub]
+                 apply=("--inputs", "--plan", "--approval"), reconcile=(), status=())[sub]
     given = dict()
 
     def _need_value(flag, idx):
@@ -20125,9 +19791,48 @@ def _cmd_adopt(rest):
               file=sys.stderr)
         return EXIT_MALFORMED
 
+    if sub == "reconcile":
+        # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
+        # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
+        try:
+            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs)
+        except _opf_adopt_apply.ReconcileRefusal as exc:
+            print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except _opf_adopt_apply.AdoptApplyError as exc:
+            print("opf adopt reconcile: cannot evaluate: {}".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0 or uncaught exit-1
+            print("opf adopt reconcile: cannot evaluate: unexpected error ({!r}); failing closed to exit "
+                  "2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        recovered = [(txn, outcome) for txn, outcome in outcomes
+                     if outcome in ("rolled-back", "rolled-forward")]
+        for txn, outcome in recovered:
+            print("opf adopt reconcile: transaction {}: {}".format(txn, outcome))
+        if stale_released:
+            print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
+                  "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
+        if not (recovered or stale_released) and lock_taken:
+            print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
+                  "when this run took the journal lock (another reconcile may have recovered it first); no "
+                  "recovery write was made, and the journal lock and any store lease this run took are "
+                  "released")
+        elif not (recovered or stale_released):
+            print("opf adopt reconcile: nothing to reconcile (no interrupted adoption transaction and no "
+                  "leftover journal lock); nothing was written")
+        else:
+            print("opf adopt reconcile: the interrupted run is not resumed: inspect the reconciled tree; a "
+                  "rolled-back run takes a fresh plan with its own run id (spec 14.1)")
+        return EXIT_OK
+
     if sub == "plan":
         import datetime
         try:
+            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so the
+            # reconcile-first gate cannot pass over its unknown state: cannot-evaluate.
+            if _opf_adopt_apply.adoption_journal_fenced():
+                raise _opf_adopt_apply.AdoptApplyError(_opf_adopt_apply.JOURNAL_UNREAD)
             _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -20145,8 +19850,8 @@ def _cmd_adopt(rest):
                 print("opf adopt plan: unresolved source disposition: {}".format(source), file=sys.stderr)
             return _adopt_exit(res.status)
         except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
-            # A fail-closed --inputs read error or a non-clean adoption journal: cannot-evaluate (exit 2),
-            # never a silent skip.
+            # A fail-closed --inputs read error or a non-clean or unread adoption journal: cannot-evaluate
+            # (exit 2), never a silent skip.
             print("opf adopt plan: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
@@ -20157,6 +19862,12 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
+            # On base 2.0.0 (adoption_journal_fenced) apply refuses with the fence and approve is
+            # cannot-evaluate over the unread .aiqt adoption journal, each before it reads its inputs, so
+            # nothing was read or written and no approval issues over a journal state that is unknown.
+            if _opf_adopt_apply.adoption_journal_fenced():
+                raise _opf_adopt_apply.AdoptApplyError(
+                    _opf_adopt_apply.ADOPTION_FENCE if sub == "apply" else _opf_adopt_apply.JOURNAL_UNREAD)
             _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
@@ -20167,8 +19878,9 @@ def _cmd_adopt(rest):
                 return EXIT_OK
             approval = _adopt_read_bounded(given["--approval"], "--approval file", _opf_adopt_plan.MAX_FILE_BYTES)
             txn = _opf_adopt_apply.run_apply(root_abs, plan_bytes, approval, doc)
-            print("opf adopt apply: applied in transaction {}; the plan and its approval are in the evidence "
-                  "bundle at {}; completion, then retirement, follow".format(
+            print("opf adopt apply: applied in transaction {}; the plan, its approval and the sealed "
+                  "planning inventory are in the evidence bundle at {}; completion, then retirement, "
+                  "follow".format(
                       txn, _opf_adopt_apply.evidence_home_rel(txn)))
             return EXIT_OK
         except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
@@ -20190,6 +19902,10 @@ def _cmd_adopt(rest):
     # own classification (journal_state).
     adopt, journal = _opf_adopt_apply, _opf_adopt_apply._journal
     try:
+        # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so its state is
+        # unknown: status is cannot-evaluate before it reads either home, never clean over an unread journal.
+        if adopt.adoption_journal_fenced():
+            raise adopt.AdoptApplyError(adopt.JOURNAL_UNREAD)
         journal.require_containment()
         root_fd = adopt._open_product_root(root_abs)
         try:
@@ -20241,10 +19957,12 @@ def _cmd_adopt(rest):
         journal_rel = adopt.JOURNAL_REL
         if owner is not None:
             findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
-                            "(reconcile once no adoption run is live)".format(journal_rel, owner.get("pid")))
+                            "(run `opf adopt reconcile` once no adoption run is live)".format(
+                                journal_rel, owner.get("pid")))
         if opened:
             findings.append("the adoption journal at {} holds interrupted transaction(s) {} -- an "
-                            "adoption transaction did not complete".format(journal_rel, ", ".join(opened)))
+                            "adoption transaction did not complete (run `opf adopt reconcile`)".format(
+                                journal_rel, ", ".join(opened)))
         for run_id in runs:
             print("opf adopt status: adoption run {}: evidence bundle at {}/{}".format(
                 run_id, evidence_rel, run_id))
@@ -20264,8 +19982,87 @@ def _cmd_adopt(rest):
         return EXIT_MALFORMED
 
 
+def _upgrade_self_test():
+    """`opf upgrade` defines no store upgrade: through main(), every argument list below prints exactly the
+    refusal pinned here as a literal (so a reverted, extended or version-naming message is red) on stderr,
+    nothing on stdout, and exits 2, over a NOT-ADOPTED root and over a root holding a store manifest alike,
+    and both fixture trees stay byte-identical. `upgrade` stays a KNOWN_VERBS name. Fails without the
+    refusal: the removed engine reported NOT APPLICABLE at exit 0 over a NOT-ADOPTED root. Called by
+    _cli_self_test. Returns 0 clean, 1 on a failing check, 2 on a harness error."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+
+    want = "opf upgrade: this tooling defines no store upgrade; nothing was read or written\n"
+    failures = []
+
+    def snapshot(top):
+        tree = {}
+        for directory, dirnames, filenames in os.walk(top):
+            tree[directory] = sorted(dirnames)
+            for name in filenames:
+                with open(os.path.join(directory, name), "rb") as handle:
+                    tree[os.path.join(directory, name)] = handle.read()
+        return tree
+
+    try:
+        base = tempfile.mkdtemp(prefix="opf-upgrade-selftest-")
+    except OSError as exc:
+        print("opf upgrade self-test: harness error: could not create the fixture tempdir ({})".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+    try:
+        try:
+            not_adopted = os.path.join(base, "not-adopted")
+            os.mkdir(not_adopted)
+            store = os.path.join(base, "store")
+            machine = os.path.join(store, _opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+            os.makedirs(machine)
+            with open(os.path.join(machine, _opf_store.MANIFEST_NAME), "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nspec_version = "1.1.0"\nstandard = "opf"\n')
+            with open(os.path.join(store, _opf_store.POINTER_REL), "w", encoding="utf-8") as fh:
+                fh.write('[store]\ntarget = "dir:."\n')
+            before = snapshot(base)
+        except OSError as exc:
+            print("opf upgrade self-test: harness error: could not build a fixture root ({})".format(exc),
+                  file=sys.stderr)
+            return EXIT_MALFORMED
+        if "upgrade" not in KNOWN_VERBS:
+            failures.append("upgrade is no longer a KNOWN_VERBS name")
+        for args in ([], ["--help"], ["--root", not_adopted], ["--root", store],
+                     ["--root", store, "--root", store], ["--root"], ["--to", "2.0.0", "--root", store],
+                     ["--bogus"], ["--"]):
+            out, err = io.StringIO(), io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = main(["upgrade"] + args)
+            except BaseException as exc:  # noqa: BLE001  a dispatcher crash is itself a failure
+                failures.append("upgrade {!r} raised {!r}".format(args, exc))
+                continue
+            if rc != EXIT_MALFORMED or out.getvalue() != "" or err.getvalue() != want:
+                failures.append("upgrade {!r}: rc={!r} stdout={!r} stderr={!r} (expected 2, no stdout and "
+                                "exactly {!r})".format(args, rc, out.getvalue(), err.getvalue(), want))
+        try:
+            after = snapshot(base)
+        except OSError as exc:
+            print("opf upgrade self-test: harness error: could not re-read the fixture roots ({})".format(exc),
+                  file=sys.stderr)
+            return EXIT_MALFORMED
+        if after != before:
+            failures.append("a refused upgrade changed a fixture tree")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print("opf upgrade self-test: FAIL: {}".format("; ".join(failures)), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf upgrade self-test: PASS (9 argument lists refused at exit 2 with the exact refusal, both "
+          "fixture trees byte-identical)")
+    return EXIT_OK
+
+
 def _cli_self_test():
-    """Guard the dispatcher's render, doctor, import, record, adopt, and source-only init routes.
+    """Guard the dispatcher's render, doctor, import, upgrade, record, adopt, and source-only init routes.
     Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
     and preservation through check_opf_init._suite(main). Each case captures stdout and stderr.
     Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
@@ -20320,7 +20117,7 @@ def _cli_self_test():
         expect(["render", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
 
-        # doctor verb ROUTING (PR-B), judged on exit code only. Bad-flag / usage cases need no store on disk.
+        # doctor verb ROUTING, judged on exit code only. Bad-flag / usage cases need no store on disk.
         expect(["doctor", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
@@ -20362,6 +20159,10 @@ def _cli_self_test():
                EXIT_MALFORMED)                                   # --supersedes takes a record id
         expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
         expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # maintainer-only, refused before the store
+        expect(["record", "receipt-repair", "BI-1", "--actor", "maintainer"],
+               EXIT_MALFORMED)                                   # missing --reason
+        expect(["record", "receipt-repair", "BI-1", "--actor", "assistant", "--reason", "r"],
                EXIT_MALFORMED)                                   # maintainer-only, refused before the store
         expect(["record", "create"], EXIT_MALFORMED)             # missing --type/--title/--actor
         expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
@@ -20409,11 +20210,31 @@ def _cli_self_test():
         expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
                 "--actor", "a"], EXIT_MALFORMED)                                     # --actor is approve's
         expect(["adopt", "plan", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)      # --plan
-        # The two deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
-        # store resolution or write, each with its own located not-yet-available message (never the
-        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the
-        # completion and recovery stages land them.
-        for deferred_sub in ("complete", "reconcile"):
+        # The deferred subcommand is RECOGNIZED and refuses fail-closed (exit 2) BEFORE any parse, store
+        # resolution or write, with its own located not-yet-available message (never the unknown-verb or
+        # unknown-subcommand message, and naming no command that does not exist); the completion stage
+        # lands it. `reconcile` is wired: its grammar refuses like status's (it takes only --root), and an
+        # unrecognized argument is named by the PARSER, which the deferred head never reached (it printed
+        # not-yet-available instead), the routing discriminator; the recovery itself rides
+        # _adopt_reconcile_leg below.
+        # Each malformed vector asserts the PARSER's own diagnostic, so it is red when the routing reverts to
+        # the deferred head (exit 2 there too, but with not-yet-available and no parser message).
+        for argv, diagnostic in (
+                (["adopt", "reconcile", "--root"], "opf adopt reconcile: --root requires an argument"),
+                (["adopt", "reconcile", "--root", ".", "--root", "."],
+                 "opf adopt reconcile: --root given more than once"),
+                (["adopt", "reconcile", "--inputs", "w.toml"],
+                 "opf adopt reconcile: unrecognized argument {!r}".format("--inputs")),
+                (["adopt", "reconcile", "--bogus"],
+                 "opf adopt reconcile: unrecognized argument {!r}".format("--bogus"))):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = main(argv)
+            if rc != EXIT_MALFORMED or diagnostic not in buf.getvalue() or "not yet available" in buf.getvalue():
+                failures.append("{}: rc={!r} (expected 2 + the parser diagnostic {!r}, never "
+                                "not-yet-available; {})".format(" ".join(argv), rc, diagnostic,
+                                                                buf.getvalue().strip()))
+        for deferred_sub in ("complete",):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 rc = main(["adopt", deferred_sub])
@@ -20480,24 +20301,11 @@ def _cli_self_test():
                     failures.append("doctor --require-store over a NOT-ADOPTED root: rc={!r} (expected 2 + "
                                     "the located no-store message)".format(rc))
                 expect(["doctor", "--require-store", "--root", broken], EXIT_MALFORMED)
-                # upgrade over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and
-                # returns 0 -- the wiring discriminator (reverting the upgrade route sends `upgrade` to the
-                # fail-closed KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store
-                # fails closed (exit 2). The full 1.0.0 -> 1.1.0 migration discrimination (schema delta,
-                # canonical-bytes precondition, doctor-VALID gate, idempotence, and the above-tooling refusal)
-                # rides check_opf_upgrade.py --self-test end to end over a byte-pinned committed 1.0.0 store.
-                expect(["upgrade", "--root", not_adopted], EXIT_OK)
+                # upgrade refuses at exit 2 over these roots and every other argument list (this tooling
+                # defines no store upgrade); its exact refusal, the empty stdout and the byte-unchanged
+                # fixture trees are asserted in _upgrade_self_test.
+                expect(["upgrade", "--root", not_adopted], EXIT_MALFORMED)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
-                # the upgrade parser accepts only one non-empty --root: the retired --homes-plan, a missing
-                # or empty --root, a repeated --root and an unknown option each exit 2, and the directory and
-                # file names under the fixture root after the loop match those before it (names only, compared
-                # once; the current directory an argument-less run would use is not checked)
-                tree_before = sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base))
-                for bad in (["--homes-plan"], ["--root"], ["--root", ""],
-                            ["--root", not_adopted, "--root", not_adopted], ["--unknown"]):
-                    expect(["upgrade"] + bad, EXIT_MALFORMED)
-                if sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base)) != tree_before:
-                    failures.append("a refused upgrade argument changed the fixture tree")
                 # absorb over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
                 # 0 -- the wiring discriminator (reverting the absorb route sends `absorb` to the fail-closed
                 # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
@@ -20826,10 +20634,10 @@ def _cli_self_test():
                     store = os.path.join(ibase, "store")
                     machine = os.path.join(store, ".working", "toml")
                     os.makedirs(machine)
-                    manifest = "\n".join([
-                        "[opf]", 'standard = "opf"',
-                        'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
-                        'layout = "inline"', 'posture = "required"', 'import_status = "none"',
+                    # The [opf] base table comes from the production builder, so the fixture follows
+                    # the tooling's constants rather than restating them.
+                    import _opf_init
+                    manifest = _opf_init.base_table_text(_opf_init._manifest_model()) + "\n".join([
                         "", "[store]", 'sync_target = ""',
                         "", "[modules]", "governance = true",
                         "", "[types.backlog_item]", 'namespace = "BI"',
@@ -21113,6 +20921,11 @@ def _cli_self_test():
                     # an empty (nothing-opened) journal entry, which the engine classifies as clean.
                     unopened = os.path.join(abase, "unopened")
                     os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
+                    # a malformed evidence home (a symlink at the reserved home), which status refuses as
+                    # not a directory when it reads that home.
+                    badhome = os.path.join(abase, "badhome")
+                    os.makedirs(os.path.dirname(os.path.join(badhome, evidence_rel)))
+                    os.symlink(clean, os.path.join(badhome, evidence_rel))
                 except (OSError, journal.JournalError, _opf_adopt_apply.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the adopt fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -21140,6 +20953,63 @@ def _cli_self_test():
                                     "finding)".format(rc))
                 if tree_snapshot(debris) != before:
                     failures.append("adopt status (journal debris) mutated the product root")
+
+                # On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced, SUPPORTED_HOMES raised to 2
+                # inside the vector and restored in a finally) the .aiqt adoption journal is not read, so
+                # its state is unknown: status and plan are cannot-evaluate over the debris and over the
+                # clean root alike (red when status reports clean, exit 0 and the no-adoption-run message,
+                # or plan goes on to its worksheet; red when either still reads the journal: the journal
+                # finding or the reconcile-first refusal). Status refuses before it reads the evidence home
+                # too (red when it reports the malformed home's not-a-directory instead). reconcile and
+                # apply refuse with the fence, and approve is cannot-evaluate, apply and approve before they
+                # read their inputs (the worksheet and artefact reads are recorded: red when either reads
+                # any of them first, or approve prints an approval). Every root stays byte-identical.
+                from unittest import mock
+                this = sys.modules[__name__]
+                missing = os.path.join(abase, "no-such-worksheet.toml")
+                fenced = {}
+                read = []
+                clean_before = tree_snapshot(clean)
+                badhome_before = tree_snapshot(badhome)
+                saved_homes = _opf_store.SUPPORTED_HOMES
+                try:
+                    _opf_store.SUPPORTED_HOMES = 2
+                    for where, at in (("journal debris", debris), ("a clean root", clean)):
+                        fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
+                        fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
+                    fenced["status", "a malformed evidence home"] = run_adopt(
+                        ["adopt", "status", "--root", badhome])
+                    fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
+                    for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
+                        with mock.patch.object(this, "_adopt_read_inputs",
+                                               lambda path, sub=sub: read.append((sub, path)) or {}), \
+                                mock.patch.object(this, "_adopt_read_bounded",
+                                                  lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
+                            fenced[sub, "journal debris"] = run_adopt(
+                                ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
+                finally:
+                    _opf_store.SUPPORTED_HOMES = saved_homes
+                unread = "cannot evaluate: " + _opf_adopt_apply.JOURNAL_UNREAD
+                fence = "cannot evaluate: " + _opf_adopt_apply.ADOPTION_FENCE
+                for sub, where, want, needle, refused in (
+                        ("status", "journal debris", EXIT_MALFORMED, unread, "interrupted transaction"),
+                        ("status", "a clean root", EXIT_MALFORMED, unread, "no adoption run exists"),
+                        ("plan", "journal debris", EXIT_MALFORMED, unread, "reconcile"),
+                        ("plan", "a clean root", EXIT_MALFORMED, unread, "--inputs worksheet"),
+                        ("status", "a malformed evidence home", EXIT_MALFORMED, unread, "is not a directory"),
+                        ("reconcile", "journal debris", EXIT_MALFORMED, fence, "nothing to reconcile"),
+                        ("apply", "journal debris", EXIT_MALFORMED, fence, "reconcile"),
+                        ("approve", "journal debris", EXIT_MALFORMED, unread, "approved_at")):
+                    rc, out = fenced[sub, where]
+                    if rc != want or needle not in out or refused in out:
+                        failures.append("adopt {} over {} on base 2.0.0: rc={!r} (expected {} + {!r}, without "
+                                        "{!r}): {!r}".format(sub, where, rc, want, needle, refused, out))
+                if read:
+                    failures.append("adopt on base 2.0.0 read {!r} before its fence refused".format(read))
+                if (tree_snapshot(debris) != before or tree_snapshot(clean) != clean_before
+                        or tree_snapshot(badhome) != badhome_before):
+                    failures.append("adopt on base 2.0.0 mutated a product root (journal debris, clean or the "
+                                    "malformed evidence home)")
 
                 # status reads both homes through the ENGINE (K9a fix 1), each vector red on the K9a head:
                 # a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal
@@ -21710,10 +21580,11 @@ def _cli_self_test():
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
                 # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming the unlanded ops (the fixture plan's init-store, install-pack, register-unmanaged
-                # and retire-file ops, and the driver's receipt stage, are not landed in this build),
-                # writing nothing, no journal and no bundle (the wiring discriminator: an unwired apply
-                # refuses with the not-yet-available message instead). Flips: an approval for a fresh plan
+                # naming what is unlanded (every plan op of the fixture, its plant-governance enforcement
+                # rows among them, has landed; the driver's mandatory receipt stage has not, so apply names
+                # that stage and no plan op), writing nothing, no journal and no bundle (the wiring
+                # discriminator: an unwired apply refuses with the not-yet-available message instead).
+                # Flips: an approval for a fresh plan
                 # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
                 # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
                 # (the planner itself never reads that journal, so without the gate it reports the
@@ -21738,8 +21609,9 @@ def _cli_self_test():
                 bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
                 manifest = _opf_init.build_manifest()
                 views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
-                # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry
-                # point) lies outside every walked root, so its absence is a declared target.
+                # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with
+                # its entry point, and the deny hook) lies outside every walked root, so its absence is a
+                # declared target.
                 sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
                              targets=[_opf_adopt.PACK_MIRROR_ROOT],
                              decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
@@ -21747,8 +21619,8 @@ def _cli_self_test():
                              ops=[dict(op="init-store", store_root=".", members=[dict(
                                       path=".working/toml/manifest.toml", digest=sha(manifest.encode("utf-8")))]),
                                   dict(op="render-views", store_root=".",
-                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views]),
-                                  _opf_adopt.enforcement_install_op(bindings["enforcement"])],
+                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views])]
+                             + _opf_adopt.enforcement_install_ops(bindings["enforcement"]),
                              bindings=bindings)
                 sheet_path, plan_path, plan2_path, approval_path = (
                     os.path.join(abase, name) for name in ("adopt-sheet.toml", "adopt-plan.toml",
@@ -21801,6 +21673,12 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "not yet executable" not in err:
                         failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
                                         "refusal; {})".format(rc, err.strip()))
+                    # the plan's plant-governance rows dispatch to their landed handler, so the refusal names
+                    # the receipt stage alone and no plan op
+                    if (rc != EXIT_MALFORMED or "receipt stage" not in err or "plan op(s)" in err
+                            or "plant-governance" not in [row["op"] for row in plan_doc["ops"]]):
+                        failures.append("adopt apply over the routed enforcement rows: rc={!r} (expected 2 + "
+                                        "the receipt-stage refusal naming no plan op; {})".format(rc, err.strip()))
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
                                                "--approval", approval_path, "--root", adoptee])
                     if rc != EXIT_MALFORMED or "does not bind" not in err:
@@ -21834,6 +21712,305 @@ def _cli_self_test():
                 shutil.rmtree(abase, ignore_errors=True)
             return None
 
+        def _adopt_reconcile_leg():
+            """`opf adopt reconcile` end to end over product-root fixtures, judged on exit codes, the printed
+            outcome or named finding, and file snapshots. Every vector is red on the deferred head, which
+            refused each `adopt reconcile` with exit 2 and not-yet-available before any read. Recovery of
+            each interrupted state the journal leaves: a transaction interrupted before every op landed
+            (rolled back to the byte-identical prestate, with the store resolver and discovery patched to
+            raise, so a store resolution turns it red), one interrupted after every op landed but before
+            its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
+            (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
+            transaction that never published its INTENT (each lock released and named). The no-op: no
+            journal, a completed transaction, a store lease with nothing open, and a second reconcile after
+            a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
+            its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
+            malformed lock, a transaction with an invalid frame sequence and a stray journal entry beside no
+            transaction (journal-unclassifiable; red against a listing that skips the stray, which reads
+            nothing to reconcile), a store lease beside an open transaction (store-lease-held), and an
+            init-store reversal whose live creations are not the operation's own
+            (init-store-reversal-unproven). A fault after recovery began exits 2 as recovery-failed with
+            the partial state the journal records (the transaction open, no lock and no lease left), and a
+            second reconcile resumes it to the prestate. A product root that does not exist exits 2 as
+            cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
+            the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
+            reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
+            and 8e). Returns None on success or EXIT_MALFORMED on a harness error."""
+            from unittest import mock
+            adopt = _opf_adopt_apply
+            journal = adopt._journal
+            j_rel = adopt.JOURNAL_REL
+            rid = "adopt-20260101T000000Z-0123456789abcdef"
+            files = {".working/TODO.md": b"hand-kept todo\n", "legacy/RULES.md": b"old rules\n"}
+            body = dict(format="opf.adoption.plan/v2", run_id=rid)
+            digest = "sha256:" + adopt._sha256(adopt.emit_checked(body).encode("utf-8"))
+            plan = adopt.emit_checked(dict(body, plan_digest=digest)).encode("utf-8")
+            lease_rel = "{}/{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR,
+                                          "lease.toml")
+
+            class _Interrupt(Exception):
+                pass
+
+            def compose(ops):
+                ops.create(adopt.plan_rel(rid), plan)
+                ops.archive_occupying(".working/TODO.md", "sha256:" + adopt._sha256(files[".working/TODO.md"]))
+                ops.preserve("legacy/RULES.md", "sha256:" + adopt._sha256(files["legacy/RULES.md"]))
+
+            def snap(root):
+                got = dict()
+                for dirpath, _dirs, names in os.walk(root):
+                    for name in names:
+                        p = os.path.join(dirpath, name)
+                        with open(p, "rb") as fh:
+                            got[os.path.relpath(p, root)] = fh.read()
+                return got
+
+            def product(root):
+                return {rel: data for rel, data in snap(root).items() if not rel.startswith(".aiqt" + os.sep)}
+
+            def journal_clean(root):
+                try:
+                    adopt.require_clean_journal(root)
+                    return True
+                except adopt.AdoptApplyError:
+                    return False
+
+            def fixture(name):
+                root = os.path.join(rbase, name)
+                for rel, payload in files.items():
+                    os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                    with open(os.path.join(root, rel), "wb") as fh:
+                        fh.write(payload)
+                return root
+
+            def interrupted(name, when):
+                root = fixture(name)
+
+                def kill(point):
+                    if point.startswith("after-apply-") and when(root):
+                        raise _Interrupt(point)
+                with mock.patch.object(journal, "_kill_point", kill):
+                    try:
+                        adopt.run_adopt_transaction(root, rid, compose, plan_digest=digest)
+                    except (_Interrupt, adopt.AdoptApplyError):
+                        pass
+                return root
+
+            def mid_archive(root):
+                return (os.path.exists(os.path.join(root, adopt.archive_rel(rid, ".working/TODO.md")))
+                        and os.path.exists(os.path.join(root, ".working/TODO.md")))
+
+            def all_landed(root):
+                return os.path.exists(os.path.join(root, adopt.inventory_rel(rid)))
+
+            def lock_bytes(pid):
+                owner = dict(uid=os.getuid(), pid=pid, session="opf-cli-selftest", utc="2026-01-01T00:00:00Z")
+                owner["pid-start"] = ""
+                return json.dumps(owner).encode("utf-8")
+
+            def dead_pid():
+                # a pid with POSITIVE evidence of death (ProcessLookupError on signal 0); nothing is signalled
+                pid = (1 << 22) - 1
+                for _ in range(4096):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        return pid
+                    except OSError:
+                        pass
+                    pid -= 1
+                return None
+
+            def put(root, rel, data):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "wb") as fh:
+                    fh.write(data)
+
+            def run(root):
+                out, err = io.StringIO(), io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        return main(["adopt", "reconcile", "--root", root]), out.getvalue() + err.getvalue()
+                except BaseException as exc:            # a dispatcher crash is itself a failure
+                    return "raised {!r}".format(exc), out.getvalue() + err.getvalue()
+
+            try:
+                rbase = tempfile.mkdtemp(prefix="opf-cli-reconcile-")
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the reconcile fixture tempdir "
+                      "({})".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            try:
+                try:
+                    dead = dead_pid()
+                    before = product(fixture("prestate"))
+                    back = interrupted("back", mid_archive)
+                    forward = interrupted("forward", all_landed)
+                    rip = interrupted("rip", mid_archive)
+                    rip_fired = []
+
+                    def kill_restore(point):
+                        if point.startswith("after-restore-") and not rip_fired:
+                            rip_fired.append(point)
+                            raise _Interrupt(point)
+                    with mock.patch.object(journal, "_kill_point", kill_restore):
+                        try:
+                            adopt.reconcile_report(rip)
+                        except (_Interrupt, adopt.AdoptApplyError):
+                            pass
+                    stale_open = interrupted("staleopen", mid_archive)
+                    put(stale_open, j_rel + "/lock", lock_bytes(dead or 1))
+                    stale_unopened = fixture("staleunopened")
+                    os.makedirs(os.path.join(stale_unopened, j_rel, rid))
+                    put(stale_unopened, j_rel + "/lock", lock_bytes(dead or 1))
+                    empty = fixture("nojournal")
+                    done = fixture("completed")
+                    adopt.run_adopt_transaction(done, rid, compose, plan_digest=digest)
+                    lease_only = fixture("leaseonly")
+                    put(lease_only, lease_rel, b"held\n")
+                    live = interrupted("livelock", mid_archive)
+                    put(live, j_rel + "/lock", lock_bytes(os.getpid()))
+                    badlock = interrupted("badlock", mid_archive)
+                    put(badlock, j_rel + "/lock", b"not a lock record\n")
+                    badseq = fixture("badsequence")
+                    adopt.run_adopt_transaction(badseq, rid, compose, plan_digest=digest)
+                    # the committed frame log written twice over: two INTENTs, never an accepted sequence
+                    frames = os.path.join(badseq, j_rel, rid, "frames.log")
+                    with open(frames, "rb") as fh:
+                        logged = fh.read()
+                    with open(frames, "wb") as fh:
+                        fh.write(logged * 2)
+                    # a stray file in the journal beside no transaction and no lock
+                    strayonly = fixture("strayonly")
+                    put(strayonly, j_rel + "/stray", b"")
+                    leased = interrupted("leased", mid_archive)
+                    put(leased, lease_rel, b"held\n")
+                    # an open transaction the reversal treats as init-store's (its name) whose live creations
+                    # are not that operation's own publication: the reversal preverify refuses it
+                    unproven = interrupted("unproven", mid_archive)
+                    os.rename(os.path.join(unproven, j_rel, rid),
+                              os.path.join(unproven, j_rel, rid + "." + adopt.INIT_STORE_PHASE))
+                    failing = interrupted("recoveryfailed", mid_archive)
+                    failing_before = product(fixture("recoveryfailedprestate"))
+                except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
+                    print("opf cli self-test: harness error: could not build the reconcile fixtures "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+
+                # the fixtures reached the states they name, so no vector below passes vacuously
+                for label, root, want_clean in (("interrupted before every op landed", back, False),
+                                                ("interrupted after every op landed", forward, False),
+                                                ("interrupted mid-rollback", rip, False),
+                                                ("completed", done, True)):
+                    if journal_clean(root) != want_clean:
+                        failures.append("reconcile fixture {}: journal clean={!r} (expected {!r})".format(
+                            label, not want_clean, want_clean))
+                if not rip_fired or dead is None:
+                    failures.append("reconcile fixtures: rollback interrupt fired={!r}, dead pid={!r} (both "
+                                    "needed)".format(bool(rip_fired), dead))
+
+                # recovery, each red on the deferred head; the rollback runs with the store resolver and
+                # discovery raising (spec 14.2: recovery never requires the tree to resolve as a store).
+                no_store = AssertionError("reconcile resolved the store")
+                with mock.patch.object(_opf_store, "resolve_store", side_effect=no_store), \
+                        mock.patch.object(_opf_store, "discover_machine_store", side_effect=no_store):
+                    rc, out = run(back)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and product(back) == before and journal_clean(back)):
+                    failures.append("adopt reconcile over a transaction interrupted before every op landed: "
+                                    "rc={!r} (expected 0 + rolled-back, the byte-identical prestate, no store "
+                                    "resolution; {})".format(rc, out.strip()))
+                rc, out = run(forward)
+                if not (rc == EXIT_OK and "transaction {}: rolled-forward".format(rid) in out
+                        and journal_clean(forward)
+                        and adopt.verify_bundle(forward, rid).status == _opf_store.VALID
+                        and not os.path.exists(os.path.join(forward, ".working/TODO.md"))):
+                    failures.append("adopt reconcile over a transaction interrupted after every op landed: "
+                                    "rc={!r} (expected 0 + rolled-forward, its bundle VALID; {})".format(
+                                        rc, out.strip()))
+                rc, out = run(rip)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and product(rip) == before and journal_clean(rip)):
+                    failures.append("adopt reconcile over an interrupted rollback: rc={!r} (expected 0 + "
+                                    "rolled-back, the byte-identical prestate; {})".format(rc, out.strip()))
+                for label, root, needle in (
+                        ("a dead run's lock beside an open transaction", stale_open,
+                         "transaction {}: rolled-back".format(rid)),
+                        ("a dead run's lock beside a transaction that never published its INTENT",
+                         stale_unopened, "is not resumed")):
+                    rc, out = run(root)
+                    if not (rc == EXIT_OK and needle in out and "released the adoption journal lock" in out
+                            and product(root) == before and journal_clean(root)):
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + {!r} + the released "
+                                        "lock named, the prestate, a clean journal; {})".format(
+                                            label, rc, needle, out.strip()))
+
+                # nothing to recover: exit 0 and every file, the journal included, byte-identical; a
+                # second reconcile after a recovery is the same no-op.
+                for label, root in (("no journal", empty), ("a completed transaction", done),
+                                    ("a store lease with nothing open", lease_only),
+                                    ("an already reconciled journal", back)):
+                    was = snap(root)
+                    rc, out = run(root)
+                    if rc != EXIT_OK or "nothing to reconcile" not in out or snap(root) != was:
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + nothing to reconcile, "
+                                        "byte-identical; {})".format(label, rc, out.strip()))
+
+                # each refusal: exit 2, its named finding, every file byte-identical.
+                for label, root, finding in (
+                        ("a live journal lock", live, adopt.RECONCILE_LOCK_HELD),
+                        ("a malformed journal lock", badlock, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("an invalid frame sequence", badseq, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("a stray journal entry beside no transaction", strayonly, adopt.RECONCILE_UNCLASSIFIABLE),
+                        ("a store lease beside an open transaction", leased, adopt.RECONCILE_STORE_LEASE_HELD),
+                        ("an init-store reversal whose live creations are not its own", unproven,
+                         adopt.RECONCILE_REVERSAL_UNPROVEN)):
+                    was = snap(root)
+                    rc, out = run(root)
+                    if rc != EXIT_MALFORMED or "REFUSED ({})".format(finding) not in out or snap(root) != was:
+                        failures.append("adopt reconcile over {}: rc={!r} (expected 2 + REFUSED ({}), "
+                                        "byte-identical; {})".format(label, rc, finding, out.strip()))
+
+                # a product root that does not exist: cannot evaluate (exit 2), never a REFUSED finding, and
+                # nothing created there (a contract pin, green on the build before it too).
+                missing = os.path.join(rbase, "missing")
+                rc, out = run(missing)
+                if (rc != EXIT_MALFORMED or "cannot evaluate" not in out or "cannot open product root" not in out
+                        or "REFUSED" in out or os.path.lexists(missing)):
+                    failures.append("adopt reconcile over a product root that does not exist: rc={!r} (expected "
+                                    "2 + cannot evaluate, no REFUSED finding, nothing created; {})".format(
+                                        rc, out.strip()))
+
+                # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
+                # archive copy is discarded) exits 2 named, and the state is the journal's record of a
+                # PARTIAL recovery: the transaction still open, the archive copy gone, no journal lock and no
+                # store lease left; a second reconcile resumes it to the byte-identical prestate.
+                copy = os.path.join(failing, adopt.archive_rel(rid, ".working/TODO.md"))
+                fired = []
+
+                def restore_fault(point):
+                    if point.startswith("after-restore-") and not os.path.exists(copy) and not fired:
+                        fired.append(point)
+                        raise OSError(5, "injected EIO at " + point)
+                with mock.patch.object(journal, "_kill_point", restore_fault):
+                    rc, out = run(failing)
+                partial = (fired != [] and rc == EXIT_MALFORMED
+                           and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out and "PARTIAL" in out
+                           and not journal_clean(failing) and not os.path.exists(copy)
+                           and not os.path.exists(os.path.join(failing, j_rel, "lock"))
+                           and not any(rel.endswith("lease.toml") for rel in snap(failing))
+                           and product(failing) != failing_before)
+                rc2, out2 = run(failing)
+                if not (partial and rc2 == EXIT_OK and "transaction {}: rolled-back".format(rid) in out2
+                        and product(failing) == failing_before and journal_clean(failing)):
+                    failures.append("adopt reconcile over a recovery that faults after it began: rc={!r} then "
+                                    "{!r} (expected 2 + REFUSED (recovery-failed), the partial state the "
+                                    "journal records, then 0 + rolled-back to the prestate; {} / {})".format(
+                                        rc, rc2, out.strip(), out2.strip()))
+            finally:
+                shutil.rmtree(rbase, ignore_errors=True)
+            return None
+
         harness_rc = _fixture_leg()
         if harness_rc is not None:
             return harness_rc
@@ -21843,6 +22020,14 @@ def _cli_self_test():
         adopt_rc = _adopt_leg()
         if adopt_rc is not None:
             return adopt_rc
+        reconcile_rc = _adopt_reconcile_leg()
+        if reconcile_rc is not None:
+            return reconcile_rc
+        upgrade_rc = _upgrade_self_test()
+        if upgrade_rc == EXIT_MALFORMED:
+            return upgrade_rc
+        if upgrade_rc != EXIT_OK:
+            failures.append("the opf upgrade refusal (_upgrade_self_test, reported above)")
 
         # Discriminating harness-path coverage (FIX 2): an injected OSError at fixture SETUP (mkdtemp) and at
         # fixture I/O (directory creation) must each route to the located cannot-evaluate (exit 2), never
@@ -21866,10 +22051,22 @@ def _cli_self_test():
         _expect_harness("mkdtemp-oserror", tempfile, "mkdtemp")
         _expect_harness("makedirs-oserror", os, "makedirs")
 
+        # A helper that faults while being imported (sys.exit(0), a bare sys.exit(), SystemExit(1), another
+        # BaseException, a ValueError, a SyntaxError, a cause whose __str__ raises, a class whose metaclass's
+        # mro() leaves out BaseException and KeyboardInterrupt) must reach the located cannot-evaluate (exit 2),
+        # never a success or the finding code; and the script entry must end at exit 2 whenever main() raises
+        # anything but an interrupt or returns anything but 0, 1 or 2, sys.exit replaced or not.
+        failures.extend(_bootstrap_exit_findings())
+        failures.extend(_main_exit_findings())
+
         # The same fixture vectors drive this in-process dispatcher and the dedicated gate's
         # isolated child. A refusal must name its reason and preserve the fixture, not merely return 2.
+        # The in-process init and the lease fixtures take the shared init operation mutex, whose
+        # rev-parse strips every GIT_* variable; the OPF git lifecycle's PATH wrapper reasserts the
+        # system-config pins there, so these vectors never read the host's system configuration.
         import check_opf_init
-        init_rc = check_opf_init._suite(main)
+        import _opf_oplock
+        init_rc = _opf_oplock._st_with_git_lifecycle(lambda: check_opf_init._suite(main))
         if init_rc == EXIT_MALFORMED:
             return EXIT_MALFORMED
         if init_rc != EXIT_OK:
@@ -21904,8 +22101,14 @@ def _cli_self_test():
               "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
-              "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
-              "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
+              "adoption planner -- bare/malformed usage and the deferred complete fail closed to exit 2; "
+              "reconcile -> 0 recovering an interrupted transaction from the journal alone (rolled back "
+              "with no store resolution, rolled forward, an interrupted rollback finished, a dead run's "
+              "lock released) or a byte-identical no-op with nothing to recover / 2 with a named finding "
+              "and nothing written on a live or malformed lock, an invalid frame sequence, a store "
+              "lease beside an open transaction or an unproven init-store reversal, and 2 recovery-failed "
+              "with the journal's partial state that a second reconcile resumes, malformed arguments named "
+              "by the parser; status -> 0 no-run or verified run / 1 open-transaction or invalid-"
               "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
               "another phase or plan digest than its own sealed plan's, or has no plan, "
               "plan -> 2 missing, FIFO, oversized "
@@ -21913,7 +22116,13 @@ def _cli_self_test():
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
               "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
               "the unlanded ops or an approval for another plan, each mutating nothing; an "
-              "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
+              "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2; a helper "
+              "faulting while being imported -> 2 naming the helper and the cause, only the cause's type where "
+              "describing the cause fails, or neither where its type cannot be named or its class's "
+              "metaclass's mro() leaves out BaseException, an interrupt it raises escaping unchanged; the "
+              "script entry -> 2 when main() raises anything but an interrupt or returns anything but 0, 1 or "
+              "2, sys.exit replaced or not, and an interrupt main() raises ends the run as an uncaught "
+              "interrupt does (SIGINT, return code -2))")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
@@ -22105,8 +22314,8 @@ def _retained_close_offpath_self_test():
     import types
     from unittest import mock
     import check_opf_prompt_pack
-    import check_opf_upgrade
     import _opf_adopt_observe
+    import _opf_oplock
     this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
     real_open, real_dup, real_pipe, real_close, real_fstat = os.open, os.dup, os.pipe, os.close, os.fstat
@@ -22244,14 +22453,12 @@ def _retained_close_offpath_self_test():
         views_block = "".join(
             _opf_views._view(name, kind, list(sources))
             for name, (kind, sources, _renderer) in _opf_views.NAMED_VIEWS.items())
+        # The [opf] base table comes from the production builder, so the fixture follows the tooling's
+        # constants rather than restating them.
+        import _opf_init
         manifest = (
-            "[opf]\n"
-            'standard = "opf"\n'
-            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-            'layout = "inline"\n'
-            'posture = "required"\n'
-            'import_status = "none"\n'
-            "\n[store]\n"
+            _opf_init.base_table_text(_opf_init._manifest_model())
+            + "\n[store]\n"
             'sync_target = ""\n'
             "\n[modules]\ngovernance = true\noperational_policy = true\nconcurrent_operation = true\n\n"
             + types_block + "\n[vendors]\nregistered = []\n\n" + views_block)
@@ -22383,8 +22590,7 @@ def _retained_close_offpath_self_test():
                lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
         expect("offpath-adopt-apply-transaction-refusal",
                lambda: _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None))
-        # opf.py: the init inventory / root-binding / create-only / observation helpers and the upgrade
-        # replace / create-index writers, beneath a held root.
+        # opf.py: the init inventory / root-binding / create-only / observation helpers, beneath a held root.
         init = base / "init"
         (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)
         (init / "VERSION").write_bytes(b"1.0.0\n")
@@ -22400,18 +22606,9 @@ def _retained_close_offpath_self_test():
             _init_observed(init_fd, [_opf_store.WORKING_DIRNAME], dict(VERSION=b"1.0.0\n"))
 
         expect("offpath-opf-init-helpers", init_helpers)
-
-        def upgrade_helpers():
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink("new.index.toml", dir_fd=init_fd)
-            _upgrade_replace(init_fd, "VERSION", b"1.0.0\n")
-            _upgrade_create_index(init_fd, "new.index.toml", b"schema = 1\n")
-
-        expect("offpath-opf-upgrade-helpers", upgrade_helpers)
         # #377 fix 2 (claude QA r1 coverage gaps): _render_resolved_store's product-root open-failure branch,
-        # _init_repo's repository-root probe (a real git worktree), _cmd_init's directory publication (its
-        # git boundary stubbed), and _upgrade_run's destination loop and root close over the frozen 1.0.0
-        # store (the cleanliness gate stubbed, stopped at the ignore probe before any write).
+        # _init_repo's repository-root probe (a real git worktree), and _cmd_init's directory publication (its
+        # git boundary stubbed).
         missing = base / "no-such-product-root"
         with contextlib.redirect_stderr(io.StringIO()):
             if _opf_views._render_resolved_store(missing, res, True) != _opf_views.EXIT_CANNOT_EVALUATE:
@@ -22430,55 +22627,35 @@ def _retained_close_offpath_self_test():
         expect("offpath-opf-init-repo", lambda: _init_repo(repo))
         fresh = base / "init-cmd"
         fresh.mkdir()
+        # A real worktree, because init takes the shared init operation mutex, which binds to git;
+        # its descriptor closes join the sweep, and only init's own git preflight stays stubbed.
+        made = _opf_observe._run_git(
+            git, fresh, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main", "init", "-q"])
+        if not made.completed or made.rc != 0:
+            raise RuntimeError("the init fixture worktree could not be initialized ({})".format(made.err))
 
         def cmd_init():
+            # Every run starts from the same tree: an injected close failure in the lease detach
+            # keeps the active record (with the lease) for a later recover=True, by design, and a
+            # kept record would refuse every later run at the mutex, so it is reset here too.
             shutil.rmtree(str(fresh / _opf_store.WORKING_DIRNAME), ignore_errors=True)
-            for name in (_opf_store.POINTER_REL, "CHANGELOG.md"):
+            for name in (_opf_store.POINTER_REL, "CHANGELOG.md", ".git/opf-oplock/active.toml"):
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(str(fresh / name))
             with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
                     mock.patch.object(this, "_init_untracked", lambda *args: None), \
                     mock.patch.object(this, "_init_unignored", lambda *args: None), \
                     mock.patch.object(this, "_init_no_prior_store", lambda *args: None):
-                return _cmd_init(["--root", str(fresh)])
+                # The OPF git lifecycle's PATH wrapper reasserts the system-config pins after the
+                # init operation mutex's rev-parse strips every GIT_* variable, so this in-process
+                # init never reads the host's system configuration.
+                return _opf_oplock._st_with_git_lifecycle(
+                    lambda: _cmd_init(["--root", str(fresh)]))
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             if cmd_init() != EXIT_OK:
                 raise RuntimeError("the stubbed init fixture did not publish")
         expect("offpath-opf-cmd-init", cmd_init)
-        legacy = base / "upgrade"
-        legacy_machine = legacy / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
-        legacy_machine.mkdir(parents=True)
-        for name, text in ((_opf_store.MANIFEST_NAME, check_opf_upgrade._FIX_MANIFEST),
-                           (_opf_check.COUNTERS_NAME, check_opf_upgrade._FIX_COUNTERS),
-                           (_opf_check.VERSION_NAME, check_opf_upgrade._FIX_VERSION),
-                           (_opf_check.WORKLOG_NAME, check_opf_upgrade._FIX_WORKLOG)):
-            (legacy_machine / name).write_text(text, encoding="utf-8")
-        for name in check_opf_upgrade._FIX_INDEX_TYPES:
-            (legacy_machine / (name + _opf_check.INDEX_SUFFIX)).write_text(
-                check_opf_upgrade._FIX_INDEX, encoding="utf-8")
-        (legacy / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
-        (legacy / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
-
-        class _StopBeforeWrite(Exception):
-            pass
-
-        def stop(*args):
-            raise _StopBeforeWrite()
-
-        def upgrade_run():
-            with mock.patch.object(_opf_write_guard, "check_clean", lambda *args: None), \
-                    mock.patch.object(_opf_write_guard, "check_ignored", stop):
-                _upgrade_run(str(legacy))
-
-        try:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                upgrade_run()
-        except _StopBeforeWrite:
-            pass
-        else:
-            raise RuntimeError("the frozen 1.0.0 upgrade fixture did not reach the ignore probe")
-        expect("offpath-opf-upgrade-run", upgrade_run)
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf retained-close offpath self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -23363,6 +23540,65 @@ def _self_tests():
     ("opf-cli", _cli_self_test),
 )
 
+
+# The named groups of the registry above, each run alone by `opf.py --self-test-group NAME`, a local runner
+# split; CI runs the whole self-test once. Every registered label sits in exactly one group, and a group runs its labels in
+# registry order. _self_test_group_faults names a label left out, doubled or unknown, and the selector runs
+# nothing while it names one, so a group can never silently drop a leg. The selector is its own flag, not an
+# argument after --self-test: a command carrying --self-test is a registered self-test that the git-fixture-env
+# config lanes rerun, and the whole run stays registered (the host-patch CI job and opf/tools/run_all_checks.sh
+# still run it), so those lanes run each leg once and no group command a second time.
+SELF_TEST_GROUPS = (
+    ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
+              "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
+              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+    ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
+    ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
+)
+
+
+def _self_test_group_faults(registry, groups):
+    """Return the faults of `groups` as a partition of the labels of `registry`, (label, callable) pairs: a
+    group name given twice, an empty group, a label registered twice, a registered label in no group (left
+    out), a label named more than once across the groups (doubled), and a grouped label with no registry
+    entry. No fault means every registered self-test is in exactly one group."""
+    labels = [label for label, _fn in registry]
+    names = [name for name, _members in groups]
+    grouped = [label for _name, members in groups for label in members]
+    faults = ["group {} is named {} times".format(name, names.count(name))
+              for name in sorted(set(names)) if names.count(name) > 1]
+    faults += ["group {} is empty".format(name) for name, members in groups if not members]
+    faults += ["{} is registered {} times".format(label, labels.count(label))
+               for label in sorted(set(labels)) if labels.count(label) > 1]
+    for label in sorted(set(labels)):
+        if not grouped.count(label):
+            faults.append("{} is in no group (left out)".format(label))
+        elif grouped.count(label) > 1:
+            faults.append("{} is grouped {} times (doubled)".format(label, grouped.count(label)))
+    faults += ["{} is grouped, but no registry entry has that label".format(label)
+               for label in sorted(set(grouped) - set(labels))]
+    return faults
+
+
+def run_self_test_group(name, groups=None, tests=None):
+    """Run the one group of SELF_TEST_GROUPS named `name` through run_self_tests: its registered self-tests, in
+    registry order, with the aggregate's worst-outcome exit. Returns 2 (cannot evaluate) and runs nothing when the
+    groups are not a partition of the registry (_self_test_group_faults) or no group has that name."""
+    groups = SELF_TEST_GROUPS if groups is None else groups
+    tests = _self_tests() if tests is None else tests
+    faults = _self_test_group_faults(tests, groups)
+    if faults:
+        print("opf self-test group: the groups do not hold every registered self-test exactly once, so no group "
+              "runs (cannot evaluate): {}".format("; ".join(faults)), file=sys.stderr)
+        return EXIT_MALFORMED
+    members = dict(groups).get(name)
+    if members is None:
+        print("opf self-test group: no group is named {}; the groups are {} (cannot evaluate)".format(
+            _init_inert(name), ", ".join(group for group, _members in groups)), file=sys.stderr)
+        return EXIT_MALFORMED
+    return run_self_tests(tuple((label, fn) for label, fn in tests if label in members))
+
+
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb",
                "record")
@@ -23446,6 +23682,8 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
+    if len(args) == 2 and args[0] == "--self-test-group":
+        return run_self_test_group(args[1])
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED
@@ -23476,5 +23714,305 @@ def main(argv=None):
     return EXIT_MALFORMED
 
 
+# The one line the module entry point prints before it ends the process at EXIT_MALFORMED.
+_MAIN_UNDOCUMENTED = "opf: the command raised an error or returned no documented exit status (cannot evaluate)"
+
+
+def _main_exit(main):
+    """The module entry point: run `main` and end the process by raising SystemExit itself, never through
+    sys.exit, so a helper that replaces sys.exit with a no-op cannot let the script run on to exit 0. The
+    status is main()'s own return only when it is exactly an int among the exit codes opf documents
+    (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED); any other return (None, a str, a bool, a float, another int)
+    and any exception main() lets escape end at EXIT_MALFORMED after the one best-effort _MAIN_UNDOCUMENTED
+    line, except a KeyboardInterrupt by its real type, which is re-raised unchanged. An `except
+    KeyboardInterrupt` arm decides that first: the interpreter matches it through the type's mro(), calling
+    neither issubclass nor type, so a class whose metaclass's mro() names KeyboardInterrupt is one, by design,
+    whether or not that mro() names BaseException. An `except BaseException as exc` arm follows, where the
+    interpreter binds what it caught, and tests the real type again (issubclass(type(exc),
+    KeyboardInterrupt)) as a second check. A bare except follows it for a class whose metaclass's mro()
+    leaves out BaseException and KeyboardInterrupt, never asks what it caught (sys.exception() can be
+    replaced) and never re-raises, so such a class ends at EXIT_MALFORMED too. Every guarantee here holds
+    only within the residual stated in _bootstrap: code main() loads can end the process itself, at any time,
+    or replace anything this function uses."""
+    try:
+        status = main()
+    except KeyboardInterrupt:  # matched through the type's mro(), no issubclass or type call: re-raised unchanged
+        raise
+    except BaseException as exc:  # an escape is a cannot-evaluate, except an interrupt
+        # The interpreter binds exc, and the real type decides again, as a second check: isinstance would read
+        # the exception's own __class__.
+        if issubclass(type(exc), KeyboardInterrupt):
+            raise
+        status = None
+    except:  # noqa: E722  a class whose metaclass's mro() leaves out BaseException and KeyboardInterrupt
+        # Never read, never re-raised.
+        status = None
+    if type(status) is int and status in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
+        raise SystemExit(status)
+    try:
+        print(_MAIN_UNDOCUMENTED, file=sys.stderr)
+    except:  # noqa: E722  the exit status still carries the fault
+        pass
+    raise SystemExit(EXIT_MALFORMED)
+
+
+# The scripts _main_exit_findings launches, each a copy of this file run as `opf.py upgrade` beside an empty
+# stand-in for every helper _bootstrap imports, the first (_opf_worklog) holding the source given: (label, that
+# source, then the exact lines, stdout and stderr merged, the run must print as it exits EXIT_MALFORMED, or
+# KeyboardInterrupt when the run must end as Python ends an interrupt nothing caught). A
+# helper that replaces sys.exit with a no-op leaves `opf upgrade` its own refusal and exit; one that rebinds
+# that verb to return None makes main() return a non-int; the two mro() faults are mapped by _bootstrap. A
+# helper that replaces sys.exception with a function reporting a KeyboardInterrupt, then raises SystemExit(0)
+# at import or rebinds that verb to raise SystemExit(0) or an mro() exit, must still end at EXIT_MALFORMED.
+# A class whose metaclass's mro() names KeyboardInterrupt and leaves out BaseException, raised at import or by
+# that verb, is an interrupt and must end the run as one; so must a KeyboardInterrupt that verb raises after a
+# helper replaced builtins.issubclass with a function answering no about KeyboardInterrupt, while a
+# SystemExit(0) it raises then must still end at EXIT_MALFORMED.
+_MAIN_HALTS = "import __main__\n\n\ndef halt(rest):\n    raise {}\n\n\n__main__._cmd_upgrade = halt\n"
+_MAIN_EXIT_CASES = (
+    ("helper-replaces-sys-exit", "import sys\nsys.exit = lambda *args: None\n", ("opf upgrade: " + UPGRADE_NONE,)),
+    ("main-returns-none", "import __main__\n__main__._cmd_upgrade = lambda rest: None\n", (_MAIN_UNDOCUMENTED,)),
+    ("mro-keeps-systemexit", _BOOT_MRO_KEEP + "raise HelperExit(0)\n", (_BOOT_FAILED[0], _BOOT_NAMELESS[0])),
+    ("mro-drops-baseexception", _BOOT_MRO_DROP + "raise HelperExit(0)\n", (_BOOT_FAILED[0], _BOOT_NAMELESS[0])),
+    ("helper-replaces-sys-exception", _BOOT_CLAIMS_INTERRUPT + "raise SystemExit(0)\n",
+     (_BOOT_FAILED[0], _BOOT_RAISED.format("SystemExit", "0"))),
+    ("replaced-sys-exception-main-raises", _BOOT_CLAIMS_INTERRUPT + _MAIN_HALTS.format("SystemExit(0)"),
+     (_MAIN_UNDOCUMENTED,)),
+    ("replaced-sys-exception-main-raises-mro-exit",
+     _BOOT_CLAIMS_INTERRUPT + _BOOT_MRO_KEEP + _MAIN_HALTS.format("HelperExit(0)"), (_MAIN_UNDOCUMENTED,)),
+    ("mro-names-keyboardinterrupt", _BOOT_MRO_INTERRUPT + "raise HelperExit(0)\n", KeyboardInterrupt),
+    ("main-raises-mro-names-keyboardinterrupt", _BOOT_MRO_INTERRUPT + _MAIN_HALTS.format("HelperExit(0)"),
+     KeyboardInterrupt),
+    ("replaced-issubclass-main-raises-keyboardinterrupt",
+     _BOOT_HIDES_INTERRUPT + _MAIN_HALTS.format("KeyboardInterrupt('stop')"), KeyboardInterrupt),
+    ("replaced-issubclass-main-raises", _BOOT_HIDES_INTERRUPT + _MAIN_HALTS.format("SystemExit(0)"),
+     (_MAIN_UNDOCUMENTED,)),
+)
+
+
+def _main_exit_findings():
+    """Drive the module entry point and return the failures, empty when every case holds. In process,
+    _main_exit must raise exactly SystemExit of main()'s own return, printing nothing, when it is exactly 0, 1
+    or 2, and SystemExit(EXIT_MALFORMED) printing exactly _MAIN_UNDOCUMENTED when main() returns anything else
+    (None, a str, False, 0.0, 3) or raises a ValueError, a SystemExit(0), a SystemExit subclass whose
+    metaclass's mro() leaves out BaseException and KeyboardInterrupt (keeping SystemExit or not), or an
+    exception whose __class__ claims KeyboardInterrupt, and SystemExit(EXIT_MALFORMED) printing nothing when
+    main() returns None after replacing sys.stderr with a stream whose write raises SystemExit(0) or such a
+    class; a KeyboardInterrupt, and a SystemExit subclass whose metaclass's mro() names KeyboardInterrupt and
+    leaves out BaseException (judged by its class, as its str() names an address), must escape unchanged.
+    Then each _MAIN_EXIT_CASES script must exit exactly EXIT_MALFORMED printing exactly its lines, or, where
+    its case names KeyboardInterrupt, end at the SIGINT status Python ends an interrupt nothing caught with,
+    printing a traceback and no line that starts with opf. With _main_exit's SystemExit raises reverted to
+    sys.exit, the sys.exit script exits 0 (or prints the entry's line after its own) and fails; with the
+    entry ending at main()'s own return (sys.exit(main()) or raise SystemExit(main()), the child-status guard
+    first or not), the None script and the three scripts whose verb raises SystemExit(0) or an mro() exit
+    after a helper replaced sys.exception or issubclass exit 0 and fail; with _main_exit's bare arm removed,
+    its two mro() cases that leave out KeyboardInterrupt escape and fail; with its `except KeyboardInterrupt`
+    arm removed, the
+    in-process mro() case naming KeyboardInterrupt ends at EXIT_MALFORMED from the bare arm, and the two
+    scripts that raise that class and the replaced-issubclass script whose verb raises a KeyboardInterrupt
+    print the entry's line and exit EXIT_MALFORMED, and each fails; with _bootstrap's `except
+    KeyboardInterrupt` arm removed, the script that raises that class at import prints the bootstrap lines
+    and exits EXIT_MALFORMED, and fails; with its interrupt test reverted to isinstance, the __class__ case
+    escapes and fails;
+    with its broader arm deciding the interrupt from sys.exception(), the replaced-sys.exception script whose
+    verb raises SystemExit(0) exits 0 and fails, and with its bare arm re-raising the interrupt sys.exception() reports,
+    the one whose verb raises an mro() exit exits 0 and fails; with the guard around its line removed, both
+    stream cases end at the stream's exception and fail, and with that guard reverted to `except
+    BaseException`, the mro() stream case does; with _bootstrap's bare arm removed, the two mro() scripts
+    print the entry's line in place of the bootstrap lines and fail, and with _bootstrap's broader arm
+    deciding the interrupt from sys.exception(), the replaced-sys.exception script that raises at import
+    does the same. The replaced-issubclass script whose verb raises SystemExit(0) pins the exit-2 outcome
+    under a replaced issubclass, and no revert of an interrupt test or arm turns it red: the replacement
+    answers otherwise than the real issubclass only when asked whether a KeyboardInterrupt class is one, and
+    SystemExit is not. Besides the entry revert above, an `except SystemExit: raise` arm put ahead of
+    _main_exit's broader arm makes it exit 0 and fail, as the in-process SystemExit(0) case then ends at
+    SystemExit(0) and fails."""
+    import ast
+    import contextlib
+    import inspect
+    import io
+    import signal
+    import subprocess
+    import tempfile
+
+    class SkipBase(type):
+        def mro(cls):
+            return (cls, SystemExit, object)
+
+    class SkipAll(type):
+        def mro(cls):
+            return (cls, object)
+
+    class Liar(type):
+        def mro(cls):
+            return (cls, KeyboardInterrupt, object)
+
+    class KeptExit(SystemExit, metaclass=SkipBase):
+        pass
+
+    class DroppedExit(SystemExit, metaclass=SkipAll):
+        pass
+
+    class InterruptExit(SystemExit, metaclass=Liar):
+        pass
+
+    class ClaimsInterrupt(ValueError):
+        @property
+        def __class__(self):
+            return KeyboardInterrupt
+
+    def raising(exc):
+        def stand_in():
+            raise exc
+        return stand_in
+
+    class Unwritable:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def write(self, text):
+            raise self.exc
+
+    def unwritable(exc):
+        # A main() that replaces sys.stderr with a stream whose every write raises exc, then returns None.
+        def stand_in():
+            sys.stderr = Unwritable(exc)
+        return stand_in
+
+    line = _MAIN_UNDOCUMENTED + "\n"
+    failures = []
+    # (label, a stand-in main, the exception type that must escape unchanged or None, then the escaping
+    # exception's text (None when it is not compared), or else the status _main_exit must raise as SystemExit
+    # and exactly what it must print).
+    for label, stand_in, escapes, want in (
+            ("returns-0", lambda: 0, None, (EXIT_OK, "")),
+            ("returns-1", lambda: 1, None, (EXIT_FINDING, "")),
+            ("returns-2", lambda: 2, None, (EXIT_MALFORMED, "")),
+            ("returns-none", lambda: None, None, (EXIT_MALFORMED, line)),
+            ("returns-str", lambda: "0", None, (EXIT_MALFORMED, line)),
+            ("returns-false", lambda: False, None, (EXIT_MALFORMED, line)),
+            ("returns-float", lambda: 0.0, None, (EXIT_MALFORMED, line)),
+            ("returns-3", lambda: 3, None, (EXIT_MALFORMED, line)),
+            ("raises-valueerror", raising(ValueError("not an exit")), None, (EXIT_MALFORMED, line)),
+            ("raises-systemexit-0", raising(SystemExit(0)), None, (EXIT_MALFORMED, line)),
+            ("raises-mro-keeps-systemexit", raising(KeptExit(0)), None, (EXIT_MALFORMED, line)),
+            ("raises-mro-drops-baseexception", raising(DroppedExit(0)), None, (EXIT_MALFORMED, line)),
+            ("raises-class-claims-keyboardinterrupt", raising(ClaimsInterrupt("class claims")), None,
+             (EXIT_MALFORMED, line)),
+            ("stream-raises-systemexit-0", unwritable(SystemExit(0)), None, (EXIT_MALFORMED, "")),
+            ("stream-raises-mro-exit", unwritable(KeptExit(0)), None, (EXIT_MALFORMED, "")),
+            ("raises-keyboardinterrupt", raising(KeyboardInterrupt("stop")), KeyboardInterrupt, "stop"),
+            ("raises-mro-names-keyboardinterrupt", raising(InterruptExit(0)), InterruptExit, None)):
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                got = _main_exit(stand_in)
+        except:  # noqa: E722  what ends the call is this case's verdict, judged below, whatever its class
+            got = sys.exception()
+        if escapes is not None:
+            if type(got) is not escapes or (want is not None and str(got) != want):
+                failures.append("main exit {}: {!r} (expected the {} to escape unchanged)".format(
+                    label, got, escapes.__name__))
+            continue
+        if (type(got) is not SystemExit or type(got.code) is not int or got.code != want[0]
+                or out.getvalue() != want[1]):
+            failures.append("main exit {}: ended with {!r} printing {!r} (expected SystemExit({}) printing "
+                            "{!r})".format(label, got, out.getvalue(), want[0], want[1]))
+
+    helpers = [alias.name for node in ast.walk(ast.parse(inspect.getsource(_bootstrap)))
+               if isinstance(node, ast.Import) for alias in node.names]
+    if "_opf_worklog" not in helpers:
+        failures.append("main exit scripts: _bootstrap imports no _opf_worklog to stand in for: {!r}".format(
+            helpers))
+        return failures
+    source = Path(__file__).read_bytes()
+    for label, stand_in, lines in _MAIN_EXIT_CASES:
+        want = b"" if lines is KeyboardInterrupt else "".join(text + "\n" for text in lines).encode("utf-8")
+        with tempfile.TemporaryDirectory(prefix="opf-main-exit-") as tmp:
+            for name in helpers:
+                (Path(tmp) / (name + ".py")).write_text("", encoding="utf-8")
+            (Path(tmp) / "_opf_worklog.py").write_text(stand_in, encoding="utf-8")
+            (Path(tmp) / "opf.py").write_bytes(source)
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(Path(tmp) / "opf.py"), "upgrade"],
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                got = (child.returncode, child.stdout)
+            except subprocess.TimeoutExpired:
+                got = ("killed at its 120 s bound", b"")
+        if lines is KeyboardInterrupt:
+            # Python ends a run whose interrupt nothing caught with its traceback and the SIGINT status.
+            if (got[0] != -signal.SIGINT or not got[1].startswith(b"Traceback (most recent call last):\n")
+                    or any(text.startswith(b"opf") for text in got[1].splitlines())):
+                failures.append("main exit script {}: exited {!r} printing {!r} (expected the interrupt to end "
+                                "it at status {} with a traceback and no opf line)".format(
+                                    label, got[0], got[1], -signal.SIGINT))
+            continue
+        if got != (EXIT_MALFORMED, want):
+            failures.append("main exit script {}: exited {!r} printing {!r} (expected exit {} printing "
+                            "{!r})".format(label, got[0], got[1], EXIT_MALFORMED, want))
+    return failures
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. It runs at the entry line, not inside
+# main(), because the CLI self-test calls main() in process many times and some of its fixtures set
+# SIGCHLD to SIG_IGN in process on purpose; it covers every verb, the CLI self-test, opf-ci.sh and the
+# pre-commit hook, which all start this file.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+
+# _main_exit ends the process by raising SystemExit itself: code main() loads can replace sys.exit. The
+# child-status guard runs first, inside it, and a refusal ends the process at once with its own line and
+# status (os._exit(2)), before main() runs.
 if __name__ == "__main__":
-    sys.exit(main())
+    _main_exit(lambda: _child_status_refusal_exit("opf.py") or main())

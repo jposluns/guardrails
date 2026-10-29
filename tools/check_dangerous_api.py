@@ -364,6 +364,11 @@ ALLOWLIST = (
      _MUTANT + " (the descriptor cleanup and cancellation reverts)"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", "code", 1,
      _MUTANT + " (source_mutant requires exactly one matching site)"),
+    ("opf/tools/_opf_adopt_apply.py", "_load_sweep_report_slice", "code", 1,
+     "self-test harness: exec_module loads, from a file under the self-test's temporary directory,"
+     " the sweep-reporting slice its only caller cuts from the repository's own _self_test_checks"
+     " (read from __file__, or one of its literal mutants), never registered in sys.modules; no"
+     " external input"),
     ("opf/tools/_opf_emit.py", "_fixture_main", "code", 1,
      "self-test fixture runner: runs the Python body its own supervisor passes after an"
      " explicit isolated sys.executable -I -B -c argv, the same trust as python3 -c; the body"
@@ -424,16 +429,24 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "shell", 2,
      "self-test deny table: (module, name) seams patched to refuse process and file effects"
      " (subprocess.Popen and os names from a fixed literal tuple); replaced, never called"),
-    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", "code", 2,
-     "self-test flip: exec_module builds a module from the repository's own _opf_upgrade"
-     " source with one literal replacement, and types.FunctionType rebinds its code; no"
-     " external input"),
     ("tools/check_instruction_budget.py", "_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own production source with"
      " one reviewed literal substitution; no external input"),
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_child_status_coverage.py", "_canonical_module", "code", 1,
+     "authority loader: exec_module of the repository's own opf/tools/_child_status.py under ROOT,"
+     " the equivalent of an import; no external input"),
+    ("tools/check_child_status_coverage.py", "_load_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/check_rule_placement.py", "_load_probe_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of the repository's own _standards.py with one"
+     " reviewed literal substitution from the self-test's fixed mutant table; no external input"),
+    ("tools/check_rule_placement.py", "_load_placement_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution (the listing identity check dropped); no external input"),
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
@@ -460,11 +473,18 @@ ALLOWLIST = (
     ("opf/tools/_opf_adopt_observe.py", "self_test.deny_effects", "shell", 1,
      "self-test deny patch: mock.patch.object(os, name) over a fixed literal tuple of spawn and"
      " exec names, each replaced with a refusal; never called"),
-    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 1,
-     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run)"),
+    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 2,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run, once by"
+     " the rec-nolazyfetch env capture and once by the blank-probe status-answer injection, each"
+     " restored in a finally)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated._recheck_under", "shell", 1,
      "self-test fault injector: picks the hook module's own os (or os.path) to patch one"
      " function its caller names from a fixed fault table; never runs a shell"),
+    ("tools/selftest_orch_hooks.py", "_rwh_cases", "shell", 2,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run, saved"
+     " once for the probe-error stubs and once around the locale-pin recorder; the identity-probe"
+     " stubs raise for the one probe argv they intercept and delegate every other call unchanged,"
+     " and the locale recorder answers the probe reply shape without running anything)"),
     ("tools/selftest_orch_hooks.py", "_main_isolated", "shell", 1,
      "self-test fault injector: setattr on the hook module's own os with a function name from"
      " its fixed fault table; never runs a shell"),
@@ -500,8 +520,10 @@ ALLOWLIST = (
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
      _SAVED + " (the saved real runs the git cat-file fault injectors delegate to and restore)"),
-    ("tools/orch_register.py", "self_test", "shell", 1,
-     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores)"),
+    ("tools/orch_register.py", "self_test", "shell", 3,
+     _SAVED + " (the saved real run the git cat-file fault injector delegates to and restores);"
+     " the descriptor fault vector's two setattr calls on os patch, then restore in a finally,"
+     " one name from its own fixed literal tuple (read, fstat, close); never runs a shell"),
     ("tools/gen_hooks.py", "self_test_main", "shell", 1,
      _SAVED + " (the saved real Popen the spawn-failure vector restores after patching)"),
     ("tools/gen_hooks.py", "self_test_main._communicate_fault_case", "shell", 3,
@@ -509,6 +531,21 @@ ALLOWLIST = (
     ("tools/gen_hooks.py", "self_test_main._secondary_fault_case", "shell", 9,
      _SAVED + " (the saved real Popen.communicate, kill and wait the staged-cleanup vectors"
      " wrap and restore)"),
+    ("tools/check_opf_standalone_closure.py", "_bounds_self_test", "shell", 1,
+     "self-test launch refusal: keeps the real subprocess.Popen only to restore it in a finally"
+     " after patching in a stand-in that records the argv and raises OSError, so nothing is"
+     " launched; no call in this file turns shell on"),
+    ("tools/check_opf_standalone_closure.py", "_after_launch_fault_self_test", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the after-launch fault double, whose __init__"
+     " forwards _run_one's own sys.executable -I -B argv list; restored in a finally)"),
+    ("tools/check_opf_standalone_closure.py", "_harness_routing_self_test", "shell", 2,
+     "self-test launch refusal: the (subprocess, \"Popen\", real Popen) restore triple, set back"
+     " in a finally after each routing case patches in a stand-in that records the leg's script"
+     " and raises, so nothing is launched; no call in this file turns shell on"),
+    ("tools/check_opf_standalone_closure.py", "_ci_job_sweep_self_test", "shell", 1,
+     "self-test launch refusal: keeps the real subprocess.Popen only to restore it in a finally"
+     " after patching in a raiser for the whole check, so no per-job sweep vector can launch a"
+     " process; no call in this file turns shell on"),
     ("opf/tools/_opf_adopt_observe.py", "_runner_red_checks", "shell", 2, _SAVED),
     ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks", "shell", 3, _SAVED),
     ("opf/tools/check_opf_doctor.py", "_self_test_isolated._doctor_suite", "shell", 3, _SAVED),

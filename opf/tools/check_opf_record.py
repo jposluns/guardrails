@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T90)
+  check_opf_record.py --self-test                    the fixture suite (T1-T115)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -22,13 +22,33 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T4  two sequential creates claim BI-1 then BI-2 (and their own worklog entries WL-1, WL-2) with
       monotonic counters; a counters map missing an enabled namespace refuses (flip: drop the
       known-complete proof)
-  T5  a kill at each journal step of create and of an assistant transition (three operands: counters,
-      index, worklog) and of a maintainer done-with-receipt (four operands: counters, backlog index, done
-      index, worklog) leaves the killed run's lease; the next run releases that confirmed-dead holder's
+  T5  a kill at each journal step of create, of an assistant transition (three operands: counters,
+      index, worklog), of a handoff-superseding create (three operands: the supersession and the appended
+      handoff land together or not at all once reconciled) and of a maintainer done-with-receipt (four
+      operands: counters, backlog index, done index, worklog) leaves the killed run's lease. The
+      guarantee is recovery atomicity, not an untorn on-disk state at the instant of the kill: a kill
+      mid-apply can leave an operand's bytes torn (neither the prestate nor the poststate), so BEFORE
+      reconciliation the matrix asserts the write-ahead evidence instead (whenever any operand's bytes
+      differ from the prestate, the killed run's own journal transaction is present to drive recovery).
+      The spec 8.5 at-most-one-current handoff rule additionally holds CONTINUOUSLY, not only once
+      reconciled: at every kill point the matrix asserts that the on-disk handoff index, wherever its
+      bytes parse at all, holds at most one clean current handoff, so no intermediate on-disk state of a
+      post ever shows a reader a second current handoff (a torn, unparseable payload, and a parsed index
+      whose record value is not an array, count none and are recovery's business; a RecursionError or
+      MemoryError at the parse turns on the stack and memory left to the run, not on the bytes alone, so
+      the check cannot evaluate, never a pass).
+      The next run releases that confirmed-dead holder's
       leftover lease through its own reconciliation (spec 5.7, the T74 dead-run release clause) and
       reconciles, leaving the operands exactly the prestate or exactly the poststate, the poststate iff
-      the transaction is COMPLETE, and no killed run reports an id (flip: write counters outside the
-      journaled transaction)
+      the transaction is COMPLETE, and no killed run reports an id (flips: write counters outside the
+      journaled transaction; write the handoff index outside it, which only the handoff-superseding
+      scenario can catch, so a green run proves that scenario discriminates on its own; land the handoff
+      index at a parseable two-current state inside the journaled apply, which the write-ahead evidence
+      cannot catch: the continuous at-most-one-current assertion turns red on the exposure itself, at the
+      kill point, where without it the corruption would surface only later and indirectly, as the
+      reconciliation refusing a changed operand; that flip counts only when that assertion is the one
+      that turns red, by its scenario, kill point and count, and with the assertion disarmed the
+      discrimination must fail)
   T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
       done-with-receipt refuses before the store is resolved, and a maintainer `transition BI done`
       refuses, both with every byte untouched; a maintainer done-with-receipt (ratifying done/proposed, or
@@ -50,9 +70,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       review and the lease released (flip: skip the final doctor)
   T11 worklog-append claims the next WL id with no status qualifier; an id inside a released span refuses
       exit 2, bytes untouched (flip: drop the released-span check)
-  T12 an interrupted journal while another live run holds the shared lease (taken through the upgrade
-      verb) refuses exit 2 with every byte untouched and the peer's lease intact (flip: recover without
-      the lease)
+  T12 an interrupted journal while another live run holds the shared lease (taken under the `upgrade`
+      label, which no writer of this tooling now uses) refuses exit 2 with every byte untouched and the
+      peer's lease intact (flip: recover without the lease)
   T13 an interrupted journal whose operand was edited after the interruption, on the prestate side or the
       poststate side, refuses exit 2 naming the path, every byte untouched; once the edit is undone the
       next run reconciles (flip: drop the intervening-edit check)
@@ -397,8 +417,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       reserves derive the same numbers; the first reserves through the production claim-and-reserve
       path, and the second is refused at the held revalidation with no reservation of its own, no
       transaction and no operand published; re-planned, it derives the next numbers, both
-      reservations standing disjoint (flips: the derivation flip of T79; a reservation step with no
-      fresh scan and no stale-plan comparison)
+      reservations standing disjoint (flips: the derivation flip of T79; a reservation step that passes
+      the seam no planned claims to compare)
   T81 the homes-2 high-water reads every journal kind's reservations, the homes enumerated from
       JOURNAL_KINDS: an import-kind reservation of BI-1 and WL-1 moves the next create to BI-2 and
       WL-2, which records, exit 0, the final doctor reading that reservation too, and a malformed
@@ -453,7 +473,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
       _DECLARED_INJECTIONS); the child receives the token pools alone, as what it needs to raise the
       declared injections. A line binds only when its bytes carry exactly one recorded, unconsumed
       token whose label the flip declares and are the backstop envelope the record CLI shares with
-      opf upgrade and opf adopt around a repr EQUAL to one the parent computed for that token's
+      opf adopt around a repr EQUAL to one the parent computed for that token's
       injection; anything the child prints that the parent did not record binds nothing, and
       a token the parent never minted binds nothing however it is shaped (tokens are unguessable and
       parent-held). So an unrelated crash under a declared flip, another exception type carrying the
@@ -504,6 +524,41 @@ Each case runs on its own copy of that template; the root is removed in a finall
       once on every path. Accepted: the declared injection reaching its own backstop (flips: a
       discriminator that refuses only stray backstop lines; T75's earlier collection, which drops
       each child's stderr when an assertion fails before its verdict reads)
+  T89 posting a new handoff supersedes the current one in the same act (spec 8.5), landing the status the
+      writer's own transition grammar derives for the posting actor (spec 8.4): a first handoff supersedes
+      nothing and reports no status change; an assistant posting lands the old handoff at
+      superseded/proposed with proposed_from recording current (awaiting ratification, surfaced so by
+      HANDOFF.md), an automation posting the same, and a maintainer posting lands it at unqualified
+      superseded; each posting takes this operation's updated_at, appends the supersedes link to the new
+      record after its requested links, records the supersession in its worklog entry, reports the status
+      change, and is doctor VALID once committed with HANDOFF.md showing exactly one current handoff
+      (flips: the planner performs no supersession, the reviewed head's append-only create, which only the
+      independent oracle refuses; a supersession that demands a previous current handoff, under which the
+      first posting is refused; a supersession landed unqualified whatever the actor, which the planner's
+      own validate_transition refuses, spec 8.4, the oracle's per-actor derivation covered by the unit
+      vectors). A maintainer rejecting the posting's supersession proposal back to current while the new
+      handoff stands current refuses whole, with the named two-current-handoffs diagnostic and every byte
+      untouched (spec 8.8 restores only the one named record and settles no outcome for the newer post,
+      so the writer invents none and keeps the spec 8.5 at-most-one-current rule); ratifying the proposal
+      to superseded still passes, and a rejection with no other clean current handoff (a
+      transition-proposed supersession) still restores current (flip: drop the sole-current rule, under
+      which the rejection publishes two current handoffs and fails its own final doctor only after the
+      store is dirtied). A legacy importer-authored current handoff is history outside
+      every current-state join (spec 8.6): it neither blocks a clean posting nor receives the
+      supersession, its bytes stay untouched, and the doctor and HANDOFF.md keep it out of the
+      current-handoff join once posted over (flip: count importer-authored rows back into the writer's
+      join, under which the posting wrongly supersedes the history and the oracle refuses). Each prior
+      state the spec forbids refuses with its named diagnostic and every byte untouched, never published
+      and then failed at the final doctor, each case its own test: a hand-edited second current handoff (a
+      C-HANDOFF finding at rest) refuses the next posting (two-current-handoffs; flip: supersede whichever
+      current handoff comes first, which the oracle's own one-current derivation still refuses), and a
+      current handoff hand-rotated into an archive bucket (a C-ROTATION finding at rest) refuses it with
+      the named archived-current-handoff diagnostic, ahead of the generic archive-walk refusal (flip: drop
+      the named classification back to the generic walk refusal, which the needle assertion catches). The
+      atomicity of the supersession rides T5: a kill at each journal step of the superseding create, once
+      the next run reconciles, leaves the store at exactly the prestate or exactly the poststate, the old
+      and new handoff never split, with the pre-reconciliation write-ahead evidence asserted at each kill
+      point and a handoff-scoped unjournaled-index flip proving that scenario discriminates on its own.
   T89 a store whose backlog index an earlier emitter wrote with a literal U+2028 and U+2029 inside a
       basic string (doctor-VALID, views rendered over those bytes) takes a create: the write succeeds,
       the file is re-spelled with the \\u2028 and \\u2029 escapes, the existing record reads back
@@ -517,6 +572,107 @@ Each case runs on its own copy of that template; the root is removed in a finall
       under the cap the same create records, re-spells the legacy index, and stays doctor-VALID
       (flip: the size guard removed, so the over-cap index is published and the byte comparison
       turns red)
+  T91 five runs each reserving one BI id through the reservation seam alone (no planner), each under
+      its own acquired and released operation capability, claim the counter's base + 1 to base + 5:
+      the seam derives every claim from counters.toml and every earlier reservation (flip: the
+      seam's reservation scan returning nothing, so every run reserves the same number)
+  T92 concurrent runs in separate processes never share a number: forked processes released together
+      each take the operation capability (retrying while another holds it) and reserve one BI id,
+      claiming exactly base + 1 to base + their count (flip: T91's)
+  T93 two threads sharing one held capability, their reservation attempts made to overlap (the first
+      held inside the seam's derivation until the second's attempt ends): the second is refused as the
+      capability being used and only the first's reservation stands, at base + 1 (flip: the seam's
+      held scope without the capability's claim, so both derive the same number and both reserve it)
+  T94 the held reservation step refuses a plan whose ordered ids its demand and planned claims do not
+      imply (a wrong number, another order, an id missing or extra) with nothing reserved, and the
+      plan's own ids then reserve its claims (flip: the planned-id check removed, so only the claims
+      are compared and the wrong ids reserve)
+  T95 a legacy importer-authored backlog item seated in the clean index of a doctor-VALID store is never a
+      clean-series operand (spec 8.6, 8.8): a maintainer transition, an assistant proposal and a maintainer
+      done-with-receipt each refuse exit 2 naming importer-authored-operand with every byte untouched, and
+      a new clean item linking derives_from back records with the history's bytes unchanged; a clean
+      decide superseding an importer-authored resolution still records, the target's bytes unchanged and
+      the store doctor VALID (flips: the operand's author check removed, so the refusals publish; the
+      check applied to the --supersedes target too, so the remedy refuses)
+  T96 a malformed lease is present, so it is held: a create refuses exit 2 with the held-lease refusal,
+      the lease not deleted and every byte untouched (flip: an acquisition that reads a lease it cannot
+      parse as absent and removes it)
+  T97 a store below its git repository root, with a foreign held lease, reaches the held-lease refusal
+      naming the holder, never the dirty-store refusal; the lease and every byte untouched (flip: the
+      lease exclusion compares porcelain paths without the store's prefix strip)
+  T98 a FIFO at the lease path refuses promptly in a bounded child, naming a present non-regular lease;
+      the FIFO and every byte untouched (flip: the held-lease message opens the lease without
+      O_NONBLOCK, so the child blocks past its bound)
+  T99 a canonical, uncommitted counters edit refuses exit 2 before mutation, naming the path and advising
+      commit or move aside with no restore command; every byte, the index and HEAD untouched (flip: the
+      cleanliness gate as a no-op)
+  T100 an ignored, untracked file at a view's destination refuses exit 2 the same way, every byte and the
+      index untouched; moved aside, the absent destination still refuses its ignore rule, and with the
+      rule corrected the create records, the saved owner bytes and the ignored content outside the
+      planned scope intact (flip: the dirty probe without --ignored=matching)
+  T101 the whole store untracked and ignored, which git collapses to `!! .working/`, still names every
+      planned destination and refuses exit 2, every byte untouched (flip: no ignored-ancestor expansion)
+  T102 an ignored directory at a view's destination, which git reports with a trailing slash, refuses
+      exit 2 naming it, every byte untouched (flip: the dirty probe without --ignored=matching)
+  T103 ignored content at a declared unmanaged prefix sibling of a destination, which git reports under
+      literal pathspecs, is outside the planned scope: the create records and the bytes survive (flip:
+      every ignored record admitted as dirt)
+  T104 declared unmanaged, ignored content inside .working is outside the planned scope: the create
+      records and the bytes survive (flip: the store scope widened to all of .working)
+  T105 a store nested under a real non-UTF-8 directory name with an ignored, untracked operand, view
+      destination, or collapsed .working ancestor refuses exit 2 naming the destination; every byte, the
+      index and HEAD untouched (flip: the lossy prefix round trip with its silent non-match fallback)
+  T106 an absent ignored view destination, and an absent ignored product destination (the root VERSION
+      view), each refuse exit 2 naming the path, every byte untouched (flip: the ignore probe for absent
+      destinations as a no-op)
+  T107 an ignored lease, and a directory lease (untracked, or ignored), each get the never-seize
+      refusal, never the dirty-store remedy, the lease and every byte untouched (flip: a lease exclusion
+      that excludes nothing)
+  T108 a lease committed at HEAD and deleted in the worktree refuses exit 2 naming the TRACKED lease and
+      spec 5.7, every byte untouched (flip: the old exclusion dropping every record on the lease path)
+  T109 a view under an external normalizing clean filter (the git-lfs shape) reads dirty in the racy-clean
+      window because the probe never runs the filter: the create refuses exit 2 naming the git-lfs-shape
+      filter and settling the worktree, every byte untouched (flip: no filter neutralization)
+  T110 receipt-repair (spec 8.8), the maintainer's reviewed repair of a ratified item with no receipt, over a
+      committed BI-1 a reviewed hand edit put at unqualified done (the C-RECEIPTS finding at rest), with
+      homes 2 activated as T79 does: the repair records exit 0 with exactly one receipt_of receipt and its
+      own worklog entry, the backlog index bytes unchanged and no status change, its run's reservation
+      claiming exactly the receipt's and the entry's numbers, doctor VALID, and a second repair refuses
+      (flip: no reservation published, which the publication boundary refuses); at homes 1, with no
+      reservation home, it refuses exit 2 before any file but the manifest is read, every byte untouched
+      (flips: the homes guard dropped; the request check's homes refusal dropped, so the planner refuses
+      only after the operand reads); an item whose only receipt is importer-authored takes the clean
+      receipt beside it, doctor VALID (flip: the writer's receipt join counting importer-authored
+      receipts); and a kill at each journal step of its three-operand publication, every hook
+      kill_points(3) names but after-lock, which a homes-2 publication never reaches (that run records),
+      leaves the reservation standing and reconciles to exactly the prestate or the poststate, the backlog
+      index never written, the next repair deriving above the reserved numbers (flip: the done index
+      written outside the journaled transaction, in the killed child)
+  T111 an assistant or automation receipt-repair refuses before the store is resolved, every byte untouched
+      (flip: the maintainer check dropped)
+  T112 receipt-repair refuses an item at open, active, dropped or done/proposed, the last pointed to
+      done-with-receipt (flip: the state guard dropped, so a later guard refuses with another message); an
+      item already holding its clean receipt (flip: the receipt check dropped); a done row naming the item
+      whose links the doctor's receipt join cannot interpret, which leaves that join not evaluated (flip:
+      the active done rows' interpretation check dropped, so a second receipt publishes and fails the final
+      doctor); a backlog row beside the item whose status the doctor's receipt join cannot interpret, which
+      leaves that join not evaluated too (flip: the active backlog rows' interpretation check dropped, so
+      the receipt publishes and is refused only after publication); an item whose receipt sits in the
+      archive, and an archive the doctor's walk does not pass
+      (flip, for both: the active-only read, under which a second receipt publishes and fails the final
+      doctor), each with every byte untouched
+  T113 a peer reservation of the receipt's number landing between planning and the held capability refuses
+      the repair at the held revalidation with nothing reserved or written; the re-run claims above it and
+      records (flip: T80's reservation step without the planned claims); and the backlog index, which the
+      repair only reads, edited between planning and the held lease refuses it at the held re-read with
+      nothing reserved or written (flip: the held re-read of the operands alone)
+  T114 the reviewed edit uncommitted, or committed and then edited again, refuses exit 2 naming the commit,
+      every byte untouched (flip: the committed-row check dropped, so the repair publishes and its final
+      doctor fails after publication)
+  T115 HEAD moved between planning and the held lease, to a commit not holding the item at all and to the
+      one holding it at active, refuses exit 2 at the committed-row check read again under the held lease,
+      every byte untouched, no reservation and no transaction (flip: the held re-check dropped, so the
+      repair publishes over a prior commit that does not hold the item and records exit 0)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -578,6 +734,7 @@ MACH = ".working/toml"
 COUNTERS = MACH + "/counters.toml"
 BI_INDEX = MACH + "/backlog_item.index.toml"
 PD_INDEX = MACH + "/pending_decision.index.toml"
+HO_INDEX = MACH + "/handoff.index.toml"
 MD_INDEX = MACH + "/maintainer_decision.index.toml"
 PP_INDEX = MACH + "/preference_pattern.index.toml"
 DECISIONS_VIEW = ".working/DECISIONS.md"
@@ -1309,14 +1466,62 @@ def _publish(ctx, plan, subcommand, cap=None):
 record._publish = _publish
 """
 
+# The handoff-scoped T5 flip, applied inside the killed child: the HANDOFF INDEX (the one operand that
+# carries both the supersession and the appended handoff) is written directly, OUTSIDE the journaled
+# transaction, and only the other operands are journaled. The flip activates on a handoff index operand
+# alone, so every other T5 scenario stays green under it and a red run can come only from the
+# handoff-superseding scenario: the discrimination the aggregate FLIP_T5 cannot attribute (its
+# unjournaled counters write already turns the FIRST scenario red before the handoff matrix runs).
+FLIP_T5_HANDOFF = """
+_journaled = record._publish
+def _publish(ctx, plan, subcommand, cap=None):
+    operands = list(plan.operands)
+    for operand in operands:
+        if operand.rel.endswith("/handoff.index.toml"):
+            (Path(ctx.res.store_root) / operand.rel).write_bytes(operand.new_raw)
+            operands.remove(operand)
+            plan.operands = operands
+            break
+    return _journaled(ctx, plan, subcommand, cap=cap)
+record._publish = _publish
+"""
 
-def child(env, root, args, kill=None, flip=""):
+# The two-current T5 flip, applied inside the killed child: at the torn-payload kill point of the HANDOFF
+# INDEX, instead of the torn prefix the flip leaves a PARSEABLE index whose superseded row reads current
+# again beside the appended current handoff, then dies. The journaled transaction is already present (the
+# kill point is inside apply), so the write-ahead evidence assertion stays green, the kill and lease
+# assertions stay green, and the first assertion to turn red is the continuous at-most-one-current check
+# over the intermediate on-disk state, naming the exposure itself (without that check the corruption
+# surfaces only later and indirectly, as the reconciliation refusing a changed operand). The needle bytes
+# exist only in a superseding handoff index payload, so every other scenario, and every other operand,
+# keeps the engine's own torn behaviour.
+FLIP_T5_TWO_CURRENT = """
+import _journal
+_torn = _journal._maybe_torn_payload
+def _two_current(fd, data, i):
+    if (os.environ.get(_journal.KILL_ENV, "") == "torn-payload:{}".format(i)
+            and b'"superseded/proposed"' in data):
+        _journal._write_all(fd, data.replace(b'"superseded/proposed"', b'"current"', 1))
+        os.fsync(fd)
+        os._exit(137)
+    _torn(fd, data, i)
+_journal._maybe_torn_payload = _two_current
+"""
+
+# The message of the continuous at-most-one-current assertion, and the one red FLIP_T5_TWO_CURRENT must
+# produce: that assertion, at the handoff-superseding scenario's torn-payload kill of its handoff index
+# (operand 1 of counters, handoff index, worklog), seeing two clean current handoffs.
+T5_TWO_CURRENT = "T5 an intermediate on-disk state holds two current handoffs"
+T5_TWO_CURRENT_EXPOSURE = (T5_TWO_CURRENT, ("handoff-supersede", "torn-payload:1"), 2)
+
+
+def child(env, root, args, kill=None, flip="", timeout=180):
     script = _CHILD.format(tools=str(TOOLS), flip=flip)
     child_env = dict(env.vars)
     if kill is not None:
         child_env[journal.KILL_ENV] = kill
     proc = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)] + list(args),
-                          capture_output=True, text=True, timeout=180, env=child_env)
+                          capture_output=True, text=True, timeout=timeout, env=child_env)
     _note_backstops(proc.stderr)
     _oop_forward(proc.stderr)
     return proc
@@ -1340,16 +1545,148 @@ def journal_states(root, rel=None):
         os.close(jr_fd)
 
 
+def _clean_current_handoffs(data):
+    """The clean (non-importer) current-handoff count of one on-disk handoff index state (the spec 8.5/8.6
+    join over these bytes alone). Bytes that do not parse as TOML, and a parsed index whose record value
+    is not an array, count no handoff: a torn payload is neither state, shows a reader no second current
+    handoff, and is recovery's business (the write-ahead evidence assertion). A RecursionError or a
+    MemoryError at the parse is CannotEvaluate, never a count: it depends on the stack and memory left
+    to this process, not on the index bytes alone, so it shows nothing about how many current handoffs
+    the bytes hold."""
+    try:
+        rows = tomllib.loads(data.decode("utf-8")).get("record", [])
+    except ValueError:
+        # tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal.
+        return 0
+    except (RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("the handoff index count could not finish its parse ({!r}); a two-current "
+                             "index is not ruled out".format(exc)[:400]) from None
+    if not isinstance(rows, list):
+        return 0
+    return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
+               and r.get("status") == "current"
+               and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
+
+
+def t5_handoff_count_malformed(fx):
+    """The count behind the continuous at-most-one-current assertion reads a torn or malformed handoff
+    index as no handoff, never as a crash of the matrix: undecodable bytes, a TOML syntax error, an
+    over-long integer literal (a bare ValueError) and a record value that is not an array (an integer, a
+    boolean, a string or a single [record] table) each count 0. Deep nesting (RecursionError) and a
+    parse that exhausts memory (MemoryError, injected at the parser over a well-formed index) are
+    cannot-evaluate, never 0: neither is a property of the bytes alone, so neither may pass the
+    assertion. Well-formed indexes count exactly their clean current handoffs (one or two current, while
+    a superseded or importer-authored one counts nothing), so a count that reads every index as empty is
+    red too. Every vector runs and every wrong count is named, so a red lists each vector it reaches."""
+    current = '[[record]]\ntype = "handoff"\nstatus = "current"\n'
+    cannot = "cannot-evaluate"
+    wrong = []
+
+    def expect(label, data, want):
+        try:
+            got = _clean_current_handoffs(data)
+        except CannotEvaluate:
+            got = cannot
+        except (ValueError, RecursionError, MemoryError, TypeError) as exc:
+            got = "escaped {!r}".format(exc)[:160]
+        if got != want:
+            wrong.append((label, got, want))
+    for label, data, want in (("undecodable", b"\xff" + current.encode(), 0),
+                              ("unparseable", b"[[record]\n", 0),
+                              ("over-long-integer", ("x = 1" + "0" * 5000 + "\n").encode(), 0),
+                              ("deeply-nested", ("x = " + "[" * 5000 + "]" * 5000 + "\n").encode(), cannot),
+                              ("integer-record", b"record = 5\n", 0),
+                              ("boolean-record", b"record = true\n", 0),
+                              ("string-record", b'record = "handoff"\n', 0),
+                              ("table-record", b'[record]\ntype = "handoff"\nstatus = "current"\n', 0)):
+        expect(label, data, want)
+
+    def exhausted(text):
+        raise MemoryError("synthetic parse exhaustion")
+    with patch.object(tomllib, "loads", exhausted):
+        expect("memory-exhausting", current.encode(), cannot)
+    for label, data, want in (("one-current", current, 1),
+                              ("two-current", current + "\n" + current, 2),
+                              ("superseded", current.replace("current", "superseded"), 0),
+                              ("importer-current", current + 'actor = { kind = "importer" }\n', 0)):
+        expect(label, data.encode(), want)
+    assert not wrong, ("T5 the handoff count of each (index, got, want) below is wrong", wrong)
+
+
+def flip_t5_count_narrow():
+    """The pre-fix count: only a UnicodeDecodeError or a TOMLDecodeError reads as no handoff, so a bare
+    ValueError, a RecursionError or a MemoryError escapes the parse, and an integer or boolean record
+    value raises TypeError when iterated. A string or table record value iterates (its characters, its
+    keys) without error and yields no row, so it counts 0 here as in the fixed count: those two vectors
+    stay green under this flip. flip_t5_count_table_row reds the table one; the string one stays green
+    under every flip here and only pins the rule."""
+    def narrow(data):
+        try:
+            rows = tomllib.loads(data.decode("utf-8")).get("record", [])
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return 0
+        return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
+                   and r.get("status") == "current"
+                   and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", narrow)
+
+
+def flip_t5_count_empty():
+    """A count that reads every index as holding no handoff, malformed or not."""
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", lambda data: 0)
+
+
+def flip_t5_count_host_zero():
+    """The count that read a RecursionError or a MemoryError at the parse as no handoff: an index the
+    parser could not finish, two-current or not, passes the at-most-one-current assertion."""
+    real = _clean_current_handoffs
+
+    def host_zero(data):
+        try:
+            return real(data)
+        except CannotEvaluate:
+            return 0
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", host_zero)
+
+
+def flip_t5_count_table_row():
+    """A count that reads a single [record] table as a one-row array, so a table record value holding a
+    current handoff counts it, where every production reader refuses a record value that is not an
+    array."""
+    def table_row(data):
+        try:
+            rows = tomllib.loads(data.decode("utf-8")).get("record", [])
+        except ValueError:
+            return 0
+        except (RecursionError, MemoryError) as exc:
+            raise CannotEvaluate("the handoff index count could not finish its parse ({!r})".format(
+                exc)[:400]) from None
+        rows = [rows] if isinstance(rows, dict) else rows
+        if not isinstance(rows, list):
+            return 0
+        return sum(1 for r in rows if isinstance(r, dict) and r.get("type") == "handoff"
+                   and r.get("status") == "current"
+                   and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer"))
+    return patch.object(sys.modules[__name__], "_clean_current_handoffs", table_row)
+
+
 def _t5_scenarios(fx):
     """(label, base store or None for the template, args, operands in journal order): create over the
     template; an assistant transition (three operands) and a maintainer done-with-receipt (four operands)
-    over a committed store whose BI-1 is active."""
+    over a committed store whose BI-1 is active; and a handoff-superseding create (three operands) over a
+    committed store holding the current HO-1, so the supersession and the appended handoff land together
+    or not at all (spec 8.5)."""
     active = fx.case("t5-base-active")
     with ticking():
         step(fx, active, ["create", "--type", "backlog_item", "--title", "k"] + MAINTAINER, "BI-1")
         step(fx, active, ["transition", "BI-1", "active"] + MAINTAINER, "BI-1 active")
+    posted = fx.case("t5-base-handoff")
+    with ticking():
+        step(fx, posted, ["create", "--type", "handoff", "--title", "k"] + ASSISTANT, "HO-1")
     return (("create", None, CREATE, (COUNTERS, BI_INDEX, WORKLOG)),
             ("transition", active, ["transition", "BI-1", "done"] + ASSISTANT, (COUNTERS, BI_INDEX, WORKLOG)),
+            ("handoff-supersede", posted, ["create", "--type", "handoff", "--title", "k2"] + ASSISTANT,
+             (COUNTERS, HO_INDEX, WORKLOG)),
             ("done-with-receipt", active, ["done-with-receipt", "BI-1"] + MAINTAINER,
              (COUNTERS, BI_INDEX, DN_INDEX, WORKLOG)))
 
@@ -1357,6 +1694,27 @@ def _t5_scenarios(fx):
 def t5_crash(fx):
     for label, base, args, operands in _t5_scenarios(fx):
         _t5_matrix(fx, label, base, args, operands)
+
+
+class _T5OtherRed(Exception):
+    """FLIP_T5_TWO_CURRENT turned t5_crash red through an assertion other than the continuous
+    at-most-one-current one at the exposure: not an assertion, so the discriminator fails by name."""
+
+
+def t5_two_current_exposed(fx):
+    """t5_crash as the two-current discriminator runs it. Unflipped it is t5_crash, every assertion its
+    own. Under FLIP_T5_TWO_CURRENT the one red that counts is the continuous at-most-one-current
+    assertion itself, by identity (T5_TWO_CURRENT_EXPOSURE: its message, scenario, kill point and a count
+    of two); any other assertion, such as a later recovery assertion that sees the same corruption only
+    indirectly as a reconciliation refusal, is raised as _T5OtherRed instead, so removing the immediate
+    assertion cannot leave the discrimination green."""
+    try:
+        t5_crash(fx)
+    except AssertionError as exc:
+        if _t5_flip[0] == FLIP_T5_TWO_CURRENT and exc.args != (T5_TWO_CURRENT_EXPOSURE,):
+            raise _T5OtherRed("the two-current flip went red through another assertion: {!r}".format(
+                exc.args)[:1200]) from None
+        raise
 
 
 def _t5_matrix(fx, label, base, args, operands):
@@ -1380,6 +1738,28 @@ def _t5_matrix(fx, label, base, args, operands):
         # leftover through its own reconciliation (the T74 dead-run release clause, spec 5.7) and
         # reconciles.
         assert (Path(root) / LEASE).exists(), ("T5 the killed run leaves its lease", point)
+        # Recovery atomicity, asserted BEFORE reconciliation: a kill mid-apply may leave an operand's
+        # bytes torn (neither the prestate nor the poststate), and the write-ahead journal is what makes
+        # that state recoverable, so whenever any operand's bytes differ from the prestate the killed
+        # run's own journal transaction must already be present to drive the recovery; an operand changed
+        # with no such transaction could never be restored and is asserted red here, not after the fact.
+        interim = {rel: read(root, rel) for rel in operands}
+        opened = {name for name in journal_states(root) if name not in retained}
+        assert all(interim[rel] == pre[rel] for rel in operands) or opened, (
+            "T5 an operand changed with no journal transaction to drive recovery", point)
+        # The spec 8.5 at-most-one-current rule holds CONTINUOUSLY, not only once reconciled: at every
+        # kill point, wherever the on-disk handoff index parses at all, it holds at most one clean
+        # current handoff, so no intermediate state of a post shows a reader a second current handoff
+        # (bytes that do not parse, or whose record value is not an array, count none; a parse ended by
+        # a RecursionError or a MemoryError is cannot-evaluate, never a count).
+        # The write-ahead evidence above cannot catch this (a two-current intermediate can sit inside a
+        # journaled apply): this assertion reds on the exposure itself, at the kill point, where the
+        # later recovery assertions would see it only indirectly, as a reconciliation refusal of a
+        # changed operand. FLIP_T5_TWO_CURRENT drives it red, and its discriminator credits only this
+        # assertion (T5_TWO_CURRENT_EXPOSURE).
+        if HO_INDEX in operands:
+            seen = _clean_current_handoffs(interim[HO_INDEX])
+            assert seen <= 1, (T5_TWO_CURRENT, point, seen)
         result = record_cli(env, root, CREATE)
         refused(result, "was reconciled")
         assert "leftover single-writer lease" in result[2], ("T5 the released leftover lease is named",
@@ -1517,7 +1897,8 @@ def _interrupted(fx, name, point="after-apply-0"):
 def t12_recovery_lease(fx):
     env = fx.env
     root = _interrupted(fx, "t12-live-peer")
-    # A live peer takes the shared lease through the upgrade verb, as `opf upgrade` does.
+    # A live peer takes the shared lease under another verb's label (`upgrade`, which no writer of this
+    # tooling now uses), so the record recovery treats it as a live peer, never its own leftover.
     root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     try:
         peer = guard.acquire_lease(root_fd, MACH, "upgrade")
@@ -1792,7 +2173,7 @@ def t16_recorded_predecessor(fx):
         _set_status(fx, root, "done/proposed", "proposed by hand")
         refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
                           "no pre-proposal state")
-    # Merge styles of a reject-and-re-propose cycle (the QA3 F1 reproduction): the recorded field rides
+    # Merge styles of a reject-and-re-propose cycle: the recorded field rides
     # the merge, so the rejection still restores the true predecessor and the forged line still fails.
     for style in ("no-ff", "squash"):
         root = fx.case("t16-merge-" + style)
@@ -1829,7 +2210,7 @@ def t16_recorded_predecessor(fx):
 
 
 # A schema-invalid current row (a doctor finding) is never trusted or overwritten, so the verb never launders
-# a doctor-INVALID store into a VALID one (QA4 F1). Each refusal is its own test, so flip_t16_trust must turn
+# a doctor-INVALID store into a VALID one. Each refusal is its own test, so flip_t16_trust must turn
 # EACH one red, not only the first.
 
 def _forged_predecessor(fx, name):
@@ -1907,7 +2288,7 @@ def flip_t16_trust():
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
-# --- T17: the strict type-aware delta comparison (codex QA3 F2) ----------------------------------------------
+# --- T17: the strict type-aware delta comparison -------------------------------------------------------------
 
 MANIFEST = MACH + "/manifest.toml"
 
@@ -2429,10 +2810,10 @@ ARCHIVE = MACH + "/archive/2026"
 ARCHIVED_PD_INDEX = ARCHIVE + "/pending_decision.index.toml"
 
 
-def _rotate(fx, root, rid):
+def _rotate(fx, root, rid, index_rel=PD_INDEX, archived_rel=ARCHIVED_PD_INDEX, rtype="pending_decision"):
     """Release the whole worklog as 0.1.0 (release_cut, its published changelog summary, and VERSION) and
-    rotate it into archive/2026 with `rid`'s pending_decision row, archive.toml enumerating the moved id
-    and span; then render and commit: doctor VALID (spec 12)."""
+    rotate it into archive/2026 with `rid`'s row of `rtype` (a pending_decision unless named), archive.toml
+    enumerating the moved id and span; then render and commit: doctor VALID (spec 12)."""
     env = fx.env
     worklog, version = model(root, WORKLOG), model(root, VERSION)
     cut = opf_release.release_cut(version, worklog, "0.1.0", "2026-09-01T00:00:00Z")
@@ -2443,17 +2824,17 @@ def _rotate(fx, root, rid):
     released["summary"] = [{"covers": "0.1.0", "status": "published",
                             "digest": opf_changelog.freeze_digest(dict(entries)["0.1.0"])},
                            {"covers": "unreleased", "status": "working"}]
-    index = model(root, PD_INDEX)
+    index = model(root, index_rel)
     moved = [r for r in index["record"] if r["id"] == rid]
     assert len(moved) == 1, (rid, index)
     index["record"] = [r for r in index["record"] if r["id"] != rid]
     span = [worklog["entry"][0]["id"], worklog["entry"][-1]["id"]]
     documents = {
-        VERSION: released, PD_INDEX: index, WORKLOG: dict(worklog, entry=[]),
-        ARCHIVED_PD_INDEX: {"schema": 1, "record": moved},
+        VERSION: released, index_rel: index, WORKLOG: dict(worklog, entry=[]),
+        archived_rel: {"schema": 1, "record": moved},
         ARCHIVE + "/worklog.toml": {"schema": 1, "entry": worklog["entry"]},
-        ARCHIVE + "/archive.toml": {"schema": 1, "moved": [{"id": rid, "type": "pending_decision",
-                                                           "destination": "archive/2026/pending_decision.index.toml"}],
+        ARCHIVE + "/archive.toml": {"schema": 1, "moved": [{"id": rid, "type": rtype,
+                                                           "destination": archived_rel[len(MACH) + 1:]}],
                                    "worklog_moved": [{"span": span, "destination": "archive/2026/worklog.toml"}]}}
     (Path(root) / ARCHIVE).mkdir(parents=True)
     for rel, document in documents.items():
@@ -2522,7 +2903,7 @@ def flip_t72_archive():
 
 
 def t72_archived_head(fx):
-    """QA4 MINOR-3. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
+    """An archived chain head. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
     doctor VALID. PD-3 decided with --supersedes PD-2 finds the archived head through the chain rule's
     record set, so it lands and the doctor stays VALID, PD-3 the chain's one current resolution."""
     root = fx.case("t72-archived-head")
@@ -2740,6 +3121,277 @@ def flip_t73_receipt():
     """The rejection of acknowledged/proposed keeps the receipt keys, which a sent contribution may not
     carry."""
     return patch.object(record, "_rejected_delivery", lambda rtype, cur_state, rejection, row: None)
+
+
+# --- T89: posting a new handoff supersedes the current one in the same act ----------------------------------
+
+HANDOFF_VIEW = ".working/HANDOFF.md"
+HO_CREATE = ["create", "--type", "handoff", "--title", "resume here"]
+
+
+def _handoff_section(root, heading):
+    """The entry lines of one section of the rendered HANDOFF view."""
+    text = read(root, HANDOFF_VIEW).decode("utf-8")
+    assert "## " + heading + "\n" in text, (heading, text)
+    return text.split("## " + heading + "\n", 1)[1].split("\n## ", 1)[0].strip().splitlines()
+
+
+def t89_handoff_supersession(fx):
+    """A first handoff supersedes nothing and reports no status change; posting the second supersedes it in
+    the same act (spec 8.5), landing the status the writer's transition grammar derives for the posting
+    actor (spec 8.4): an assistant posting lands HO-1 at superseded/proposed with proposed_from recording
+    current, HANDOFF.md surfacing it as awaiting ratification; an automation posting lands the same; a
+    maintainer posting lands unqualified superseded. Each posting takes this operation's updated_at,
+    appends the supersedes link after its requested links, records the supersession in its worklog entry,
+    reports the status change, and is doctor VALID once committed, HANDOFF.md showing exactly one current
+    handoff."""
+    env = fx.env
+    root = fx.case("t89-supersede")
+    with ticking():
+        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        assert '"change": null' in out, ("T89 a first handoff reports no status change", out[-800:])
+        first = row(root, "HO-1", HO_INDEX)
+        assert first["status"] == "current" and "links" not in first, first
+        doctor_valid(env, root)
+        out = step(fx, root, HO_CREATE + ["--link", "relates=HO-1"] + ASSISTANT, "HO-2 supersedes HO-1")
+        assert '"change": "HO-1 current -> superseded/proposed"' in out, (
+            "T89 the assistant supersession is reported as the proposal it lands", out[-800:])
+        old, new = row(root, "HO-1", HO_INDEX), row(root, "HO-2", HO_INDEX)
+        assert old["status"] == "superseded/proposed" and old["proposed_from"] == "current", (old, new)
+        assert old["updated_at"] == new["created_at"], (old, new)
+        assert new["status"] == "current" and new["links"] == [
+            {"rel": "relates", "id": "HO-1"}, {"rel": "supersedes", "id": "HO-1"}], new
+        assert lifecycle(root)[-1] == "opf-record create HO-2 current\nsupersedes: HO-1", lifecycle(root)
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert entry["links"] == [{"rel": "relates", "id": "HO-2"}, {"rel": "relates", "id": "HO-1"}], entry
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
+        assert _handoff_section(root, "Awaiting ratification") == [
+            "- HO-1 (superseded/proposed) resume here"], read(root, HANDOFF_VIEW)
+        # An automation posting lands the same proposal shape; a maintainer then posts over it, and the
+        # maintainer's supersession lands the unqualified terminal with no proposed_from (spec 8.4).
+        out = step(fx, root, HO_CREATE + ["--actor", "automation"], "HO-3 supersedes HO-2")
+        assert '"change": "HO-2 current -> superseded/proposed"' in out, out[-800:]
+        auto = row(root, "HO-2", HO_INDEX)
+        assert auto["status"] == "superseded/proposed" and auto["proposed_from"] == "current", auto
+        doctor_valid(env, root)
+        out = step(fx, root, HO_CREATE + MAINTAINER, "HO-4 supersedes HO-3")
+        assert '"change": "HO-3 current -> superseded"' in out, (
+            "T89 the maintainer supersession lands unqualified", out[-800:])
+        done = row(root, "HO-3", HO_INDEX)
+        assert done["status"] == "superseded" and "proposed_from" not in done, done
+        assert row(root, "HO-4", HO_INDEX)["status"] == "current", row(root, "HO-4", HO_INDEX)
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-4 resume here"], read(root, HANDOFF_VIEW)
+        assert _handoff_section(root, "Superseded") == ["- HO-3 resume here"], read(root, HANDOFF_VIEW)
+
+
+def flip_t89_skip():
+    """The planner performs no supersession (the reviewed head's behaviour: create only appends): only the
+    independent oracle, which derives the handoff posting rule on its own, refuses the second posting."""
+    return patch.object(record, "_handoff_supersession", lambda ctx, operand, ts: None)
+
+
+def flip_t89_required_target():
+    """A supersession that demands a previous current handoff: a first handoff, with nothing to supersede,
+    is refused instead of posted."""
+    original = record._handoff_supersession
+
+    def demanding(ctx, operand, ts):
+        target = original(ctx, operand, ts)
+        if target is None:
+            raise record.RecordError("posting a handoff requires a current handoff to supersede; fail-closed")
+        return target
+    return patch.object(record, "_handoff_supersession", demanding)
+
+
+def flip_t89_unqualified():
+    """A supersession landed unqualified whatever the posting actor (the spec-8.4 bypass this gate must
+    catch): the landing derivation always returns the bare state. The planner's own validate_transition
+    refuses that landing (an assistant terminal transition must land '/proposed', spec 8.4), so the
+    assistant posting refuses and its test goes red; the independent oracle's per-actor derivation is
+    covered by the unit vectors."""
+    return patch.object(record, "_derived_status", lambda kind, spec, cur_state, target: target)
+
+
+def t89_two_current_refused(fx):
+    """The forbidden prior state (spec 8.5: at most one current handoff) refuses with its named diagnostic
+    and every byte untouched, never published and then failed at the final doctor: a second current handoff
+    hand-edited in canonically (a C-HANDOFF finding at rest) refuses the next posting."""
+    env = fx.env
+    root = fx.case("t89-two-current")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        index = model(root, HO_INDEX)
+        forged = dict(index["record"][0], id="HO-2", title="a forged twin")
+        index["record"] = index["record"] + [forged]
+        write_commit(env, root, HO_INDEX, emit.emit_checked(index).encode("utf-8"), "a second current handoff")
+        counters = model(root, COUNTERS)
+        counters["counters"]["HO"] += 1
+        write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc == 1 and "C-HANDOFF" in out, ("T89 two current handoffs are a doctor finding", rc,
+                                                out[-1600:])
+        refused_untouched(env, root, HO_CREATE + ASSISTANT, "two-current-handoffs")
+
+
+def flip_t89_first_current():
+    """Supersede whichever current handoff comes first when several stand: the forbidden prior state is
+    laundered instead of refused with its named diagnostic. The independent oracle derives the one-current
+    rule on its own and still refuses, so the named refusal this flip removes turns its test red."""
+    original = record._current_handoffs
+
+    def first_only(ctx, rows, verb="create handoff"):
+        return original(ctx, rows, verb=verb)[:1]
+    return patch.object(record, "_current_handoffs", first_only)
+
+
+def t89_importer_history_posts(fx):
+    """A legacy importer-authored current handoff in the clean index is history outside every current-state
+    join (spec 8.6: the section 8.5 at-most-one-current rule evaluates only clean records authored by
+    non-importer actors, and such a record keeps its bytes, its recorded state and its place in the clean
+    series): a clean posting proceeds, supersedes nothing, and leaves the importer bytes untouched; the
+    committed store is doctor VALID and HANDOFF.md keeps the history out of Current. A second clean
+    posting then supersedes the clean current handoff only (the mixed historical-importer/clean-current
+    case), the history again untouched."""
+    env = fx.env
+    root = fx.case("t89-importer-history")
+    legacy = {
+        "id": "HO-1", "type": "handoff", "status": "current", "title": "migrated",
+        "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z",
+        "actor": {"kind": "importer"}}
+    index = model(root, HO_INDEX)
+    index["record"] = index["record"] + [legacy]
+    write_commit(env, root, HO_INDEX, emit.emit_checked(index).encode("utf-8"), "a legacy importer handoff")
+    counters = model(root, COUNTERS)
+    counters["counters"]["HO"] += 1
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    with ticking():
+        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-2 over importer history")
+        assert '"change": null' in out, ("T89 importer history discharges no supersession", out[-800:])
+        assert row(root, "HO-1", HO_INDEX) == legacy, ("T89 the importer bytes stay untouched",
+                                                       row(root, "HO-1", HO_INDEX))
+        posted = row(root, "HO-2", HO_INDEX)
+        assert posted["status"] == "current" and "links" not in posted, posted
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
+        assert _handoff_section(root, "Imported history") == [
+            "- HO-1 (current) migrated"], read(root, HANDOFF_VIEW)
+        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-3 supersedes HO-2, the history untouched")
+        assert '"change": "HO-2 current -> superseded/proposed"' in out, out[-800:]
+        assert row(root, "HO-1", HO_INDEX) == legacy, row(root, "HO-1", HO_INDEX)
+        assert row(root, "HO-3", HO_INDEX)["links"] == [{"rel": "supersedes", "id": "HO-2"}], (
+            row(root, "HO-3", HO_INDEX))
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-3 resume here"], read(root, HANDOFF_VIEW)
+
+
+def flip_t89_importer():
+    """Count importer-authored rows back into the writer's current-handoff join (the conflation this gate
+    must catch): the posting then wrongly supersedes the imported history. The independent oracle keeps
+    its own importer exclusion and expects no supersession, so the posting refuses and the test goes
+    red."""
+    def counted(ctx, rows, verb="create handoff"):
+        archived, problems = opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types,
+                                                        ctx.vendors, ctx.import_status, homes=ctx.homes)
+        if problems:
+            raise record.RecordError("the archive does not pass the doctor's own archive walk ({}); "
+                                     "fail-closed".format("; ".join(problems)))
+        recs = [opf_check._make_rec(r, record.HANDOFF, "active")
+                for r in rows if isinstance(r, dict)] + archived
+        return [rec for rec in recs
+                if rec.rtype == record.HANDOFF and rec.state == "current" and rec.qual is None]
+    return patch.object(record, "_current_handoffs", counted)
+
+
+def t89_archived_current_refused(fx):
+    """A current handoff hand-rotated into an archive bucket (a C-ROTATION finding at rest: the archive
+    never holds a current handoff, spec 12) refuses the next posting with the named
+    archived-current-handoff diagnostic, ahead of the generic archive-walk refusal, and every byte
+    untouched."""
+    env = fx.env
+    root = fx.case("t89-archived-current")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        index = model(root, HO_INDEX)
+        moved = index["record"]
+        index["record"] = []
+        (Path(root) / ARCHIVE).mkdir(parents=True)
+        documents = {
+            HO_INDEX: index,
+            ARCHIVE + "/handoff.index.toml": {"schema": 1, "record": moved},
+            ARCHIVE + "/archive.toml": {"schema": 1, "moved": [{
+                "id": "HO-1", "type": "handoff", "destination": "archive/2026/handoff.index.toml"}]}}
+        for rel, document in documents.items():
+            (Path(root) / rel).write_bytes(emit.emit_checked(document).encode("utf-8"))
+        fx.commit_all(root, "HO-1 hand-rotated to the archive while current")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc == 1 and "C-ROTATION" in out, ("T89 the archived current handoff is a doctor finding",
+                                                 rc, out[-1600:])
+        refused_untouched(env, root, HO_CREATE + ASSISTANT, "archived-current-handoff")
+
+
+def flip_t89_archived():
+    """Drop the named archived-current classification back to the generic archive-walk refusal (the
+    unreachable-diagnostic regression this gate must catch): the posting still refuses fail-closed, but
+    not with the named diagnostic, so the needle assertion goes red."""
+    def generic_only(ctx, rows, verb="create handoff"):
+        archived, problems = opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types,
+                                                        ctx.vendors, ctx.import_status, homes=ctx.homes)
+        if problems:
+            raise record.RecordError("the archive does not pass the doctor's own archive walk ({}); "
+                                     "fail-closed".format("; ".join(problems)))
+        recs = [opf_check._make_rec(r, record.HANDOFF, "active")
+                for r in rows if isinstance(r, dict)] + archived
+        return [rec for rec in recs
+                if rec.rtype == record.HANDOFF and rec.state == "current" and rec.qual is None
+                and rec.actor_kind != "importer"]
+    return patch.object(record, "_current_handoffs", generic_only)
+
+
+def t89_reject_supersession(fx):
+    """A maintainer rejecting the supersession proposal an assistant posting created, back to current,
+    while the new handoff stands current, refuses whole with the named two-current-handoffs diagnostic
+    and every byte untouched, never published and then failed at the final doctor: spec 8.8 bounds a
+    rejection to restoring the one named record and settles no outcome for the newer post, so the writer
+    invents none and keeps the spec 8.5 at-most-one-current rule after every reachable sequence.
+    Ratifying the proposal to unqualified superseded still passes and leaves exactly one current handoff;
+    a rejection with no other clean current handoff (a transition-proposed supersession over the sole
+    handoff) still restores current, so the sole-current rule refuses nothing the spec allows."""
+    env = fx.env
+    root = fx.case("t89-reject-supersession")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-2 supersedes HO-1")
+        assert row(root, "HO-1", HO_INDEX)["status"] == "superseded/proposed", row(root, "HO-1", HO_INDEX)
+        reject = ["transition", "HO-1", "current", "--reason", "the old handoff still stands"] + MAINTAINER
+        refused_untouched(env, root, reject, "two-current-handoffs")
+        out = step(fx, root, ["transition", "HO-1", "superseded"] + MAINTAINER, "HO-1 ratified")
+        assert '"change": "HO-1 superseded/proposed -> superseded"' in out, out[-800:]
+        done = row(root, "HO-1", HO_INDEX)
+        assert done["status"] == "superseded" and "proposed_from" not in done, done
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
+    root = fx.case("t89-reject-sole-current")
+    with ticking():
+        step(fx, root, HO_CREATE + ASSISTANT, "HO-1")
+        step(fx, root, ["transition", "HO-1", "superseded"] + ASSISTANT, "HO-1 proposed superseded")
+        pending = row(root, "HO-1", HO_INDEX)
+        assert pending["status"] == "superseded/proposed" and pending["proposed_from"] == "current", pending
+        out = step(fx, root, ["transition", "HO-1", "current", "--reason", "not superseded"] + MAINTAINER,
+                   "HO-1 rejection restores current")
+        assert '"change": "HO-1 superseded/proposed -> current"' in out, out[-800:]
+        restored = row(root, "HO-1", HO_INDEX)
+        assert restored["status"] == "current" and "proposed_from" not in restored, restored
+        doctor_valid(env, root)
+        assert _handoff_section(root, "Current") == ["- HO-1 resume here"], read(root, HANDOFF_VIEW)
+
+
+def flip_t89_reject_guard():
+    """The sole-current rule dropped from the rejection path (the reviewed head's behaviour): the
+    rejection publishes a second current handoff and only the final doctor, after the store is dirtied,
+    finds the C-HANDOFF, so the bytes-untouched assertion goes red."""
+    return patch.object(record, "_require_sole_current_handoff", lambda ctx, rows, rid, rel: None)
 
 
 def t8_collision(fx):
@@ -3162,23 +3814,24 @@ def flip_t22_validator():
 
 
 # One flip per reservation-entry branch the unreadable and wrong-type cases of T22 and T81 test, each
-# disabling that branch alone.
+# disabling that branch alone. The reader is the reservation seam's own (_opf_journal), which both the
+# planner's scan and the seam's derivation under the held capability call, so a flip there reaches both.
 
 @contextlib.contextmanager
 def flip_unreadable_reservation_skipped():
     """The reservation reader's read-failure handler turned into a skip for an OS-level error: an entry
     whose open fails (an OSError) reads as holding no reservation. A read failure the journal layer
     reports (a JournalError, such as a non-regular entry) still refuses."""
-    real = record._read_reservation
+    real = record._opf_journal._read_reservation
 
     def skipping(afd, kind, entry):
         try:
             return real(afd, kind, entry)
-        except record.RecordError as exc:
+        except journal.JournalError as exc:
             if str(exc).startswith("cannot read the id reservation ") and isinstance(exc.__context__, OSError):
                 return {}
             raise
-    with patch.object(record, "_read_reservation", skipping):
+    with patch.object(record._opf_journal, "_read_reservation", skipping):
         yield
 
 
@@ -3187,7 +3840,8 @@ def flip_string_claims_admitted():
     """The reservation claims check without its type test for a string: a claims value that is a decimal
     string is checked as the integer it spells, so the reader no longer refuses it as malformed, and the
     scan's high-water comparison of that string with an integer crashes (the injection its declared
-    backstop is bound to, recorded where it leaves _kind_reservation_high; T22 and T81 both reach it)."""
+    backstop is bound to, recorded where it leaves _opf_journal._kind_reservation_high; T22 and T81
+    both reach it)."""
     real = record._opf_journal._check_claims
 
     def lenient(kind, claims):
@@ -3196,7 +3850,7 @@ def flip_string_claims_admitted():
                           for ns, n in claims.items())
         return real(kind, claims)
     with patch.object(record._opf_journal, "_check_claims", lenient), \
-            _crash_point("t22-t81-string-claims", record, "_kind_reservation_high",
+            _crash_point("t22-t81-string-claims", record._opf_journal, "_kind_reservation_high",
                          TypeError("'>' not supported between instances of 'str' and 'int'")):
         yield
 
@@ -6612,8 +7266,9 @@ def flip_t84():
 
 def t78_homes2_needs_the_pair(fx):
     """With homes 2 activated as the record verb will run once activation admits it (SUPPORTED_HOMES = 2
-    alone, without _Homes2SpecGate, so _load_manifest still admits 1.2.0 and the journal-home probe is
-    the only guard), a store declaring homes = 2 at the base spec_version (1.2.0, not
+    alone, without _Homes2SpecGate, so _load_manifest still admits 1.2.0; manifest validation also
+    refuses this declaration, but only after reconciliation, so the journal-home probe is the guard
+    before any write), a store declaring homes = 2 at the base spec_version (1.2.0, not
     HOMES2_SPEC_VERSION) is not a homes-2 store, and the record verb refuses it at that probe before any
     reconciliation or write. Two stores, each with the declaration committed: a fresh one, where a run
     past the probe publishes into the legacy journal and rewrites the operands, and one holding a
@@ -6732,9 +7387,10 @@ def t79_kill_after_reserve(fx):
 
 
 def flip_t79():
-    """A derivation that ignores the reservation scan: an orphaned reservation gets its numbers
-    issued again."""
-    return patch.object(record, "_reservation_high", lambda ctx: {})
+    """A derivation that ignores the reservation scan, in the planner and in the reservation seam
+    alike (both read _opf_journal.reservation_high): an orphaned reservation gets its numbers issued
+    again."""
+    return patch.object(record._opf_journal, "reservation_high", lambda root_fd, exclude=None: {})
 
 
 def flip_t79_doctor():
@@ -6807,11 +7463,72 @@ def t80_two_runs_never_same_id(fx):
 
 
 def flip_t80_no_recheck():
-    """A held reservation step with no fresh scan and no stale-plan comparison: the planned claims are
-    reserved as they stand, so a reservation landing after planning is never noticed."""
+    """A held reservation step with no stale-plan comparison: the seam is asked for the run's demand
+    without the planned claims as `expected`, so a reservation landing after planning is never noticed
+    here and the stale run reserves the next numbers, which its plan does not carry. T80 calls this step
+    directly, so it sees no refusal; on the full record path the publication boundary's claims
+    comparison (_require_reservation) would still refuse the run, leaving that reservation orphaned."""
     def no_recheck(ctx, plan, cap, run_id):
-        record._opf_journal.reserve_allocation(cap, "record", run_id, ctx.claims)
+        record._opf_journal.reserve_allocation(cap, "record", run_id,
+                                               {ns: ctx.demand.count(ns) for ns in ctx.demand})
     return patch.object(record, "_reserve_claim", no_recheck)
+
+
+def t94_planned_ids_bound_to_claims(fx):
+    """The held reservation step refuses a plan whose ordered ids are not the ones its demand and
+    planned claims imply, before anything is reserved: with the claims unchanged, a wrong number, the
+    right ids in another order, a missing id and an extra id each refuse with no reservation, no
+    transaction and every operand at the prestate; the plan's own ids then reserve exactly its claims."""
+    base = fx.case("t94-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t94-homes2-planned-ids", base)
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        stamp = "record-20260927T000201Z-" + "c" * 16
+        reservation = Path(root) / record._opf_store.allocation_record("record", stamp)
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        try:
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            record._load_manifest(ctx)
+            assert ctx.homes == 2, ("T94 the validated generation", ctx.homes)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            ids = record._claim(ctx, ["BI", "WL"])
+            assert ids == ["BI-1", "WL-1"] and ctx.claims == {"BI": 1, "WL": 1}, ("T94 the plan", ids, ctx.claims)
+
+            def reserve(planned_ids):
+                cap = record._opf_oplock.acquire_operation(str(res.store_root), record.VERB)
+                try:
+                    record._reserve_claim(ctx, record.Plan([], planned_ids), cap, stamp)
+                finally:
+                    record._opf_oplock.release_operation(cap)
+            for label, wrong in (("foreign-number", ["BI-999", "WL-1"]), ("reordered", ["WL-1", "BI-1"]),
+                                 ("missing", ["BI-1"]), ("extra", ["BI-1", "WL-1", "BI-2"])):
+                try:
+                    reserve(wrong)
+                except record.RecordError as exc:
+                    message = str(exc)
+                else:
+                    raise AssertionError(("T94 a plan whose ids its claims do not imply must refuse", label))
+                assert "are not the ids its demand and planned claims imply" in message, (label, message)
+                assert not reservation.exists(), ("T94 the refused plan publishes no reservation", label)
+                assert journal_states(root, TYPED_JOURNAL) == {}, ("T94 no transaction is opened", label)
+                assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, \
+                    ("T94 no operand is published", label)
+            reserve(ids)
+        finally:
+            os.close(root_fd)
+        payload = model(root, record._opf_store.allocation_record("record", stamp))
+        assert payload["claims"] == {"BI": 1, "WL": 1}, ("T94 the plan's own ids reserve its claims", payload)
+
+
+def flip_t94_ids_unchecked():
+    """The held reservation step without its planned-id check: only the claims are compared, so a plan
+    whose ids its claims do not imply reserves. T94 calls this step directly, so nothing else refuses
+    that plan; on the full record path the postcondition's id comparison (_postcondition) would
+    still refuse the run before the lease, so the planned-id check is a second guard behind it."""
+    return patch.object(record, "_check_planned_ids", lambda ctx, plan: None)
 
 
 # --- T81-T83: the cross-kind high-water, the publication boundary, the journal-home reader ---------------
@@ -6892,9 +7609,12 @@ def t81_cross_kind_reservations(fx):
 
 
 def flip_t81():
-    """The reviewed head's single hard-coded home: only the record kind's reservations are read."""
-    return patch.object(record, "_reservation_high",
-                        lambda ctx: record._kind_reservation_high(ctx, "record", record._ALLOCATIONS_REL))
+    """The reviewed head's single hard-coded home: only the record kind's reservations are read, by the
+    planner and by the reservation seam alike."""
+    def record_home_only(root_fd, exclude=None):
+        skip = exclude[1] + ".toml" if exclude is not None and exclude[0] == "record" else None
+        return record._opf_journal._kind_reservation_high(root_fd, "record", record._ALLOCATIONS_REL, skip)
+    return patch.object(record._opf_journal, "reservation_high", record_home_only)
 
 
 def flip_t81_doctor():
@@ -7135,14 +7855,16 @@ def _t85_leg(fx, kind, shape):
                 refused_untouched(env, root, CREATE, "cannot list the {} allocations home {} ([Errno {}] "
                                   "synthetic unlistable allocations home".format(kind, rel, errno.EIO))
         elif shape == "underivable":
-            real = record._allocations_rel
+            # The derivation the scan reads is the reservation seam's own (_opf_journal), which the
+            # planner's scan and the seam's derivation under the held capability both call.
+            real = record._opf_journal._allocations_rel
             error = KeyError if kind == "import" else ValueError
 
             def underivable(k):
                 if k == kind:
                     raise error("synthetic underivable {} home".format(kind))
                 return real(k)
-            with patch.object(record, "_allocations_rel", underivable):
+            with patch.object(record._opf_journal, "_allocations_rel", underivable):
                 refused_untouched(env, root, CREATE, "the journal kind {!r} has no reservation home this "
                                   "build can derive (".format(kind))
         else:
@@ -7157,8 +7879,10 @@ def _t85(kind, shape):
 
 
 # The reservation scan's four broken-home handlers, each with its own flip that turns that handler alone
-# into `return {}`: in _kind_reservation_high, the walk to the home's parent (_journal._open_parent), the
-# home's own no-follow open, and its listing; in _reservation_high, the derivation of a kind's home (two
+# into `return {}`, in the reservation seam's own scan (_opf_journal), which the planner and the seam's
+# derivation under the held capability both call: in _kind_reservation_high, the walk to the home's parent
+# (_journal._open_parent), the home's own no-follow open, and its listing; in reservation_high, the
+# derivation of a kind's home (two
 # flips, one per underivable leg, because only the record kind's leg then crashes past the scan, so only
 # its flip expects that crash, _INTENDED_BACKSTOPS). A
 # wrapper returns {} exactly where its handler raises, which is where the handler would have returned,
@@ -7168,7 +7892,7 @@ T85_DERIVE_REFUSAL = "has no reservation home this build can derive"
 
 
 def _t85_home_handler(exc):
-    """The _kind_reservation_high handler that raised the RecordError `exc`: "open-parent" when the error it
+    """The _kind_reservation_high handler that raised the JournalError `exc`: "open-parent" when the error it
     handled was raised inside _journal._open_parent, "open" for the home's own open, "listing", or None
     for any other refusal."""
     message = str(exc)
@@ -7187,16 +7911,16 @@ def _t85_home_handler(exc):
 @contextlib.contextmanager
 def _t85_home_handler_returns_empty(handler):
     """_kind_reservation_high with its `handler` (as _t85_home_handler names it) turned into return {}."""
-    kind_high = record._kind_reservation_high
+    kind_high = record._opf_journal._kind_reservation_high
 
-    def returning_empty(ctx, kind, home):
+    def returning_empty(root_fd, kind, home, skip=None):
         try:
-            return kind_high(ctx, kind, home)
-        except record.RecordError as exc:
+            return kind_high(root_fd, kind, home, skip)
+        except journal.JournalError as exc:
             if _t85_home_handler(exc) == handler:
                 return {}
             raise
-    with patch.object(record, "_kind_reservation_high", returning_empty):
+    with patch.object(record._opf_journal, "_kind_reservation_high", returning_empty):
         yield
 
 
@@ -7221,19 +7945,19 @@ def flip_t85_listing():
 
 @contextlib.contextmanager
 def flip_t85_derive():
-    """The derivation handler of _reservation_high turned into return {}: a kind whose home cannot be
+    """The derivation handler of reservation_high turned into return {}: a kind whose home cannot be
     derived ends the scan with no reservations, every kind's included (the import kind's underivable
     leg, which then records)."""
-    high = record._reservation_high
+    high = record._opf_journal.reservation_high
 
-    def returning_empty(ctx):
+    def returning_empty(root_fd, exclude=None):
         try:
-            return high(ctx)
-        except record.RecordError as exc:
+            return high(root_fd, exclude)
+        except journal.JournalError as exc:
             if T85_DERIVE_REFUSAL in str(exc):
                 return {}
             raise
-    with patch.object(record, "_reservation_high", returning_empty):
+    with patch.object(record._opf_journal, "reservation_high", returning_empty):
         yield
 
 
@@ -7247,6 +7971,206 @@ def flip_t85_derive_record():
     with flip_t85_derive(), \
             _crash_point("t85-record-underivable", record, "_read_reservation",
                          ValueError("synthetic underivable record home")):
+        yield
+
+
+# --- T91, T92: the seam's own next-ID derivation (spec 8.2) ---------------------------------------------
+
+def _seam_reservation_bi(root, run_id):
+    """The BI claim of the record reservation `run_id` on the store `root`, whose bytes must be the
+    canonical payload its own content declares."""
+    rel = record._opf_store.allocation_record("record", run_id)
+    payload = model(root, rel)
+    assert read(root, rel) == record._opf_journal.reservation_payload(
+        "record", run_id, payload["operation_id"], payload["claims"]), ("canonical reservation", rel)
+    return payload["claims"]["BI"]
+
+
+def t91_seam_five_sequential_distinct(fx):
+    """Five runs each reserving one BI id through the reservation seam alone (no planner), each under
+    an operation capability of its own acquired and released in turn, never share a number: the seam
+    derives every claim under the held capability from counters.toml and every earlier reservation,
+    so the runs claim the counter's base + 1 to base + 5 in order, five reservations standing."""
+    root = fx.case("t91-homes2-five-runs")
+    with _self_test_homes2_active(root):
+        base = model(root, COUNTERS)["counters"]["BI"]
+        runs = ["record-20260928T00000{}Z-".format(n) + "e" * 16 for n in range(1, 6)]
+        for run_id in runs:
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+            try:
+                record._opf_journal.reserve_allocation(cap, "record", run_id, {"BI": 1})
+            finally:
+                record._opf_oplock.release_operation(cap)
+        claims = [_seam_reservation_bi(root, run_id) for run_id in runs]
+        assert claims == [base + n for n in range(1, 6)], ("T91 five runs claim five distinct numbers", base,
+                                                            claims)
+        assert sorted(os.listdir(Path(root) / record._ALLOCATIONS_REL)) == sorted(r + ".toml" for r in runs), \
+            "T91 five reservations stand"
+
+
+def flip_t91_scan_ignored():
+    """The seam deriving from counters.toml alone (the reservation scan returns nothing): every run
+    reserves the same next number."""
+    return patch.object(record._opf_journal, "reservation_high", lambda root_fd, exclude=None: {})
+
+
+T92_CHILDREN = 6
+# Each child's own bound on retrying a contended acquisition, and the parent's bound on reaping them.
+T92_CHILD_DEADLINE = 60.0
+T92_REAP_DEADLINE = 120.0
+
+
+def _t92_child(root, run_id, go_fd, parent_end):
+    """A forked T92 child: close its inherited copy of the parent's write end of the start pipe, wait
+    for the parent's start byte, take the operation capability (retrying while another child holds it,
+    up to T92_CHILD_DEADLINE), reserve one BI id, release, and exit 0; any failure exits 1. It never
+    returns."""
+    code = 1
+    try:
+        os.close(parent_end)
+        os.read(go_fd, 1)
+        deadline = time.monotonic() + T92_CHILD_DEADLINE
+        while True:
+            try:
+                cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+                break
+            except record._opf_oplock.OpLockError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.01)
+        try:
+            record._opf_journal.reserve_allocation(cap, "record", run_id, {"BI": 1})
+        finally:
+            record._opf_oplock.release_operation(cap)
+        code = 0
+    except BaseException:  # noqa: BLE001  the exit status is the child's only verdict
+        code = 1
+    finally:
+        os._exit(code)
+
+
+def _t92_reap(pids):
+    """The wait status of each of this test's own children, in order, None for one that outlived
+    T92_REAP_DEADLINE; such a child, and only such a child of this test, is killed and reaped."""
+    statuses = {}
+    deadline = time.monotonic() + T92_REAP_DEADLINE
+    while len(statuses) < len(pids) and time.monotonic() < deadline:
+        for pid in pids:
+            if pid not in statuses:
+                waited, status = os.waitpid(pid, os.WNOHANG)
+                if waited == pid:
+                    statuses[pid] = status
+        time.sleep(0.05)
+    for pid in pids:
+        if pid not in statuses:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    return [statuses.get(pid) for pid in pids]
+
+
+def t92_seam_concurrent_processes_distinct(fx):
+    """Concurrent runs in separate processes never share a number. T92_CHILDREN forked processes,
+    released together through a pipe, each take the operation capability (retrying while another holds
+    it: the anchor flock is non-blocking, so a contender is refused, never queued) and reserve one BI id
+    through the seam: every child exits 0 and the claims are exactly base + 1 to base + T92_CHILDREN."""
+    root = fx.case("t92-homes2-concurrent")
+    with _self_test_homes2_active(root):
+        base = model(root, COUNTERS)["counters"]["BI"]
+        runs = ["record-20260928T0001{:02d}Z-".format(n) + "f" * 16 for n in range(T92_CHILDREN)]
+        go_read, go_write = os.pipe()
+        pids = []
+        try:
+            for run_id in runs:
+                pid = os.fork()
+                if pid == 0:
+                    _t92_child(root, run_id, go_read, go_write)
+                pids.append(pid)
+            os.write(go_write, b"g" * len(pids))
+        finally:
+            os.close(go_read)
+            os.close(go_write)
+            statuses = _t92_reap(pids)
+        assert all(s is not None and os.WIFEXITED(s) and os.WEXITSTATUS(s) == 0 for s in statuses), \
+            ("T92 every child reserved and exited 0", statuses)
+        claims = sorted(_seam_reservation_bi(root, run_id) for run_id in runs)
+        assert claims == list(range(base + 1, base + 1 + T92_CHILDREN)), \
+            ("T92 concurrent runs claim distinct consecutive numbers", base, claims)
+
+
+# How long T93's first thread is held inside the derivation waiting for the second thread's attempt to end,
+# and the parent's bound on joining both threads.
+T93_OVERLAP_DEADLINE = 30.0
+T93_JOIN_DEADLINE = 60.0
+
+
+def t93_seam_threads_serialised(fx):
+    """Two threads sharing ONE held operation capability never reserve the same number, with the two
+    reservation attempts made to overlap: the first thread is held inside the seam's derivation (under
+    the capability's claim, after it has derived its claims and before it publishes) until the second
+    thread's attempt has ended, and the second thread starts only once the first is held there. The
+    second attempt is refused at once as the capability being used, the first then reserves base + 1,
+    and exactly that one reservation stands. A second attempt that blocks instead of ending releases the
+    first at T93_OVERLAP_DEADLINE and turns this red on the outcomes."""
+    root = fx.case("t93-homes2-threads")
+    with _self_test_homes2_active(root):
+        base = model(root, COUNTERS)["counters"]["BI"]
+        runs = ["record-20260928T0002{:02d}Z-".format(n) + "f" * 16 for n in range(2)]
+        outcomes = [None, None]
+        held_inside, second_ended = threading.Event(), threading.Event()
+        real_derive = record._opf_journal._derive_claims
+
+        def holding_derive(root_fd, machine_rel, kind, run_id, demand):
+            claims = real_derive(root_fd, machine_rel, kind, run_id, demand)
+            if run_id == runs[0]:
+                held_inside.set()
+                second_ended.wait(T93_OVERLAP_DEADLINE)
+            return claims
+
+        def worker(index):
+            try:
+                record._opf_journal.reserve_allocation(cap, "record", runs[index], {"BI": 1})
+                outcomes[index] = "reserved"
+            except journal.JournalError as exc:
+                outcomes[index] = str(exc)
+            finally:
+                if index == 1:
+                    second_ended.set()
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            with patch.object(record._opf_journal, "_derive_claims", holding_derive):
+                first = threading.Thread(target=worker, args=(0,))
+                first.start()
+                reached = held_inside.wait(T93_OVERLAP_DEADLINE)
+                second = threading.Thread(target=worker, args=(1,))
+                second.start()
+                for thread in (first, second):
+                    thread.join(timeout=T93_JOIN_DEADLINE)
+        finally:
+            record._opf_oplock.release_operation(cap)
+        assert reached, ("T93 the first thread is held inside the derivation", outcomes)
+        assert not first.is_alive() and not second.is_alive(), "T93 both threads finished"
+        assert outcomes[0] == "reserved" and "being released or used" in (outcomes[1] or ""), \
+            ("T93 the overlapping second attempt is refused as the capability being used", outcomes)
+        standing = sorted(n[:-len(".toml")] for n in os.listdir(Path(root) / record._ALLOCATIONS_REL))
+        numbers = [_seam_reservation_bi(root, run_id) for run_id in standing]
+        assert standing == [runs[0]] and numbers == [base + 1], \
+            ("T93 exactly the first thread's reservation stands, at base + 1", base, standing, numbers)
+
+
+@contextlib.contextmanager
+def flip_t93_unserialised():
+    """The seam's held-capability scope without its claim: each entry claims a private twin of the
+    capability (the same store, identity and descriptors, its own unused lock), so a second thread using
+    the same capability is never refused and derives while the first is still inside."""
+    real = record._opf_journal._held_root
+
+    @contextlib.contextmanager
+    def unserialised(cap):
+        twin = copy.copy(cap)
+        twin._claim = threading.Lock()
+        with real(twin) as root_fd:
+            yield root_fd
+    with patch.object(record._opf_journal, "_held_root", unserialised):
         yield
 
 
@@ -7302,7 +8226,7 @@ def _oop_declared(allowed):
 
 # The diagnostic envelope of the record CLI backstops (record.cli, opf._cmd_record) in a line _BACKSTOP
 # found: the printed repr of the exception is everything between the fixed head and the fixed tail. The
-# envelope is shared: the backstops of opf upgrade and of opf adopt plan and status print the same one,
+# envelope is shared: the backstops of opf adopt plan and status print the same one,
 # and the verb prefix that tells them apart lies before the _BACKSTOP match, so the envelope alone never
 # shows which verb printed a line; only the recorded token and parent-computed repr, which the record
 # tests' injections alone carry, make a line bind.
@@ -8646,9 +9570,9 @@ _DECLARED_INJECTIONS = {
 # run, so its recovery flip meets it too; the T84 flip restores a lease parse that lets the RecursionError of a
 # deeply nested payload reach the backstop, recorded where it leaves _closed_lease_model; the string-claims
 # flip of T22 and T81 admits a string claims value, and the TypeError the scan's high-water comparison then
-# raises is recorded where it leaves _kind_reservation_high; and the T85 record-kind derivation flip ends the
-# scan empty, so the leg's own ValueError is raised again at the publication boundary's reservation read,
-# recorded where it leaves _read_reservation.
+# raises is recorded where it leaves _opf_journal._kind_reservation_high; and the T85 record-kind
+# derivation flip ends the scan empty, so the leg's own ValueError is raised again at the publication
+# boundary's reservation read, recorded where it leaves _read_reservation.
 _INTENDED_BACKSTOPS = {
     flip_t18_requires: ("t18-requires",),
     flip_t18_together: ("t18-together",),
@@ -8795,6 +9719,1088 @@ def flip_t90_no_cap():
     return patch.object(record, "_require_within_read_cap", lambda rel, data: None)
 
 
+# --- T95: importer-authored history is never a clean-series operand (spec 8.6, 8.8) -------------------------
+
+def _importer_item(fx, name, status):
+    """A legacy importer-authored backlog item seated in the clean index with its counter (the T89 seeding),
+    then the views rendered and committed, so the store is doctor VALID before the operation runs."""
+    env = fx.env
+    root = fx.case(name)
+    legacy = {"id": "BI-1", "type": "backlog_item", "status": status, "title": "migrated",
+              "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z",
+              "actor": {"kind": "importer"}}
+    index = model(root, BI_INDEX)
+    index["record"] = index["record"] + [legacy]
+    write_commit(env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "a legacy importer item")
+    counters = model(root, COUNTERS)
+    counters["counters"]["BI"] += 1
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("T95 the views render over the history", rc, err[-800:])
+    fx.commit_all(root, "views")
+    doctor_valid(env, root)
+    return root, legacy
+
+
+def t95_importer_operand_transition(fx):
+    """A transition on a legacy importer-authored item refuses whoever acts, with every byte untouched; acting
+    on that history is a new clean record linking back, which records and leaves the history's bytes alone."""
+    env = fx.env
+    with ticking():
+        root, legacy = _importer_item(fx, "t95-importer-operand-transition", "open")
+        refused_untouched(env, root, ["transition", "BI-1", "active"] + MAINTAINER, "importer-authored-operand")
+        refused_untouched(env, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "importer-authored-operand")
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link", "derives_from=BI-1"]
+             + MAINTAINER, "BI-2 acting on history")
+        assert row(root, "BI-1") == legacy, ("T95 the history keeps its bytes", row(root, "BI-1"))
+        assert row(root, "BI-2")["links"] == [{"rel": "derives_from", "id": "BI-1"}], row(root, "BI-2")
+        doctor_valid(env, root)
+
+
+def t95_importer_operand_receipt(fx):
+    """done-with-receipt on a legacy importer-authored active item refuses with every byte untouched."""
+    with ticking():
+        root, _legacy = _importer_item(fx, "t95-importer-operand-receipt", "active")
+        refused_untouched(fx.env, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "importer-authored-operand")
+
+
+def t95_importer_resolution_superseded(fx):
+    """A --supersedes target is read and linked, never the operand: a clean decide superseding a legacy
+    importer-authored resolution (a doctor finding at rest, spec 8.6) records with the target's bytes
+    unchanged and leaves the store doctor VALID."""
+    env = fx.env
+    root = fx.case("t95-importer-resolution-superseded")
+    ts = "2026-08-01T00:00:00Z"
+    held = {"id": "PD-1", "type": "pending_decision", "status": "decided", "title": "migrated",
+            "created_at": ts, "updated_at": ts, "actor": {"kind": "importer"}, "decision": "use X",
+            "decided_at": ts, "decided_by": "the board"}
+    fresh = {"id": "PD-2", "type": "pending_decision", "status": "open", "title": "resolve it now",
+             "created_at": ts, "updated_at": ts, "actor": {"kind": "maintainer"}}
+    index = model(root, PD_INDEX)
+    index["record"] = index["record"] + [held, fresh]
+    write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "an importer resolution")
+    counters = model(root, COUNTERS)
+    counters["counters"]["PD"] += 2
+    write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    assert rc != 0 and "importer-authored pending_decision 'PD-1'" in out, (
+        "T95 the importer resolution is a doctor finding at rest", rc, out[-1600:])
+    with ticking():
+        step(fx, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by", "the board",
+                        "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes the importer resolution")
+    assert row(root, "PD-1", PD_INDEX) == held, ("T95 the target keeps its bytes", row(root, "PD-1", PD_INDEX))
+    assert row(root, "PD-2", PD_INDEX)["links"] == [{"rel": "supersedes", "id": "PD-1"}], (
+        row(root, "PD-2", PD_INDEX))
+    doctor_valid(env, root)
+
+
+def flip_t95_author():
+    """Drop the operand's author check (the reviewed head's behaviour): each transition and the receipt on
+    importer-authored history publish, so the byte comparison turns each refusal red."""
+    return patch.object(record, "_require_clean_author", lambda row, rid, rel, verb: None)
+
+
+def flip_t95_target():
+    """Apply the author check to the --supersedes target too (the check folded into _require_valid_current
+    or _require_valid_target): the clean decide that resolves an importer-authored chain then refuses, so
+    the remedy's recorded step turns red."""
+    original = record._require_valid_target
+
+    def also_author(trow, ctx, target, rel):
+        original(trow, ctx, target, rel)
+        record._require_clean_author(trow, target, rel, "transition")
+    return patch.object(record, "_require_valid_target", also_author)
+
+
+# --- T96-T98: the held-lease refusal over a malformed, a nested and a non-regular lease (spec 5.7) ----------
+# The record verb runs the check_clean lease exclusion and the acquire_lease claim that the removed
+# store-upgrade gate used to exercise, so each is driven here.
+
+T96_MALFORMED = b"not valid = = = toml\n"
+T98_BOUND = 30
+
+
+def t96_malformed_lease(fx):
+    """A malformed lease is present, so it is held, never absent: the create refuses exit 2 with the
+    held-lease refusal, the lease is not deleted and every byte is untouched."""
+    root = fx.case("t96-malformed-lease")
+    (Path(root) / LEASE).write_bytes(T96_MALFORMED)
+    before = snapshot(root)
+    result = record_cli(fx.env, root, CREATE)
+    refused(result, "never seized")
+    assert "a present lease with an unreadable payload" in result[2], result[2][-800:]
+    assert read(root, LEASE) == T96_MALFORMED, "T96 the malformed lease is not deleted"
+    assert snapshot(root) == before, "T96 every byte untouched"
+
+
+def flip_t96():
+    """An acquisition that reads a lease it cannot parse as absent: it removes that lease, then claims."""
+    original = guard.acquire_lease
+
+    def absent_if_malformed(root_fd, machine_rel, verb):
+        rel = "{}/{}".format(machine_rel, opf_check.LEASE_NAME)
+        with contextlib.suppress(FileNotFoundError):
+            with open(os.open(rel, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd), "rb") as handle:
+                raw = handle.read()
+            try:
+                tomllib.loads(raw.decode("utf-8"))
+            except ValueError:
+                os.unlink(rel, dir_fd=root_fd)
+        return original(root_fd, machine_rel, verb)
+    return patch.object(guard, "acquire_lease", absent_if_malformed)
+
+
+def t97_nested_store_held_lease(fx):
+    """A store root BELOW its git repository root, with a foreign held lease, reaches the held-lease
+    refusal naming the holder, never the dirty-store refusal: the porcelain paths are repository-root-
+    relative, so the lease is excluded only once the store's prefix is stripped. The lease survives and
+    every byte is untouched."""
+    env = fx.env
+    outer = fx.case("t97-nested")
+    store = outer / "product" / "store"
+    store.mkdir(parents=True)
+    for entry in sorted(outer.iterdir()):
+        if entry.name not in (".git", "product"):
+            entry.rename(store / entry.name)
+    env.git(outer, "add", "-A")
+    env.git(outer, "commit", "-q", "-m", "nest the store below the repository root")
+    assert env.git(store, "rev-parse", "--show-prefix") == "product/store/\n", "T97 the store is nested"
+    (store / LEASE).write_bytes(PEER_LEASE)   # untracked, as a live peer leaves it
+    before = snapshot(outer)
+    result = record_cli(env, store, CREATE)
+    refused(result, "never seized")
+    assert "peer-runner" in result[2] and "the working tree is not clean" not in result[2], result[2][-800:]
+    assert read(store, LEASE) == PEER_LEASE and snapshot(outer) == before, "T97 the peer lease survives"
+
+
+def flip_t97():
+    """The un-normalized lease exclusion: each porcelain path is compared without the store's prefix strip."""
+    original = guard.parse_porcelain
+    return patch.object(guard, "parse_porcelain",
+                        lambda raw, prefix, lease, specs, verb: original(raw, b"", lease, specs, verb))
+
+
+def t98_fifo_lease(fx):
+    """A FIFO at the lease path refuses promptly: the held-lease refusal names a present non-regular lease
+    without reading it. The create runs in a child bounded by T98_BOUND, so a blocking open turns this
+    test red rather than hanging the gate. The FIFO is untouched and every byte is unchanged."""
+    if not hasattr(os, "mkfifo"):
+        raise CannotEvaluate("T98 needs os.mkfifo to plant a FIFO lease")
+    root = fx.case("t98-fifo-lease")
+    os.mkfifo(str(Path(root) / LEASE))
+    before = snapshot(root)
+    try:
+        proc = child(fx.env, root, CREATE, flip=_t98_flip[0], timeout=T98_BOUND)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("T98 the FIFO lease held the run past {} s, never refused".format(T98_BOUND))
+    assert proc.returncode == 2, ("T98 exit 2", proc.returncode, proc.stderr[-800:])
+    assert "a present non-regular lease (held)" in proc.stderr and "never seized" in proc.stderr, (
+        proc.stderr[-800:])
+    assert stat.S_ISFIFO((Path(root) / LEASE).lstat().st_mode) and snapshot(root) == before, (
+        "T98 the FIFO is untouched")
+
+
+# The T98 flip, applied inside the bounded child: the held-lease message opens the lease without
+# O_NONBLOCK, so its open of a writer-less FIFO blocks. The wrapper forwards dir_fd, so it is listed in
+# os.supports_dir_fd, as the containment probe requires of os.open. _t98_flip holds the child's prelude.
+_t98_flip = [""]
+FLIP_T98 = """
+_open = os.open
+def _blocking_open(path, flags, *args, **kwargs):
+    if path == "lease.toml" and not flags & os.O_CREAT:
+        flags &= ~os.O_NONBLOCK
+    return _open(path, flags, *args, **kwargs)
+os.open = _blocking_open
+os.supports_dir_fd.add(_blocking_open)
+"""
+
+
+@contextlib.contextmanager
+def flip_t98():
+    _t98_flip[0] = FLIP_T98
+    try:
+        yield
+    finally:
+        _t98_flip[0] = ""
+
+
+# --- T99-T109: the planned-destination cleanliness, ignore and lease guards before mutation ----------------
+# The record verb runs check_clean and check_ignored before its lease, the cleanliness, ignore and lease
+# guards (and the normalizing-filter refusal note) that the removed store-upgrade gate used to exercise,
+# so each is driven here through `opf record create`.
+
+CONTRIBUTIONS_VIEW = ".working/CONTRIBUTIONS.md"
+VERSION_VIEW = ".working/VERSION.md"
+OWNER_BYTES = b"the owner's own notes\n"
+T105_PREFIX = b"nested-\xff/"
+
+
+def _exclude(root, *rules):
+    """Replace the repository's .git/info/exclude with `rules` (bytes), one per line."""
+    info = Path(root) / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "exclude").write_bytes(b"".join(rule + b"\n" for rule in rules))
+
+
+def _untrack(env, root, *rels):
+    """Remove `rels` from the index, keeping the files, and commit, so HEAD no longer holds them."""
+    env.git(root, "rm", "-q", "-r", "--cached", "--", *rels)
+    env.git(root, "commit", "-q", "-m", "untrack " + " ".join(rels))
+
+
+def _with_manifest(fx, root, **tables):
+    """Commit the manifest with each named top-level table replaced, emitted canonically."""
+    document = model(root, MANIFEST)
+    document.update(tables)
+    write_commit(fx.env, root, MANIFEST, emit.emit_checked(document).encode("utf-8"), "manifest tables")
+
+
+def _git_bytes(root, args, run_git=guard._opf_observe._run_git):
+    """A git observation's raw stdout, through the production bytes boundary (paths need not be UTF-8),
+    bound at import so a flip that patches the probe's git leaves the fixture's own checks alone."""
+    out = run_git(guard._opf_observe._git_path(), str(root), args)
+    if not out.completed or out.rc != 0:
+        raise Harness("fixture git {} failed: {}".format(args, out.err))
+    return out.out
+
+
+def _index_and_head(root):
+    return _git_bytes(root, ["ls-files", "--stage", "-z"]), _git_bytes(root, ["rev-parse", "HEAD"])
+
+
+def _status_ignored(root, rel):
+    return _git_bytes(root, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                             "--ignored=matching", "--no-renames", "--", rel]).split(b"\x00")
+
+
+def _create_refused(env, root, needle):
+    """refused_untouched over CREATE, returning the refusal's stderr: the byte comparison is asserted
+    first, so a guard removed under a flip turns the test red on what was written."""
+    before = snapshot(root)
+    result = record_cli(env, root, CREATE)
+    assert snapshot(root) == before, ("bytes untouched on refusal", result[0], result[2][-800:])
+    refused(result, needle)
+    return result[2]
+
+
+def t99_dirty_operand(fx):
+    """A canonical, uncommitted counters edit at a planned rewrite destination refuses exit 2 BEFORE any
+    mutation: the refusal names the path and advises committing or moving the work aside, offering no
+    restore command (the dirt is the owner's), and every byte is untouched."""
+    env = fx.env
+    root = fx.case("t99-dirty-operand")
+    (Path(root) / COUNTERS).write_bytes(read(root, COUNTERS).replace(b"BI = 0", b"BI = 1"))
+    state = _index_and_head(root)
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert COUNTERS in err and "the working tree is not clean" in err, err[-800:]
+    assert "restore --staged" not in err, err[-800:]
+    assert _index_and_head(root) == state, "T99 index and HEAD unchanged"
+
+
+def flip_t99():
+    """The cleanliness gate as a no-op."""
+    return patch.object(guard, "check_clean", lambda *args: None)
+
+
+def t100_ignored_render_target(fx):
+    """An ignored, untracked file at a declared view's destination is the owner's work, not a clean
+    destination: the create refuses exit 2 before mutation with the dirty-store remedy naming it, every
+    byte and the index untouched. Moved aside, the absent destination still refuses its ignore rule; with
+    the rule corrected the create records, and the saved owner bytes and the ignored content outside the
+    planned scope survive."""
+    env = fx.env
+    root = fx.case("t100-ignored-render-target")
+    _untrack(env, root, CONTRIBUTIONS_VIEW)
+    (Path(root) / CONTRIBUTIONS_VIEW).write_bytes(OWNER_BYTES)
+    (Path(root) / "outside-build").mkdir()
+    (Path(root) / "outside-build" / "cache").write_bytes(b"unrelated ignored content\n")
+    _exclude(root, b"/" + CONTRIBUTIONS_VIEW.encode("utf-8"), b"/outside-build/")
+    assert env.git(root, "check-ignore", "--", CONTRIBUTIONS_VIEW).strip() == CONTRIBUTIONS_VIEW, (
+        "T100 the fixture target is ignored")
+    state = _index_and_head(root)
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert CONTRIBUTIONS_VIEW in err and "restore --staged" not in err, err[-800:]
+    assert _index_and_head(root) == state, "T100 index and HEAD unchanged"
+    saved = Path(root).parent / (Path(root).name + "-owner-notes")
+    (Path(root) / CONTRIBUTIONS_VIEW).rename(saved)
+    _create_refused(env, root, "ignored planned destinations")
+    _exclude(root, b"/outside-build/")
+    recorded(record_cli(env, root, CREATE))
+    assert saved.read_bytes() == OWNER_BYTES, "T100 the saved owner bytes survive"
+    assert read(root, "outside-build/cache") == b"unrelated ignored content\n", (
+        "T100 ignored content outside the planned scope is untouched")
+
+
+def flip_unignored_probe():
+    """The dirty probe without --ignored=matching (and its expansion): status then reports no ignored entry."""
+    original = guard._opf_observe._run_git
+
+    def run_git(git, root, args, **kwargs):
+        return original(git, root, [a for a in args if a not in ("--ignored=matching", "--ignored=traditional")],
+                        **kwargs)
+    return patch.object(guard._opf_observe, "_run_git", run_git)
+
+
+def t101_collapsed_ignored_ancestor(fx):
+    """A collapsed ignored ancestor (`!! .working/`, the whole store untracked and ignored) does not hide
+    the planned destinations beneath it: the expansion over the same destinations names them, and the
+    create refuses exit 2 before mutation with the dirty-store remedy, every byte untouched."""
+    env = fx.env
+    root = fx.case("t101-collapsed-ancestor")
+    _untrack(env, root, ".working")
+    _exclude(root, b"/.working/")
+    assert b"!! .working/" in _status_ignored(root, CONTRIBUTIONS_VIEW), "T101 git collapses the ancestor"
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert "16 dirty path(s)" in err and CONTRIBUTIONS_VIEW in err, (
+        "T101 the refusal counts every planned destination and names them", err[-800:])
+
+
+def flip_t101():
+    """No ignored-ancestor expansion: the traditional-mode status reports nothing."""
+    original = guard._opf_observe._run_git
+
+    def run_git(git, root, args, **kwargs):
+        if "--ignored=traditional" in args:
+            return guard._opf_observe._GitOutcome(True, 0, b"", "")
+        return original(git, root, args, **kwargs)
+    return patch.object(guard._opf_observe, "_run_git", run_git)
+
+
+def t102_directory_at_destination(fx):
+    """An ignored directory at a declared view's destination is a collision, though git reports it with a
+    trailing slash: the create refuses exit 2 before mutation naming it, every byte untouched."""
+    env = fx.env
+    root = fx.case("t102-directory-at-destination")
+    _untrack(env, root, CONTRIBUTIONS_VIEW)
+    (Path(root) / CONTRIBUTIONS_VIEW).unlink()
+    (Path(root) / CONTRIBUTIONS_VIEW).mkdir()
+    (Path(root) / CONTRIBUTIONS_VIEW / "owner").write_bytes(OWNER_BYTES)
+    _exclude(root, b"/" + CONTRIBUTIONS_VIEW.encode("utf-8") + b"/")
+    assert b"!! " + CONTRIBUTIONS_VIEW.encode("utf-8") + b"/" in _status_ignored(root, CONTRIBUTIONS_VIEW), (
+        "T102 git reports the directory with a trailing slash")
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert CONTRIBUTIONS_VIEW in err, ("T102 the refusal names the destination", err[-800:])
+
+
+def t103_ignored_prefix_sibling(fx):
+    """Ignored content at a declared unmanaged prefix sibling of a destination (.working/CONTRIBUTIONS.md.bak/,
+    which --ignored=matching reports even under literal pathspecs) is outside the planned scope: the
+    create records and the sibling's bytes survive."""
+    env = fx.env
+    root = fx.case("t103-ignored-prefix-sibling")
+    sibling = CONTRIBUTIONS_VIEW + ".bak"
+    _with_manifest(fx, root, unmanaged={"paths": [sibling]})
+    _exclude(root, b"/" + sibling.encode("utf-8") + b"/")
+    (Path(root) / sibling).mkdir()
+    (Path(root) / sibling / "owner").write_bytes(OWNER_BYTES)
+    assert b"!! " + sibling.encode("utf-8") + b"/" in _status_ignored(root, CONTRIBUTIONS_VIEW), (
+        "T103 git reports the prefix sibling")
+    recorded(record_cli(env, root, CREATE))
+    assert read(root, sibling + "/owner") == OWNER_BYTES, "T103 the sibling's bytes survive"
+
+
+def flip_t103():
+    """No ignored-record scope filter: every ignored record git reports is admitted as dirt."""
+    original = guard.parse_porcelain
+
+    def parse(raw, prefix, lease, specs, verb):
+        extra = [os.fsdecode(r[3:]).removeprefix(os.fsdecode(prefix)).rstrip("/")
+                 for r in raw.split(b"\x00") if r.startswith(b"!! ")]
+        return original(raw, prefix, lease, list(specs) + extra, verb)
+    return patch.object(guard, "parse_porcelain", parse)
+
+
+def t104_unmanaged_ignored_content(fx):
+    """Declared unmanaged, ignored content inside .working (.working/cache/) is outside the planned scope:
+    the create records and its bytes survive."""
+    env = fx.env
+    root = fx.case("t104-unmanaged-ignored")
+    _with_manifest(fx, root, unmanaged={"paths": [".working/cache"]})
+    _exclude(root, b"/.working/cache/")
+    (Path(root) / ".working" / "cache").mkdir()
+    (Path(root) / ".working" / "cache" / "output.bin").write_bytes(b"unmanaged output\n")
+    recorded(record_cli(env, root, CREATE))
+    assert read(root, ".working/cache/output.bin") == b"unmanaged output\n", "T104 the unmanaged bytes survive"
+
+
+def flip_t104():
+    """The whole-store scope: the store's planned destinations widened to all of .working."""
+    original = guard.plan_write_scope
+
+    def scope(*args):
+        return dict(original(*args), store=(".working",))
+    return patch.object(guard, "plan_write_scope", scope)
+
+
+def t105_non_utf8_prefix(fx):
+    """A store nested below its repository root under a real non-UTF-8 directory name: git's -z paths and
+    --show-prefix carry those bytes. An ignored, untracked operand (counters), view destination, or
+    collapsed .working ancestor refuses exit 2 before mutation with the dirty-store remedy naming the
+    destination; every byte, the index and HEAD untouched."""
+    env = fx.env
+    for case, rel, untrack in (("counters", COUNTERS, COUNTERS), ("render", CONTRIBUTIONS_VIEW, CONTRIBUTIONS_VIEW),
+                               ("ancestor", CONTRIBUTIONS_VIEW, ".working")):
+        outer = fx.case("t105-" + case)
+        nested = outer / os.fsdecode(T105_PREFIX.rstrip(b"/"))
+        nested.mkdir()
+        for entry in sorted(outer.iterdir()):
+            if entry.name not in (".git", nested.name):
+                entry.rename(nested / entry.name)
+        env.git(outer, "add", "-A")
+        env.git(outer, "commit", "-q", "-m", "nest the store below a non-UTF-8 directory")
+        _untrack(env, nested, untrack)
+        if case == "render":
+            (nested / rel).write_bytes(OWNER_BYTES)
+        ignored = b".working/" if case == "ancestor" else rel.encode("utf-8")
+        _exclude(outer, b"/" + T105_PREFIX + ignored)
+        assert _git_bytes(nested, ["rev-parse", "--show-prefix"]) == T105_PREFIX + b"\n", (
+            "T105 a real non-UTF-8 prefix", case)
+        assert b"!! " + T105_PREFIX + ignored in _status_ignored(nested, rel), ("T105 a real ignored record", case)
+        state = _index_and_head(outer)
+        before = snapshot(outer)
+        result = record_cli(env, nested, CREATE)
+        assert snapshot(outer) == before, ("T105 bytes untouched on refusal", case, result[0], result[2][-800:])
+        refused(result, "Commit your changes (or move them aside)")
+        assert rel in result[2], (case, result[2][-800:])
+        assert _index_and_head(outer) == state, ("T105 index and HEAD unchanged", case)
+
+
+def flip_t105():
+    """The lossy prefix round trip and its silent non-match fallback."""
+    def old_status_path(pbytes, prefix):
+        prefix_b = os.fsencode(prefix).decode("utf-8", "replace").encode("utf-8")
+        return pbytes[len(prefix_b):] if prefix_b and pbytes.startswith(prefix_b) else pbytes
+    return patch.object(guard, "status_path", old_status_path)
+
+
+def t106_absent_ignored_destination(fx):
+    """An absent planned destination has no status entry, so its ignore rule is probed: an absent ignored
+    view destination, and an absent ignored product destination (the root VERSION view), each refuse exit
+    2 before mutation naming the path, every byte untouched."""
+    env = fx.env
+    root = fx.case("t106-absent-view")
+    _untrack(env, root, CONTRIBUTIONS_VIEW)
+    (Path(root) / CONTRIBUTIONS_VIEW).unlink()
+    _exclude(root, b"/" + CONTRIBUTIONS_VIEW.encode("utf-8"))
+    err = _create_refused(env, root, "ignored planned destinations")
+    assert repr(CONTRIBUTIONS_VIEW) in err, ("T106 the view destination is named", err[-800:])
+    root = fx.case("t106-absent-product")
+    views = dict(model(root, MANIFEST)["views"],
+                 VERSION={"kind": "deterministic", "sources": ["version"], "target": "VERSION"})
+    _with_manifest(fx, root, views=views)
+    _exclude(root, b"/VERSION")
+    err = _create_refused(env, root, "ignored planned destinations")
+    assert "'VERSION'" in err, ("T106 the product destination is named", err[-800:])
+
+
+def flip_t106():
+    """The ignore probe for absent destinations as a no-op."""
+    return patch.object(guard, "check_ignored", lambda *args: None)
+
+
+def t107_ignored_and_directory_lease(fx):
+    """An ignored lease, and a directory lease (untracked, or ignored and so collapsed), are held: each
+    create refuses exit 2 with the never-seize refusal, never the dirty-store remedy, the lease and every
+    byte untouched."""
+    env = fx.env
+    root = fx.case("t107-ignored-lease")
+    (Path(root) / LEASE).write_bytes(PEER_LEASE)
+    _exclude(root, b"/" + LEASE.encode("utf-8"))
+    assert env.git(root, "check-ignore", "--", LEASE).strip() == LEASE, "T107 the fixture lease is ignored"
+    err = _create_refused(env, root, "The lease is never seized (spec 5.7)")
+    assert "peer-runner" in err and "confirmed NO opf run is live" in err, err[-800:]
+    assert "Commit your changes" not in err, err[-800:]
+    assert read(root, LEASE) == PEER_LEASE, "T107 the ignored lease survives"
+    for ignored in (False, True):
+        root = fx.case("t107-directory-lease-" + ("ignored" if ignored else "untracked"))
+        (Path(root) / LEASE).mkdir()
+        (Path(root) / LEASE / "owner").write_bytes(b"held by another run\n")
+        if ignored:
+            _exclude(root, b"/" + LEASE.encode("utf-8") + b"/")
+        err = _create_refused(env, root, "The lease is never seized (spec 5.7)")
+        assert "Commit your changes" not in err, ("T107 no dirt advice", ignored, err[-800:])
+        assert (Path(root) / LEASE).is_dir(), ("T107 the directory lease survives", ignored)
+
+
+def flip_t107():
+    """A lease exclusion that excludes nothing: the lease record reads as ordinary dirt."""
+    original = guard.parse_porcelain
+    return patch.object(guard, "parse_porcelain",
+                        lambda raw, prefix, lease, specs, verb: original(raw, prefix, None, specs, verb))
+
+
+def t108_committed_deleted_lease(fx):
+    """A lease committed at HEAD (a spec 5.7 violation) and deleted in the worktree emits a tracked " D"
+    record on the lease path: the create refuses exit 2 naming the TRACKED lease and spec 5.7, rather than
+    claiming the now-absent lease and sweeping its deletion into the change; every byte untouched."""
+    env = fx.env
+    root = fx.case("t108-committed-deleted-lease")
+    write_commit(env, root, LEASE, PEER_LEASE, "a committed lease")
+    (Path(root) / LEASE).unlink()
+    err = _create_refused(env, root, "is TRACKED in git")
+    assert "spec 5.7" in err, ("T108 the refusal names spec 5.7", err[-800:])
+
+
+def flip_t108():
+    """The old lease exclusion: every record on the lease path is dropped, whatever its status."""
+    original = guard.parse_porcelain
+
+    def parse(raw, prefix, lease, specs, verb):
+        if lease is not None:
+            path = os.fsencode(prefix) + os.fsencode(lease)
+            raw = b"".join(r + b"\x00" for r in raw.split(b"\x00")[:-1] if r[3:] != path)
+        return original(raw, prefix, lease, specs, verb)
+    return patch.object(guard, "parse_porcelain", parse)
+
+
+def t109_normalizing_filter_note(fx):
+    """A store whose view carries an external normalizing clean filter (the git-lfs shape: the index holds
+    the cleaned blob, the worktree the uncleaned body) reads dirty in the racy-clean window, because the
+    probe never runs the filter: the create refuses exit 2 before mutation, and the refusal names the
+    git-lfs-shape filter and settling the worktree; every byte untouched."""
+    env = fx.env
+    root = fx.case("t109-normalizing-filter")
+    env.git(root, "config", "filter.norm.clean", "sed 's/[0-9]//g'")
+    env.git(root, "config", "filter.norm.required", "true")
+    (Path(root) / ".gitattributes").write_text(VERSION_VIEW + " filter=norm\n", encoding="utf-8")
+    env.git(root, "add", "--renormalize", "--", VERSION_VIEW)
+    env.git(root, "add", "--", ".gitattributes")
+    env.git(root, "commit", "-q", "-m", "a normalizing filter")
+    assert not re.search("[0-9]", env.git(root, "show", ":" + VERSION_VIEW)) and re.search(
+        b"[0-9]", read(root, VERSION_VIEW)), "T109 the index holds the cleaned blob"
+    os.utime(str(Path(root) / VERSION_VIEW), (4102444800, 4102444800))   # 2100-01-01: status must re-hash
+    err = _create_refused(env, root, "Commit your changes (or move them aside)")
+    assert "git-lfs-shape" in err and "Settle the worktree" in err, err[-800:]
+
+
+def flip_t109():
+    """No filter neutralization: the probe runs the filter, so the normalizing store reads clean."""
+    return patch.object(guard._opf_observe, "_filter_neutralizing_config", lambda *args, **kwargs: [])
+
+
+# --- T110-T114: receipt-repair, the reviewed repair of a ratified item with no receipt (spec 8.8) -----------
+
+REPAIR_REASON = "ratified in review without its receipt"
+REPAIR = ["receipt-repair", "BI-1", "--reason", REPAIR_REASON] + MAINTAINER
+REPAIR_OPERANDS = (COUNTERS, DN_INDEX, WORKLOG)
+ARCHIVED_DN_INDEX = ARCHIVE + "/done.index.toml"
+NO_RECEIPT = "C-RECEIPTS: ratified backlog_item 'BI-1' (at 'done') has no done receipt"
+T113_PEER_RUN = "imp-20260927T000102Z-" + "b" * 16
+
+
+def _drop_legacy_journal(root):
+    """The homes-1 runs that built a fixture leave their completed transactions in the legacy record
+    journal, local recovery evidence that a homes-2 run refuses on sight (T20); a fixture about to run at
+    homes 2 removes it, once every transaction there is terminal and nothing else sits under .aiqt."""
+    states = journal_states(root)
+    assert states and all(s != "open" for s in states.values()), ("the setup runs left no open transaction",
+                                                                  states)
+    aiqt = Path(root) / ".aiqt"
+    assert sorted(os.listdir(aiqt)) == ["record"], ("only the legacy record journal sits under .aiqt",
+                                                    sorted(os.listdir(aiqt)))
+    shutil.rmtree(aiqt)
+
+
+def _repair_store(fx, name, moves=(["transition", "BI-1", "active"] + MAINTAINER,), edit="commit"):
+    """A store whose maintainer-created BI-1 ("repair me") the verb moved through `moves` at homes 1, each
+    step committed. With `edit` "commit" the reviewed hand edit then puts BI-1 at unqualified done with no
+    receipt, canonical and committed (doctor reports the C-RECEIPTS finding); with "worktree" the same
+    edit is left uncommitted; with None no edit is made. The legacy journal is then removed
+    (_drop_legacy_journal), and the store is ready for homes-2 activation."""
+    root = fx.case(name)
+    with ticking():
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "repair me"] + MAINTAINER, "BI-1")
+        for move in moves:
+            step(fx, root, move, " ".join(move[:3]))
+    if edit is not None:
+        index = model(root, BI_INDEX)
+        index["record"][0].update(status="done", updated_at="2026-09-01T00:30:00Z")
+        data = emit.emit_checked(index).encode("utf-8")
+        if edit == "commit":
+            write_commit(fx.env, root, BI_INDEX, data, "the reviewed edit: BI-1 done")
+        else:
+            (Path(root) / BI_INDEX).write_bytes(data)
+    _drop_legacy_journal(root)
+    return root
+
+
+def _reservations(root, kind="record"):
+    home = Path(root) / record._opf_journal._allocations_rel(kind)
+    return sorted(os.listdir(home)) if home.exists() else []
+
+
+def t110_receipt_repair(fx):
+    """A committed BI-1 a reviewed hand edit put at unqualified done with no receipt (the C-RECEIPTS finding
+    at rest): at homes 2 the maintainer's receipt-repair records exit 0, landing exactly one receipt_of
+    receipt and its own worklog entry, the backlog index bytes unchanged, no status change reported, its
+    run's reservation under journals/record/allocations claiming exactly the receipt's and the entry's
+    numbers, one COMPLETE transaction in the typed journal, and doctor VALID; a second repair then refuses,
+    every byte untouched (flip: no reservation published, so the publication boundary refuses)."""
+    env = fx.env
+    base = _repair_store(fx, "t110-base")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc == 1 and NO_RECEIPT in out + err, ("T110 the reviewed edit leaves the C-RECEIPTS finding", rc,
+                                                 out[-1600:], err[-800:])
+    with _self_test_homes2_active(base):
+        root = fx.case("t110-repair", base)
+        bi_before = read(root, BI_INDEX)
+        counters0 = model(root, COUNTERS)["counters"]
+        did, wid = "DN-{}".format(counters0["DN"] + 1), "WL-{}".format(counters0["WL"] + 1)
+        with ticking():
+            out = recorded(record_cli(env, root, REPAIR + ["--summary", "the missing receipt"]))
+        assert '"change": null' in out and '"ids": ["{}", "{}"]'.format(did, wid) in out, out[-1600:]
+        assert read(root, BI_INDEX) == bi_before, "T110 the backlog index bytes are unchanged"
+        receipts = receipts_of(root, "BI-1")
+        assert [r["id"] for r in receipts] == [did], receipts
+        assert (receipts[0]["actor"] == {"kind": "maintainer", "id": "owner"} and receipts[0]["title"] == "repair me"
+                and receipts[0]["status"] == "recorded" and receipts[0]["summary"] == "the missing receipt"), receipts
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert entry["id"] == wid and entry["detail"] == "opf-record create {} recorded\nreceipt_of: BI-1\nreason: {}".format(
+            did, REPAIR_REASON), entry
+        states = journal_states(root, TYPED_JOURNAL)
+        assert list(states.values()) == ["complete"], ("T110 one COMPLETE typed transaction", states)
+        (run_id,) = states
+        assert _reservations(root) == [Path(record._opf_store.allocation_record("record", run_id)).name], (
+            "T110 the run's own reservation stands", _reservations(root))
+        payload = model(root, record._opf_store.allocation_record("record", run_id))
+        assert payload["claims"] == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, payload
+        assert not (Path(root) / record.JOURNAL_REL).exists(), "T110 no legacy journal is created"
+        doctor_valid(env, root)
+        refused_untouched(env, root, REPAIR, "already holds the clean done receipt '{}'".format(did))
+
+
+def t110_homes1_refused(fx):
+    """At homes 1 there is no reservation home: the repair refuses exit 2 naming it, before any file but the
+    manifest is read, every byte untouched and no journal home created (flips: the homes guard dropped, so
+    the repair claims through the homes-1 counters path and publishes; the request check's homes refusal
+    dropped, so only the planner's own refusal holds, after every operand is read)."""
+    root = _repair_store(fx, "t110-homes1")
+    manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
+    reads = []
+    original_read = record._read_operand
+
+    def observing(root_fd, rel):
+        reads.append(rel)
+        return original_read(root_fd, rel)
+    with patch.object(record, "_read_operand", observing):
+        refused_untouched(fx.env, root, REPAIR, "only a homes-2 store has")
+    assert reads and set(reads) == {manifest_rel}, ("T110 refused before any operand is read", reads)
+    assert not (Path(root) / ".working/journals").exists(), "T110 no reservation home is created"
+
+
+def flip_t110_homes1():
+    return patch.object(record, "_require_reservation_home", lambda ctx: None)
+
+
+def flip_t110_homes1_late():
+    """The request check without its receipt-repair homes refusal: the planner's own call still refuses."""
+    check_request = record._check_request
+
+    def without_repair(req, ctx):
+        if req.subcommand != "receipt-repair":
+            check_request(req, ctx)
+    return patch.object(record, "_check_request", without_repair)
+
+
+def t110_importer_arm(fx):
+    """A clean BI-1 at done whose only receipt is a legacy importer-authored DN-1 (the spec 8.6 receipt arm's
+    finding at rest) takes the clean receipt beside it: DN-2 records exit 0, the importer's row keeps its
+    bytes, and the store is doctor VALID (flip: the writer's receipt join counts importer-authored
+    receipts, so the item is refused, never repaired)."""
+    env = fx.env
+    base = _repair_store(fx, "t110-importer-base")
+    legacy = {"id": "DN-1", "type": "done", "status": "recorded", "title": "migrated receipt",
+              "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z",
+              "actor": {"kind": "importer"}, "links": [{"rel": "receipt_of", "id": "BI-1"}]}
+    dones = model(base, DN_INDEX)
+    dones["record"] = dones.get("record", []) + [legacy]
+    write_commit(env, base, DN_INDEX, emit.emit_checked(dones).encode("utf-8"), "a legacy importer receipt")
+    counters = model(base, COUNTERS)
+    counters["counters"]["DN"] += 1
+    write_commit(env, base, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc == 1 and "its only receipt(s) 'DN-1' are importer-authored" in out + err, (
+        "T110 the importer-only receipt is the receipt arm's finding at rest", rc, out[-1600:], err[-800:])
+    with _self_test_homes2_active(base):
+        root = fx.case("t110-importer-arm", base)
+        with ticking():
+            recorded(record_cli(env, root, REPAIR))
+        assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-1", "DN-2"], receipts_of(root, "BI-1")
+        assert model(root, DN_INDEX)["record"][0] == legacy, "T110 the importer's receipt keeps its bytes"
+        doctor_valid(env, root)
+
+
+def flip_t110_importer():
+    """The writer's receipt join without the spec 8.6 firewall: every receipt naming the item counts,
+    importer-authored ones included."""
+    def counting(ctx, operand, rid):
+        held = [rec.id for rec in record._receipt_records(ctx, record._index_rows(operand))
+                if rec.rtype == "done" and ("receipt_of", rid) in rec.links]
+        if held:
+            raise record.RecordError("receipt-repair refused: {} already holds {}".format(rid, held))
+    return patch.object(record, "_require_unreceipted", counting)
+
+
+# Inside the killed child: the done index, the one operand the repair adds a row to, is written directly,
+# OUTSIDE the journaled transaction, and only the counters and the worklog are journaled.
+FLIP_REPAIR_UNJOURNALED = """
+_journaled = record._publish
+def _publish(ctx, plan, subcommand, cap=None, run_id=None):
+    operands = [op for op in plan.operands if not op.rel.endswith("/done.index.toml")]
+    for op in plan.operands:
+        if op.rel.endswith("/done.index.toml"):
+            (Path(ctx.res.store_root) / op.rel).write_bytes(op.new_raw)
+    plan.operands = operands
+    return _journaled(ctx, plan, subcommand, cap=cap, run_id=run_id)
+record._publish = _publish
+"""
+_repair_crash_flip = [""]
+
+
+def t110_repair_crash(fx):
+    """A homes-2 receipt-repair (three operands: counters, done index, worklog) run at each of the journal
+    engine's injection hooks kill_points(3) names. At after-lock, the homes-1 journal lock's hook, the child
+    records: the homes-2 publication holds the operation capability and takes no journal lock, so that hook
+    is never reached. Killed at every other hook, the run leaves its reservation standing and no reported
+    id; the next run refuses after reclaiming the dead holder's capability records (a kill before INTENT is
+    durable, which opens no transaction) or reconciling the typed journal, leaving the operands exactly at
+    the prestate or exactly at the poststate (the poststate iff COMPLETE) and the backlog index untouched;
+    after a rolled-back kill the next repair derives above the reserved numbers and records, doctor VALID
+    (flip: the done index written outside the journaled transaction, applied in the killed child)."""
+    env = fx.env
+    base = _repair_store(fx, "t110-crash-base")
+    with _self_test_homes2_active(base):
+        counters0 = model(base, COUNTERS)["counters"]
+        reference = fx.case("t110-crash-reference", base)
+        proc = child(env, reference, REPAIR, flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+        post = dict((rel, read(reference, rel)) for rel in REPAIR_OPERANDS)
+        rolled_back = None
+        points = kill_points(len(REPAIR_OPERANDS))
+        for hook in points:
+            point = ("T110 repair", hook)
+            root = fx.case("t110-crash-" + hook.replace(":", "-"), base)
+            pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+            bi_before = read(root, BI_INDEX)
+            proc = child(env, root, REPAIR, kill=hook, flip=HOMES2_CHILD_FLIP + _repair_crash_flip[0])
+            if hook == "after-lock":
+                # The homes-1 journal lock's hook: the homes-2 publication runs under the held operation
+                # capability and takes no journal lock, so the hook is never reached and the run records.
+                assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (
+                    "T110 no journal lock is taken at homes 2", point, proc.returncode, proc.stderr[-800:])
+                assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == post, ("T110 the poststate", point)
+                continue
+            assert proc.returncode == 137, ("T110 the child is killed at", point, proc.stderr[-800:])
+            assert RECORDED_EVENT not in proc.stdout, ("T110 a killed run reports no id", point)
+            (reserved,) = _reservations(root)
+            claims = model(root, record._ALLOCATIONS_REL + "/" + reserved)["claims"]
+            assert claims == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, (point, claims)
+            # Before INTENT is durable the kill leaves no opened transaction, only the dead holder's
+            # capability records, which the next run reclaims; from INTENT on it reconciles the transaction.
+            opened = points.index(hook) >= points.index("after-publish-INTENT")
+            refused(record_cli(env, root, REPAIR), "was reconciled" if opened else "were reclaimed")
+            states = journal_states(root, TYPED_JOURNAL)
+            assert states and all(s != "open" for s in states.values()), ("T110 terminal", point, states)
+            assert opened or set(states.values()) == {"nothing-opened"}, ("T110 nothing opened", point, states)
+            now = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+            complete = any(s == "complete" for s in states.values())
+            assert now == (post if complete else pre), ("T110 prestate or poststate, poststate iff COMPLETE",
+                                                        point, states)
+            assert read(root, BI_INDEX) == bi_before, ("T110 the backlog index is never written", point)
+            assert _reservations(root) == [reserved], ("T110 the reservation stands", point)
+            if "rolled-back" in states.values() and rolled_back is None:
+                rolled_back = root
+        assert rolled_back is not None, "T110 some kill point rolls the repair back"
+        recorded(record_cli(env, rolled_back, REPAIR))
+        assert [r["id"] for r in receipts_of(rolled_back, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
+            "T110 the next repair derives above the reserved numbers", receipts_of(rolled_back, "BI-1"))
+        doctor_valid(env, rolled_back)
+
+
+@contextlib.contextmanager
+def flip_t110_crash():
+    """The crash matrix's children run with the done index written outside the journaled transaction."""
+    _repair_crash_flip[0] = FLIP_REPAIR_UNJOURNALED
+    try:
+        yield
+    finally:
+        _repair_crash_flip[0] = ""
+
+
+def t111_repair_maintainer_only(fx):
+    """An assistant or automation receipt-repair refuses before the store is resolved, every byte untouched,
+    naming the maintainer-only rule (flip: the maintainer check dropped)."""
+    env = fx.env
+    base = _repair_store(fx, "t111-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t111-maintainer-only", base)
+        for actor in (ASSISTANT, ["--actor", "automation"]):
+            refused_before_store(env, root, ["receipt-repair", "BI-1", "--reason", REPAIR_REASON] + actor,
+                                 "maintainer-only")
+
+
+def flip_t111():
+    return patch.object(record, "_require_repair_maintainer", lambda actor: None)
+
+
+def t112_repair_state_guard(fx):
+    """An item at open, active, dropped or done/proposed is refused with every byte untouched, the
+    done/proposed one pointed to done-with-receipt (flip: the state guard dropped, under which the item is
+    refused only by a later guard, naming another rule)."""
+    env = fx.env
+    for label, moves, needle in (
+            ("open", (), "at unqualified done"),
+            ("active", (["transition", "BI-1", "active"] + MAINTAINER,), "at unqualified done"),
+            ("dropped", (["transition", "BI-1", "dropped"] + MAINTAINER,), "at unqualified done"),
+            ("proposed", (["transition", "BI-1", "active"] + MAINTAINER, ["transition", "BI-1", "done"] + ASSISTANT),
+             "ratified with its receipt by opf record done-with-receipt")):
+        base = _repair_store(fx, "t112-" + label, moves=moves, edit=None)
+        with _self_test_homes2_active(base):
+            refused_untouched(env, fx.case("t112-" + label + "-repair", base), REPAIR, needle)
+
+
+def flip_t112_state():
+    return patch.object(record, "_require_done_item", lambda row, rid: None)
+
+
+def t112_repair_existing_receipt(fx):
+    """An item that already holds its clean receipt (done-with-receipt) is refused, every byte untouched
+    (flip: the receipt check dropped, so a second receipt publishes and fails the final doctor)."""
+    base = _repair_store(fx, "t112-held", moves=(["transition", "BI-1", "active"] + MAINTAINER,
+                                                 ["done-with-receipt", "BI-1"] + MAINTAINER), edit=None)
+    with _self_test_homes2_active(base):
+        refused_untouched(fx.env, fx.case("t112-held-repair", base), REPAIR,
+                          "already holds the clean done receipt 'DN-1'")
+
+
+def flip_t112_receipt():
+    return patch.object(record, "_require_unreceipted", lambda ctx, operand, rid: None)
+
+
+def t112_repair_uninterpreted_receipt(fx):
+    """A committed DN-1 naming BI-1 whose links value is one table rather than an array of tables, which the
+    doctor's receipt join reads as no link at all and so does not evaluate (C-RECEIPTS CANNOT-EVALUATE), is
+    refused naming the row and the cause, every byte untouched (flip: the active done rows' interpretation
+    check dropped, so the receipt join reads DN-1 as no receipt, a second receipt publishes and the final
+    doctor fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t112-uninterpreted")
+    malformed = {"id": "DN-1", "type": "done", "status": "recorded", "title": "repair me",
+                 "created_at": "2026-09-01T00:30:00Z", "updated_at": "2026-09-01T00:30:00Z",
+                 "actor": {"kind": "maintainer"}, "links": {"rel": "receipt_of", "id": "BI-1"}}
+    dones = model(base, DN_INDEX)
+    dones["record"] = dones.get("record", []) + [malformed]
+    write_commit(env, base, DN_INDEX, emit.emit_checked(dones).encode("utf-8"), "a receipt with malformed links")
+    counters = model(base, COUNTERS)
+    counters["counters"]["DN"] += 1
+    write_commit(env, base, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc != 0 and "the receipt join is not evaluated over a partial set" in out + err, (
+        "T112 the malformed receipt leaves the receipt join not evaluated at rest", rc, out[-1600:], err[-800:])
+    with _self_test_homes2_active(base):
+        refused_untouched(env, fx.case("t112-uninterpreted-repair", base), REPAIR,
+                          "done.index.toml#{} has links that cannot be interpreted".format(len(dones["record"])))
+
+
+def flip_t112_uninterpreted():
+    real = record._require_interpreted_rows
+
+    def backlog_rows_only(rows, rtype, rel, rid):
+        if rtype != "done":
+            real(rows, rtype, rel, rid)
+    return patch.object(record, "_require_interpreted_rows", backlog_rows_only)
+
+
+def t112_repair_uninterpreted_backlog(fx):
+    """A committed BI-2 beside BI-1 whose status the doctor cannot interpret, which leaves the receipt join
+    not evaluated (C-RECEIPTS CANNOT-EVALUATE) just as an uninterpreted done row does, is refused naming
+    the backlog row and the cause, every byte untouched (flip: the active backlog rows' interpretation
+    check dropped, so the repair publishes and is refused only after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t112-uninterpreted-backlog")
+    items = model(base, BI_INDEX)
+    items["record"].append(dict(items["record"][0], id="BI-2", title="unread", status="bogus"))
+    write_commit(env, base, BI_INDEX, emit.emit_checked(items).encode("utf-8"), "a backlog row with a bad status")
+    counters = model(base, COUNTERS)
+    counters["counters"]["BI"] += 1
+    write_commit(env, base, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    rc, out, err = cli(env, ["doctor", "--root", str(base)])
+    assert rc != 0 and "the receipt join is not evaluated over a partial set" in out + err, (
+        "T112 the uninterpreted backlog row leaves the receipt join not evaluated at rest", rc, out[-1600:],
+        err[-800:])
+    with _self_test_homes2_active(base):
+        refused_untouched(env, fx.case("t112-uninterpreted-backlog-repair", base), REPAIR,
+                          "backlog_item record row {}#2 has status that cannot be interpreted".format(BI_INDEX))
+
+
+def flip_t112_backlog():
+    real = record._require_interpreted_rows
+
+    def done_rows_only(rows, rtype, rel, rid):
+        if rtype != "backlog_item":
+            real(rows, rtype, rel, rid)
+    return patch.object(record, "_require_interpreted_rows", done_rows_only)
+
+
+def _archived_receipt(fx, name):
+    """BI-1 ratified with its receipt DN-1 (done-with-receipt), then DN-1 rotated to archive/2026: doctor
+    VALID, the receipt held only in the archive."""
+    root = _repair_store(fx, name, moves=(["transition", "BI-1", "active"] + MAINTAINER,
+                                          ["done-with-receipt", "BI-1"] + MAINTAINER), edit=None)
+    _rotate(fx, root, "DN-1", DN_INDEX, ARCHIVED_DN_INDEX, "done")
+    assert receipts_of(root, "BI-1") == [], "the receipt sits in the archive alone"
+    return root
+
+
+def t112_repair_archived_receipt(fx):
+    """An item whose clean receipt sits in the archive is refused, every byte untouched: the receipt join
+    reads every archived record (flip: the active-only read, under which a second receipt publishes and
+    fails the final doctor)."""
+    base = _archived_receipt(fx, "t112-archived")
+    with _self_test_homes2_active(base):
+        refused_untouched(fx.env, fx.case("t112-archived-repair", base), REPAIR,
+                          "already holds the clean done receipt 'DN-1'")
+
+
+def t112_repair_unreadable_archive(fx):
+    """An archived done index that does not parse (committed) refuses the repair with the archive walk's
+    problems, every byte untouched, never skipped (flip: the active-only read)."""
+    base = _archived_receipt(fx, "t112-unreadable-archive")
+    write_commit(fx.env, base, ARCHIVED_DN_INDEX, b"record = [\n", "a torn archive index")
+    with _self_test_homes2_active(base):
+        refused_untouched(fx.env, fx.case("t112-unreadable-archive-repair", base), REPAIR,
+                          "does not pass the doctor's own archive walk")
+
+
+def flip_t112_archive():
+    return patch.object(record, "_receipt_records", lambda ctx, rows: [
+        opf_check._make_rec(r, "done", "active") for r in rows if isinstance(r, dict)])
+
+
+def t113_repair_peer_reservation(fx):
+    """A peer's reservation of the receipt's number landing between planning and the held capability (an
+    import-kind reservation planted just before this run reserves) refuses the run at the held
+    revalidation: every operand at the prestate, no record reservation and no transaction; the re-run
+    claims above the peer's number and records, doctor VALID (flip: the reservation step without the
+    planned claims, which reserves the next numbers and is refused only at the publication boundary)."""
+    env = fx.env
+    base = _repair_store(fx, "t113-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t113-peer-reservation", base)
+        counters0 = model(root, COUNTERS)["counters"]
+        peer = Path(root) / record._opf_store.allocation_record("import", T113_PEER_RUN)
+        payload = record._opf_journal.reservation_payload("import", T113_PEER_RUN, "op",
+                                                          {"DN": counters0["DN"] + 1})
+        reserve = record._reserve_claim
+
+        def peer_first(ctx, plan, cap, run_id):
+            peer.parent.mkdir(parents=True, exist_ok=True)
+            peer.write_bytes(payload)
+            return reserve(ctx, plan, cap, run_id)
+        pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS + (BI_INDEX,))
+        with patch.object(record, "_reserve_claim", peer_first), ticking():
+            result = record_cli(env, root, REPAIR)
+        assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
+        refused(result, "changed between planning and the held capability")
+        assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS + (BI_INDEX,)) == pre, \
+            "T113 every operand at the prestate"
+        assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
+        assert peer.read_bytes() == payload, "T113 the peer's reservation is never touched"
+        with ticking():
+            recorded(record_cli(env, root, REPAIR))
+        assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-{}".format(counters0["DN"] + 2)], (
+            "T113 the re-run claims above the peer's reservation", receipts_of(root, "BI-1"))
+        doctor_valid(env, root)
+
+
+def t113_repair_backlog_changed(fx):
+    """The backlog index the repair reads and never rewrites, edited between planning and the held lease
+    (BI-1 put back at active just before the lease is taken), refuses the run at the held re-read naming
+    that index: every operand at the prestate, no reservation and no transaction (flip: the held re-read
+    of the operands alone, under which the receipt publishes for an item no longer at done and the final
+    doctor fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t113-backlog-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t113-backlog-changed", base)
+        index = model(root, BI_INDEX)
+        index["record"][0]["status"] = "active"
+        edited = emit.emit_checked(index).encode("utf-8")
+        acquire = record._acquire_guard
+
+        def edit_first(ctx):
+            (Path(root) / BI_INDEX).write_bytes(edited)
+            return acquire(ctx)
+        pre = dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS)
+        with patch.object(record, "_acquire_guard", edit_first), ticking():
+            result = record_cli(env, root, REPAIR)
+        assert dict((rel, read(root, rel)) for rel in REPAIR_OPERANDS) == pre, "T113 every operand at the prestate"
+        assert _reservations(root) == [], ("T113 the refused run publishes no reservation", _reservations(root))
+        assert journal_states(root, TYPED_JOURNAL) == {}, "T113 no transaction is opened"
+        refused(result, "{} changed after it was read".format(BI_INDEX))
+
+
+def flip_t113_backlog():
+    return patch.object(record, "_planned_from", lambda ctx, plan: list(plan.operands))
+
+
+def t114_repair_uncommitted_edit(fx):
+    """The reviewed edit must be committed first: BI-1 at done in the working tree only, and then committed at
+    done with a further uncommitted edit of its row, each refuse exit 2 naming it, every byte untouched
+    (flip: the committed-row check dropped, so the repair publishes and the final doctor, which accepts no
+    pending status change for it, fails after publication)."""
+    env = fx.env
+    base = _repair_store(fx, "t114-base", edit="worktree")
+    with _self_test_homes2_active(base):
+        root = fx.case("t114-uncommitted", base)
+        refused_untouched(env, root, REPAIR, "commit the reviewed edit first")
+        write_commit(env, root, BI_INDEX, read(root, BI_INDEX), "the reviewed edit: BI-1 done")
+        index = model(root, BI_INDEX)
+        index["record"][0]["title"] = "repair me, retitled"
+        (Path(root) / BI_INDEX).write_bytes(emit.emit_checked(index).encode("utf-8"))
+        refused_untouched(env, root, REPAIR, "commit the reviewed edit first")
+
+
+def flip_t114():
+    return patch.object(record, "_require_committed_item", lambda ctx, row, rid: None)
+
+
+def t115_repair_head_moved(fx):
+    """HEAD moved between planning and the held lease (git reset --soft, as another shell would run it,
+    made just before the lease is taken, after planning read the prior commit) to the first commit, which
+    does not hold BI-1 at all, and to the commit holding BI-1 at active, each refuse at the committed-row
+    check read again under the held lease: exit 2 naming it, every byte untouched, no reservation and no
+    transaction (flip: the held re-check dropped, so the repair publishes over a prior commit that does
+    not hold the item, and, the doctor's history check never reaching an item the prior commit does not
+    hold, records exit 0)."""
+    env = fx.env
+    base = _repair_store(fx, "t115-base")
+    with _self_test_homes2_active(base):
+        for label, target in (("absent", None), ("active", "HEAD~1")):
+            root = fx.case("t115-head-moved-" + label, base)
+            if target is None:
+                (target,) = env.git(root, "rev-list", "--max-parents=0", "HEAD").split()
+            target = env.git(root, "rev-parse", "--verify", target).strip()
+            acquire = record._acquire_guard
+
+            def moved_first(ctx, root=root, target=target, acquire=acquire):
+                env.git(root, "reset", "-q", "--soft", target)
+                return acquire(ctx)
+            before = snapshot(root)
+            with patch.object(record, "_acquire_guard", moved_first), ticking():
+                result = record_cli(env, root, REPAIR)
+            assert snapshot(root) == before, ("T115 bytes untouched", label, result[0], result[2][-1600:])
+            assert _reservations(root) == [], ("T115 no reservation", label, _reservations(root))
+            assert journal_states(root, TYPED_JOURNAL) == {}, ("T115 no transaction is opened", label)
+            assert env.git(root, "rev-parse", "HEAD").strip() == target, ("T115 HEAD was moved", label)
+            refused(result, "under the held lease, immediately before publication, the prior commit (HEAD) "
+                            "was read again: receipt-repair refused (uncommitted-item): BI-1")
+
+
+def flip_t115():
+    return patch.object(record, "_require_committed_held", lambda ctx, req: None)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -8834,6 +10840,10 @@ TESTS = (
                                                               flip_boolean_claims_admitted)),
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
     ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
+    ("T5-handoff-count-malformed-index", t5_handoff_count_malformed, (flip_t5_count_narrow,
+                                                                      flip_t5_count_empty,
+                                                                      flip_t5_count_host_zero,
+                                                                      flip_t5_count_table_row)),
     ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
     ("T25-recovery-plan-under-capability", t25_plan_under_capability, flip_t25),
     ("T26-complete-before-projection", t26_complete_before_projection, flip_t26),
@@ -8948,10 +10958,52 @@ TESTS = (
                                                                           flip_t87_repr_substring)),
     ("T88-expected-injection-seen", t88_expected_injection_seen, (flip_t88_unchecked,
                                                                   flip_t88_t75_unwinding)),
+    ("T89-handoff-posting-supersedes", t89_handoff_supersession, (flip_t89_skip, flip_t89_required_target,
+                                                                  flip_t89_unqualified)),
+    ("T89-two-current-handoffs-refused", t89_two_current_refused, flip_t89_first_current),
+    ("T89-importer-history-clean-posting", t89_importer_history_posts, flip_t89_importer),
+    ("T89-archived-current-handoff-refused", t89_archived_current_refused, flip_t89_archived),
+    ("T89-reject-supersession-sole-current", t89_reject_supersession, flip_t89_reject_guard),
     ("T89-prior-separator-spelling-respelled", t89_prior_separator_spelling, (flip_t89_no_escape,
                                                                             flip_t89_strict)),
     ("T89-prior-separator-spelling-bounded", t89_bounded_acceptance, flip_t89_any_bytes),
     ("T90-store-read-cap-before-publication", t90_reader_cap, flip_t90_no_cap),
+    ("T91-seam-five-sequential-distinct", t91_seam_five_sequential_distinct, flip_t91_scan_ignored),
+    ("T92-seam-concurrent-processes-distinct", t92_seam_concurrent_processes_distinct, flip_t91_scan_ignored),
+    ("T93-seam-threads-serialised", t93_seam_threads_serialised, flip_t93_unserialised),
+    ("T94-planned-ids-bound-to-claims", t94_planned_ids_bound_to_claims, flip_t94_ids_unchecked),
+    ("T95-importer-operand-transition-refused", t95_importer_operand_transition, flip_t95_author),
+    ("T95-importer-operand-receipt-refused", t95_importer_operand_receipt, flip_t95_author),
+    ("T95-importer-resolution-superseded", t95_importer_resolution_superseded, flip_t95_target),
+    ("T96-malformed-lease-refused-as-held", t96_malformed_lease, flip_t96),
+    ("T97-nested-store-held-lease", t97_nested_store_held_lease, flip_t97),
+    ("T98-fifo-lease-refused-promptly", t98_fifo_lease, flip_t98),
+    ("T99-dirty-operand-refused", t99_dirty_operand, flip_t99),
+    ("T100-ignored-render-target-refused", t100_ignored_render_target, flip_unignored_probe),
+    ("T101-collapsed-ignored-ancestor-refused", t101_collapsed_ignored_ancestor, flip_t101),
+    ("T102-directory-at-destination-refused", t102_directory_at_destination, flip_unignored_probe),
+    ("T103-ignored-prefix-sibling-outside-scope", t103_ignored_prefix_sibling, flip_t103),
+    ("T104-unmanaged-ignored-outside-scope", t104_unmanaged_ignored_content, flip_t104),
+    ("T105-non-utf8-prefix-refused", t105_non_utf8_prefix, flip_t105),
+    ("T106-absent-ignored-destination-refused", t106_absent_ignored_destination, flip_t106),
+    ("T107-ignored-and-directory-lease-held", t107_ignored_and_directory_lease, flip_t107),
+    ("T108-committed-deleted-lease-refused", t108_committed_deleted_lease, flip_t108),
+    ("T109-normalizing-filter-note", t109_normalizing_filter_note, flip_t109),
+    ("T110-receipt-repair-records", t110_receipt_repair, flip_t22_noreserve),
+    ("T110-receipt-repair-homes1-refused", t110_homes1_refused, (flip_t110_homes1, flip_t110_homes1_late)),
+    ("T110-receipt-repair-importer-arm", t110_importer_arm, flip_t110_importer),
+    ("T110-receipt-repair-crash", t110_repair_crash, flip_t110_crash),
+    ("T111-receipt-repair-maintainer-only", t111_repair_maintainer_only, flip_t111),
+    ("T112-receipt-repair-state-guard", t112_repair_state_guard, flip_t112_state),
+    ("T112-receipt-repair-existing-receipt", t112_repair_existing_receipt, flip_t112_receipt),
+    ("T112-receipt-repair-uninterpreted-receipt", t112_repair_uninterpreted_receipt, flip_t112_uninterpreted),
+    ("T112-receipt-repair-uninterpreted-backlog", t112_repair_uninterpreted_backlog, flip_t112_backlog),
+    ("T112-receipt-repair-archived-receipt", t112_repair_archived_receipt, flip_t112_archive),
+    ("T112-receipt-repair-unreadable-archive", t112_repair_unreadable_archive, flip_t112_archive),
+    ("T113-receipt-repair-peer-reservation", t113_repair_peer_reservation, flip_t80_no_recheck),
+    ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
+    ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
+    ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
 )
 
 
@@ -9014,6 +11066,12 @@ def _self_test_isolated():
             check("red-on-revert-T5-crash-prestate-or-poststate",
                   lambda: _discriminate("T5", lambda: t5_crash(fx),
                                         lambda: _child_flip(fx)))
+            check("red-on-revert-T5-handoff-unjournaled-index",
+                  lambda: _discriminate("T5-handoff", lambda: t5_crash(fx),
+                                        lambda: _child_flip_handoff(fx)))
+            check("red-on-revert-T5-handoff-two-current-interim", lambda: _discriminate_two_current(fx))
+            check("red-on-revert-T5-handoff-two-current-interim-disarmed",
+                  lambda: t5_two_current_counter(fx))
             check("red-on-revert-T75-concurrent-recovery-single-writer",
                   lambda: _discriminate("T75", lambda: t75_concurrent_recovery(fx),
                                         lambda: _t75_child_flip(fx)))
@@ -9045,6 +11103,53 @@ def _child_flip(fx):
         yield
     finally:
         _t5_flip[0] = ""
+
+
+@contextlib.contextmanager
+def _child_flip_handoff(fx):
+    """The handoff-scoped T5 flip as a context: while active, t5_crash's killed children run with
+    FLIP_T5_HANDOFF, under which every scenario but the handoff-superseding one stays green, so the
+    red it must produce can come only from that scenario's own matrix."""
+    _t5_flip[0] = FLIP_T5_HANDOFF
+    try:
+        yield
+    finally:
+        _t5_flip[0] = ""
+
+
+@contextlib.contextmanager
+def _child_flip_two_current(fx):
+    """The two-current T5 flip as a context: while active, t5_crash's killed children run with
+    FLIP_T5_TWO_CURRENT, under which the handoff-superseding scenario's torn-payload kill leaves a
+    PARSEABLE two-current handoff index inside a journaled apply. Every assertion before the continuous
+    at-most-one-current check stays green there (the child is killed, its lease stands, and the
+    write-ahead evidence is present), so that check is the first to red, on the exposure itself."""
+    _t5_flip[0] = FLIP_T5_TWO_CURRENT
+    try:
+        yield
+    finally:
+        _t5_flip[0] = ""
+
+
+def _discriminate_two_current(fx):
+    """FLIP_T5_TWO_CURRENT must turn T5 red through the continuous at-most-one-current assertion at the
+    exposure itself (t5_two_current_exposed), and the unflipped T5 must stay green around it."""
+    _discriminate("T5-two-current", lambda: t5_two_current_exposed(fx), lambda: _child_flip_two_current(fx))
+
+
+def t5_two_current_counter(fx):
+    """With the continuous at-most-one-current assertion disarmed (its count reads every handoff index
+    as holding none, flip_t5_count_empty), FLIP_T5_TWO_CURRENT still turns T5 red, later, through a
+    recovery assertion; the two-current discriminator must refuse that red and fail, naming the other
+    assertion (_T5OtherRed), not on an unrelated fault."""
+    with flip_t5_count_empty():
+        try:
+            _discriminate_two_current(fx)
+        except AssertionError as exc:
+            assert "_T5OtherRed(" in str(exc), ("T5 the disarmed two-current discriminator failed, but not "
+                                                "on another assertion", str(exc)[:1200])
+            return
+    raise AssertionError("T5 the two-current discriminator stayed green with its assertion disarmed")
 
 
 @contextlib.contextmanager
