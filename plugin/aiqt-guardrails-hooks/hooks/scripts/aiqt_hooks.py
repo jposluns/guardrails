@@ -16655,11 +16655,11 @@ def commit_msg_subst(data):
 
 
 # --- trkasy: a process check on a full command line that its own shell can match -------------------
-# pgrep -f, pkill -f and a filter fed by ps match a pattern against every process's full command line, and the
-# shell running a Bash command carries the command text on its own command line, as does every ancestor shell
-# and every pipeline stage or background subshell it forks (a forked copy is not an ancestor, so pgrep -A does
-# not leave it out). The pattern written once in the check therefore already matches that shell: a wait on it
-# never ends and a presence check always reads as running. The guard reads the raw command text, not lexer
+# pgrep -f, pkill -f, pidwait -f and a filter fed by ps match a pattern against every process's full command line,
+# and the shell running a Bash command carries the command text on its own command line, as does every ancestor
+# shell and every pipeline stage or background subshell it forks (a forked copy is not an ancestor, so pgrep -A
+# does not leave it out). The pattern written once in the check therefore already matches that shell: a wait on
+# it never ends and a presence check always reads as running. The guard reads the raw command text, not lexer
 # segments, so a check inside a quoted $(...), backticks, an eval or a bash -c string is found too; quote
 # characters and backslashes are dropped first, so a nested string reads as its own words.
 _PSM_UNQUOTE = {ord("'"): None, ord('"'): None, ord("\\"): None}
@@ -16670,16 +16670,25 @@ _PSM_TOKEN_RE = re.compile(
     r"|(?P<redir>\d*(?:&>>|&>|>>|>&|<&|<<<|<<|<>|>\||[<>]))"
     r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
     r"|(?P<word>[^\s<>|&;()`]+)")
-# pgrep and pkill (procps-ng 4.0.4, pgrep --help) options that take a value: the short letters, and the long
-# names written without '=' (their value is the next word).
-_PSM_PGREP_VALUE_SHORT = frozenset("dgGOPstuUFr")
+# The procps-ng 4.0.4 lookups that match a pattern (pgrep, pkill and pidwait --help).
+_PSM_LOOKUPS = frozenset(("pgrep", "pkill", "pidwait"))
+# Their options that take a value: the short letters (-q is pkill's), and the long names written without '='
+# (their value is the next word).
+_PSM_PGREP_VALUE_SHORT = frozenset("dgGOPstuUFrq")
 _PSM_PGREP_VALUE_LONG = frozenset((
     "--delimiter", "--pgroup", "--group", "--older", "--parent", "--session", "--signal", "--terminal", "--euid",
-    "--uid", "--pidfile", "--runstates", "--cgroup", "--ns", "--nslist"))
-# Every long option pgrep --help lists, so a unique abbreviation (--fu for --full) is read as getopt reads it.
+    "--uid", "--pidfile", "--runstates", "--cgroup", "--ns", "--nslist", "--queue"))
+# Every long option their --help lists, so a unique abbreviation (--fu for --full) is read as getopt reads it.
 _PSM_PGREP_LONG = _PSM_PGREP_VALUE_LONG | frozenset((
     "--list-name", "--list-full", "--inverse", "--lightweight", "--count", "--full", "--ignore-case",
-    "--newest", "--oldest", "--exact", "--logpidfile", "--ignore-ancestors", "--help", "--version"))
+    "--newest", "--oldest", "--exact", "--logpidfile", "--ignore-ancestors", "--help", "--version", "--echo",
+    "--require-handler"))
+# The signal names a pkill signal option can carry (-TERM, -SIGTERM; -9 is read by its digits), so a single
+# option letter such as -P or -F is read as the option it is, never as a signal.
+_PSM_SIGNALS = frozenset((
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "IOT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE",
+    "ALRM", "TERM", "STKFLT", "CHLD", "CLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ",
+    "VTALRM", "PROF", "WINCH", "IO", "POLL", "PWR", "SYS", "RTMIN", "RTMAX"))
 # ps (procps-ng) short options that take a value, and the short options that select processes other than by
 # PID; the long options that take a value, and those that select other than by PID.
 _PSM_PS_VALUE_SHORT = frozenset("CGgOopqstUuk")
@@ -16689,11 +16698,58 @@ _PSM_PS_VALUE_LONG = frozenset((
     "--sort", "--cols", "--columns", "--width", "--rows", "--lines"))
 _PSM_PS_SELECT_LONG = frozenset((
     "--ppid", "--sid", "--tty", "--user", "--User", "--group", "--Group", "--quick-pid", "--deselect"))
+# The words that can stand before the process-listing ps in command-word position: the wrappers the
+# commit-identity reader passes over (_CMTIDN_GIT_WRAPPERS), and these, which run their operands as a command
+# too (a shell or eval run the de-quoted string the scan reads as words). Reserved words and VAR=value words
+# are passed over as well; so is a duration word (timeout 5 ps).
+_PSM_WRAPPERS = _CMTIDN_GIT_WRAPPERS | frozenset((
+    "builtin", "doas", "ionice", "watch", "eval", "su", "sh", "bash", "dash", "zsh", "ksh"))
+_PSM_DURATION_RE = re.compile(r"[0-9.]+[smhd]?")
+# How a filter after ps takes its options, by program: (short letters with no value, short letters taking a
+# value, short letters carrying a pattern, long names with no value, long names taking a value, long names
+# carrying a pattern, the first of them a pattern and any other a file of patterns). A long option is read as
+# getopt reads it, a unique abbreviation included; any abbreviation of a pattern-carrying name carries a
+# pattern. An option word a table does not classify, and every option word of a program with no table, is
+# taken to carry a pattern. Only the e of grep (GNU grep 3.12 --help) and sed (GNU sed 4.9 --help) is judged
+# for the bracket idiom; f names a file the hook cannot read.
+_PSM_GREP_OPTIONS = (
+    frozenset("EFGPiyvwxcLloqsbHhnTZzaIrRUV0123456789"), frozenset("mABCdD"), frozenset("ef"),
+    frozenset(("--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--ignore-case",
+               "--no-ignore-case", "--word-regexp", "--line-regexp", "--null-data", "--no-messages",
+               "--invert-match", "--version", "--help", "--byte-offset", "--line-number", "--line-buffered",
+               "--with-filename", "--no-filename", "--only-matching", "--quiet", "--silent", "--text",
+               "--files-without-match", "--files-with-matches", "--count", "--initial-tab", "--null",
+               "--recursive", "--dereference-recursive", "--binary", "--color", "--colour")),
+    frozenset(("--max-count", "--after-context", "--before-context", "--context", "--label", "--binary-files",
+               "--devices", "--directories", "--exclude", "--exclude-from", "--exclude-dir", "--include",
+               "--group-separator")),
+    ("--regexp", "--file"))
+_PSM_FILTER_OPTIONS = {
+    "grep": _PSM_GREP_OPTIONS, "egrep": _PSM_GREP_OPTIONS, "fgrep": _PSM_GREP_OPTIONS,
+    "zgrep": _PSM_GREP_OPTIONS, "zegrep": _PSM_GREP_OPTIONS, "zfgrep": _PSM_GREP_OPTIONS,
+    "sed": (frozenset("nrEsuz"), frozenset("l"), frozenset("ef"),
+            frozenset(("--quiet", "--silent", "--debug", "--posix", "--regexp-extended", "--separate",
+                       "--sandbox", "--unbuffered", "--null-data", "--follow-symlinks", "--help", "--version")),
+            frozenset(("--line-length",)), ("--expression", "--file")),
+    "wc": (frozenset("clmwL"), frozenset(), frozenset(),
+           frozenset(("--bytes", "--chars", "--lines", "--words", "--max-line-length", "--help", "--version")),
+           frozenset(("--files0-from", "--total")), ()),
+    "head": (frozenset("qvz0123456789"), frozenset("nc"), frozenset(),
+             frozenset(("--quiet", "--silent", "--verbose", "--zero-terminated", "--help", "--version")),
+             frozenset(("--lines", "--bytes")), ()),
+    "sort": (frozenset("bdfgiMhnRrVcCmsuz"), frozenset("kStTo"), frozenset(),
+             frozenset(("--ignore-leading-blanks", "--dictionary-order", "--ignore-case", "--general-numeric-sort",
+                        "--ignore-nonprinting", "--month-sort", "--human-numeric-sort", "--numeric-sort",
+                        "--random-sort", "--reverse", "--version-sort", "--check", "--merge", "--stable",
+                        "--unique", "--zero-terminated", "--debug", "--help", "--version")),
+             frozenset(("--key", "--field-separator", "--buffer-size", "--temporary-directory", "--output",
+                        "--sort", "--parallel", "--batch-size", "--compress-program", "--files0-from",
+                        "--random-source")), ())}
 # The bracket idiom: a pattern opening with a character class and then a literal character cannot match its
 # own text, where the class is followed by ']'.
 _PSM_IDIOM_RE = re.compile(r"\[([A-Za-z0-9_]+)\]([^][.*+?(){}|^$\\]+)")
-# Each judged idiom searches the whole command text, so past this many in one command the rest are not judged
-# and deny, which keeps a long command's cost linear.
+# Each judged idiom scans the command text once, so past this many in one command the rest are not judged
+# and deny, which keeps a long command's cost linear in its length.
 _PSM_IDIOM_LIMIT = 64
 
 
@@ -16724,14 +16780,42 @@ def _psm_commands(command):
     return commands, text
 
 
+def _psm_period_letters(rest):
+    """The characters rest[d - 1] for each period d of rest shorter than rest: the only characters that can
+    stand just before an occurrence of rest that overlaps an earlier occurrence (a prefix-function pass)."""
+    fail, border = [0] * len(rest), 0
+    for k in range(1, len(rest)):
+        while border and rest[k] != rest[border]:
+            border = fail[border - 1]
+        if rest[k] == rest[border]:
+            border += 1
+        fail[k] = border
+    found, border = set(), fail[-1]
+    while border:
+        found.add(rest[len(rest) - border - 1])
+        border = fail[border - 1]
+    return found
+
+
 def _psm_bracket_idiom(pattern, lowered):
     """True when pattern opens with the bracket idiom ([j]ob7) and no literal it matches ('job7', in any case)
-    occurs anywhere in lowered, the de-quoted command in lower case."""
+    occurs anywhere in lowered, the de-quoted command in lower case. One scan of lowered for the literal after
+    the class, each occurrence tested against the class letters as a set; the scan steps past each occurrence,
+    and an occurrence it skips overlaps the one before, so the character before it lies inside that one at a
+    period of the literal (_psm_period_letters): where a class letter is such a character the idiom is not
+    judged (False, a deny) rather than searched again."""
     match = _PSM_IDIOM_RE.match(pattern)
     if match is None:
         return False
-    rest = match.group(2).lower()
-    return not any(letter + rest in lowered for letter in match.group(1).lower())
+    letters, rest = frozenset(match.group(1).lower()), match.group(2).lower()
+    if letters & frozenset(rest) and letters & _psm_period_letters(rest):
+        return False
+    at = lowered.find(rest)
+    while at != -1:
+        if at and lowered[at - 1] in letters:
+            return False
+        at = lowered.find(rest, at + len(rest))
+    return True
 
 
 def _psm_pgrep_long(word):
@@ -16745,9 +16829,9 @@ def _psm_pgrep_long(word):
 
 
 def _psm_pgrep_full(args, pkill):
-    """(full, pattern) for a pgrep or pkill given args: full when -f or --full is given (in any cluster, at any
-    place, past the values of the options that take one); pattern its first operand, or None. A pkill signal
-    written as an option (-9, -TERM) is skipped."""
+    """(full, pattern) for a pgrep, pkill or pidwait given args: full when -f or --full is given (in any
+    cluster, at any place, past the values of the options that take one); pattern its first operand, or None.
+    A pkill signal written as an option (-9, -TERM, -SIGTERM) is skipped; a single option letter is never one."""
     full, pattern = False, None
     i, n = 0, len(args)
     while i < n:
@@ -16761,7 +16845,9 @@ def _psm_pgrep_full(args, pkill):
             full = full or name == "--full"
             i += 1 if "=" not in word and name in _PSM_PGREP_VALUE_LONG else 0
         elif word.startswith("-") and len(word) > 1:
-            if pkill and (word[1:].isdigit() or word[1:].isupper()):
+            signal = word[4:] if word.startswith("-SIG") else word[1:]
+            if pkill and (word[1:].isdigit() or len(word) > 2 and (signal in _PSM_SIGNALS or signal[:5] in (
+                    "RTMIN", "RTMAX"))):
                 continue                    # a pkill signal
             for at, letter in enumerate(word[1:], 2):
                 if letter in _PSM_PGREP_VALUE_SHORT:
@@ -16799,30 +16885,104 @@ def _psm_ps_by_pid(args):
     return pid and not other
 
 
+def _psm_listing_at(words):
+    """The index of the word ps (or a path ending in it) standing as the command word of a simple command's
+    words, or None: past leading reserved words and VAR=value words, and past each wrapper (_PSM_WRAPPERS) with
+    its options, a duration word, and any word right after an option (which may be that option's value), so
+    sudo -u root ps and timeout -s KILL 5 ps are listings and docker ps, podman ps and docker compose ps are
+    not."""
+    wrapped = value = False
+    for k, word in enumerate(words):
+        name = word.rsplit("/", 1)[-1]
+        if name == "ps":
+            return k
+        if wrapped and word.startswith("-") and len(word) > 1:
+            value = "=" not in word
+        elif name in _PSM_WRAPPERS:
+            wrapped, value = True, False
+        elif value or word in _CMTIDN_RESERVED or _ENV_ASSIGN_RE.match(word) or (
+                wrapped and _PSM_DURATION_RE.fullmatch(word)):
+            value = False
+        else:
+            return None
+    return None
+
+
+def _psm_long_name(word, known):
+    """The long option `word` (its text before any '=') names among known, a unique abbreviation expanded;
+    None when it names none or is ambiguous."""
+    name = word.split("=", 1)[0]
+    if name in known:
+        return name
+    found = [option for option in known if option.startswith(name)]
+    return found[0] if len(found) == 1 else None
+
+
 def _psm_filter_pattern(words, idiom):
-    """The first pattern-like argument of a pipeline stage after ps, or None: a word past the stage's program
-    that is not an option (an -e or --regexp= value glued to its option included), other than one idiom
-    judges a bracket idiom; a word of digits right after an option is read as that option's value."""
-    after_option = False
-    for word in words[1:]:
-        if word.startswith("-") and len(word) > 1:
-            glued = word[2:] if word[:2] == "-e" else word[9:] if word.startswith("--regexp=") else ""
-            if glued and not idiom(glued):
-                return glued
-            after_option = True
+    """The first argument of a pipeline stage after ps that may carry a pattern, or None. With the program's
+    option table (_PSM_FILTER_OPTIONS): an operand other than one idiom judges a bracket idiom; an option
+    letter or long name carrying a pattern, unless it is the regexp option whose value idiom judges a bracket
+    idiom; an option word or letter the table does not classify; and a short cluster holding a
+    pattern-carrying letter anywhere, inside another option's glued value too. A program with no table takes
+    every option word as carrying a pattern. A value option's value is skipped."""
+    table = _PSM_FILTER_OPTIONS.get(words[0].rsplit("/", 1)[-1])
+    i, n = 1, len(words)
+    while i < n:
+        word = words[i]
+        i += 1
+        if word == "--":
+            return next((rest for rest in words[i:] if not idiom(rest)), None)
+        if not word.startswith("-") or len(word) == 1:
+            if not idiom(word):
+                return word
             continue
-        if not (after_option and word.isdigit()) and not idiom(word):
+        if table is None:
             return word
-        after_option = False
+        no_value, value_short, pattern_short, no_value_long, value_long, pattern_long = table
+        if word.startswith("--"):
+            name, eq, glued = word.partition("=")
+            carrier = next((k for k, option in enumerate(pattern_long)
+                            if len(name) > 2 and option.startswith(name)), None)
+            if carrier is not None:
+                value = glued if eq else (words[i] if i < n else None)
+                i += 0 if eq else 1
+                if carrier or value is None or not idiom(value):
+                    return word if value is None else value
+                continue
+            known = _psm_long_name(word, no_value_long | value_long | frozenset(pattern_long))
+            if known in no_value_long:
+                continue
+            if known in value_long:
+                i += 0 if eq else 1
+                continue
+            return word
+        letters = word[1:]
+        if any(letter in pattern_short for letter in letters):
+            at = letters.find("e") if "e" in pattern_short else -1
+            if at == -1 or not all(letter in no_value for letter in letters[:at]):
+                return word
+            value = letters[at + 1:] or (words[i] if i < n else None)
+            i += 0 if letters[at + 1:] else 1
+            if value is None or not idiom(value):
+                return word if value is None else value
+            continue
+        for at, letter in enumerate(letters, 1):
+            if letter in value_short:
+                i += 0 if at < len(letters) else 1
+                break
+            if letter not in no_value:
+                return word
     return None
 
 
 def _psm_hit(command):
     """The first process check anywhere in command's raw text that can match the shell running it, as (check,
-    pattern), or None: pgrep or pkill with -f or --full (with or without -A), unless its pattern is the
-    bracket idiom; or ps, not selecting by PID only, piped through any number of stages into a program given a
-    pattern-like argument. The words pgrep, pkill and ps are found wherever they stand as a whole word (a path
-    such as /usr/bin/pgrep included), in prose or a quoted string too. Pattern None means none was named."""
+    pattern), or None: pgrep, pkill or pidwait with -f or --full (with or without -A), unless its pattern is
+    the bracket idiom; or ps, standing as a simple command's command word (_psm_listing_at) and not selecting
+    by PID only, piped through any number of stages into a program given an argument that may carry a pattern
+    (_psm_filter_pattern). The words pgrep, pkill and pidwait are found wherever they stand as a whole word (a
+    path such as /usr/bin/pgrep included), in prose or a quoted string too. Pattern None means none was
+    named."""
     commands, text = _psm_commands(command)
     lowered, judged = text.lower(), [0]
 
@@ -16839,23 +16999,23 @@ def _psm_hit(command):
             if pattern is not None:
                 return "ps | " + words[0].rsplit("/", 1)[-1], pattern
         names = [word.rsplit("/", 1)[-1] for word in words]
-        at = next((k for k, name in enumerate(names) if name in ("pgrep", "pkill")), None)
+        at = next((k for k, name in enumerate(names) if name in _PSM_LOOKUPS), None)
         if at is not None:
             full, pattern = _psm_pgrep_full(words[at + 1:], names[at] == "pkill")
             if full and (pattern is None or not idiom(pattern)):
                 return names[at] + " -f", pattern
-        at = next((k for k, name in enumerate(names) if name == "ps"), None)
+        at = _psm_listing_at(words)
         fed = (fed or (at is not None and not _psm_ps_by_pid(words[at + 1:]))) and piped
     return None
 
 
 def pgrep_self_match(data):
     """trkasy (integ/track-launched-work), PreToolUse/Bash. DENY-and-educate a process check that can match the
-    shell running it (_psm_hit): pgrep or pkill with -f, with or without -A, or ps piped into a program given a
-    pattern, found anywhere in the raw command text (inside a quoted $(...), backticks, eval and bash -c
+    shell running it (_psm_hit): pgrep, pkill or pidwait with -f, with or without -A, or ps piped into a
+    program given a pattern, found anywhere in the raw command text (inside a quoted $(...), backticks, eval and bash -c
     strings too), since the checking shell, its ancestors and the pipeline stages and subshells it forks
     carry the command text on their command lines. A pattern written as the bracket idiom ([j]ob7) is
-    allowed. Hooks never ask. BEST EFFORT: a name built at run time is not seen; the residue in the hook
+    allowed. Hooks never ask. BEST EFFORT: a command word built at run time is not seen; the residue in the hook
     manifest states the shapes read and the misses. A missing tool_name takes the shared deny and a
     non-string command denies fail-safe, as the sibling deny hooks do."""
     if data.get("hook_event_name") != PRETOOL:

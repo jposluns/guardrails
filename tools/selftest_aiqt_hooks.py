@@ -2500,9 +2500,9 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
-# pgrep_self_match rows (trkasy): each deny row is a process check that can match the shell running it (pgrep
-# or pkill with -f, with or without -A, or ps piped into a program given a pattern), found anywhere in the
-# command text; each allow row is one the guard must pass.
+# pgrep_self_match rows (trkasy): each deny row is a process check that can match the shell running it (pgrep,
+# pkill or pidwait with -f, with or without -A, or ps piped into a program given a pattern), found anywhere in
+# the command text; each allow row is one the guard must pass.
 _PSM_DENY_ROWS = (
     ("(psm-d1) pgrep -f guarding the launch it checks", "pgrep -f 'run-x' || dispatch run-x"),
     ("(psm-d2) until-loop on pgrep -f", "until ! pgrep -f job7; do sleep 5; done"),
@@ -2588,7 +2588,29 @@ _PSM_DENY_ROWS = (
     ("(psm-d76) bracket idioms past the judged count", "ps aux | grep" + " -e '[j]ob7'" * 65),
     ("(psm-d77) ps in a group piped into grep", "( ps aux ) | grep job7"),
     ("(psm-d78) grep in a group after ps", "ps aux | ( grep job7 )"),
-    ("(psm-d79) a pipe continued on the next line", "ps aux |\n  grep job7"))
+    ("(psm-d79) a pipe continued on the next line", "ps aux |\n  grep job7"),
+    # A filter option word carries a pattern unless its table knows it takes none: an e anywhere in a short
+    # cluster, an abbreviation of --regexp or --file, and an option word no table classifies.
+    ("(psm-d80) -e glued inside a cluster", "ps aux | grep -iejob7"),
+    ("(psm-d81) -e glued after -q", "ps aux | grep -qejob7"),
+    ("(psm-d82) --regexp abbreviated with a glued value", "ps aux | grep --regex=job7"),
+    ("(psm-d83) an abbreviation that is also --recursive's", "ps aux | grep --re=job7"),
+    ("(psm-d84) sed -e glued inside a cluster", "ps aux | sed -ne/job7/p"),
+    ("(psm-d85) --file with a glued value", "ps aux | grep --file=pats"),
+    ("(psm-d86) an e inside another option's glued value", "ps aux | grep -m1e '[j]ob7'"),
+    ("(psm-d87) an option word no table classifies", "ps aux | grep --frobnicate '[j]ob7'"),
+    ("(psm-d88) any option of a program with no table", "ps aux | awk -W '[j]ob7'"),
+    ("(psm-d89) a digits-only pattern after a no-value option", "ps aux | grep -c 5"),
+    # ps in command-word position behind a wrapper is the process listing.
+    ("(psm-d90) sudo before ps", "sudo ps aux | grep job7"),
+    ("(psm-d91) timeout with a signal and a duration before ps", "timeout -s KILL 5 ps aux | grep job7"),
+    ("(psm-d92) ps in a watch string", "watch 'ps aux | grep job7'"),
+    # pidwait matches a pattern as pgrep does.
+    ("(psm-d93) pidwait -f", "pidwait -f job7"),
+    ("(psm-d94) pidwait --full", "pidwait --full job7"),
+    # A pkill option letter that takes a value is never a signal, so the pattern after it is read.
+    ("(psm-d95) pkill -G value before -f", "pkill -G '[x]x' -f job7"),
+    ("(psm-d96) a pkill signal name ending in a value letter", "pkill -TSTP -f job7"))
 _PSM_ALLOW_ROWS = (
     ("(psm-a1) pgrep without -f", "pgrep job7 || run job7"),
     ("(psm-a2) pgrep -x name", "pgrep -x name; echo name"),
@@ -2608,7 +2630,15 @@ _PSM_ALLOW_ROWS = (
     ("(psm-a16) ps piped into a counter", "ps aux | wc -l"),
     ("(psm-a17) ps piped into head with a count", "ps aux | head -n 5"),
     ("(psm-a18) a wait on a completion file", "until [ -e /run/job7.done ]; do sleep 5; done"),
-    ("(psm-a19) a word that only contains pgrep", "echo xpgrep -f job7; ls pgrep.d"))
+    ("(psm-a19) a word that only contains pgrep", "echo xpgrep -f job7; ls pgrep.d"),
+    # ps that is not the command word lists containers, not processes.
+    ("(psm-a20) docker ps into grep", "docker ps | grep myapp"),
+    ("(psm-a21) docker ps into xargs", "docker ps -q | xargs docker stop"),
+    ("(psm-a22) docker compose ps into grep", "docker compose ps | grep web"),
+    ("(psm-a23) podman ps with a format into grep", "podman ps --format '{{.Names}}' | grep web"),
+    ("(psm-a24) pkill -P value is not a signal", "pkill -P 1234 -f '[j]ob7'"),
+    ("(psm-a25) known no-value and value options of the filters", "ps aux | sort -rk3 | head -5 | wc -l"),
+    ("(psm-a26) pidwait without -f", "pidwait job7"))
 # The bracket idiom ([j]ob7): its first character class keeps it from matching its own text. Each row is red
 # when the idiom exception is removed.
 _PSM_IDIOM_ROWS = (
@@ -2616,14 +2646,73 @@ _PSM_IDIOM_ROWS = (
     ("(psm-i2) ps | grep with the bracket idiom", "ps aux | grep '[j]ob7'"),
     ("(psm-i3) ps | grep -q with the bracket idiom", "ps aux | grep -q '[j]ob7'"),
     ("(psm-i4) pkill -f with the bracket idiom", "pkill -f '[j]ob7'"),
-    ("(psm-i5) pgrep -f bracket idiom in a quoted substitution", 'x="$(pgrep -f \'[j]ob7\')"'))
+    ("(psm-i5) pgrep -f bracket idiom in a quoted substitution", 'x="$(pgrep -f \'[j]ob7\')"'),
+    ("(psm-i6) grep -e in a cluster with the bracket idiom", "ps aux | grep -ie '[j]ob7'"),
+    ("(psm-i7) grep --regexp= with the bracket idiom", "ps aux | grep --regexp='[j]ob7'"),
+    ("(psm-i8) pidwait -f with the bracket idiom", "pidwait -f '[j]ob7'"))
+# Long bracket idioms, each one scan of the command: (label, command, decision). A test that searched the
+# whole command once per class letter used about 104 s of CPU on the first at 400 KB; each row must stay
+# under _PSM_TIMED_BOUND CPU seconds (about 0.01 to 0.06 s in-process on an 80-core host with Python 3.14.4,
+# 2026-10-29). The last is a literal whose period letter is the class letter, which is not judged and denies.
+_PSM_TIMED_ROWS = (
+    ("(psm-t1) a 200,000-letter class", "pgrep -f '[" + "a" * 200000 + "]x' " + "b" * 200000, "allow"),
+    ("(psm-t2) a 200,000-letter literal", "pgrep -f '[b]" + "a" * 199999 + "c' " + "a" * 200000, "allow"),
+    ("(psm-t3) a periodic literal", "pgrep -f '[a]" + "a" * 200000 + "' " + "a" * 200000, "deny"))
+_PSM_TIMED_BOUND = 2.0
+# Real-bash oracle rows: (label, command template, whether the check matches its own shell). @P@ is a fresh
+# random pattern no other process carries and @B@ its bracket idiom; each command prints only when its check
+# matched. The command runs under bash -c, and the hook must deny exactly the commands that matched. bash -c
+# runs a lone simple command in its own place, leaving no shell that carries the text, so each row has a list
+# or a pipeline, as the agent's Bash tool wrapper shell keeps one above any command. A stub
+# function stands in for docker, podman and sudo, so the row needs neither a container runtime nor a password.
+_PSM_ORACLE_ROWS = (
+    ("(psm-o1) pgrep -af", "pgrep -af @P@; :", True),
+    ("(psm-o2) grep -ie glued", "ps -eo pid,args | grep -ie@P@", True),
+    ("(psm-o3) grep -qe glued", "ps -eo pid,args | grep -qe@P@ && echo MATCHED", True),
+    ("(psm-o4) grep --regex=", "ps -eo pid,args | grep --regex=@P@", True),
+    ("(psm-o5) sed -ne glued", "ps -eo pid,args | sed -ne/@P@/p", True),
+    ("(psm-o6) sudo before ps", 'sudo() { "$@"; }; sudo ps -eo pid,args | grep @P@', True),
+    ("(psm-o7) pidwait -f", "timeout 1 pidwait -f @P@; [ $? -eq 124 ] && echo MATCHED", True),
+    ("(psm-o8) docker ps", "docker() { echo CONTAINER web; }; docker ps | grep @P@", False),
+    ("(psm-o9) docker compose ps", "docker() { echo CONTAINER web; }; docker compose ps | grep @P@", False),
+    ("(psm-o10) podman ps", "podman() { echo CONTAINER web; }; podman ps --format x | grep @P@", False),
+    ("(psm-o11) grep -ie with the bracket idiom", "ps -eo pid,args | grep -ie @B@", False),
+    ("(psm-o12) grep --regexp= with the bracket idiom", "ps -eo pid,args | grep --regexp=@B@", False),
+    ("(psm-o13) pgrep -af with the bracket idiom", "pgrep -af @B@; :", False))
+
+
+def _psm_oracle(failures, handler):
+    """Run each _PSM_ORACLE_ROWS command under real bash with a fresh random pattern, and require the hook to
+    deny exactly the commands whose check matched its own shell, and each to match as the row states."""
+    if shutil.which("bash") is None or shutil.which("ps") is None or shutil.which("pidwait") is None:
+        failures.append("(psm-oracle) the real-bash oracle needs bash, ps and pidwait on PATH")
+        return
+    for label, template, expected in _PSM_ORACLE_ROWS:
+        pattern = "zq" + os.urandom(6).hex()
+        command = template.replace("@P@", pattern).replace("@B@", "[" + pattern[0] + "]" + pattern[1:])
+        denied = _decision(handler, command) == "deny"
+        run = subprocess.run(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, timeout=30, check=False)
+        matched = run.stdout.strip() != ""
+        if denied != matched or matched != expected:
+            failures.append("{}: hook deny {} but real bash matched {} (expected {}), exit {}, stdout {!r}, "
+                            "stderr {!r}".format(label, denied, matched, expected, run.returncode,
+                                                 run.stdout[:200], run.stderr[:200]))
 
 
 def _test_pgrep_self_match(failures):
-    """pgrep_self_match rows; no submitted Bash command is executed. Each deny row must also be red with the
-    hook disabled (its detector _psm_hit patched to find nothing), so the row pins this hook's decision, and
-    each bracket idiom row must be red with the idiom exception removed."""
+    """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
+    must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
+    this hook's decision, and each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
+    for label, command, want in _PSM_TIMED_ROWS:
+        start = time.process_time()
+        got = _decision(handler, command)
+        spent = time.process_time() - start
+        if got != want or spent > _PSM_TIMED_BOUND:
+            failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
+                label, want, _PSM_TIMED_BOUND, got, spent))
+    _psm_oracle(failures, handler)
     for label, command in _PSM_DENY_ROWS:
         got = _decision(handler, command)
         if got != "deny":
