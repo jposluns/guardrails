@@ -1814,6 +1814,31 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
+def _heredoc_body_ends_early(command, body_at, body_end, heredocs):
+    """True when, reading command[body_at:body_end] for the QUOTED here-documents in heredocs ((delimiter,
+    strip_tabs), in the order their '<<' operators appeared, each ending at a line that is exactly its
+    delimiter as _skip_heredoc_bodies reads them), some body line STARTS with its delimiter and is not exactly
+    it, with a ')' or a backquote right after the delimiter on that line. That is the shape bash 5.3 ends a
+    body at inside a command or process substitution or backquotes (_subst_heredoc_end, which already refuses
+    such a body on the commit-message form), running the rest of that line and the lines after it as commands,
+    while an older bash reads the whole span as literal body. The lexer cannot know which bash will run the
+    command, so a caller that read such a body inside a substitution treats it as UNCERTAIN and fails closed
+    (the span comment in _lex_pass). Reads the same region _skip_heredoc_bodies read, so it stays linear."""
+    i = body_at
+    for delim, strip_tabs in heredocs:
+        while i < body_end:
+            nl = command.find("\n", i, body_end)
+            line = command[i:(nl if nl != -1 else body_end)]
+            if strip_tabs:
+                line = line.lstrip("\t")
+            i = body_end if nl == -1 else nl + 1
+            if line == delim:
+                break
+            if line.startswith(delim) and len(line) > len(delim) and line[len(delim)] in ")`":
+                return True
+    return False
+
+
 def _subst_heredoc_end(command, i, n, heredocs):
     """The index just past the bodies of the quoted here-documents (delimiter, strip_tabs) opened on one line
     of a '$(...)' command substitution, read from index i (just past that line's newline) in the order their
@@ -2609,22 +2634,33 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # literal data (finding 17), then resume lexing after the closing delimiter line(s).
                     body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
+                    # The exact-delimiter-line skip above ends each body where bash ends it only
+                    # when the body is read at the TOP LEVEL of the command: inside a command or
+                    # process substitution or backquotes, bash 5.3 ends a body at a line that
+                    # merely STARTS with the delimiter when a ')' or a backquote follows it on
+                    # that line (after x=$(cat <<'EOF' then body then the line EOF), bash runs
+                    # the text after that line as commands, while this skip reads it as body),
+                    # and an unterminated body here consumes text bash executes. The nesting
+                    # stack alone cannot prove such a group closed (a bare case pattern's ')'
+                    # pops its parenthesis), so the body is TRUSTED (read exactly as bash reads
+                    # it) ONLY when nothing is open on the stack AND no '(' and no backquote
+                    # appears anywhere before the body, quoted or not.
+                    trusted = (not nest and command.find("(", 0, body_at) == -1
+                               and command.find("`", 0, body_at) == -1)
+                    if not trusted and _heredoc_body_ends_early(command, body_at, i, pending_heredocs):
+                        # An untrusted body that bash 5.3 ends early at a 'DELIM)' or 'DELIM`' line (above):
+                        # the lines after it run as commands under bash 5.3 but are literal body under an
+                        # older bash, and a guard that reads this lex's segments would otherwise miss a
+                        # command bash runs (a 'git commit --no-verify' or a 'git push' the body hides). The
+                        # hook cannot know which bash runs the command, so the reading is UNCERTAIN: raise so
+                        # the whole lex fails and every guard takes its conservative, raw-text fallback (the
+                        # same fail-closed path an unquoted here-document already takes), as the
+                        # commit-message form already does (_subst_heredoc_end refuses such a body).
+                        raise ValueError("uncertain here-document body ended early in a substitution")
                     if _LexPlaces.spans is not None:
-                        # The exact-delimiter-line skip above ends each body where bash ends it only
-                        # when the body is read at the TOP LEVEL of the command: inside a command or
-                        # process substitution or backquotes, bash 5.3 ends a body at a line that
-                        # merely STARTS with the delimiter when a ')' or a backquote follows it on
-                        # that line (after x=$(cat <<'EOF' then body then the line EOF), bash runs
-                        # the text after that line as commands, while this skip reads it as body),
-                        # and an unterminated body here consumes text bash executes. The nesting
-                        # stack alone cannot prove such a group closed (a bare case pattern's ')'
-                        # pops its parenthesis), so the span is recorded as a here-document body
-                        # ONLY when nothing is open on the stack AND no '(' and no backquote appears
-                        # anywhere before the body, quoted or not; every other body records as
-                        # "body", which the bare-'&' narrowing never lifts (fail closed), while the
-                        # segments are unchanged for every other reader of this lex.
-                        trusted = (not nest and command.find("(", 0, body_at) == -1
-                                   and command.find("`", 0, body_at) == -1)
+                        # A trusted body records "heredoc"; every other body records "body", which the
+                        # bare-'&' narrowing never lifts (fail closed). The segments are unchanged for
+                        # every other reader of this lex.
                         _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "body"))
                     del pending_heredocs[:]
                     seg_start[0] = i
