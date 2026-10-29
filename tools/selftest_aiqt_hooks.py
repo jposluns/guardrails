@@ -2819,6 +2819,106 @@ def _procsubst_taken_failures():
     return out
 
 
+def _per_suffix_checker(argv):
+    """The gatdis note tier's checker reading judged afresh on every _gate_suffix_starts suffix, the reading
+    _gate_checker_suffix replaced (and must agree with)."""
+    return any(aiqt_hooks._is_checker_segment(argv[m:]) or aiqt_hooks._gate_verify_shaped(argv[m:])
+               for m in aiqt_hooks._gate_suffix_starts(argv))
+
+
+def _per_suffix_sink_kind(argv):
+    """The gatdis note tier's sink reading judged afresh on every _gate_suffix_starts suffix, the reading
+    _gate_suffix_sink_kind replaced (and must agree with)."""
+    return next((k for k in (aiqt_hooks._gate_note_sink_kind(argv[m:])
+                             for m in aiqt_hooks._gate_suffix_starts(argv)) if k is not None), None)
+
+
+# Words for the suffix-reading agreement row: wrappers, assignments, '--', '--test', runners and their checker
+# operands, verify options with and without a value, text commands, peeled wrappers and sink words.
+_SUFFIX_WORDS = ("setsid", "nohup", "sudo", "env", "nice", "timeout", "time", "-n", "5", "-c", "-k", "--",
+                 "--test", "--check", "--check=x", "--verify", "--selftestx", "FOO=1", "A+=b", "X=--check",
+                 "python3", "-m", "pytest", "node", "npx", "jest", "make", "test", "bash", "tools/run_all_checks.sh",
+                 "-c-check.py", "/usr/bin/pytest", "\\pytest", "latest", "checks", "echo", "grep", "git", "head",
+                 "tail", "cut", "sed", "-1", "-20", "-m", "1", "-q", "{", "!", "if", "x")
+
+
+@contextlib.contextmanager
+def _suffix_call_record(lengths):
+    """While the block runs, every call of the three per-suffix judges appends the length of the argv it got."""
+    names = ("_is_checker_segment", "_gate_verify_shaped", "_gate_note_sink_kind")
+    saved = dict((name, getattr(aiqt_hooks, name)) for name in names)
+
+    def recording(judge):
+        def judged(argv):
+            lengths.append(len(argv))
+            return judge(argv)
+        return judged
+    for name in names:
+        setattr(aiqt_hooks, name, recording(saved[name]))
+    try:
+        yield
+    finally:
+        for name in names:
+            setattr(aiqt_hooks, name, saved[name])
+
+
+def _suffix_flow_tokens_read(command, checker=None, sink=None):
+    """The argv tokens the three per-suffix judges are handed while _gate_flow_note reads command, with the
+    suffix readings optionally replaced by checker and sink (a wrong reading for the -red rows)."""
+    lengths = []
+    records = aiqt_hooks._lex_command(command)
+    saved = aiqt_hooks._gate_checker_suffix, aiqt_hooks._gate_suffix_sink_kind
+    aiqt_hooks._gate_checker_suffix = checker or saved[0]
+    aiqt_hooks._gate_suffix_sink_kind = sink or saved[1]
+    try:
+        with _suffix_call_record(lengths):
+            aiqt_hooks._gate_flow_note(records, command)
+    finally:
+        aiqt_hooks._gate_checker_suffix, aiqt_hooks._gate_suffix_sink_kind = saved
+    return sum(lengths)
+
+
+def _suffix_reading_failures():
+    """(dl-suffix-*) The note tier reads a wrapper's suffixes in time linear in the command. The other bounded
+    timed rows had no case for it: gate_weakening on fg_setsid_options (a wrapper before a long run of
+    words) once judged every suffix afresh, building all of them at once, about 9.8 to 10.8 s of CPU at 64 KB
+    and a MemoryError at 256 KB under an 8 GiB address-space limit (in-process on a 24-core host, 2026-10-28).
+    dl-suffix-equal and dl-suffix-sink-equal: the one-pass readings agree with the per-suffix readings on
+    3,000 seeded argvs. dl-suffix-calls: on 'setsid' and 1,200 '-c' words, and on the same after 'pytest |',
+    the per-suffix judges are handed at most a few times the command's tokens in all; dl-suffix-calls-red and
+    dl-suffix-sink-calls-red: the per-suffix readings, which hand them about the square of it over two, fail
+    that bound, so the record discriminates."""
+    out = []
+    rng = random.Random(20261028)
+    for _ in range(3000):
+        argv = [rng.choice(_SUFFIX_WORDS) for _ in range(rng.randint(0, 9))]
+        if aiqt_hooks._gate_checker_suffix(argv) != _per_suffix_checker(argv):
+            out.append("(dl-suffix-equal) _gate_checker_suffix gives {} on {!r}, the per-suffix reading {}".format(
+                aiqt_hooks._gate_checker_suffix(argv), argv, _per_suffix_checker(argv)))
+            break
+    for _ in range(3000):
+        argv = [rng.choice(_SUFFIX_WORDS) for _ in range(rng.randint(0, 9))]
+        if aiqt_hooks._gate_suffix_sink_kind(argv) != _per_suffix_sink_kind(argv):
+            out.append("(dl-suffix-sink-equal) _gate_suffix_sink_kind gives {!r} on {!r}, the per-suffix reading "
+                       "{!r}".format(aiqt_hooks._gate_suffix_sink_kind(argv), argv, _per_suffix_sink_kind(argv)))
+            break
+    words = 1201
+    bound = 4 * words
+    plain = "setsid" + " -c" * (words - 1)
+    piped = "pytest | " + plain
+    for label, command, wrong in (("calls", plain, dict(checker=_per_suffix_checker)),
+                                  ("sink-calls", piped, dict(sink=_per_suffix_sink_kind))):
+        read = _suffix_flow_tokens_read(command)
+        if read > bound:
+            out.append("(dl-suffix-{}) the per-suffix judges were handed {} tokens for a {}-word wrapper "
+                       "command, over the linear bound of {}".format(label, read, words, bound))
+        red = _suffix_flow_tokens_read(command, **wrong)
+        if red <= bound:
+            out.append("(dl-suffix-{}-red) the per-suffix reading was handed only {} tokens (bound {}), so the "
+                       "record cannot tell it from the one-pass reading".format(label, red, bound))
+    return out
+
+
 def _read_visit_count(command, cwd, read_segments=None):
     """The _command_start calls one diff_source_pretool call makes on command (with read_segments in place of
     aiqt_hooks._read_segments when given), and the number of the lexer's own records that hold a word."""
@@ -4080,7 +4180,7 @@ _DEADLINE_CASES = {
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
-                       "ansi_c_herestr", "ansi_c_noverify_after"),
+                       "ansi_c_herestr", "ansi_c_noverify_after", "fg_setsid_options"),
     "gensrc_guard": ("write_content", "write_deep_path"),
     "git_discard": ("git_segments_reset", "nest_parens"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
@@ -6519,6 +6619,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_raw_mirror_failures())
     failures.extend(_procsubst_skip_failures())
     failures.extend(_procsubst_taken_failures())
+    failures.extend(_suffix_reading_failures())
     failures.extend(_read_visit_failures(str(tmp)))
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
