@@ -13667,8 +13667,8 @@ def protected_line(data):
 
 # --- sechau/secrst: the guard's own reading of a command ----------------------------------------------
 # The destructive-operation guard reads a command through its OWN copy of the word reader and lexer below
-# (_destruct_read_word, _destruct_lex_command), so the shared lexer every other hook uses (_destruct_lex_command,
-# _destruct_read_word) stays exactly as it is. The copy adds what the guard needs and the shared lexer does not have:
+# (_destruct_read_word, _destruct_lex_command), so the shared lexer every other hook uses (_lex_command,
+# _read_word) stays exactly as it is. The copy adds what the guard needs and the shared lexer does not have:
 # a recover mode that models the constructs the default contract rejects and reads each $( ), backtick and
 # process substitution as a nested '(' ... ')' group, and an argv_plain flag per word. It reuses the shared
 # operator matcher, here-document delimiter parser and body skip. The shared lexer is still a FLOOR under it
@@ -14443,10 +14443,19 @@ def _destruct_main_floor(command):
     '#' whose comment reading depends on context, or a quoted here-document body inside a substitution that the
     shared skip reads otherwise. The guard's own reading takes every '#' at a word boundary as a comment and
     reads such a body one way only, so where the shared lexer finds more than one reading, the reading the
-    guard classified may not be the one bash runs."""
+    guard classified may not be the one bash runs. The ValueError names the cause the command can hold: more
+    than one reading needs an uncertain '#' (so a '#' in the text) or a body read in a substitution (so a '<<'),
+    and a shared lexer that cannot read the command raises its own ValueError, naming its cause."""
     if len(_lex_readings(command)) != 1:
-        raise ValueError("the shared lexer reads this command more than one way (an unquoted '#' whose "
-                         "comment reading depends on context, or a here-document body inside a substitution)")
+        if "<<" not in command:
+            cause = ("an unquoted '#' in it, at a word start inside a parenthesis, a substitution or a '${' or "
+                     "right after a '(', a ')' or a backquote, is a comment or word text by context")
+        elif "#" not in command:
+            cause = "a here-document body inside a substitution is read otherwise by the shared skip"
+        else:
+            cause = ("it holds a '#' and a '<<': an unquoted '#' whose comment reading depends on context, or a "
+                     "here-document body inside a substitution")
+        raise ValueError("the shared lexer reads this command more than one way: {}".format(cause))
 
 
 # --- sechau/secrst: a destructive operation outside git's reach ---------------------------------------
@@ -14807,13 +14816,23 @@ _DESTRUCT_COMMAND_ENV = frozenset((
     "LESSOPEN", "LESSCLOSE"))
 _DESTRUCT_CONFIG_COMMAND_RE = re.compile(
     r"(?i)^(?:core\.(?:pager|editor|sshcommand)|sequence\.editor|diff\.external|.+\.textconv|alias\..+)$")
+# A client's shell, program or file-loading meta-commands, as patterns read by _destruct_raw_found (a match
+# whose miss group did not take part is a hit). Linear in the length of the argument: a backslash run is
+# matched at its last backslash (a run before a meta-command holds one right before it), a line's leading
+# blanks after its last newline (a meta-command after a run of blank lines follows that run's last newline),
+# and a head whose tail can lie anywhere later in its run (psql's \g, \o, \w or \copy before a '|' on its
+# line; copy before to/from program with no ';' between) is followed, where no tail follows it, by the miss
+# group taking the rest of that run, which the tail of every later head in it would also have to lie in.
+# Each pattern finds a hit in exactly the texts where the single pattern it replaces matched; that one
+# backtracked over the run for every backslash, newline or head in it, in time quadratic in its length.
 _DESTRUCT_SQL_EXEC_RE = {
-    "psql": re.compile(r"(?is)\\+(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b|(?:gx?|o|w|copy)\b[^\n]*\|)"
-                       r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
-    "mysql": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
-    "mariadb": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
-    "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
-                          r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
+    "psql": (re.compile(r"(?is)\\(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b)"),
+             re.compile(r"(?is)\\(?:gx?|o|w|copy)\b(?:[^\n|]*\||(?P<miss>[^\n|]*))"),
+             re.compile(r"(?is)\bcopy\b(?:[^;]*?\b(?:to|from)\s+program\b|(?P<miss>[^;]*))")),
+    "mysql": (re.compile(r"(?im)\\(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])[^\S\n]*(?:system|source|edit|pager)\b"),),
+    "mariadb": (re.compile(r"(?im)\\(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])[^\S\n]*(?:system|source|edit|pager)\b"),),
+    "sqlite3": (re.compile(r"(?im)(?:^|\n)[^\S\n]*\.(?:shell|system|import|load|read)\b"
+                           r"|(?:^|\n)[^\S\n]*\.(?:output|once)\s+[\x22\x27]?\|"),),
 }
 _DESTRUCT_CREATORS = frozenset(("cp", "mv", "ln", "tee", "mkdir", "touch"))
 _DESTRUCT_ASSIGN_BUILTINS = frozenset(("export", "declare", "typeset", "local", "readonly", "set"))
@@ -15121,8 +15140,8 @@ def _destruct_shell_text(text, prose):
             else:
                 stack.pop()
                 spans = top["prose"]
-                if (spans is not None and not "".join(out[spans[0] + 1:spans[1]]).strip()
-                        and not "".join(out[spans[1] + 1:]).strip()):
+                if (spans is not None and _destruct_chunks_blank(out, spans[0] + 1, spans[1])
+                        and _destruct_chunks_blank(out, spans[1] + 1, len(out))):
                     out[spans[1]] = "\n"  # the exact $(cat <<'EOF' ... EOF) prose idiom: its body is data
         elif text.startswith("<<<", i):
             out.append("<<<")
@@ -15136,7 +15155,7 @@ def _destruct_shell_text(text, prose):
                 # only a substitution's FIRST heredoc operator can follow a bare cat: each operator's own text
                 # stays in the substitution, so the text a later one reads is never cat alone
                 if (prose and quoted and in_sub and not top.get("heredoc")
-                        and "".join(out[top["start"]:]).strip() == "cat"):
+                        and _destruct_chunks_cat(out, top["start"])):
                     owner = top
                 if in_sub:
                     top["heredoc"] = True
@@ -15163,6 +15182,32 @@ def _destruct_shell_text(text, prose):
         out.append(c)
         i += 1
     return "".join(out)
+
+
+# The prose-idiom checks of _destruct_shell_text, on the chunks it has copied so far. Each reads the chunks only up
+# to the first one that rules its answer out, rather than joining them all: a substitution's text starts with
+# the '$(' chunk of any substitution nested in it, so a check never reads past one, and each chunk is read by
+# the checks of one substitution only. Joining them read the text of every nested substitution again at each
+# level, in time quadratic in the length of a nested command.
+def _destruct_chunks_blank(chunks, start, stop):
+    """True when the text of chunks[start:stop] is whitespace only, or empty (its strip() is empty)."""
+    return all(not chunks[k] or chunks[k].isspace() for k in range(start, stop))
+
+
+def _destruct_chunks_cat(chunks, start):
+    """True when the text of chunks[start:] is cat with only whitespace around it (its strip() is 'cat')."""
+    head = ""  # the first three characters of the text once its leading whitespace is removed
+    for k in range(start, len(chunks)):
+        chunk = chunks[k] if head else chunks[k].lstrip()
+        if len(head) < 3:
+            take = 3 - len(head)
+            head += chunk[:take]
+            if not "cat".startswith(head):
+                return False
+            chunk = chunk[take:]
+        if chunk and not chunk.isspace():
+            return False
+    return head == "cat"
 
 
 def _destruct_join_lines(text):
@@ -15908,7 +15953,7 @@ def _destruct_classified(seg, idx, word, cwd, deadline, ctx):
     if word == "dropdb" and "dropdb" in _DESTRUCT_RULES:
         return [("deny", "dropdb destroys a database")]
     if (ctx.get("prior") and word in _DESTRUCT_SQL_CLIENTS
-            and any(_DESTRUCT_SQL_EXEC_RE[word].search(arg) for arg in args)):
+            and any(_destruct_raw_found(_DESTRUCT_SQL_EXEC_RE[word], arg) for arg in args)):
         return [("deny", "prior-effect: {} carries a shell/program or file-loading meta-command".format(word))]
     if word in _DESTRUCT_SQL_CLIENTS and "sql" in _DESTRUCT_RULES and any(
             _DESTRUCT_SQL_RE.search(arg) for arg in args):
@@ -16157,15 +16202,30 @@ _DESTRUCT_REDIR_WRITE_RE = re.compile(
 # argument (printf 'curl -o f') is still seen on an uncertain read. A STOPPED read no longer needs them:
 # it denies outright (recover-stop) before the effectful test is consulted. Read
 # only on an uncertain read (over-match toward DENY, the safe direction there); a quote-concatenated
-# spelling (c''url) is NOT seen by these and is covered by the decoded checks instead.
+# spelling (c''url) is NOT seen by these and is covered by the decoded checks instead. Each is read by
+# _destruct_raw_found: a creator word with no writing option after it in its run (up to a newline, ';', '&',
+# '|', a parenthesis or a backquote) is followed by the miss group taking the rest of that run, so a later
+# creator word in the run, whose option would also have to lie in it, is never tried again. Linear in the
+# length of the command; each finds a hit in exactly the texts where the pattern it replaces matched, which
+# scanned the rest of the run for every creator word in it, in time quadratic in the run's length.
 _DESTRUCT_WRITER_RES = (
-    re.compile(r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
-    re.compile(r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
-    re.compile(r"(?<![\w.-])tar(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])"),
-    re.compile(r"(?<![\w.-])unzip(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])"),
-    re.compile(r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
-    re.compile(r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
+    re.compile(r"(?<![\w.-])curl(?![\w.-])(?:[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"
+               r"|(?P<miss>[^\n;&|()`]*))"),
+    re.compile(r"(?<![\w.-])wget(?![\w.-])(?:[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"
+               r"|(?P<miss>[^\n;&|()`]*))"),
+    re.compile(r"(?<![\w.-])tar(?![\w.-])(?:[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])|(?P<miss>[^\n;&|()`]*))"),
+    re.compile(r"(?<![\w.-])unzip(?![\w.-])(?:[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])|(?P<miss>[^\n;&|()`]*))"),
+    re.compile(r"(?<![\w.-])chmod(?![\w.-])(?:[^\n;&|()`]*?\+x|(?P<miss>[^\n;&|()`]*))"),
+    re.compile(r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])(?:[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"
+               r"|(?P<miss>[^\n;&|()`]*))"),
 )
+
+
+def _destruct_raw_found(patterns, text):
+    """True when one of patterns (_DESTRUCT_WRITER_RES, or a client's _DESTRUCT_SQL_EXEC_RE entry) finds a hit in
+    text: a match whose miss group did not take part. Every match of one pattern is read in turn, so a miss
+    match takes the rest of its run and the next search starts past it."""
+    return any(found.lastgroup != "miss" for rx in patterns for found in rx.finditer(text))
 # Further creators the effectful predicate knows, decided from DECODED command words (the lexer's quote
 # removal applied to each recovered word), never from raw text with per-option regexes: a segment whose
 # decoded command word is in this CLOSED creator set DENIES regardless of its options (
@@ -16903,7 +16963,7 @@ def _destruct_effectful(command, segments):
     if (_destruct_text_marker(command) or _destruct_creator_segments(segments)
             or _DESTRUCT_CREATOR_RE.search(command)
             or _DESTRUCT_CMDVAR_RE.search(command) or _DESTRUCT_REDIR_WRITE_RE.search(command)
-            or any(rx.search(command) for rx in _DESTRUCT_WRITER_RES)):
+            or _destruct_raw_found(_DESTRUCT_WRITER_RES, command)):
         return True
     for effect in _destruct_prior_effects(segments):
         if effect["outputs"] or effect["links"] or effect["env"] or effect["config"]:
@@ -16925,8 +16985,9 @@ def destructive_guard(data):
     NO-ASK posture: the outcome is ALLOW, ALLOW-with-a-note, SNAPSHOT-THEN-ALLOW, or DENY-and-educate, never an
     ask.
 
-    DENY UNLESS UNDERSTOOD: an ALLOW-LIST of command shapes modelled exactly. Each lexed segment (the shared
-    quote/redirect-aware lexer, _destruct_lex_command) is resolved past leading assignments, the shell keywords !, {, if,
+    DENY UNLESS UNDERSTOOD: an ALLOW-LIST of command shapes modelled exactly. Each lexed segment (the guard's own
+    copy of the quote/redirect-aware lexer, _destruct_lex_command, with the shared lexer _lex_command as a floor
+    under it, _destruct_main_floor) is resolved past leading assignments, the shell keywords !, {, if,
     then, elif, else, do, while and until, and the wrappers modelled EXACTLY in _DESTRUCT_WRAPPER_SPECS (sudo, doas,
     env, nice, nohup, time, timeout, stdbuf, ionice, chrt, setsid, command, builtin, exec, busybox, toybox, each
     with a closed option table) to its effective command word. A segment that carries an in-scope destructive word
@@ -16958,7 +17019,9 @@ def destructive_guard(data):
     recover read that hits a SYNTAX quirk inside a substitution falls back to the plain reading, while
     one that hits a STILL-RUNS stop there is never discarded: it denies wholesale.
     On the UNPARSEABLE path (the default lexer raised: a here-string, a process substitution, an
-    unquoted heredoc, an unbalanced quote, a '{fd}>' redirect, a NUL) the text scan above runs first, then
+    unquoted heredoc, an unbalanced quote, a '{fd}>' redirect, a NUL; or the shared lexer under it,
+    _destruct_main_floor, read the command more than one way or not at all, the text-scan deny and the
+    classified-segment deny then naming that cause) the text scan above runs first, then
     every segment the recover read reaches - before, inside and after those constructs - gets the full
     classification, the prior-effect pass included, and any deny denies.
 
@@ -17029,7 +17092,14 @@ def destructive_guard(data):
     names a destructive word (xargs grep rm, pytest -k truncate, a python heredoc mentioning rm, a relative rm after
     a cd inside a case statement), as is every glob or variable operand, every path word outside a repository
     and outside scratch, a relative operand after any cd whose && chain has ended (cd d && true; rm x), and
-    every truncate or dd of= target under scratch, even a plain file there.
+    every truncate or dd of= target under scratch, even a plain file there. The shared-lexer floor adds its
+    own: a command holding an unquoted '#' that bash reads as a comment or as word text by context (at a word
+    start inside a parenthesis, a substitution or a '${', or right after a '(', a ')' or a backquote), or a
+    here-document body in a substitution that the shared skip reads otherwise, takes the unparseable path
+    even where the guard's own reading would allow it, so a scratch delete with such a '#' in a subshell
+    ((rm -rf #c -f >> /tmp/x/o)) denies, and so does a $(cat <<'EOF' ...) prose idiom whose body names a
+    destructive word beside one ((echo #a<newline>); x=$(cat <<'E' ... rm ... E)), since the text scan of that
+    path keeps every heredoc body.
 
     The prior-effect rule can also deny benign commands naming no destructive word: a trusted-name helper
     defined then invoked, a literal copy/write-then-run build step, client file-loading meta-commands, and
@@ -17196,7 +17266,9 @@ def destructive_guard(data):
     discovery, the status and ls-files probes and the recovery snapshot run with subprocess timeouts capped by
     the time remaining, an operand reached after the deadline DENIES, and a classification or snapshot result
     COMPLETED after the deadline also DENIES; a mis-wired event hard-blocks. Non-subprocess work (path
-    resolution, existence checks) is not individually bounded, the remaining overrun residual."""
+    resolution, existence checks, the lexes and the text scans) is not bounded by _DESTRUCT_BUDGET: it runs
+    inside main()'s PreToolUse deadline window (PRETOOL_BUDGET_SECONDS), and a call that has not decided by
+    then fails CLOSED with exit 2 (a deny, false for a benign command that is slow to read)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: destructive_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -17215,24 +17287,34 @@ def destructive_guard(data):
     cwd = data.get("cwd")
     cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
     exc = None
+    floored = False  # the guard's own lexer read the command and the shared lexer under it did not
     try:
         plain = _destruct_lex_command(command)
-        _destruct_main_floor(command)  # the shared lexer must read it whole, one way only
         parseable = True
     except ValueError as _lex_exc:
         parseable, exc = False, _lex_exc
+    if parseable:
+        try:
+            _destruct_main_floor(command)  # the shared lexer must read it whole, one way only
+        except ValueError as _floor_exc:
+            parseable, exc, floored = False, _floor_exc, True
     if not parseable:
         # UNPARSEABLE COMMAND: the text scan runs first, then ONE recover-mode read models the constructs
         # the default lexer rejects (here-strings, process substitutions, unquoted heredoc bodies and the
         # substitutions inside them). Every segment it reaches is classified.
         hit = _destruct_text_marker(command) if "raw" in _DESTRUCT_RULES else None
         if hit:
-            return _deny("AIQT rules sechau/secrst: the command could not be parsed by the shell lexer (a "
-                         "here-string, a process substitution, an unquoted heredoc or an unbalanced quote), and "
-                         "its text, read through its quoting context with line continuations joined, names {!r}, "
-                         "an in-scope destructive command; this guard classifies only the command shapes it "
-                         "models exactly, so it denies rather than run (fail closed). Re-issue it as a "
-                         "parseable command with literal targets. {}".format(hit, _DESTRUCT_ALTS),
+            if floored:
+                why = ("the shared shell lexer, a floor under this guard's own reading, could not read this "
+                       "command one way only ({})".format(exc))
+            else:
+                why = ("the command could not be parsed by the shell lexer (a here-string, a process "
+                       "substitution, an unquoted heredoc or an unbalanced quote)")
+            return _deny("AIQT rules sechau/secrst: {}, and its text, read through its quoting context with "
+                         "line continuations joined, names {!r}, an in-scope destructive command; this guard "
+                         "classifies only the command shapes it models exactly, so it denies rather than run "
+                         "(fail closed). Re-issue it as a parseable command with literal targets. {}".format(
+                             why, hit, _DESTRUCT_ALTS),
                          "AIQT guardrail: denied an unparseable command naming a destructive operation "
                          "(rules sechau, secrst).")
         if "raw" in _DESTRUCT_RULES and "prior-effect" in _DESTRUCT_RULES:

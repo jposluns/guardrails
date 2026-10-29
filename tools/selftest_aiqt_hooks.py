@@ -2328,15 +2328,22 @@ def _make_stash_fixture(repo, failures):
 
 def _symlink_probe(target, link, failures):
     """Create and remove a probe symlink at link and return True; on a platform that cannot create it
-    record the NAMED cannot-evaluate failure and return False."""
+    record the NAMED cannot-evaluate failure and return False. A failure to REMOVE the probe link once it
+    was created is its own named failure (cs-symlink-cleanup), never conflated with creation failure: the
+    platform can create symlinks, so this still returns True and the symlink cases still run."""
     try:
         os.symlink(str(target), str(link))
-        os.unlink(str(link))
-        return True
     except OSError as exc:
         failures.append("(ws-cs-symlink-cannot-evaluate) the symlink probe failed ({}), so the frozen-floor, "
                         "frozen-registry and lexical-tree symlink cases were not evaluated".format(exc))
         return False
+    try:
+        os.unlink(str(link))
+    except OSError as exc:
+        failures.append("(cs-symlink-cleanup) the symlink probe was created but could not be unlinked ({}); "
+                        "the frozen-floor, frozen-registry and lexical-tree symlink cases still "
+                        "ran".format(exc))
+    return True
 
 
 def _test_cannot_evaluate_paths(failures, tmp):
@@ -2358,6 +2365,25 @@ def _test_cannot_evaluate_paths(failures, tmp):
         if made is not False or len(probe) != 1 or not probe[0].startswith("(" + name + ")"):
             failures.append("({}-inject) an injected setup fault must record the named failure and skip "
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
+    # A probe link that is created but cannot be removed records its own named failure and still lets the
+    # symlink cases run: the removal is made to fail by an os.unlink that raises, put back before the link
+    # is removed for real.
+    link = tmp / "cannot-evaluate-cleanup-link"
+    probe = []
+    real_unlink = os.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        raise PermissionError("injected unlink failure: {}".format(path))
+    os.unlink = failing_unlink
+    try:
+        made = _symlink_probe(tmp, link, probe)
+    finally:
+        os.unlink = real_unlink
+    if made is not True or len(probe) != 1 or not probe[0].startswith("(cs-symlink-cleanup)"):
+        failures.append("(cs-symlink-cleanup-inject) a probe link that cannot be removed must record the named "
+                        "cleanup failure and still run the case; got made={!r} recorded={!r}".format(made, probe))
+    if os.path.lexists(str(link)):
+        os.unlink(str(link))
 
 
 def _test_git_stash_ref(failures):
@@ -2563,6 +2589,74 @@ _DESTRUCT_SHADOW_EDGES = (
     "f() { true; }", "f ( )", "1abc()", "a.b:c-d ()", "x ( \t)", "a" * 60 + "(", "f()", ".()", "1()", "-()",
     "a=b()", "function f", "alias x=y", "PATH=/x", "export PATH=x", "x f(", "\u00e9()", "_()", "9_()", "a b()",
     "echo hi", "")
+# The raw writer patterns and the client meta-command patterns as they stood before their linear rewrites
+# (_DESTRUCT_WRITER_RES and _DESTRUCT_SQL_EXEC_RE, read by _destruct_raw_found), kept verbatim as the references
+# those rewrites must agree with, and texts on each side of every alternative of each: a hit and a miss for
+# each head and option, a stop character between them, a tail on the next line, a backslash, newline or head
+# run with and without a hit after it, Unicode space and word characters, and the case-folded spellings.
+_DESTRUCT_WRITER_RES_BEFORE = (
+    re.compile(r"(?<![\w.-])curl(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-[oO]|-s[oO]|--output)(?![\w.-])"),
+    re.compile(r"(?<![\w.-])wget(?![\w.-])[^\n;&|()`]*?(?<![\w.-])(?:-O|--output-document)(?![\w.-])"),
+    re.compile(r"(?<![\w.-])tar(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-C(?![\w.-])"),
+    re.compile(r"(?<![\w.-])unzip(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-d(?![\w.-])"),
+    re.compile(r"(?<![\w.-])chmod(?![\w.-])[^\n;&|()`]*?\+x"),
+    re.compile(r"(?<![\w.-])(?:python3?|perl|ruby|node)(?![\w.-])[^\n;&|()`]*?(?<![\w.-])-[ce](?![\w.-])"),
+)
+_DESTRUCT_SQL_EXEC_RE_BEFORE = {
+    "psql": re.compile(r"(?is)\\+(?:!|e[fv]?\b|ir?\b|include(?:_relative)?\b|(?:gx?|o|w|copy)\b[^\n]*\|)"
+                       r"|\bcopy\b[^;]*\b(?:to|from)\s+program\b"),
+    "mysql": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "mariadb": re.compile(r"(?im)\\+(?:[!.]|[eP](?![A-Za-z]))|(?:^|[;\n])\s*(?:system|source|edit|pager)\b"),
+    "sqlite3": re.compile(r"(?im)(?:^|\n)\s*\.(?:shell|system|import|load|read)\b"
+                          r"|(?:^|\n)\s*\.(?:output|once)\s+[\x22\x27]?\|"),
+}
+_DESTRUCT_WRITER_EDGES = (
+    "curl -o f", "curl x -O f", "curl -so f", "curl -sO f", "curl --output f", "curl -oo f", "curl -o.f",
+    "curl a-o f", "xcurl -o f", "curl.x -o f", "curl;-o f", "curl x\n-o f", "curl x | tee -o f", "curl x `-o`",
+    "(curl -o f)", "curl x (-o f)", "curl\u2028-o f", "curl\u00a0-o f", "curl\u00e9 -o f", "curl", "curl ",
+    "curl curl curl", "curl " * 40, "curl " * 40 + "-o f", "curl x; curl -o f", "curl -o f; curl x", "-o curl",
+    "wget -O f", "wget --output-document=f", "wget -o f", "tar -x -C d", "tar -xC d", "unzip z -d d",
+    "unzip z -dd", "chmod +x f", "chmod u+x f", "chmod+x", "chmod 600 f", "chmod x\n+x", "python -c x",
+    "python3 -c x", "python3.12 -c x", "perl -e x", "ruby x -c", "node -e x", "pythons -c", "perl -E x",
+    "perl & -e x", "perl " * 30 + "-e", "")
+_DESTRUCT_SQL_EXEC_EDGES = (
+    "\\! ls", "\\\\! ls", "\\" * 40 + "!", "\\" * 40, "\\e", "\\ef", "\\ev", "\\ex", "\\E", "\\EF", "\\i f",
+    "\\ir f", "\\include f", "\\include_relative f", "\\includex", "\\g | cat", "\\g x", "\\gx |", "\\gxy |",
+    "\\o|", "\\w x|", "\\copy x | y", "\\COPY x |", "\\g x\n| y", "\\g " * 40, "\\g " * 40 + "|",
+    "a | \\g b", "copy t to program 'x'", "COPY t FROM PROGRAM 'x'", "copy t to \n program 'x'",
+    "copy t; to program x", "copy " * 40, "copy " * 40 + "to program x", "xcopy to program", "copy toprogram",
+    "copy to programs", "\\.", "\\. f", "\\P", "\\p", "\\px", "\\" * 30 + ".", "system ls", "x; system ls",
+    "x;\n\n  system ls", "\n" * 40 + "system", "\n" * 40 + "x", " \n \n \n source f", "\u2028system",
+    "x\u2028system", "\u00a0pager", "  edit", "editx", "systems", ";" * 30 + "system", "; \t;\n pager",
+    ".shell ls", "\n.system x", "  .import f t", ".load x", ".read f", ".output |cat", ".output '|cat'",
+    ".once \"|x\"", ".output f", ".outputx |", "\n" * 40 + ".shell", "\n" * 40 + ".x",
+    ".output" + " " * 40 + "x", ".output\n\n|", "x .shell", ";.shell", ".SHELL", "")
+# Commands on each side of the prose idiom of _destruct_shell_text, the texts its two chunk checks read: a
+# bare cat with blanks around it in any chunks (an ANSI-C quote and an empty one included), a quoted and an
+# unquoted delimiter, text before or after the here-document in the substitution, a second operator, nested
+# idioms and substitutions, and a short form of the nested input the joined checks took quadratic time on.
+_DESTRUCT_PROSE_EDGES = (
+    "x=$(cat <<'EOF'\nrm -rf /\nEOF\n)", "x=$( cat <<'EOF'\nrm\nEOF\n )", "x=$(cat <<EOF\nrm\nEOF\n)",
+    "x=$(cat x <<'E'\nrm\nE\n)", "x=$($'c'at <<'E'\nrm\nE\n)", "x=$($''cat <<'E'\nrm\nE\n)",
+    "x=$(c''at <<'E'\nrm\nE\n)", "x=$(cat <<'E' y\nrm\nE\n)", "x=$(cat <<'E'\nrm\nE\necho)",
+    "x=$(cat <<'E'\nrm\nE\n$(true))", "x=$(\ncat\n<<'E'\nrm\nE\n)", "x=$(cat\t<<'E'\nrm\nE\n)",
+    "x=$(cat <<'E' <<'F'\nrm\nE\nrm\nF\n)", "x=\"$(cat <<'E'\nrm\nE\n)\"", "x=$(cats <<'E'\nrm\nE\n)",
+    "x=$(ca <<'E'\nrm\nE\n)", "x=$(\u00a0cat\u2003<<'E'\nrm\nE\n)", "x=$(ca\\\nt <<'E'\nrm\nE\n)",
+    "$(cat <<'A'\nrm\nA\n$(cat <<'B'\nrm\nB\n))", "$(cat <<'A'\nrm\nA\n $(cat <<'B'\nrm\nB\n) )",
+    "x $(cat <<'E'\nrm\nE\n) y", "".join("$(cat <<'E'\nrm\nE\n" for _ in range(6)) + ")" * 6,
+    "x " + "$( " * 6 + "true" + ") <<'E'\nrm\nE\n" * 6, "x=$(cat <<'E'\nrm\nE\n) # c", "")
+
+
+def _destruct_chunks_blank_before(chunks, start, stop):
+    """The prose idiom's blank check as _destruct_shell_text read it before _destruct_chunks_blank (the former
+    expression verbatim but for its arguments), the reference the self-test compares that check with."""
+    return not "".join(chunks[start:stop]).strip()
+
+
+def _destruct_chunks_cat_before(chunks, start):
+    """The prose idiom's bare-cat check as _destruct_shell_text read it before _destruct_chunks_cat (the former
+    expression verbatim but for its arguments), the reference the self-test compares that check with."""
+    return "".join(chunks[start:]).strip() == "cat"
 
 
 def _destruct_argv_marker_before(words):
@@ -2588,10 +2682,12 @@ def _destruct_argv_marker_before(words):
 
 @contextlib.contextmanager
 def _destruct_scan_recorder():
-    """While the block runs, every text handed to the guard's text scan and every word list handed to its argv
-    marker is recorded (each still answers as before): yields (texts, word_lists)."""
-    texts, word_lists = [], []
-    search, marker = aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker
+    """While the block runs, every text handed to the guard's text scan, every word list handed to its argv
+    marker and every (patterns, text) pair handed to its raw pattern reader is recorded (each still answers as
+    before): yields (texts, word_lists, raw_pairs)."""
+    texts, word_lists, raw_pairs = [], [], []
+    search, marker, raw = (aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker,
+                           aiqt_hooks._destruct_raw_found)
 
     def recording_search(text):
         texts.append(text)
@@ -2600,22 +2696,72 @@ def _destruct_scan_recorder():
     def recording_marker(words):
         word_lists.append(list(words))
         return marker(words)
+
+    def recording_raw(patterns, text):
+        raw_pairs.append((patterns, text))
+        return raw(patterns, text)
     aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker = recording_search, recording_marker
+    aiqt_hooks._destruct_raw_found = recording_raw
     try:
-        yield texts, word_lists
+        yield texts, word_lists, raw_pairs
     finally:
         aiqt_hooks._destruct_text_search, aiqt_hooks._destruct_argv_marker = search, marker
+        aiqt_hooks._destruct_raw_found = raw
 
 
-def _destruct_scan_equivalence_failures(texts, commands, word_lists):
-    """(dz-text-scan-equal, dz-shadow-scan-equal, dz-argv-marker-equal, dz-scan-equal-vacuous) The linear
-    rewrites give what the former forms gave. The text scan finds the matched text the former regex found,
+def _destruct_scan_equivalence_failures(texts, commands, word_lists, raw_pairs=()):
+    """(dz-text-scan-equal, dz-shadow-scan-equal, dz-argv-marker-equal, dz-writer-scan-equal,
+    dz-sql-exec-equal, dz-prose-scan-equal, dz-scan-equal-vacuous) The linear rewrites give what the former
+    forms gave. The text scan finds the matched text the former regex found,
     or misses where it missed, on every text the guard's vectors handed it (texts) and on _DESTRUCT_TEXT_EDGES.
     The function-header search finds a header in exactly the texts the former pattern did, on the
     shell-context reading of every vector command (the text it is searched in) and on _DESTRUCT_SHADOW_EDGES.
-    The argv marker returns what the former one returned on every word list the vectors handed it. Each
+    The argv marker returns what the former one returned on every word list the vectors handed it. Each raw
+    writer pattern, and each client's meta-command patterns, find a hit in exactly the texts the former
+    pattern matched, on every text the vectors handed them (raw_pairs) and on _DESTRUCT_WRITER_EDGES and
+    _DESTRUCT_SQL_EXEC_EDGES. The shell-context reading with the prose idiom's chunk checks gives the text it
+    gives with the former joined checks, on every vector command and on _DESTRUCT_PROSE_EDGES. Each
     comparison must see at least one hit and one miss, so none passes vacuously."""
     out = []
+    writer_texts = [text for patterns, text in raw_pairs if patterns is aiqt_hooks._DESTRUCT_WRITER_RES]
+    writer_texts = list(dict.fromkeys(writer_texts + list(_DESTRUCT_WRITER_EDGES)))
+    writer_hits = 0
+    for text in writer_texts:
+        for k, before_rx in enumerate(_DESTRUCT_WRITER_RES_BEFORE):
+            want = bool(before_rx.search(text))
+            writer_hits += want
+            if aiqt_hooks._destruct_raw_found((aiqt_hooks._DESTRUCT_WRITER_RES[k],), text) != want:
+                out.append("(dz-writer-scan-equal) writer {} on {!r}: the former pattern matched: {}, the scan "
+                           "found: {}".format(k, text[:120], want, not want))
+    sql_texts = {client: [] for client in _DESTRUCT_SQL_EXEC_RE_BEFORE}
+    for patterns, text in raw_pairs:
+        for client in sql_texts:
+            if patterns is aiqt_hooks._DESTRUCT_SQL_EXEC_RE.get(client):
+                sql_texts[client].append(text)
+    sql_total = sql_hits = 0
+    for client, seen in sorted(sql_texts.items()):
+        for text in dict.fromkeys(seen + list(_DESTRUCT_SQL_EXEC_EDGES)):
+            want = bool(_DESTRUCT_SQL_EXEC_RE_BEFORE[client].search(text))
+            sql_total += 1
+            sql_hits += want
+            if aiqt_hooks._destruct_raw_found(aiqt_hooks._DESTRUCT_SQL_EXEC_RE[client], text) != want:
+                out.append("(dz-sql-exec-equal) {} on {!r}: the former pattern matched: {}, the scan found: "
+                           "{}".format(client, text[:120], want, not want))
+    prose_commands = list(dict.fromkeys(list(commands) + list(_DESTRUCT_PROSE_EDGES)))
+    prose_hits = 0
+    saved_checks = aiqt_hooks._destruct_chunks_blank, aiqt_hooks._destruct_chunks_cat
+    for command in prose_commands:
+        got = aiqt_hooks._destruct_shell_text(command, True)
+        aiqt_hooks._destruct_chunks_blank = _destruct_chunks_blank_before
+        aiqt_hooks._destruct_chunks_cat = _destruct_chunks_cat_before
+        try:
+            want = aiqt_hooks._destruct_shell_text(command, True)
+        finally:
+            aiqt_hooks._destruct_chunks_blank, aiqt_hooks._destruct_chunks_cat = saved_checks
+        prose_hits += want != aiqt_hooks._destruct_shell_text(command, False)
+        if got != want:
+            out.append("(dz-prose-scan-equal) {!r}: the joined checks read {!r}, the chunk checks {!r}".format(
+                command[:120], want[:120], got[:120]))
     texts = list(dict.fromkeys(list(texts) + list(_DESTRUCT_TEXT_EDGES)))
     text_hits = 0
     for text in texts:
@@ -2644,7 +2790,10 @@ def _destruct_scan_equivalence_failures(texts, commands, word_lists):
             out.append("(dz-argv-marker-equal) {!r}: the former marker gave {!r}, the current one {!r}".format(
                 words[:20], want, got))
     for label, total, found in (("text scan", len(texts), text_hits), ("header search", len(shells), headers),
-                                ("argv marker", len(word_lists), marks)):
+                                ("argv marker", len(word_lists), marks),
+                                ("writer scan", len(writer_texts) * len(_DESTRUCT_WRITER_RES_BEFORE), writer_hits),
+                                ("meta-command scan", sql_total, sql_hits),
+                                ("prose reading", len(prose_commands), prose_hits)):
         if not 0 < found < total:
             out.append("(dz-scan-equal-vacuous) the {} comparison found {} hits in {} inputs; it needs a hit "
                        "and a miss".format(label, found, total))
@@ -3018,7 +3167,7 @@ def _test_destructive_guard(failures, tmp):
                 failures.append("(dz-{}) expected {}, got {}".format(label, want, got))
         # every text the vectors hand the text scan and every word list they hand the argv marker is recorded,
         # and the former forms are compared on exactly those after the run
-        with _destruct_scan_recorder() as (seen_texts, seen_words):
+        with _destruct_scan_recorder() as (seen_texts, seen_words, seen_raw):
             for label, rule, command, cwd, want, opts in vectors:
                 got = run(command, cwd, opts)
                 if got != want:
@@ -3039,7 +3188,8 @@ def _test_destructive_guard(failures, tmp):
                 if mutant == want:
                     failures.append("(dz-mutant-{}) removing rule {!r} left {!r} at {}; the vector does not "
                                     "depend on its rule".format(label, rule, command, want))
-        failures.extend(_destruct_scan_equivalence_failures(seen_texts, [vec[2] for vec in vectors], seen_words))
+        failures.extend(_destruct_scan_equivalence_failures(seen_texts, [vec[2] for vec in vectors], seen_words,
+                                                            seen_raw))
         # REAL-SHELL ORACLE: each row builds a fresh repository holding an ignored keep.log and a scratch
         # directory s (holding qa, and hl, a hard link to keep.log), asks the hook from the repository, then
         # RUNS the command in real bash there and reads whether keep.log survived. The hook must deny exactly
@@ -3116,7 +3266,7 @@ def _test_destructive_guard(failures, tmp):
             return patched
 
         def blank_client(name):
-            return ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, **{name: never_match}))
+            return ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, **{name: (never_match,)}))
 
         saved_creators = aiqt_hooks._DESTRUCT_EFFECT_CREATORS
 
@@ -3138,7 +3288,8 @@ def _test_destructive_guard(failures, tmp):
             # writer mutant is also a liveness pin on its own pattern (one mutant per pattern, never
             # one whole-tuple mutant).
             return ("_DESTRUCT_WRITER_RES",
-                    tuple(never_match if rx.search(sample) else rx for rx in saved_writers))
+                    tuple(never_match if aiqt_hooks._destruct_raw_found((rx,), sample) else rx
+                          for rx in saved_writers))
 
         saved_tail = aiqt_hooks._destruct_tail_segment_unknown
 
@@ -3192,8 +3343,8 @@ def _test_destructive_guard(failures, tmp):
             ("recover-stop-rule", "pe-stop-separator-after-quote",
              ("_DESTRUCT_RULES", saved_rules - frozenset(("recover-stop",)))),
             ("sql-sqlite3-single-quote", "pe-sqlite-output-pipe-single",
-             ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, sqlite3=re.compile(
-                 saved_sql_exec["sqlite3"].pattern.replace("\\x27", ""), saved_sql_exec["sqlite3"].flags)))),
+             ("_DESTRUCT_SQL_EXEC_RE", dict(saved_sql_exec, sqlite3=tuple(
+                 re.compile(rx.pattern.replace("\\x27", ""), rx.flags) for rx in saved_sql_exec["sqlite3"])))),
             # The substitution, case-reserved and parseable still-runs branches, one isolating witness
             # each. Collapsing the sentinel to the unmarked raw erases the quoted/unquoted distinction, so
             # the run-path-only restriction spreads to every substitution group (a regression): the
