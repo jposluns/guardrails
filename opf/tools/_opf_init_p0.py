@@ -245,8 +245,8 @@ def _compatibility(manifest, provenance):
                            MANIFEST_PATH, declared, required))
     _require(raw_version == required,
              "VERSION", "manifest",
-             "{} declares spec_version {}, below {}, which names no version this specification "
-             "defines; to adopt its tree instead, first "
+             "{} declares spec_version {}, which is below {} and names no version this "
+             "specification defines; to adopt its tree instead, first "
              "move {} aside by hand: its files are then ordinary foreign content for a first "
              "adoption".format(MANIFEST_PATH, declared, required, MANIFEST_PATH))
     homes = base.get("homes")

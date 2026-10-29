@@ -192,7 +192,7 @@ def vectors(f):
         # rewording it, dropping any of them, or offering an upgrade again, is red.
         got = m.validate_compatibility(old[p0.MANIFEST_PATH])
         check([f[2] for f in got.findings] == [
-            "{0} declares spec_version '1.1.0', below 2.0.0, which names no version this "
+            "{0} declares spec_version '1.1.0', which is below 2.0.0 and names no version this "
             "specification defines; to adopt its tree instead, first move {0} aside by hand: its "
             "files are then ordinary foreign content for a first adoption".format(p0.MANIFEST_PATH)],
             "compat/older-version-refused/message")
@@ -224,7 +224,7 @@ def vectors(f):
     for earlier in ("1.2.0", "1.3.0", "1.99.99"):
         pinned_refusal("below-gets-hand-step-" + earlier,
                        manifest.replace(b'"2.0.0"', '"{}"'.format(earlier).encode()), "VERSION",
-                       "{0} declares spec_version '{1}', below 2.0.0, which names no version this "
+                       "{0} declares spec_version '{1}', which is below 2.0.0 and names no version this "
                        "specification defines; to adopt its tree instead, first move {0} aside by "
                        "hand: its files are then ordinary foreign content for a first "
                        "adoption".format(p0.MANIFEST_PATH, earlier))

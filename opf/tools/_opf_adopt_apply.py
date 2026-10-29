@@ -47,19 +47,22 @@ landed handler (the enforcement pack is planted by plant-governance rows and its
 enable-hook); the completion checks, the stage driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
 a green completion check, and no adoption interface opens that transaction in this build), and the
 `complete` CLI subcommand remains a later slice, as does the driver's receipt stage; the read-only
-`opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` runs the
-journal-only recovery (reconcile_report) under the journal lock and its own store leases (releasing a
-dead run's leftover lease lands with the lease join). Live
+`opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` is wired to the
+journal-only recovery (reconcile_report), whose engine body runs under the journal lock and its own
+store leases (releasing a dead run's leftover lease lands with the lease join). Live
 outside the self-test fixtures today: `opf adopt status` opens and lists the evidence home in opf.py
-through the _journal containment primitives, then grades each listed bundle through this module's
-_verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal through
-journal_state, with _open_product_root anchoring both reads to one product-root descriptor; the engine
-bodies of approve and apply refuse over a non-clean adoption journal (require_clean_journal), and on
-base 2.0.0 approve issues its approval without reading that journal (_capture_approval_journal_free)
-while apply is fenced; the transaction
-shell and the dispatch table are reachable from `opf adopt apply` only past the unlanded-op gate and
-the driver's mandatory receipt stage (unlanded in this build), which no plan passes; reconcile() is
-reachable from `opf adopt reconcile` through reconcile_report; and compose_rows stays reachable only
+through the _journal containment primitives and grades each listed bundle through this module's
+_verify_bundle_at (beneath the HELD home descriptor it is passed), with _open_product_root anchoring
+those reads to one product-root descriptor; on base 2.0.0 it never reads the adoption journal
+(journal_state is not called) and prints JOURNAL_UNREAD instead. The engine bodies of approve and
+apply refuse over a non-clean adoption journal (require_clean_journal); on base 2.0.0 approve issues
+its approval without reading that journal (_capture_approval_journal_free), and apply and reconcile
+are fenced: opf.py refuses both before it resolves the root, and run_apply and reconcile_report refuse
+with ADOPTION_FENCE too. So on base 2.0.0 the transaction shell, the dispatch table and reconcile()
+are reachable only from the self-test, which drives the engine bodies directly. Past the fence, the
+shell and the dispatch table would be reachable from `opf adopt apply` only past the unlanded-op gate
+and the driver's mandatory receipt stage (unlanded in this build), which no plan passes, and
+reconcile() from `opf adopt reconcile` through reconcile_report; compose_rows stays reachable only
 from the self-test and the crash children it starts in a fresh interpreter through the
 `--selftest-child` flag (the `_opf_init_operation` crash-child precedent), a self-test harness entry,
 never an adoption interface, which runs whatever spec it is handed without an approval.

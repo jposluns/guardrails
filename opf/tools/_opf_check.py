@@ -6,12 +6,13 @@ ONE record at a time and U3 (`_opf_release`) validates ONE ledger at a time; nei
 store, so the class of spec-MANDATED cross-record, historical, archive, view, changelog, and topology
 invariants the integrity layer owns (OPF-SPEC 11) has no owner. THIS unit builds that whole-store layer as
 a reusable ENGINE, `validate_store`, that REUSES the U1/U2/U3/U4/U5/U8 primitives and never
-re-implements per-record or per-ledger logic. It is the engine the future `opf doctor` VERB will drive; the
-verb itself is deliberately NOT wired here (see the sequencing note below).
+re-implements per-record or per-ledger logic. It is the engine the `opf doctor` verb drives; the verb's
+CLI wiring lives in opf.py, not here (see the wiring note below).
 
 Routing model (the structural cure for the hollow-validator class). The spec-11 integrity roster is a
-CLOSED tuple, `REQUIRED_CHECKS`. Every required check calls `rep.ran(<check-id>)` exactly once, whatever it
-finds. `result()` reconciles the emitted set against `REQUIRED_CHECKS`: a check that silently stops running
+CLOSED tuple, `DOCTOR_ROSTER` (the spec-11 `REQUIRED_CHECKS` with the homes-2 and imported-series checks).
+Every required check calls `rep.ran(<check-id>)` exactly once, whatever it finds. `result()` reconciles the
+emitted set against `DOCTOR_ROSTER`: a check that silently stops running
 is a missing id, which reconciliation routes to CANNOT-EVALUATE naming it, so a skipped check can never read
 as VALID. Each check routes to exactly one of: GRADE (evaluable from parsed TOML, contained filesystem
 listings, or a supplied observation; a defect is `rep.finding` -> INVALID); FAIL-CLOSED CANNOT-EVALUATE (an
@@ -39,11 +40,10 @@ composed U3 helper may construct a LAZY `range` over a declared worklog span, bu
 against the present ids and short-circuits at the first gap, so a declared numeric field still cannot
 amplify the run into an enumeration of the interval.
 
-CRITICAL SEQUENCING (honoured by this unit): the live `doctor` verb is NOT CLI-wired here. A prerequisite
-hardening step (VC-4-HARDEN) has not landed, and wiring a live store verb before it is a known finding
-(PD-OPF-PASSA-DEPTH option B, F-373). U6 therefore lands as (1) this module plus (2) its self-test wired
-into the `opf-check` self-test leg ONLY, exactly as the earlier units did. Assurance rides `--self-test`
-over synthetic whole stores; the observation seam under test is exercised directly.
+WIRING: this module defines no CLI verb. The live `opf doctor` verb is wired in opf.py (_cmd_doctor),
+which gathers the git-derived observations and calls validate_store; this module's own self-test rides the
+`opf-check` self-test leg over synthetic whole stores, and the observation seam under test is exercised
+directly.
 """
 import sys
 
@@ -178,8 +178,9 @@ def _schema_deferred(tname):
     this from the module tier to the importer legacy_fragment type)."""
     return tname not in BASELINE_SPECS and (tname in MODULE_TYPES or tname in IMPORTER_TYPES)
 
-# The closed spec-11 integrity roster. Every required check calls rep.ran(<id>) once; result() reconciles
-# the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
+# The closed spec-11 integrity roster, which DOCTOR_ROSTER (below) extends. Every required check calls
+# rep.ran(<id>) once; result() reconciles the emitted set against DOCTOR_ROSTER, so a silently-skipped check
+# becomes CANNOT-EVALUATE, never VALID.
 REQUIRED_CHECKS = (
     "C-MANIFEST", "C-PROFILES", "C-ROSTER", "C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM",
     "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-LEASE", "C-ID-SPACE", "C-RECEIPTS",
@@ -189,8 +190,8 @@ REQUIRED_CHECKS = (
     "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION",
 )
 _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
-# Checks a homes-2 store also requires (spec 4.2), inserted after C-ARCHIVE-ENUM. A legacy (homes 1) store's
-# roster, and so its report, is exactly REQUIRED_CHECKS.
+# Checks a homes-2 store also requires (spec 4.2), inserted after C-ARCHIVE-ENUM. Every report, whatever
+# its manifest declares, requires DOCTOR_ROSTER, which carries them.
 HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
 # The four imported-series checks spec 8.3 names, which the doctor roster carries (spec 4.2), after the
 # homes-2 checks. All four are graded here; result()'s roster reconciliation still routes any of them
@@ -553,7 +554,7 @@ class _Report:
             self.checks[cid] = "FINDING"
 
     def result(self, evaluated_profiles=None, unevaluated_profiles=None):
-        # Reconcile the emitted check ids against the closed REQUIRED_CHECKS roster. A required check that
+        # Reconcile the emitted check ids against the closed DOCTOR_ROSTER roster. A required check that
         # never registered ran() is routed to CANNOT-EVALUATE naming it; an unknown id that somehow ran is a
         # fail-closed internal fault. Neither can read as a pass.
         for cid in self.required:
@@ -566,7 +567,7 @@ class _Report:
         required = frozenset(self.required)
         for cid in list(self.checks):
             if cid not in required:
-                msg = ("internal: an unknown check id {!r} was run (not in REQUIRED_CHECKS; "
+                msg = ("internal: an unknown check id {!r} was run (not in DOCTOR_ROSTER; "
                        "fail-closed)".format(cid))
                 self.cannot.append(msg)
                 self.unattributed.append(msg)                   # an unknown id has no roster verdict to carry it
@@ -6385,7 +6386,7 @@ def self_test():
         _is2_m = base_manifest()
         _is2_m["types"]["legacy_fragment"] = {"namespace": "LF"}
         _is2_act_m = copy.deepcopy(_is2_m)
-        _is2_act_m["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+        _is2_act_m["opf"]["spec_version"] = _opf_store.SPEC_VERSION
         _is2_act_m["opf"]["homes"] = 2
         _is2_on = classify_containment(_is2_act_m, ".working/toml")
         # The omission vector: the bare call on an ACTIVATED manifest yields the ACTIVATED
@@ -6450,7 +6451,7 @@ def self_test():
               and _is2_refused(lambda: classify_containment(_is2_m, ".working/toml", True)))
         # The 2.0.0 / homes = 2 pair with its empty imported leaves (the clean fixture) is VALID.
         _is2_h2 = clean_machine()
-        _is2_h2["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+        _is2_h2["manifest.toml"]["opf"]["spec_version"] = _opf_store.SPEC_VERSION
         _is2_h2["manifest.toml"]["opf"]["homes"] = 2
         _is2_h2_clean = run(copy.deepcopy(_is2_h2))
         check("containment-homes2-pair-clean-valid",
@@ -6485,7 +6486,7 @@ def self_test():
         # checks need on an active store.
         def act_machine():
             m = clean_machine()
-            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            m["manifest.toml"]["opf"]["spec_version"] = _opf_store.SPEC_VERSION
             m["manifest.toml"]["opf"]["homes"] = 2
             for leaf in _opf_store.imported_leaf_names(m["manifest.toml"]["types"]):
                 m[leaf] = ({"schema": 1, "entry": []} if leaf == _opf_store.IMPORTED_WORKLOG_NAME
@@ -6651,7 +6652,7 @@ def self_test():
         # inactive: it would then plan writes over a declaration the doctor flags as colliding).
         import _opf_write_guard
         _is2_wg_m = base_manifest()
-        _is2_wg_m["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+        _is2_wg_m["opf"]["spec_version"] = _opf_store.SPEC_VERSION
         _is2_wg_m["opf"]["homes"] = 2
         _is2_wg_m["unmanaged"] = dict(paths=[".working/toml/worklog.imported.toml"])
         _is2_wg_cls = classify_containment(_is2_wg_m, ".working/toml")
@@ -7212,14 +7213,14 @@ def self_test():
               and imported_series_active(_h1["manifest.toml"]) is False)
         # The pure flag over the manifest shapes at the shipped constants: True only for the
         # 2.0.0 / homes = 2 pair (red when either arm of the declaration moves).
-        _pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+        _pair = {"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": 2}}
         _flag_rows = (
             (_pair, True),
             ({"opf": {"spec_version": "1.3.0"}}, False),
             ({"opf": {"spec_version": "1.3.0", "homes": 2}}, False),
             ({"opf": {"spec_version": "1.3.1", "homes": 2}}, False),
-            ({"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}}, False),
-            ({"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 1}}, False),
+            ({"opf": {"spec_version": _opf_store.SPEC_VERSION}}, False),
+            ({"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": 1}}, False),
             (None, False))
         check("imported-series-active-keyed-on-homes2-declaration",
               [imported_series_active(_fm) is _want for _fm, _want in _flag_rows]
@@ -7255,13 +7256,13 @@ def self_test():
         # On base 2.0.0 the imported-series flag reads exactly the homes-2 grade over every manifest
         # shape, so a graded homes-2 store never has its imported leaves graded as unregistered strays
         # (red when the flag and the grade diverge on any shape).
-        _h2c_pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+        _h2c_pair = {"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": 2}}
         _h2c_manifests = (
-            _h2c_pair, {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION}},
+            _h2c_pair, {"opf": {"spec_version": _opf_store.SPEC_VERSION}},
             {"opf": {"homes": 2}}, {"opf": {"spec_version": "1.3.0", "homes": 2}},
             {"opf": {"spec_version": "1.3.0", "homes": 1}},
-            {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": True}},
-            {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": "2"}},
+            {"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": True}},
+            {"opf": {"spec_version": _opf_store.SPEC_VERSION, "homes": "2"}},
             {"opf": {}}, {"opf": []}, {}, None)
         check("imported-active-is-homes2-grade",
               all(imported_series_active(_h2c_m) is (_opf_store.homes_generation(_h2c_m) >= 2)
@@ -10754,7 +10755,7 @@ def self_test():
 
         def h2_manifest(machine):
             machine = copy.deepcopy(machine)
-            machine["manifest.toml"]["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            machine["manifest.toml"]["opf"]["spec_version"] = _opf_store.SPEC_VERSION
             machine["manifest.toml"]["opf"]["homes"] = 2
             return machine
 

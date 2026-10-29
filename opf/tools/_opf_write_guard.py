@@ -946,12 +946,10 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
 
 def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_existing=None):
     """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). Its callers are
-    the two generation-2 init paths: the init operation (_opf_init_operation._inspect_homes_gitignore),
-    reached only through that operation's explicit homes2 input, and plain `opf init`
-    (opf._init_homes_gitignore_inspect), reached only while this tooling activates homes 2. Each
-    requires an absent file, no hold, and planned bytes equal to its own create-only payload before
-    it writes those bytes, and re-checks with verify_homes_gitignore_effective after the write. No
-    verb calls it at the shipped constants.
+    the two init paths: the init operation (_opf_init_operation._inspect_homes_gitignore) and plain
+    `opf init` (opf._init_homes_gitignore_inspect), which calls it on every run. Each requires an
+    absent file, no hold, and planned bytes equal to its own create-only payload before it writes
+    those bytes, and re-checks with verify_homes_gitignore_effective after the write.
 
     Returns (planned, holds, prestate): `planned` is the full new file bytes
     _opf_store.plan_homes_gitignore computed (None for no change), `prestate` is the exact file

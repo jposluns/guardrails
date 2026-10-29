@@ -72,6 +72,13 @@ matches only a quotation block. Residual:
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
 
+The default entry also runs the retired gate name scan (retired_gate_name_findings): no .py module
+under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each line is
+NFKC-normalized before it is matched, as Python normalizes identifiers, so a fullwidth or
+mathematical-alphanumeric spelling is caught. Residual: it is a line scan, so a name built at run time
+(getattr, setattr, or a globals() key assembled from split or formatted strings) is outside it, and so
+is every file that is not a .py file.
+
 The default entry also guards the informative sections: a heading whose title or body holds
 "(informative)" or the declaration ("This appendix is informative", or section or subsection,
 as Appendix E does), or whose title sets the word off as a label (below), and every
@@ -1463,6 +1470,7 @@ _SURFACE = {
         'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
         'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
+        'The reference CLI runs investigation and planning today, and prints the approval without recording it; recording the approval, apply and completion are not executable yet, so the assistant stops there and reports.',
     ),
     ADOPT_GUIDE: (
         "The reference tooling's opf init scaffolds a 2.0.0 store with homes = 2.",
@@ -1497,8 +1505,9 @@ _SURFACE = {
 # 9.2 defines no path for a manifest below 2.0.0), and the disclosure and record-indexes pages'
 # description of a store upgrade the reference tooling no longer defines, and each surface's
 # tooling-status sentences from before the tooling initialized and validated base 2.0.0 stores (its
-# 1.2.0 scaffold and grading, and the adoption subcommands that read or refused over the adoption
-# journal). Each sentence present in its file's normalized text is a finding.
+# 1.2.0 scaffold and grading, the adoption subcommands that read or refused over the adoption
+# journal, and the adopt page's claim that approval did not run). Each sentence present in its
+# file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1534,6 +1543,7 @@ _SURFACE_RETIRED = {
         'opf adopt approve, apply, complete and reconcile refuse with exit 2, so no approval is recorded, nothing is applied, and nothing is retired.',
         'The read-only plan and status subcommands run; approve, apply, complete, and reconcile refuse with exit 2 before reading anything.',
         'reports any open transaction or held lock in the adoption journal.',
+        'The reference CLI runs investigation and planning today; approval, apply and completion are not executable yet, so the assistant stops there and reports.',
     ),
     ADOPT_GUIDE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1578,7 +1588,11 @@ def surface_findings(texts=None):
 
 # The transitional aliases of store.HOMES and store.SPEC_VERSION are retired: no module under opf/tools
 # may spell either name again, as a definition or as a read. Each name is built from two pieces, so
-# this module's own source never carries it and the scan covers this file like any other.
+# this module's own source never carries it and the scan covers this file like any other. Python
+# normalizes every identifier with NFKC, so a fullwidth or mathematical-alphanumeric spelling is the
+# same identifier: each line is NFKC-normalized before it is matched. What a line scan cannot see is
+# outside this gate: a name built at run time (getattr, setattr or a globals() key assembled from
+# split or formatted strings) never appears whole on any line, and only .py files are scanned.
 _RETIRED_GATE_NAMES = ("SUPPORTED_" + "HOMES", "SUPPORTED_" + "SPEC_VERSION")
 _TOOLS = Path(__file__).resolve().parent
 
@@ -1588,6 +1602,7 @@ def retired_gate_name_findings(tools=None):
     findings = []
     for path in sorted(tools.rglob("*.py")):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            line = unicodedata.normalize("NFKC", line)
             for name in _RETIRED_GATE_NAMES:
                 if name in line:
                     findings.append("{}:{}: retired gate name {}; read store.{} instead".format(
@@ -5461,10 +5476,10 @@ def _self_test_vectors():
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 11, 7, 7, 4))
+          tuple(map(len, _SURFACE.values())) == (10, 7, 12, 7, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (6, 14, 9, 6, 7, 1) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (6, 14, 10, 6, 7, 1) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -5505,6 +5520,19 @@ def _self_test_vectors():
                   retired_gate_name_findings(tree) == ["nested/reader.py:2: retired gate name {}; read store.{} "
                                                        "instead".format(n, c)])
             (tree / "nested" / "reader.py").unlink()
+            # A fullwidth or math-bold spelling of the prefix is the same Python identifier (NFKC), so
+            # an alias assignment spelled either way is refused at its line like the plain one (red
+            # when the scan matches the raw line).
+            for form, first in (("fullwidth", 0xFF21), ("math-bold", 0x1D400)):
+                spelled = "".join(chr(first + ord(ch) - ord("A")) for ch in "SUPPORTED") + "_" + current
+                (tree / "_opf_store.py").write_text(store_source + "{} = {}\n".format(spelled, current),
+                                                    encoding="utf-8")
+                check("retired-gate-names-" + form + "-" + name, lambda n=name, c=current, s=spelled:
+                      s != n and unicodedata.normalize("NFKC", s) == n
+                      and retired_gate_name_findings(tree) == [
+                          "_opf_store.py:{}: retired gate name {}; read store.{} instead".format(
+                              store_source.count("\n") + 1, n, c)])
+                (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)

@@ -31,17 +31,21 @@ pointer to adoption and the prompt pack, parsing no argument, reading no input f
 
 `init` HAS landed: `opf init [--root DIR] [--recover]` creates validated store sources, a pointer, and a
 starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 lease, without rendering or
-git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`.
+git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`. It also
+writes `.working/.gitignore` (spec 4.2) after inspecting git's effective ignore rules and index; that
+inspection is cannot-evaluate (exit 2, nothing written) while the environment carries a runtime git
+configuration override (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_COUNT and its pairs,
+GIT_CONFIG_PARAMETERS or GIT_CONFIG; GIT_CONFIG_NOSYSTEM is allowed): unset them and retry.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
 `record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, `receipt-repair`, and
 `worklog-append` author one change (with its own worklog entry, and for done-with-receipt the one-to-one done
 receipt) through one journaled publication, then render and require doctor VALID, leaving the change
 uncommitted. `receipt-repair BI-ID --actor maintainer[:ID] --reason S` adds the missing receipt of an item a
-committed reviewed edit put at done, claiming its id through a homes-2 id reservation; it refuses at homes 1,
-so while this build activates homes 1 only it refuses on every store (exit 2, recording nothing; like every
-subcommand, on a homes-1 store it first reconciles any interrupted earlier run, and that recovery, where one
-is needed, writes the store before the run refuses).
+committed reviewed edit put at done, claiming its id through a homes-2 id reservation. Every subcommand
+admits only a store whose manifest declares spec_version 2.0.0 with homes = 2: a readable manifest
+declaring anything else refuses (exit 2) before any reconciliation or write, and below 2.0.0 the refusal
+states the spec 9.2 hand step, above it asks for newer tooling.
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.
@@ -50,15 +54,14 @@ delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--r
 `adopt` HAS landed (OPF-ADOPT K9a, the read-only half): `opf adopt plan --inputs FILE [--root DIR]`
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
 nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply -- and
-`opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles and
-the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
-`opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
-and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed.
-`opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
-alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
-own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
-safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+`opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles; with
+none present it reports that no adoption run exists, and every report says the .aiqt adoption journal is
+not read, so its state is unknown). The stage driver adds `opf adopt approve --inputs FILE --plan FILE
+--actor NAME`, the one approval, printed and writing nothing. On base 2.0.0, the only base this build
+implements, the adoption journal is a homes-1 location under .aiqt and is not read, so
+`opf adopt apply --inputs FILE --plan FILE --approval FILE` and `opf adopt reconcile [--root DIR]` refuse
+with exit 2 before the root is resolved or anything is read or written: nothing is applied and no
+interrupted adoption transaction is recovered until the journal moves to its homes-2 home. `complete` is
 recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -19250,10 +19253,11 @@ def _cmd_adopt(rest):
     recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
     never read as a passing operation. On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced; the only
     base this build implements) the adoption journal, a homes-1 location under .aiqt, is not read: apply
-    refuses with exit 2 (_opf_adopt_apply.ADOPTION_FENCE) before it reads its inputs and reconcile before
-    any .aiqt access; plan, approve and status run without it, so none of them refuses over an open
-    transaction or a held lock there, and status says the journal is not read
-    (_opf_adopt_apply.JOURNAL_UNREAD).
+    and reconcile refuse with exit 2 (_opf_adopt_apply.ADOPTION_FENCE) once their arguments parse, before
+    the root is resolved or any input or .aiqt path is read; plan, approve and status run without it, so
+    none of them refuses over an open transaction or a held lock there, and status says the journal is not
+    read (_opf_adopt_apply.JOURNAL_UNREAD). The apply and reconcile entries below therefore describe their
+    engine bodies, which no CLI call reaches on base 2.0.0.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19280,18 +19284,22 @@ def _cmd_adopt(rest):
           inventory_digest (_opf_adopt_apply.capture_approval, which on base 2.0.0 does not read the
           adoption journal). Exit 0: the approval TOML on stdout. Exit
           2: every refusal or cannot-evaluate.
-      apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
-          (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
+      apply --inputs FILE --plan FILE --approval FILE [--root DIR] : on base 2.0.0, the fence refusal
+          above (exit 2), and nothing else. The engine body, the apply stage
+          (_opf_adopt_apply.run_apply), would admit only a plan whose approval binds it, re-derive it over the
           live tree and its observed revision, then in the run's one journaled base transaction persist the
           plan, the approval and the sealed planning inventory re-derivation reproves (the bytes the plan's
           inventory_digest binds, which the completion check reads) in its evidence bundle, dispatch every
           plan op in the apply stage and compose
           the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
-          stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
-          written, which in this build is every plan. Exit 0: applied
-          (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
-      reconcile [--root DIR] : the EXPLICIT recovery of an interrupted adoption transaction
-          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE: the store is never
+          stage. An op or the receipt stage not yet landed would refuse the whole apply before anything
+          is written, which in this build is every plan. Its exit 0 would mean applied (completion and
+          retirement follow). Exit 2: every refusal or cannot-evaluate, the fence included; exit 1 is not
+          used.
+      reconcile [--root DIR] : on base 2.0.0, the fence refusal above (exit 2): nothing is recovered,
+          read or written. The engine body is the EXPLICIT recovery of an interrupted adoption transaction
+          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE, described from here to the
+          end of this entry in the present tense of that body: the store is never
           resolved (spec 14.2), and no reconcile-first gate runs (this IS the reconcile). Each open
           transaction rolls FORWARD when every poststate already verifies, else BACK from its durable
           preimages, under the journal lock, and a confirmed-dead run's journal lock is broken only
@@ -19404,6 +19412,12 @@ def _cmd_adopt(rest):
         if flag in takes and flag not in given:
             print("opf adopt {}: {} {}".format(sub, flag, need), file=sys.stderr)
             return EXIT_MALFORMED
+    # On base 2.0.0 (adoption_journal_fenced) apply and reconcile refuse HERE, before the root is resolved:
+    # resolution stats and resolves the path the operator spelled, so a --root naming .aiqt (R/.aiqt/..)
+    # would otherwise be reached before the refusal. Nothing is read or written.
+    if sub in ("apply", "reconcile") and _opf_adopt_apply.adoption_journal_fenced():
+        print("opf adopt {}: cannot evaluate: {}".format(sub, _opf_adopt_apply.ADOPTION_FENCE), file=sys.stderr)
+        return EXIT_MALFORMED
     inputs_file = given.get("--inputs")
     try:
         # The EFFECTIVE root is what the operator's traversal names: the --root value, or the current
@@ -19524,10 +19538,8 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
-            # On base 2.0.0 (adoption_journal_fenced) apply refuses with the fence before it reads its
-            # inputs, so nothing was read or written; approve runs without the .aiqt adoption journal.
-            if sub == "apply" and _opf_adopt_apply.adoption_journal_fenced():
-                raise _opf_adopt_apply.AdoptApplyError(_opf_adopt_apply.ADOPTION_FENCE)
+            # On base 2.0.0 (adoption_journal_fenced) apply refused with the fence before root resolution
+            # above, so only approve reaches here there; it runs without the .aiqt adoption journal.
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
             if sub == "approve":
@@ -20607,6 +20619,33 @@ def _cli_self_test():
                                               lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
                         fenced[sub, "journal debris"] = run_adopt(
                             ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
+                # apply and reconcile refuse before the root is resolved: over a --root that crosses the
+                # debris's .aiqt (R/.aiqt/..) neither stats, opens, lists nor resolves a path naming .aiqt
+                # before the fence (red when root resolution runs first: its realpath and its `..` walk
+                # both reach R/.aiqt).
+                touched = []
+
+                def tracing(real, name):
+                    def traced(path, *args, **kwargs):
+                        if isinstance(path, (str, bytes, os.PathLike)) and ".aiqt" in os.fsdecode(path):
+                            touched.append((name, os.fsdecode(path)))
+                        return real(path, *args, **kwargs)
+                    return traced
+                through_aiqt = os.path.join(debris, ".aiqt", "..")
+                for sub, flags in (("apply", ["--inputs", missing, "--plan", missing, "--approval", missing]),
+                                   ("reconcile", [])):
+                    del touched[:]
+                    with mock.patch.object(os, "lstat", tracing(os.lstat, "lstat")), \
+                            mock.patch.object(os, "stat", tracing(os.stat, "stat")), \
+                            mock.patch.object(os, "open", tracing(os.open, "open")), \
+                            mock.patch.object(os, "listdir", tracing(os.listdir, "listdir")), \
+                            mock.patch.object(os.path, "realpath", tracing(os.path.realpath, "realpath")):
+                        rc, out = run_adopt(["adopt", sub] + flags + ["--root", through_aiqt])
+                    said = "opf adopt {}: cannot evaluate: {}\n".format(sub, _opf_adopt_apply.ADOPTION_FENCE)
+                    if rc != EXIT_MALFORMED or out != said or touched:
+                        failures.append("adopt {} over --root R/.aiqt/.. on base 2.0.0: rc={!r} (expected 2 + "
+                                        "exactly the fence, with no .aiqt path reached first): {!r}; "
+                                        "reached {!r}".format(sub, rc, out, touched))
                 unread = "opf adopt status: " + _opf_adopt_apply.JOURNAL_UNREAD
                 fence = "cannot evaluate: " + _opf_adopt_apply.ADOPTION_FENCE
                 gate = (_opf_adopt_apply.JOURNAL_UNREAD, "must be reconciled")

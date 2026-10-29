@@ -321,9 +321,6 @@ def is_evidence_inventory_name(name):
     return isinstance(name, str) and _EVIDENCE_INVENTORY_RE.fullmatch(name) is not None
 
 
-HOMES2_SPEC_VERSION = SPEC_VERSION    # the only spec_version the homes-2 contract applies to (spec 4.2)
-
-
 def homes_generation(manifest_data):
     """The store's homes generation: 2 when the manifest declares both exactly the integer 2 and
     spec_version 2.0.0, otherwise 1, which validation refuses. Manifest validation, not this
@@ -2267,8 +2264,8 @@ def _validate_base(base, findings, manifest_rel=None):
             # foreign content for a first adoption.
             if spec_tuple < _parse(SPEC_VERSION):
                 where = "the store manifest" if manifest_rel is None else _safe_display(manifest_rel)
-                mismatch = ("{} declares [opf].spec_version {}, below {}, which names no version "
-                            "this specification defines, so the store is refused; to adopt this "
+                mismatch = ("{} declares [opf].spec_version {}, which is below {} and names no "
+                            "version this specification defines, so the store is refused; to adopt this "
                             "tree instead, first move {} aside by hand: its files are then "
                             "ordinary foreign content for a first adoption "
                             "(spec 9.2; fail-closed)".format(
@@ -3030,7 +3027,7 @@ def self_test():
         mv_old = validate_manifest(m_old)
         check("spec-version-floor-invalid", mv_old.status == INVALID)
         check("spec-version-floor-named",
-              any("below 2.0.0, which names no version this specification defines" in f
+              any("which is below 2.0.0 and names no version this specification defines" in f
                   and "opf upgrade" not in f for f in mv_old.findings))
         # The lower refusal names the manifest path and the declared spec_version, states that the
         # store is refused, and states the hand step (spec 9.2), pinned whole: rewording it, dropping
@@ -3038,8 +3035,8 @@ def self_test():
         # homes = 2, so the refusal is the spec_version one alone.
         floor_rel = ".working/toml/manifest.toml"
         floor_message = (
-            "'.working/toml/manifest.toml' declares [opf].spec_version '1.2.0', below 2.0.0, which "
-            "names no version this specification defines, so the store is refused; to adopt this "
+            "'.working/toml/manifest.toml' declares [opf].spec_version '1.2.0', which is below 2.0.0 "
+            "and names no version this specification defines, so the store is refused; to adopt this "
             "tree instead, first move '.working/toml/manifest.toml' aside by hand: its files are "
             "then ordinary foreign content for a first adoption (spec 9.2; fail-closed)")
         m_floor = _t.loads(manifest_text(spec_version="1.2.0"))
@@ -3055,7 +3052,7 @@ def self_test():
         mv_130 = validate_manifest(_t.loads(manifest_text(spec_version="1.3.0")))
         check("spec-version-floor-1.3.0",
               mv_130.status == INVALID
-              and any("below 2.0.0, which names no version" in f for f in mv_130.findings)
+              and any("which is below 2.0.0 and names no version" in f for f in mv_130.findings)
               and not any("upgrade the tooling" in f for f in mv_130.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text())).status == VALID

@@ -2098,7 +2098,8 @@ def _self_test_isolated():
                 # An applied adoption run as committed evidence: the real planner freezes the retirement of
                 # one file at the store location in a scratch tree, and the plan, its approval, the file's
                 # preimage under the run archive and the sealed inventory are written into root beside the
-                # frozen file (apply itself refuses while its receipt stage has not landed). Returns the run id;
+                # frozen file (apply itself refuses on base 2.0.0 with the adoption fence, and its engine body
+                # while its receipt stage has not landed). Returns the run id;
                 # a fixture that cannot be built is a harness error.
                 import copy
                 import datetime

@@ -70,10 +70,10 @@ only receipts are importer-authored, spec 8.6): maintainer-only and requiring --
 before the store is touched, it mints the missing `done` receipt, linked `receipt_of`, and its own
 worklog entry in one publication, rewriting counters.toml, done.index.toml and worklog.toml only; the
 backlog index is read, never rewritten, and no status changes (spec 8.8). Its new id is claimed through
-the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has, so on a homes-1 store
-it refuses, recording nothing (_require_reservation_home; like every subcommand, it first reconciles any
-interrupted earlier run, and that recovery, where one is needed, writes the store before the run refuses);
-the admission probe (below) refuses every store but a homes-2 one first. The item must be seated once in the active backlog index at unqualified `done`,
+the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has. The admission probe
+(below) refuses every readable manifest but the spec_version 2.0.0 / homes = 2 baseline before any
+reconciliation or write, so every store this subcommand reaches has that home; _require_reservation_home keeps a refusal of
+any other generation, recording nothing, as a fail-closed backstop. The item must be seated once in the active backlog index at unqualified `done`,
 schema-valid and authored by a clean-series author, and its row must be exactly the row the prior commit
 (HEAD) holds, read through the doctor's own prior-snapshot reader (_require_committed_item) while planning
 and read again under the held lease immediately before anything is reserved or published
@@ -2253,11 +2253,23 @@ def _probe_admission(ctx):
     declared = base.get("homes") if isinstance(base, dict) else None
     if (version != _opf_store.SPEC_VERSION or type(declared) is not int
             or declared != _opf_store.HOMES):
+        # The remedy doctor's manifest finding gives (spec 9.2): a version below the baseline names no
+        # version the specification defines, so the tree's way in is the hand step and a first adoption;
+        # a later one is a store this tooling is too old for. A malformed or matching version gets neither.
+        parsed = _opf_store._parse(version) if isinstance(version, str) else None
+        remedy = ""
+        if parsed is not None and parsed < _opf_store._parse(_opf_store.SPEC_VERSION):
+            where = _opf_store._safe_display(ctx.rel(_opf_store.MANIFEST_NAME))
+            remedy = (" A spec_version below {} names no version this specification defines; to adopt "
+                      "this tree instead, first move {} aside by hand: its files are then ordinary "
+                      "foreign content for a first adoption.".format(_opf_store.SPEC_VERSION, where))
+        elif parsed is not None and parsed > _opf_store._parse(_opf_store.SPEC_VERSION):
+            remedy = " Upgrade the tooling before operating on this store."
         raise RecordError("the store manifest declares spec_version {} with homes {}, but this tooling "
-                          "admits only spec_version {} with homes = {} (spec 9.2). Nothing written "
+                          "admits only spec_version {} with homes = {} (spec 9.2).{} Nothing written "
                           "(fail-closed)".format(
                               _opf_store._safe_display(version), _opf_store._safe_display(declared),
-                              _opf_store.SPEC_VERSION, _opf_store.HOMES))
+                              _opf_store.SPEC_VERSION, _opf_store.HOMES, remedy))
     return _opf_store.homes_generation(model)
 
 
@@ -4036,6 +4048,18 @@ def _self_test_units(check):
     check("a readable non-baseline manifest refuses at the admission probe",
           all(r is not None and "admits only spec_version 2.0.0 with homes = 2" in r
               for r in probe_refusals))
+    # The refusal carries doctor's spec 9.2 remedy: the hand step below 2.0.0, newer tooling above it,
+    # and neither for a 2.0.0 declaration whose homes is wrong (red when the probe names no remedy).
+    hand_step = ("A spec_version below 2.0.0 names no version this specification defines; to adopt this "
+                 "tree instead, first move '.working/toml/manifest.toml' aside by hand: its files are then "
+                 "ordinary foreign content for a first adoption.")
+    newer = "Upgrade the tooling before operating on this store."
+    check("the admission refusal below 2.0.0 states the spec 9.2 hand step",
+          all(r is not None and hand_step in r and newer not in r for r in probe_refusals[:2]))
+    check("the admission refusal above 2.0.0 asks for newer tooling",
+          probe_refusals[6] is not None and newer in probe_refusals[6] and hand_step not in probe_refusals[6])
+    check("the admission refusal at 2.0.0 with another homes names neither remedy",
+          all(r is not None and hand_step not in r and newer not in r for r in probe_refusals[2:6]))
     # An unreadable manifest probes as the typed home and touches nothing under .aiqt/: the legacy
     # journal is never inspected (red when the .aiqt lstat returns).
     def unreadable(root_fd, rel):

@@ -1928,7 +1928,7 @@ def self_test():
             self.assertEqual(refused.status, store.CANNOT_EVALUATE)
             self.assertEqual(list(refused.findings), [
                 "resolved manifest is not valid: '.working/toml/manifest.toml' declares "
-                "[opf].spec_version '1.1.0', below {0}, which names no version this "
+                "[opf].spec_version '1.1.0', which is below {0} and names no version this "
                 "specification defines, so the store is refused; to adopt this tree instead, "
                 "first move '.working/toml/manifest.toml' aside by hand: its files are then "
                 "ordinary foreign content for a first adoption "

@@ -77,8 +77,9 @@
         <h3>Assistant-driven (recommended)</h3>
         <p>Your AI development assistant follows the adoption procedure in the prompt pack: it
           investigates your project, proposes one plan, and asks for one approval of that plan. The
-          reference CLI runs investigation and planning today; approval, apply and completion are
-          not executable yet, so the assistant stops there and reports. The standard requires no
+          reference CLI runs investigation and planning today, and prints the approval without
+          recording it; recording the approval, apply and completion are not executable yet, so the
+          assistant stops there and reports. The standard requires no
           particular assistant or tool.</p>
       </div>
       <div class="card">
@@ -214,11 +215,19 @@
       target for an existing store, an existing pointer, foreign content already under
       <code>.working/</code>, or an existing root <code>CHANGELOG.md</code> or <code>VERSION</code>, and
       refuses rather than absorbing what it finds. It then builds the machine
-      sources in memory (the manifest, the ID counters, the version ledger, the worklog, and the eleven
-      typed indexes), takes the shared operation lock and repeats its checks under it, holds the lease
-      while it writes them under <code>.working/toml/</code>, writes the <code>.opf.toml</code>
-      pointer at the product root, and creates a starter <code>CHANGELOG.md</code>. Publication is
-      create-only: it writes new paths and does not overwrite an existing one.</p>
+      sources in memory (the manifest, the ID counters, the version ledger, the worklog, the eleven
+      typed indexes, the eleven imported indexes beside them, and the imported worklog), takes the
+      shared operation lock and repeats its checks under it, holds the lease while it writes them
+      under <code>.working/toml/</code>, writes the <code>.opf.toml</code> pointer at the product
+      root, and creates a starter <code>CHANGELOG.md</code>. It also writes
+      <code>.working/.gitignore</code> (specification section 4.2) after inspecting git's effective
+      ignore rules and index. That inspection cannot evaluate, and <code>init</code> exits 2 writing
+      nothing, while the environment carries a runtime git configuration override
+      (<code>GIT_CONFIG_GLOBAL</code>, <code>GIT_CONFIG_SYSTEM</code>, <code>GIT_CONFIG_COUNT</code>
+      with its key and value pairs, <code>GIT_CONFIG_PARAMETERS</code>, or <code>GIT_CONFIG</code>;
+      <code>GIT_CONFIG_NOSYSTEM</code> is allowed), since its answer could then differ from your
+      own git: unset them and retry. Publication is create-only: it writes new paths and does not
+      overwrite an existing one.</p>
     <p><b style="color:var(--ink)">Result.</b> A scaffolded store, a committed-store pointer, and a
       starter changelog, all left untracked for your review; <code>init</code> does not
       stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes

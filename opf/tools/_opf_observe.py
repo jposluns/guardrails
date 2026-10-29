@@ -1251,8 +1251,8 @@ def self_test_isolated():
     _record_digest over the same committed content); a HEAD manifest whose base table is named [devprocess]
     rather than [opf] -> the whole prior OMITTED with a note; an unborn HEAD -> the honest empty prior; a
     non-repository directory -> the remote and prior fields OMITTED with a note while tracked reads
-    "untracked"; the imported baseline of a homes-2 HEAD that ACTIVATES the series under the homes-2 test
-    toggle (the member absent while the series is inactive, the committed leaf rows, worklog entries
+    "untracked"; the imported baseline of a homes-2 HEAD that ACTIVATES the series (spec_version 2.0.0
+    with homes = 2) (the member absent while the series is inactive, the committed leaf rows, worklog entries
     included, under the engine's digest once it is active, every authoritative type's leaf read even where
     the HEAD manifest omits the type, and the whole prior omitted on a row with no id, a leaf that does not
     read or parse, a row list that is not an array, a row that cannot be canonicalized, or a machine tree
@@ -1554,7 +1554,7 @@ def self_test_isolated():
         manifest_path = homes2_repo / machine_rel / _MANIFEST_NAME
         manifest_path.write_text(manifest_path.read_text(encoding="utf-8").replace(
             'spec_version = "1.0.0"\n', 'spec_version = "{}"\nhomes = 2\n'.format(
-                _opf_store.HOMES2_SPEC_VERSION)), encoding="utf-8")
+                _opf_store.SPEC_VERSION)), encoding="utf-8")
         leaf_rel = "{}/backlog_item{}".format(machine_rel, _opf_store.IMPORTED_INDEX_SUFFIX)
         leaf_row = ('[[record]]\n'
                     'type = "backlog_item"\n'

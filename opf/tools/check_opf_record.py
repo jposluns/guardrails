@@ -4072,6 +4072,10 @@ def t30b_non_baseline_refused_first(fx):
         assert snapshot(root) == before, ("T30b nothing is reconciled or written", label)
         refused(result, "admits only spec_version {} with homes = {}".format(
             record._opf_store.SPEC_VERSION, record._opf_store.HOMES))
+        # Below 2.0.0 the refusal states the spec 9.2 hand step, as doctor's does; at 2.0.0 it does not.
+        hand_step = "first move '{}' aside by hand".format(manifest_rel)
+        assert (hand_step in result[2]) == (label == "1.2.0"), ("T30b the spec 9.2 hand step", label,
+                                                               result[2][-1200:])
 
 
 def flip_t30b():

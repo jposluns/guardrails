@@ -78,7 +78,12 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    the lock, `opf init` refuses. A run that stopped partway can leave a partial `.working/` and
    its lock record behind: once that `.working/` is moved aside, `opf init --recover` clears a
    record whose holder is confirmed dead, and refuses a record whose holder may still be live.
-   `opf init` also refuses when the git
+   `opf init` also writes `.working/.gitignore` (specification section 4.2) after inspecting git's
+   effective ignore rules and index, and that inspection refuses as cannot-evaluate (exit 2, nothing
+   written) while the environment carries a runtime git configuration override (`GIT_CONFIG_GLOBAL`,
+   `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT` with its key and value pairs, `GIT_CONFIG_PARAMETERS`, or
+   `GIT_CONFIG`; `GIT_CONFIG_NOSYSTEM` is allowed), since its answer could then differ from the
+   adopter's own git: unset them and retry. `opf init` also refuses when the git
    history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
    never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
