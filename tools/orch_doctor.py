@@ -53,7 +53,7 @@ def main():
     if status == "absent":
         # Scoped like the components themselves: every component except the truncation guard is inert
         # with no registry at the repository root, but the guard's ancestor walk can find a registry ABOVE
-        # it (and the guard is then active), and in registry-required mode it denies instead of going inert.
+        # it (and the guard is then active), and in registry-required mode it denies instead of denying nothing.
         print("no orchestration registry at the repository root: every suite component except the "
               "truncation guard is inert here (by design); the truncation guard scopes by the cwd's "
               "ancestor chain and the git toplevel, judged per call from its cwd")

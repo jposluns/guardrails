@@ -61,7 +61,7 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 # The registry this tool renders, repo-root-relative. It is listed in its own output (below), so the
 # inventory is complete: the registry names itself alongside every other generated artefact.
@@ -470,7 +470,7 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(REGISTRY_REL, exc), file=sys.stderr)
         return 2
-    drifted = reconcile(root / REGISTRY_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+    drifted = reconcile(root / REGISTRY_REL, text, check, root)  # shared reconcile fail-closes (exit 2) on an
                                                             # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_gensrc.py".format(REGISTRY_REL), file=sys.stderr)
@@ -1083,6 +1083,10 @@ def self_test_main():
         if rc != 2 or ".working component" not in err or "x/.working/TODO.md" not in err:
             failures.append("a .working target (x/.working/TODO.md) expected exit 2 naming the .working "
                             "component (OPF boundary), got {} ({!r})".format(rc, err.strip()))
+        # .aiqt/ above the registry symlinked outside the root fails closed (exit 2) in --check and write mode
+        # with the registry there untouched; symlinked inside the root, it is read and the registry rewritten.
+        failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _build_from(
+            base, "gen_selftestgood.py", _FAKE_GOOD), run, ".aiqt", REGISTRY_REL))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit

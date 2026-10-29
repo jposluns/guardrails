@@ -96,7 +96,7 @@ designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
 Without --config the built-in default applies: corpus [".aiqt/core/rules/*.md"] and no exclusions; no
 default file is read. This repository's own CI and tools/run_all_checks.sh pass --config
 .aiqt/cited-standards.toml (tracked, not shipped), whose corpus adds the OPF prompt-pack members
-(opf/prompt-pack/**/*.md) to the rule files. A config file carries:
+(opf/prompt-pack/**/*.md and opf/prompt-pack/import/examples/*.batch.toml) to the rule files. A config file carries:
   format-version = 1                        required
   corpus = ["<root-relative glob>", ...]    optional; each glob must match at least one file
   [[exclusion]]                             optional, repeatable
@@ -137,7 +137,8 @@ from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import load_manifests, ManifestError, dir_present, ensure_listable  # noqa: E402
+from _standards import (load_manifests, ManifestError, dir_or_absent, dir_present, ensure_listable,  # noqa: E402
+                        LINK_OUTSIDE_ROOT)
 
 DEFAULT_CORPUS = (".aiqt/core/rules/*.md",)
 STANDARDS_REL = ".aiqt/standards"
@@ -379,7 +380,14 @@ def expand_corpus(root, globs):
         deep = len(static) < len(parts) - 1      # a wildcard in a directory component
         matched = 0
         try:
-            if dir_present(base):
+            # dir_or_absent: a base that is there but cannot be read as a directory (a regular
+            # file, or a symlink that is dangling, whose target is not a directory or resolves outside the root)
+            # is refused before it is listed; a symlink to a directory inside the root is read.
+            # dir_present, bound beneath root, then judges every component above it the same way.
+            _present, problem = dir_or_absent(base, root)
+            if problem is not None:
+                raise CannotEvaluate("corpus glob {!r}: {} {}".format(pattern, base, problem))
+            if dir_present(base, root=root):
                 # Path.glob silently yields nothing for a directory it cannot list; force the read error.
                 ensure_listable(base)
                 if deep:
@@ -477,7 +485,7 @@ def run(root, config=None):
     root = Path(root)
     try:
         try:
-            manifests = load_manifests(root / STANDARDS_REL)
+            manifests = load_manifests(root / STANDARDS_REL, root=root)
         except (ManifestError, OSError) as exc:
             raise CannotEvaluate("standards manifests: {}".format(exc))
         registered = manifest_identities(manifests)
@@ -1053,6 +1061,25 @@ def self_test_main():
         code, out = _drive(manifests, rules, config, extra[0] if extra else None, extra[1] if len(extra) > 1 else None)
         if code != expect or not predicate(out):
             failures.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, out))
+    # A corpus glob base that is a symlink to a directory holding a matching file: outside the root, it cannot
+    # evaluate, refused by the base probe before it is listed (the refusal names the link); inside the root, it
+    # is read and passes.
+    for where, expect in (("outside", 2), ("in-root", 0)):
+        with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
+            root, _cfg = _fixture(tmp)
+            held = Path(tmp) / "held" if where == "outside" else root / "shared" / "held"
+            held.mkdir(parents=True)
+            (held / "r.md").write_text("# Rule\n\nNothing cited.\n", encoding="utf-8")
+            (root / "linked").symlink_to(held if where == "outside" else os.path.relpath(held, root))
+            cfg = Path(tmp) / "linked.toml"
+            cfg.write_text('format-version = 1\ncorpus = ["linked/*.md"]\n', encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                code = run(root, cfg)
+            named = "{} {}".format(root / "linked", LINK_OUTSIDE_ROOT) in buf.getvalue()
+        if (code, named) != (expect, expect == 2):
+            failures.append("a corpus glob base that is a symlink {}: expected exit {}{}, got {}; output:\n{}".format(
+                where, expect, " naming the link" if expect == 2 else "", code, buf.getvalue()))
     # _drive patch contract: an unknown patch name is rejected before anything is applied (installed, it
     # would leave the intended fault uninjected and contaminate every later vector), and every patched
     # name is restored after a run that returns non-zero, after one that returns 0 (the injected run must
@@ -1109,7 +1136,8 @@ def self_test_main():
             print(line)
         return 1
     print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
-          "manifest-field identities, {} fixture vector(s), the _drive patch contract (an unknown name is "
+          "manifest-field identities, {} fixture vector(s), a corpus glob base symlinked outside the root "
+          "refused before it is listed and one symlinked inside the root read, the _drive patch contract (an unknown name is "
           "rejected; a patched name is restored after a non-zero return, a zero return and a raise) and the "
           "usage error: an "
           "unresolved designator fails, a "
