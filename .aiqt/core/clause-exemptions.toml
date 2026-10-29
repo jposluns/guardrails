@@ -279,12 +279,12 @@ reason = "Scope note separating this rule from the branch-and-merge-on-green rul
 
 [[exempt]]
 corpus-id = "trkasy"
-text = "A task abandoned at launch, an uncollected background process, an\nunawaited result or an unread queued job hides its failures and leaves a later claim that it finished\nungrounded."
+text = "A task started and abandoned, a background process whose completion\nis neither collected nor monitored, an asynchronous result neither awaited nor otherwise observed, or a queued\njob whose outcome no one reads, hides any failure it carries and leaves a later claim that it finished\nungrounded."
 reason = "Rationale for trkasy.1 and trkasy.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "trkasy"
-text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and its failure are lost unless they are collected."
+text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work as an\nexplicit background dispatch does: its result and failure are lost unless collected."
 reason = "Classifies a detached child as launched asynchronous work, so trkasy.6 applies; no obligation of its own."
 
 [[exempt]]

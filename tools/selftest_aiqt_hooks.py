@@ -2500,37 +2500,63 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
-# pgrep_self_match rows (trkasy): each deny row is a process check whose literal pattern the command also
-# carries, so the check can match the checking shell; each allow row is one the guard must pass.
+# pgrep_self_match rows (trkasy): each deny row is a process check that can match the shell running it (pgrep
+# -f without -A, pkill -f, ps piped into grep on a pattern); each allow row is one the guard must pass.
 _PSM_DENY_ROWS = (
     ("(psm-d1) pgrep -f guarding the launch it checks", "pgrep -f 'run-x' || dispatch run-x"),
-    ("(psm-d2) until-loop on pgrep -f with the pattern echoed after",
-     "until ! pgrep -f job7; do sleep 5; done; echo job7"),
-    ("(psm-d3) pkill -f with the pattern reused", "pkill -f job7; rm job7.pid"),
-    ("(psm-d4) pgrep -af with the pattern reused", "pgrep -af job7 && echo job7 up"),
-    ("(psm-d5) ps piped into grep", "ps aux | grep job7 && echo job7"),
-    ("(psm-d6) ps piped into egrep", "ps -ef | egrep job7; echo job7"),
-    ("(psm-d7) ps piped into grep -E", "ps -ef | grep -E 'job[0-9]'; echo 'job[0-9]'"),
-    ("(psm-d8) ps piped into grep -F", "ps -ef | grep -F job7; echo job7"),
-    ("(psm-d9) pkill with a signal option before -f", "pkill -9 -f job7; echo job7"),
-    ("(psm-d10) pgrep -f inside a command substitution", "x=$(pgrep -f job7); echo job7"),
-    ("(psm-d11) pgrep -f behind timeout", "timeout 5 pgrep -f job7; echo job7"),
-    ("(psm-d12) pgrep -f with a quote-split pattern", "pgrep -f 'job''7'; echo job7"),
-    ("(psm-d13) grep after a grep -v in the ps pipeline", "ps aux | grep -v grep | grep job7; echo job7"),
-    ("(psm-d14) pgrep -u value before -f", "pgrep -u me -f job7; echo job7"))
+    ("(psm-d2) until-loop on pgrep -f", "until ! pgrep -f job7; do sleep 5; done"),
+    ("(psm-d3) pkill -f", "pkill -f job7; rm job7.pid"),
+    ("(psm-d4) pgrep -af", "pgrep -af job7 && echo up"),
+    ("(psm-d5) ps piped into grep", "ps aux | grep job7 && echo up"),
+    ("(psm-d6) ps piped into egrep", "ps -ef | egrep job7"),
+    ("(psm-d7) ps piped into grep -E", "ps -ef | grep -E 'job[0-9]'"),
+    ("(psm-d8) ps piped into grep -F", "ps -ef | grep -F job7"),
+    ("(psm-d9) pkill with a signal option before -f", "pkill -9 -f job7"),
+    ("(psm-d10) pgrep -f inside a command substitution", "x=$(pgrep -f job7)"),
+    ("(psm-d11) pgrep -f behind timeout with a signal option", "timeout -s KILL 5 pgrep -f job7"),
+    ("(psm-d12) pgrep -f with a quote-split pattern", "pgrep -f 'job''7'"),
+    ("(psm-d13) grep after a grep -v in the ps pipeline", "ps aux | grep -v grep | grep job7"),
+    ("(psm-d14) pgrep -u value before -f", "pgrep -u me -f job7"),
+    ("(psm-d15) pattern written once, then an unrelated command", "pgrep -f job7; echo done"),
+    ("(psm-d16) a lone pgrep -f", "pgrep -f job7"),
+    ("(psm-d17) pgrep -fi", "pgrep -fi JOB7"),
+    ("(psm-d18) pgrep --full", "pgrep --full job7"),
+    ("(psm-d19) pgrep --fu, an abbreviation of --full", "pgrep --fu job7"),
+    ("(psm-d20) pgrep -O value before -f", "pgrep -O 5 -f job7"),
+    ("(psm-d21) pgrep --older value before -f", "pgrep --older 5 -f job7"),
+    ("(psm-d22) pgrep -O value glued", "pgrep -O5 -f job7"),
+    ("(psm-d23) pgrep -f after the pattern", "pgrep job7 -f"),
+    ("(psm-d24) pgrep -fx still matches the full line", "pgrep -fx job7"),
+    ("(psm-d25) pkill -A -f, pkill read as keeping ancestors", "pkill -A -f job7"),
+    ("(psm-d26) time -p prefix", "time -p pgrep -f job7"),
+    ("(psm-d27) exec -a NAME prefix", "exec -a x pgrep -f job7"),
+    ("(psm-d28) command -p prefix", "command -p pgrep -f job7"),
+    ("(psm-d29) sudo -u USER prefix", "sudo -u root pgrep -f job7"),
+    ("(psm-d30) nice -n N prefix", "nice -n 5 pgrep -f job7"),
+    ("(psm-d31) nohup -- prefix", "nohup -- pgrep -f job7"),
+    ("(psm-d32) stacked prefixes", "sudo -Eu root nice -10 timeout 5 pgrep -f job7"),
+    ("(psm-d33) grep through another program in the ps pipeline", "ps aux | awk '{print}' | grep job7"),
+    ("(psm-d34) ps piped into grep -c", "ps aux | grep -c job7"),
+    ("(psm-d35) pgrep -f in an if condition", "if pgrep -f job7; then echo up; fi"),
+    ("(psm-d36) pgrep -f with -- before the pattern", "pgrep -f -- job7"))
 _PSM_ALLOW_ROWS = (
     ("(psm-a1) pgrep without -f", "pgrep job7 || run job7"),
-    ("(psm-a2) pattern not repeated", "pgrep -f job7; echo done"),
-    ("(psm-a3) pgrep -f alone", "pgrep -f job7"),
+    ("(psm-a2) pgrep -A -f leaves out the checking shell's ancestors", "pgrep -A -f job7; echo job7"),
+    ("(psm-a3) pgrep --ignore-ancestors -f", "pgrep --ignore-ancestors -f job7"),
     ("(psm-a4) pgrep -x name", "pgrep -x name; echo name"),
-    ("(psm-a5) pgrep -fx exact full line", "pgrep -fx job7; echo job7"),
+    ("(psm-a5) pgrep -Af and -fA clusters", "pgrep -Af job7; pgrep -fA job7"),
     ("(psm-a6) grep -v is an absence filter", "ps aux | grep -v job7; echo job7"),
     ("(psm-a7) grep not fed by ps", "cat log | grep job7; echo job7"),
     ("(psm-a8) a disclosed miss: pattern from a variable", 'pgrep -f "$P"; echo $P'),
     ("(psm-a9) a disclosed miss: pattern from a substitution", "pgrep -f $(cat n); cat n"),
     ("(psm-a10) a disclosed miss: a command the lexer refuses", "pgrep -f job7 <<<x; echo job7"),
     ("(psm-a11) grep -f reads patterns from a file", "ps aux | grep -f pats; echo pats"),
-    ("(psm-a12) wait on a PID captured at launch", "job7 & pid=$!; while kill -0 $pid; do sleep 5; done"))
+    ("(psm-a12) wait on a PID captured at launch", "job7 & pid=$!; while kill -0 $pid; do sleep 5; done"),
+    ("(psm-a13) ps -p PID piped into grep", "ps -p 1 -o args= | grep job7"),
+    ("(psm-a14) ps --pid PID piped into grep", "ps --pid 1 | grep job7"),
+    ("(psm-a15) pkill without -f", "pkill job7"),
+    ("(psm-a16) a value that spells f", "pgrep -u f job7"),
+    ("(psm-a17) pgrep --ignore-a abbreviation", "pgrep --ignore-a --full job7"))
 
 
 def _test_pgrep_self_match(failures):
@@ -2548,9 +2574,10 @@ def _test_pgrep_self_match(failures):
     code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                                          "tool_input": {"command": "pgrep -f job7; echo job7"}})
     reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-    if "PID or completion file captured at launch" not in reason or "'job7'" not in reason:
-        failures.append("(psm-reason) the deny reason must name the pattern and the launch-captured "
-                        "identifier remedy, got {!r}".format(reason))
+    if ("PID or completion file captured at launch" not in reason or "'job7'" not in reason
+            or "pgrep -A -f" not in reason):
+        failures.append("(psm-reason) the deny reason must name the pattern, pgrep -A -f and the "
+                        "launch-captured identifier remedy, got {!r}".format(reason))
     saved = aiqt_hooks._psm_hit
     aiqt_hooks._psm_hit = lambda command: None
     try:
@@ -3983,10 +4010,10 @@ _DEADLINE_SHAPES = {
     "fg_quoted_heredoc_amps": lambda n, base: ("Bash", {"command": "cat > f <<'E'\n" + _repeat(
         "a & b\n", n - 14, "E\n")}),
     "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
-    # pgrep_self_match: many checks whose patterns are all distinct (each judged, up to its check limit, by a
-    # search of the whole text), and a self-matching check after a long prefix.
+    # pgrep_self_match: many pgrep -A -f checks (each judged, none denied), and a self-matching check after a
+    # long prefix.
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
-        "pgrep -f p{:07d}; ".format(k) for k in range(n // 19))}),
+        "pgrep -A -f p{:07d}; ".format(k) for k in range(n // 22))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own

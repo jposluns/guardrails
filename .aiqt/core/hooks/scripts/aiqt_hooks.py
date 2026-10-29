@@ -16654,21 +16654,37 @@ def commit_msg_subst(data):
     return _allow()
 
 
-# --- trkasy: a process check whose pattern the checking command also carries --------------------------
+# --- trkasy: a process check on a full command line that its own shell can match -------------------
 # pgrep -f, pkill -f and a grep fed by ps match a pattern against every process's full command line, and the
-# shell running a compound Bash command carries the whole command text on its own command line. A pattern
-# the command also writes elsewhere (the launch the check guards, a later echo, a comment) can therefore
-# match the checking shell itself: a wait on it never ends and a presence check always reads as running.
-# Words a check may follow in its segment: reserved words and '!' (until ! pgrep ...), then the plain
-# wrappers below; timeout is read with its options and duration (_psm_command_index).
-_PSM_PREFIX_WORDS = frozenset(("!", "if", "then", "elif", "else", "while", "until", "do", "{", "time"))
-_PSM_WRAPPERS = frozenset(("command", "exec", "nohup", "sudo", "nice"))
-# pgrep and pkill (procps-ng) options that take a value: the short letters, and the long names written
-# without '=' (their value is the next word).
-_PSM_PGREP_VALUE_SHORT = frozenset("dgGPstuUFr")
+# shell running a Bash command (and every ancestor shell between it and the agent) carries the command text
+# on its own command line, so the pattern written once in the check already matches that shell: a wait on it
+# never ends and a presence check always reads as running. pgrep -A (--ignore-ancestors) leaves the checking
+# shell's ancestors out of the match; a ps that selects by PID lists only those processes.
+# Words a check may follow in its segment: reserved words and '!' (until ! pgrep ...), assignments, and the
+# wrappers of _PSM_WRAPPERS with their options (_psm_command_index).
+_PSM_PREFIX_WORDS = frozenset(("!", "if", "then", "elif", "else", "while", "until", "do", "{"))
+# wrapper: (short option letters that take a value, long options that take a value, words after the options
+# before the program). command -v or -V names the program without running it (_psm_command_index).
+_PSM_WRAPPERS = {
+    "command": ("", (), 0),
+    "exec": ("a", (), 0),
+    "nohup": ("", (), 0),
+    "time": ("fo", ("--format", "--output"), 0),
+    "sudo": ("CDghpRrTtUu", ("--close-from", "--chdir", "--group", "--host", "--prompt", "--chroot", "--role",
+                             "--command-timeout", "--type", "--other-user", "--user"), 0),
+    "nice": ("n", ("--adjustment",), 0),
+    "timeout": ("sk", ("--signal", "--kill-after"), 1),
+}
+# pgrep and pkill (procps-ng 4.0.4, pgrep --help) options that take a value: the short letters, and the long
+# names written without '=' (their value is the next word).
+_PSM_PGREP_VALUE_SHORT = frozenset("dgGOPstuUFr")
 _PSM_PGREP_VALUE_LONG = frozenset((
-    "--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
-    "--pidfile", "--runstates", "--ns", "--nslist", "--signal", "--cgroup", "--env"))
+    "--delimiter", "--pgroup", "--group", "--older", "--parent", "--session", "--signal", "--terminal", "--euid",
+    "--uid", "--pidfile", "--runstates", "--cgroup", "--ns", "--nslist"))
+# Every long option pgrep --help lists, so a unique abbreviation (--fu for --full) is read as getopt reads it.
+_PSM_PGREP_LONG = _PSM_PGREP_VALUE_LONG | frozenset((
+    "--list-name", "--list-full", "--inverse", "--lightweight", "--count", "--full", "--ignore-case",
+    "--newest", "--oldest", "--exact", "--logpidfile", "--ignore-ancestors", "--help", "--version"))
 _PSM_GREP_WORDS = frozenset(("grep", "egrep", "fgrep"))
 # GNU grep options that take a value, as above; -f/--file reads the patterns from a file and -v/--invert-match
 # turns the match into an absence filter, so either takes the grep out of scope.
@@ -16677,35 +16693,61 @@ _PSM_GREP_VALUE_LONG = frozenset((
     "--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context", "--label",
     "--devices", "--directories", "--binary-files", "--exclude", "--include", "--exclude-dir",
     "--exclude-from"))
-# Checks judged per reading of a command; one past this is not judged, so a command holding many checks costs
-# at most this many linear searches of its text.
-_PSM_CHECK_LIMIT = 256
+# ps options that select processes by PID: such a ps lists only the PIDs named, not the checking shell.
+_PSM_PS_PID_WORDS = frozenset(("-p", "--pid", "-q", "--quick-pid", "p", "q"))
 
 
 def _psm_command_index(argv):
-    """Index of the program a segment runs past its leading reserved words, '!', assignments, the plain
-    wrappers of _PSM_WRAPPERS and a timeout with its options and duration; len(argv) where none is left."""
+    """Index of the program a segment runs past its leading reserved words, '!', assignments and the wrappers
+    of _PSM_WRAPPERS with their options (and the duration of timeout); len(argv) where none is left or where
+    command -v or -V only names it."""
     i, n = 0, len(argv)
     while i < n:
         word = argv[i]
         name = word.rsplit("/", 1)[-1]
-        if word in _PSM_PREFIX_WORDS or _ENV_ASSIGN_RE.match(word) or name in _PSM_WRAPPERS:
+        if word in _PSM_PREFIX_WORDS or _ENV_ASSIGN_RE.match(word):
             i += 1
-        elif name == "timeout":
-            i += 1
-            while i < n and argv[i].startswith("-"):
-                i += 2 if argv[i] in ("-s", "-k", "--signal", "--kill-after") else 1
-            i += 1                          # the duration
-        else:
+            continue
+        if name not in _PSM_WRAPPERS:
             return i
+        short, long_, operands = _PSM_WRAPPERS[name]
+        i += 1
+        while i < n and argv[i].startswith("-") and argv[i] != "-":
+            option = argv[i]
+            i += 1
+            if option == "--":
+                break
+            if option.startswith("--"):
+                i += 1 if "=" not in option and option in long_ else 0
+                continue
+            for at, letter in enumerate(option[1:], 2):
+                if name == "command" and letter in "vV":
+                    return n
+                if letter in short:
+                    i += 1 if at == len(option) else 0
+                    break
+        i += operands
     return n
 
 
+def _psm_pgrep_long(word):
+    """The pgrep long option `word` (its text before any '=') names, a unique abbreviation expanded; '' when it
+    names none or is ambiguous (getopt then refuses the command)."""
+    name = word.split("=", 1)[0]
+    if name in _PSM_PGREP_LONG:
+        return name
+    found = [option for option in _PSM_PGREP_LONG if option.startswith(name)]
+    return found[0] if len(found) == 1 else ""
+
+
 def _psm_pgrep_pattern(argv, start):
-    """(index, pattern) of the pattern word of the pgrep or pkill named at argv[start] when it matches the full
-    command line (-f or --full, without -x or --exact); None otherwise or when it names no pattern. A pkill
-    signal written as an option (-9, -TERM) is skipped."""
-    full = exact = False
+    """(index, pattern) of the first operand of the pgrep or pkill named at argv[start] when it matches the full
+    command line (-f or --full, in any cluster and at any place) and does not leave out the checking shell's
+    ancestors; None otherwise or when it names no pattern. pgrep leaves them out with -A or
+    --ignore-ancestors; pkill is never read as doing so. A pkill signal written as an option (-9, -TERM) is
+    skipped."""
+    pkill = argv[start].rsplit("/", 1)[-1] == "pkill"
+    full = ancestors = False
     operand = None
     i, n = start + 1, len(argv)
     while i < n:
@@ -16714,12 +16756,12 @@ def _psm_pgrep_pattern(argv, start):
             operand = i + 1 if operand is None and i + 1 < n else operand
             break
         if word.startswith("--"):
-            name = word.split("=", 1)[0]
+            name = _psm_pgrep_long(word)
             full = full or name == "--full"
-            exact = exact or name == "--exact"
+            ancestors = ancestors or name == "--ignore-ancestors"
             i += 2 if "=" not in word and name in _PSM_PGREP_VALUE_LONG else 1
         elif word.startswith("-") and len(word) > 1:
-            if word[1:].isdigit() or (len(word) > 2 and word[1:].isalpha() and word[1:].isupper()):
+            if pkill and (word[1:].isdigit() or (len(word) > 2 and word[1:].isalpha() and word[1:].isupper())):
                 i += 1                      # a pkill signal
                 continue
             skip = 1
@@ -16728,12 +16770,12 @@ def _psm_pgrep_pattern(argv, start):
                     skip = 1 if at < len(word) else 2
                     break
                 full = full or letter == "f"
-                exact = exact or letter == "x"
+                ancestors = ancestors or letter == "A"
             i += skip
         else:
             operand = i if operand is None else operand
             i += 1
-    if operand is None or not full or exact:
+    if operand is None or not full or (ancestors and not pkill):
         return None
     return operand, argv[operand]
 
@@ -16776,19 +16818,21 @@ def _psm_grep_pattern(argv, start):
     return None if operand is None else (operand, argv[operand])
 
 
+def _psm_ps_by_pid(argv, start):
+    """True when the ps named at argv[start] selects processes by PID (-p, --pid, -q, --quick-pid, BSD p or q,
+    a glued -p123 or --pid=123)."""
+    for word in argv[start + 1:]:
+        if (word in _PSM_PS_PID_WORDS or word.startswith(("--pid=", "--quick-pid="))
+                or (word[:2] in ("-p", "-q") and word[2:].replace(",", "").isdigit())):
+            return True
+    return False
+
+
 def _psm_reading_hit(segments):
-    """_psm_hit for one reading's segments: the first check whose literal pattern the rest of the command text
-    also carries, as (check, pattern), or None. The rest is the raw text of every other segment, the check's
-    own raw segment where it holds the pattern twice (the pattern word itself is one), and the segment's
-    decoded words other than the pattern word."""
-    starts, at = [], 0
-    for seg in segments:
-        starts.append(at)
-        at += len(seg.raw) + 1
-    text = "\n".join(seg.raw for seg in segments)
-    checks = 0
+    """_psm_hit for one reading's segments: the first check that can match its own shell, as (check, pattern),
+    or None."""
     ps_pipe = False
-    for k, seg in enumerate(segments):
+    for seg in segments:
         argv = seg.argv
         i = _psm_command_index(argv)
         name = argv[i].rsplit("/", 1)[-1] if i < len(argv) else ""
@@ -16798,29 +16842,23 @@ def _psm_reading_hit(segments):
         elif name in _PSM_GREP_WORDS and ps_pipe:
             found = _psm_grep_pattern(argv, i)
             name = "ps | " + name
-        ps_pipe = (ps_pipe or name == "ps") and seg.sep_after in ("|", "|&")
+        feeds = name == "ps" and not _psm_ps_by_pid(argv, i)
+        ps_pipe = (ps_pipe or feeds) and seg.sep_after in ("|", "|&")
         if found is None:
             continue
         index, pattern = found
-        if not pattern or seg.argv_opaque[index]:
-            continue                        # a pattern built from a variable or substitution: not judged
-        checks += 1
-        if checks > _PSM_CHECK_LIMIT:
-            return None
-        start, end = starts[k], starts[k] + len(seg.raw)
-        others = " ".join(word for j, word in enumerate(argv) if j != index)
-        if (text.find(pattern, 0, start) >= 0 or text.find(pattern, end) >= 0
-                or seg.raw.count(pattern) >= 2 or pattern in others):
+        if pattern and not seg.argv_opaque[index]:
             return name, pattern
     return None
 
 
 def _psm_hit(command):
-    """The first process check in command (pgrep -f, pkill -f, or a grep in a pipeline fed by ps) whose literal
-    pattern also appears elsewhere in the command, as (check, pattern), or None. It reads the shared lexer's
-    segments under every reading of the command's uncertain '#' characters (_lex_readings); a command the lexer
-    refuses is None, never judged. A segment with no word and no redirect is left out (skip_empty): it holds
-    no check, and its raw text is only separators."""
+    """The first process check in command that can match the shell running it, as (check, pattern), or None:
+    pgrep -f without -A or --ignore-ancestors, pkill -f, or a grep (egrep, fgrep) on a pattern in a pipeline
+    that a ps not selecting by PID feeds through any number of stages. A pattern word the lexer marks opaque
+    (built from a variable or substitution) is not judged. It reads the shared lexer's segments under every
+    reading of the command's uncertain '#' characters (_lex_readings); a command the lexer refuses is None,
+    never judged. A segment with no word and no redirect is left out (skip_empty): it holds no check."""
     try:
         readings = _lex_readings(command, skip_empty=True)
     except ValueError:
@@ -16833,13 +16871,13 @@ def _psm_hit(command):
 
 
 def pgrep_self_match(data):
-    """trkasy (integ/track-launched-work), PreToolUse/Bash. DENY-and-educate a process-presence or
-    process-signal check (pgrep -f, pkill -f, or ps piped into grep, egrep or fgrep) whose literal pattern also
-    appears elsewhere in the same command (_psm_hit): such a check can match the checking shell itself, whose
-    command line carries the whole command text. Hooks never ask. BEST EFFORT: a command the shared lexer
-    refuses, and a pattern built from a variable or substitution, are allowed unjudged (the residue in the
-    hook manifest lists every miss). A missing tool_name takes the shared deny and a non-string command
-    denies fail-safe, as the sibling deny hooks do."""
+    """trkasy (integ/track-launched-work), PreToolUse/Bash. DENY-and-educate a process check that can match the
+    shell running it (_psm_hit): pgrep -f without -A or --ignore-ancestors, pkill -f, or ps piped into grep,
+    egrep or fgrep on a pattern, since the checking shell and its ancestors carry the command text on their
+    own command lines. Hooks never ask. BEST EFFORT: a command the shared lexer refuses, and a pattern built
+    from a variable or substitution, are allowed unjudged; the residue in the hook manifest states the shapes
+    read and the misses. A missing tool_name takes the shared deny and a non-string command denies
+    fail-safe, as the sibling deny hooks do."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: pgrep_self_match wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -16861,13 +16899,13 @@ def pgrep_self_match(data):
         return _allow()
     check, pattern = hit
     return _deny(
-        "AIQT rule trkasy (track-launched-work): this {} check's pattern {!r} also appears elsewhere in this "
-        "command. The check matches every process's full command line, and the shell running this command "
-        "carries the whole command text, so it can match the checking shell itself: a wait that never ends, "
-        "or a presence check that always succeeds. Wait or check on a PID or completion file captured at "
-        "launch, never on a string the checking command itself carries.".format(check, pattern[:80]),
-        "AIQT guardrail: denied a process check that can match its own shell (rule trkasy); wait or check on "
-        "a PID or completion file captured at launch.")
+        "AIQT rule trkasy (track-launched-work): this {} check matches its pattern {!r} against every "
+        "process's full command line, and the shell running this command, like each shell above it, carries "
+        "the command text, so the check can match the checking shell itself: a wait that never ends, or a "
+        "presence check that always succeeds. Use pgrep -A -f (it leaves out the checking shell and its "
+        "ancestors), or wait or check on a PID or completion file captured at launch.".format(check, pattern[:80]),
+        "AIQT guardrail: denied a process check that can match its own shell (rule trkasy); use pgrep -A -f, "
+        "or a PID or completion file captured at launch.")
 
 
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
