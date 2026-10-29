@@ -368,7 +368,8 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_push_step_deny", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -32744,6 +32745,130 @@ def write_scope_guard(data):
                         .format(tool_name, slice_name))                                      # row 21
 
 
+# --- push then step (clmobs) ---------------------------------------------------------------------------
+# The separators the shared lexer records between segments, as push_then_step reads them. After '&&' the next
+# command runs only when the one before it succeeded. '(' opens a subshell and carries no condition of its
+# own. A pipe joins the next stage to a push that is still running, so it runs whatever the push's result,
+# unless a '&&' after the push already gates the pipeline it starts. Every other separator (';', a newline or
+# the end of a reading, a bare '&', '||', and ')') lets the next command run whether or not the push
+# succeeded: '||' runs it exactly when the push failed. The lex leaves out a segment with no word
+# (skip_empty, which keeps a long run of separators cheap), so the separator that follows a ')' is not
+# read and ')' itself counts as dropping the gate: '(git push) && x' denies, a disclosed over-deny.
+_PUSH_STEP_GATED_SEPS = frozenset(("&&",))
+_PUSH_STEP_GROUP_SEPS = frozenset(("(",))
+_PUSH_STEP_PIPES = frozenset(("|", "|&"))
+# A segment holding only one of these words closes a compound command and runs nothing of its own, so
+# '{ git push; }' is a push alone.
+_PUSH_STEP_CLOSERS = frozenset(("}", "fi", "done", "esac"))
+# git, then push, then a separator character anywhere later in the text: push_then_step's fallback when the
+# lexer cannot read the command. A _RawSequence, so the test is linear in the command's length; a '&&' holds
+# '&', so an unreadable gated push denies too (the safe direction).
+_PUSH_STEP_RAW_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bpush\b", r"[;&|\n]")
+
+
+def _push_step_is_push(argv):
+    """True when a segment's words run git push: the command word, past a leading env-assignment prefix and
+    the bare command/exec/builtin/env/sudo wrappers (_expbnd_effective_tokens), is git, and its subcommand,
+    past the git global options (-C DIR and the rest, _git_sub_and_args), is push."""
+    eff = _expbnd_effective_tokens(argv)
+    return _command_word(eff) == "git" and _git_sub_and_args(eff)[0] == "push"
+
+
+def _push_step_finding(segments):
+    """(separator, command word) for the first command in one reading's segments that runs after a git push
+    whether or not that push succeeded, or None when every command after each push is gated on it by '&&'.
+    The walk from a push reads each separator after it in order (_PUSH_STEP_GATED_SEPS and its siblings): a
+    command reached before any separator that drops the gate is gated, and once one is crossed every later
+    command is not, so 'git push && a; b' finds b. A push with no command after it finds nothing."""
+    for index, seg in enumerate(segments):
+        if not _push_step_is_push(seg.argv):
+            continue
+        crossed_and = False
+        ungated = None
+        for k in range(index, len(segments) - 1):
+            sep = segments[k].sep_after
+            if sep in _PUSH_STEP_GATED_SEPS:
+                crossed_and = True
+            elif sep in _PUSH_STEP_PIPES:
+                if not crossed_and and ungated is None:
+                    ungated = sep
+            elif sep not in _PUSH_STEP_GROUP_SEPS and ungated is None:
+                ungated = sep
+            nxt = segments[k + 1].argv
+            if nxt and ungated is not None and not (len(nxt) == 1 and nxt[0] in _PUSH_STEP_CLOSERS):
+                return ungated, _command_word(_expbnd_effective_tokens(nxt)) or nxt[0]
+    return None
+
+
+def _push_step_deny(how):
+    """The deny-and-educate of push_then_step, naming how the later step was joined to the push."""
+    return _deny(
+        "AIQT rule clmobs (push then step): {}. That later command runs whether or not the push succeeded, so "
+        "anything it does on the strength of the push (a dispatch, a review, a status claim) can rest on a push "
+        "that never landed. Run the push on its own and read its result before the next step, or join the step "
+        "with '&&' so it runs only when the push succeeded ('git push origin br && next-step'). '||' is denied "
+        "too: its right side runs exactly when the push failed.".format(how),
+        "AIQT guardrail: denied a git push followed by a step that does not wait for the push to succeed "
+        "(rule clmobs); push alone or join the next step with '&&'.")
+
+
+def push_then_step(data):
+    """clmobs (accur/claims-rest-on-observation), PreToolUse Bash: DENY-and-educate a git push followed in the
+    same command by another command that runs whether or not the push succeeded, because a step that depends
+    on a push must run only after the push's success is observed. The shared lexer's readings
+    (_lex_readings_read, the command reading included) are each judged on their own (_push_step_finding): a
+    command joined after the push by ';', a newline, a bare '&', a pipe or '||' denies, and so does any
+    command after a later such separator ('git push && a; b'). '&&' allows, and a push alone allows. '||' is
+    denied whatever follows it, the simplest rule: what follows runs exactly when the push failed, and no
+    reading here can tell an error report from a step that dispatches work. A push is any segment whose
+    command word is git, past an env-assignment prefix and the bare command/exec/builtin/env/sudo wrappers,
+    with push as its subcommand past the git global options (git -C DIR push, git -c k=v push).
+
+    DISCLOSED SILENT ALLOWS (the lexer does not see the push): a push inside a script or program the command
+    runs, a shell function or alias, eval or an sh -c string, a variable or substituted command word ($GIT
+    push), a git alias that runs push, and a wrapper carrying its own options (env -i, sudo -u u). DISCLOSED
+    OVER-DENY: a step bash gates on the push through a compound command ('if git push; then x; fi',
+    '{ git push; } && x') reads as ';' and denies, and so does one after a subshell ('(git push) && x', the
+    ')' above _PUSH_STEP_GATED_SEPS); join it with '&&' instead. Fail posture: a missing tool_name denies (the shared contract);
+    a missing or non-string command denies (check-fails-closed-on-unreadable); an empty one runs nothing and
+    allows. A command the lexer cannot read (an unbalanced quote, a here-string, a '#' it cannot judge, a
+    command reading past its budget) denies when its raw text names git, then push, then any of ';', '&', '|'
+    or a newline (_PUSH_STEP_RAW_RE), an over-deny of such a command joined only by '&&', and allows
+    otherwise."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: push_then_step wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("clmobs")
+    if tool != "Bash":
+        return _allow()
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule clmobs (push then step): the Bash payload carried no readable command string, so this "
+            "guard could not check it for a step joined after a git push; failing closed. Re-issue the call "
+            "with a string command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule clmobs, fail-closed).")
+    if not command:
+        return _allow()
+    try:
+        readings = _lex_readings_read(command, skip_empty=True)
+    except ValueError:
+        if _PUSH_STEP_RAW_RE.search(command) is not None:
+            return _push_step_deny("this command could not be read by the shared lexer, and its text names "
+                                   "git push followed by a command separator")
+        return _allow()
+    for segments in readings:
+        finding = _push_step_finding(segments)
+        if finding is not None:
+            sep, word = finding
+            joiner = {"": "a newline", "&": "a bare '&'"}.get(sep, "'{}'".format(sep))
+            return _push_step_deny("a git push is followed by {!r}, joined by {}".format(word, joiner))
+    return _allow()
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -32775,6 +32900,7 @@ HANDLERS = {
     "orch_resume_barrier": orch_resume_barrier,
     "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
     "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
+    "push_then_step": push_then_step,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -32815,6 +32941,7 @@ HANDLER_EVENT = {
     "orch_resume_barrier": PRETOOL,
     "orch_lease_heartbeat_post": "PostToolUse",
     "orch_lease_heartbeat_stop": "Stop",
+    "push_then_step": PRETOOL,
 }
 
 

@@ -2503,6 +2503,162 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
+# push_then_step rows: (label, command). Each DENY row joins a step after a git push that bash runs whether or
+# not the push succeeded; each ALLOW row runs no step after the push, or only steps a '&&' gates on it.
+_PTS_DENY_ROWS = (
+    ("(pts-d1) step after ';'", "git push origin br; step"),
+    ("(pts-d2) step after a newline", "git push origin br\nstep"),
+    ("(pts-d3) step after a bare '&'", "git push origin br & step"),
+    ("(pts-d4) step piped from the push", "git push origin br | step"),
+    ("(pts-d5) step piped with '|&'", "git push origin br |& step"),
+    ("(pts-d6) step after '||'", "git push origin br || step"),
+    ("(pts-d7) '||' error report is denied too", "git push origin br || echo push failed"),
+    ("(pts-d8) git -C DIR push", "git -C /abs/repo push origin br; step"),
+    ("(pts-d9) options before push", "git -c push.default=current --no-pager push; step"),
+    ("(pts-d10) --git-dir= form", "git --git-dir=/abs/repo/.git push origin br; step"),
+    ("(pts-d11) assignment prefix", "GIT_TRACE=0 git push origin br; step"),
+    ("(pts-d12) bare wrapper", "command git push origin br; step"),
+    ("(pts-d13) a later ';' drops the gate", "git push origin br && true; step"),
+    ("(pts-d14) '||' after '&&'", "git push origin br && true || step"),
+    ("(pts-d15) subshell then ';'", "(git push origin br); step"),
+    ("(pts-d16) brace group then ';'", "{ git push origin br; }; step"),
+    ("(pts-d17) comment then newline", "git push origin br # publish\nstep"),
+    ("(pts-d18) redirect on the push", "git push origin br 2>&1; step"),
+    ("(pts-d19) second push after ';'", "git push origin a; git push origin b"),
+    ("(pts-d20) push inside the step chain", "true && git push origin br; step"),
+)
+_PTS_ALLOW_ROWS = (
+    ("(pts-a1) push alone", "git push origin br"),
+    ("(pts-a2) step after '&&'", "git push origin br && step"),
+    ("(pts-a3) trailing ';'", "git push origin br;"),
+    ("(pts-a4) trailing newline", "git push origin br\n"),
+    ("(pts-a5) backgrounded push alone", "git push origin br &"),
+    ("(pts-a6) pipe a '&&' gates", "git push origin br && true | step"),
+    ("(pts-a7) '&&' inside a subshell", "(git push origin br && step)"),
+    ("(pts-a8) brace group alone", "{ git push origin br; }"),
+    ("(pts-a9) step before the push", "step; git push origin br"),
+    ("(pts-a10) chain of '&&'", "git -C /abs/repo push origin br && step && step"),
+    ("(pts-a11) not a push", "git fetch origin; step"),
+    ("(pts-a12) quoted separator", "git push origin 'br;x'"),
+    ("(pts-a13) push only in quoted prose", "echo 'git push; step'"),
+    ("(pts-a14) unbalanced quote, no separator after push", 'git push origin "br'),
+)
+# Rows the lexer reads where bash still gates the step on the push: the disclosed over-deny.
+_PTS_OVERDENY_ROWS = (
+    ("(pts-o1) if/then gates the step in bash, read as ';'", "if git push origin br; then step; fi"),
+    ("(pts-o2) brace group then '&&', read as ';'", "{ git push origin br; } && step"),
+    ("(pts-o3) subshell then '&&', the ')' drops the gate", "(git push origin br) && step"),
+)
+# The fail-closed fallback on a command the lexer cannot read.
+_PTS_FALLBACK_ROWS = (
+    ("(pts-f1) here-string, then ';'", "git push origin br <<<x; step", "deny"),
+    ("(pts-f2) here-string, then '&&' (over-deny)", "git push origin br <<<x && step", "deny"),
+    ("(pts-f3) here-string, no separator", "git push origin br <<<x", "allow"),
+)
+_PTS_BASH = "/usr/bin/bash"
+# The allow and over-deny rows the oracle runs: those with a step written after the push (a step before the
+# push, or a command with no push, runs its step whatever a push does).
+_PTS_ORACLE_ALLOW_IDS = frozenset(("(pts-a2)", "(pts-a6)", "(pts-a7)", "(pts-a10)", "(pts-o1)", "(pts-o2)",
+                                   "(pts-o3)"))
+
+
+def _pts_oracle_runs(failures, tmp):
+    """(pts-oracle) Each deny and allow row runs once under real bash (env -i, the literal /usr/bin/bash) with a
+    git fixture that exits 1 (a push that failed) and a step fixture that records that it ran: a deny row must
+    run some step anyway, an allow row must run none, and the over-deny rows, which bash gates, must run none
+    too. Missing fixture evidence fails (no step recorded where one must run)."""
+    if not os.access(_PTS_BASH, os.X_OK):
+        failures.append("(pts-oracle) {} is not executable; the real-bash oracle cannot run".format(_PTS_BASH))
+        return
+    root = tmp / "pts-oracle"
+    bindir = root / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "git").write_text("#!" + _PTS_BASH + "\nexit 1\n", encoding="utf-8")
+    (bindir / "step").write_text("#!" + _PTS_BASH + "\necho ran >> \"$PTS_RECORD\"\n", encoding="utf-8")
+    os.chmod(str(bindir / "git"), 0o755)
+    os.chmod(str(bindir / "step"), 0o755)
+    record = root / "record.txt"
+    rows = ([(label, command, True) for label, command in _PTS_DENY_ROWS if "step" in command]
+            + [(label, command, False) for label, command in _PTS_ALLOW_ROWS + _PTS_OVERDENY_ROWS
+               if label.split(")")[0] + ")" in _PTS_ORACLE_ALLOW_IDS])
+    for label, command, must_run in rows:
+        if record.exists():
+            record.unlink()
+        env = {"PATH": str(bindir), "HOME": str(root), "PTS_RECORD": str(record)}
+        try:
+            subprocess.run([_PTS_BASH, "-c", command + "\nwait"], env=env, cwd=str(root), capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=30)
+        except subprocess.TimeoutExpired:
+            failures.append("{} (pts-oracle): bash did not finish within 30 s".format(label))
+            continue
+        ran = record.exists()
+        if ran != must_run:
+            failures.append("{} (pts-oracle): under real bash with a failing push the step {}, but the row "
+                            "says it {}".format(label, "ran" if ran else "did not run",
+                                                "runs" if must_run else "does not"))
+
+
+def _test_push_then_step(failures, tmp):
+    """Direct checks of push_then_step: each deny and allow row, the over-deny and fallback rows, the fail-closed
+    payloads, the wiring, a revert flip (with the finding and the fallback probe patched out, every deny row
+    must stop denying, so the rows discriminate) and the real-bash oracle. No row's command is executed here
+    except under the oracle's fixtures, which run no real git."""
+    handler = aiqt_hooks.push_then_step
+    for label, command in _PTS_DENY_ROWS + _PTS_OVERDENY_ROWS:
+        got = _decision(handler, command)
+        if got != "deny":
+            failures.append("{}: expected deny, got {}".format(label, got))
+    for label, command in _PTS_ALLOW_ROWS:
+        got = _decision(handler, command)
+        if got != "allow":
+            failures.append("{}: expected allow, got {}".format(label, got))
+    for label, command, want in _PTS_FALLBACK_ROWS:
+        got = _decision(handler, command)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+
+    for label, data in (
+            ("(pts-m1) missing tool_name",
+             {"hook_event_name": aiqt_hooks.PRETOOL, "tool_input": {"command": "git push; step"}}),
+            ("(pts-m2) None tool_name",
+             {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None, "tool_input": {"command": "git push"}})):
+        if handler(data) != aiqt_hooks._deny_missing_tool_name("clmobs"):
+            failures.append("{}: expected the shared missing-tool deny".format(label))
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "tool_input": tool_input})
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(pts-unreadable) expected a fail-closed deny for {!r}".format(tool_input))
+    if _decision(handler, "") != "allow":
+        failures.append("(pts-empty) an empty command runs nothing and must allow")
+    if _decision(handler, "git push origin br; step", tool="Read") != "allow":
+        failures.append("(pts-other-tool) a different tool must silently allow")
+    code, stdout_obj, stderr = handler({"hook_event_name": "Stop", "tool_name": "Bash",
+                                        "tool_input": {"command": "git push; step"}})
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str)
+            and "push_then_step wired to unexpected event" in stderr):
+        failures.append("(pts-event) an unexpected event must hard-block")
+    if (aiqt_hooks.HANDLERS.get("push_then_step") is not aiqt_hooks.push_then_step
+            or aiqt_hooks.HANDLER_EVENT.get("push_then_step") != aiqt_hooks.PRETOOL):
+        failures.append("(pts-wiring) push_then_step handler/event wiring is missing or wrong")
+
+    # Revert flip: with the handler's finding and fallback probe patched out (the deny logic removed), every
+    # deny row and fallback deny row must stop denying.
+    finding, probe = aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE
+    aiqt_hooks._push_step_finding = lambda segments: None
+    aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"(?!)")
+    try:
+        for label, command in _PTS_DENY_ROWS + tuple((lab, cmd) for lab, cmd, want in _PTS_FALLBACK_ROWS
+                                                      if want == "deny"):
+            if _decision(handler, command) == "deny":
+                failures.append("{} (pts-flip): still denies with the deny logic removed, so the row does not "
+                                "discriminate".format(label))
+    finally:
+        aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
+
+    _pts_oracle_runs(failures, tmp)
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -2532,6 +2688,7 @@ _RAW_SEQUENCE_REFERENCES = (
     (("_RAW_SHORT_NOVERIFY_VERB_RE",), r"(?is)\bgit\b.*?\b(?:commit|am)\b"),
     (("_RAW_COMMIT_MSG_GIT_RE",), r"(?is)\bgit\b.*?\bcommit\b"),
     (("_STASH_WORD_RE",), r"(?is)\bgit\b.*?\bstash\b"),
+    (("_PUSH_STEP_RAW_RE",), r"(?is)\bgit\b.*?\bpush\b.*?[;&|\n]"),
     (("_BRANCH_CREATE_WORD_RE",), r"(?is)\bgit\b.*?\b(?:checkout|switch|branch|worktree)\b"),
 )
 # Words and joiners the differential corpus is drawn from: each verb, its case and word-boundary
@@ -3894,6 +4051,9 @@ _DEADLINE_SHAPES = {
     "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
+    # A long run of &&-joined git words, then a push and a step joined after it by ';', which push_then_step
+    # must deny within the bound.
+    "push_step_after": lambda n, base: ("Bash", {"command": _repeat("git && ", n, "git push origin br; next-step")}),
     # One key run of quoted '-c' mirror options with no '.mirror' and no blank, which the single
     # mirror-configuration regex read in time quadratic in its length (about 0.8 s of CPU at 64 KB and 6.2
     # to 6.5 s at 180 KB for one call of the push backstop alone, in-process on a 24-core host with Python
@@ -4005,6 +4165,7 @@ _DEADLINE_CASES = {
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
+    "push_then_step": ("git_words", "git_push_words_unbal", "nest_parens", "nest_cmdsubst", "push_step_after"),
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
@@ -4027,7 +4188,7 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after")))
+    ("protected_line", "procsubst_run_after"), ("push_then_step", "push_step_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
 # a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
 # scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
@@ -24583,6 +24744,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_push_then_step(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

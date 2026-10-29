@@ -13,11 +13,11 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Gate-linked (class c only) | 1 |
 | Gate-linked (class c only), partial | 8 |
 | Hook-linked | 19 |
-| Hook-linked, partial | 4 |
+| Hook-linked, partial | 5 |
 | Preview only | 2 |
 | Preview only, partial | 0 |
 | Pending | 0 |
-| No control | 90 |
+| No control | 89 |
 
 ## Rules
 
@@ -25,7 +25,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 |---|---|---|---|
 | The AIQT principle (highest precedence) | `prjint1` | No control | No shipped control cites this rule. |
 | Citation only from a file opened at the reviewed commit | `citint` | No control | No shipped control cites this rule. |
-| Claims about the work rest on observation | `clmobs` | No control | No shipped control cites this rule. |
+| Claims about the work rest on observation | `clmobs` | Hook-linked, partial | `hook:push-then-step`, class b |
 | A completeness claim enumerates its set | `setcmp` | Hook-linked | `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
 | Corroborate external claims | `corrob` | No control | No shipped control cites this rule. |
 | A count carries its predicate | `cntprd` | No control | No shipped control cites this rule. |
@@ -1117,6 +1117,31 @@ PUSH COVERAGE REMAINS SEPARATE. A raw-text backstop scans every submitted comman
 Push residuals include execution outside Bash; renamed executables, aliases defined in configuration files (an alias the command defines for itself denies, above), functions, and scripts; runtime-expanded destinations; fragmentation beyond parsed, raw and de-quoted detection (such as an escape decoded inside an ANSI-C quote); a wrapped force, delete, mirror or --all/--branches push naming no protected branch when another earlier or later segment parses as ordinary Git and suppresses the broad push fallback (one pairing a protected branch name with a force, delete, mirror or sweep spelling in the same segment is caught by the raw-text backstop, including a spelling fragmented by quotes or a backslash under a command-word wrapper); protected branches under names other than main/master; remote-side or hosting-provider actions; persisted repository/worktree/global/system configuration and includes; command-local remote.<name>.push refspecs; GIT_CONFIG_* protocols from the session environment (a command whose text names GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_CONFIG_KEY_ denies, above), including the explicit-refspec ambient-override gap; and upstream/triangular mappings that can diverge from the session-HEAD proxy. push.default selects refs rather than forcing or deleting by itself. The raw mirror-config fallback recognizes common quoted spellings but cannot model arbitrary option/key/value fragmentation or cross-mechanism precedence. The abbreviation match follows the recorded git 2.55 push option set: an abbreviation that a later git accepts because it drops or renames a push option is not matched until that recorded set is updated, and --tags and --follow-tags are not matched (they add tags and never update or delete a branch). Negated force/delete flags, standalone --force-if-includes, and dry-run force/delete can over-deny. Parse-error/raw fallback scans and the raw-text backstop can also over-match quoted prose or unrelated option values that share a segment with a push; the push fallback scans the RAW command text with NO heredoc stripping at all (stripping removes text, so any stripping defect can only hide a live push - an earlier stripper still erased a real force-push behind a stacked heredoc and behind a quoted-heredoc lookalike nested in quotes inside a command substitution), so force-push-shaped prose inside ANY heredoc body, quoted bodies included, can over-deny on this fallback path, including prose naming only a feature ref when the command is unparseable or wrapper-hidden; the backstop reads the heredoc body lines, quoted strings and comments inside a segment as text. When the shell reading is uncertain (any unquoted #, <<, ( or ), a lone { or } word, any backtick or $(, a line continuation the lexer reads differently once joined, or a form the lexer refuses), the broad fallback decides even beside an ordinary Git segment and reads the text both as written and with quotes, a $ before a quote, and backslashes removed, so a force, delete or mirror spelling anywhere in such a command denies, including a force-push to a feature branch inside a subshell, inside a { } brace group beside another Git command, beside a command substitution, or carrying a # inside a word: a disclosed over-denial in the safe direction. Push coverage is best-effort and is not widened by the commit certificates.
 
 DEADLINE: main() gives this check 8 seconds (the 10-second hook timeout less 2), counted from before its payload read, and fails closed with exit 2 when it has not decided by then; on the worst shapes the hooks self-test times, up to 1 MB, its slowest call took about 1.01 s in-process on a 24-core host with Python 3.14.4 (one run on 2026-10-18, including the shapes whose comment reading depends on context), because the raw-text push backstop reads the whole command, one segment at a time, before the 65,536-character size cap of the commit reading denies a longer one. Those shapes now include two that were measured separately, on 2026-10-18: a run of quoted '-c' mirror options with no blank, and a run of adjacent '<(' or '>(' process substitutions, each before a force-push to a protected branch. While the backstop read the first with the single mirror-configuration regex, whose cost grew with the square of the run's length, one call of this check on it took 14.0 s of CPU time at 256 KB and reached no decision within the 60-second hang guard of the hooks self-test at 1 MB; with the linear probe that replaced that regex, it took at most 0.47 s of CPU time at 1 MB. On the second, which the backstop's segment split now walks in place instead of copying the rest of the command for each substitution, it took about 0.17 s of CPU time at 1 MB. Each figure was measured in-process on a 24-core host with Python 3.14.4. Interpreter start-up and a wait the interpreter cannot interrupt (a read from a hung mount, a long call into C code) fall outside that deadline, and whether the platform blocks a call whose hook it stops at its own timeout is unverified. Where SIGALRM, setitimer or the main thread is unavailable, or SIGALRM is blocked, the check runs with no deadline; cleanup that runs while the deadline unwinds is outside it.
+
+```
+
+### `hook:push-then-step`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `PreToolUse on Bash`
+- Class: `b`
+- Channel: `plugin`
+
+Technical limits (from the enforcement ledger):
+
+```
+A best-effort LEXICAL check over the Bash command through the shared quote/redirect-aware lexer (_lex_command, read with the command reading the other git guards use), DENY-and-educate: a git push followed in the same command by another command that runs whether or not the push succeeded is denied, because a step that depends on a push must run only after the push's success is observed. A push is a segment whose command word is git (past a leading env assignment and the bare command/exec/builtin/env/sudo wrappers) with push as its subcommand past the git global options, so git -C DIR push and git -c k=v push count.
+
+WHAT DENIES AND WHAT ALLOWS: a command joined after the push by ';', a newline, a bare '&', a pipe ('|' or '|&') or '||' denies, and so does any command after a later such separator, since once one is crossed the push no longer gates what follows (git push && a; b denies on b). '&&' allows (the next command runs only when the push succeeded), a pipe that a '&&' after the push already gates allows (git push && a | b), and a push alone allows, a trailing ';' or '&' included. '||' is denied whatever follows it, the simplest rule: what follows runs exactly when the push failed, and this check cannot tell an error report from a step that dispatches work, so git push || echo failed denies too (run the push alone and read its result). Each reading the lexer gives a context-dependent '#' is judged on its own, so a sequence no single reading holds never fires.
+
+DISCLOSED SILENT ALLOWS (the lexer does not see the push): a push inside a script or program the command runs, a shell function or alias, eval or an sh -c or bash -c string, a variable or substituted command word ($GIT push), a git alias that runs push, a wrapper carrying its own options or assignments (env -i, env FOO=1, sudo -u u) or one outside the bare set (timeout, nice, xargs), a push made in a prior Bash call, and a push outside the Bash tool. It reads the command text only, never whether a push actually succeeded, so a step that waits on '&&' can still act on a push whose result it misreads.
+
+DISCLOSED OVER-DENY: a step bash gates on the push through a compound command (if git push; then next; fi, or { git push; } && next) reads as ';' and denies, and so does a step after a subshell ((git push) && next), since the lexer drops the empty segment that carries the separator after a ')' and the check counts the ')' as dropping the gate; join the step with '&&' to a bare push instead.
+
+FAIL POSTURE: a missing tool_name denies (the shared contract); a missing or non-string command denies (fail closed on an unreadable command); an empty command runs nothing and allows. A command the lexer cannot read (an unbalanced quote, a here-string, a process substitution, a '#' it cannot judge under both readings, or backquote bodies past the command reading's budget) denies when its raw text names git, then push, then any of ';', '&', '|' or a newline, an over-deny of such a command joined only by '&&', and allows otherwise. An unexpected event hard-blocks.
+
+DEADLINE: main() gives this check 8 seconds (the 10-second hook timeout less 2), counted from before its payload read, and fails closed with exit 2 when it has not decided by then; on the shapes the hooks self-test times for it, up to 1 MB, one in-process run on 2026-10-29 measured its slowest call at 2.34 s of CPU (nest_cmdsubst at 1 MB). Interpreter start-up and a wait the interpreter cannot interrupt fall outside that deadline, and whether the platform blocks a call whose hook it stops at its own timeout is unverified. Where SIGALRM, setitimer or the main thread is unavailable, or SIGALRM is blocked, the check runs with no deadline.
 
 ```
 
