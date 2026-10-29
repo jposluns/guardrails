@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.6.0 template-sha256=c536955aeb32543291b12ebcd32c17f9bf4b9cdbfa549050d671c86cc9f74510 -->
+<!-- OPF-FLOW: release=0.7.0 template-sha256=c536955aeb32543291b12ebcd32c17f9bf4b9cdbfa549050d671c86cc9f74510 -->
 
 # /flow: the OPF operating loop
 

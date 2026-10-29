@@ -510,6 +510,7 @@ opf/enforcement/precommit/pre-commit text eol=lf
 opf/prompt-pack/adopt/SKILL.md text eol=lf
 opf/prompt-pack/adopt/clean-start.md text eol=lf
 opf/prompt-pack/flow/SKILL.md text eol=lf
+opf/prompt-pack/import/SKILL.md text eol=lf
 opf/prompt-pack/import/examples/autonomous_decision.batch.toml text eol=lf
 opf/prompt-pack/import/examples/backlog_item.batch.toml text eol=lf
 opf/prompt-pack/import/examples/block.batch.toml text eol=lf
