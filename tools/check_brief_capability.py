@@ -228,17 +228,17 @@ command line is split on whitespace once and its tokens classified by a plain pr
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
 space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each of 24 shapes at 1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus LINEAR_SLACK seconds
+each shape at 1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus LINEAR_SLACK seconds
 (the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
 long). A shape is evidence only for the text it repeats. Measured on 2026-10-08 on one shared host, each in such a
-child under nice 10, in two runs of these 24 shapes: every shape took at most 0.29 s at 128 KiB and 2.13 s at 1 MiB,
+child under nice 10, in two runs of these shapes: every shape took at most 0.29 s at 128 KiB and 2.13 s at 1 MiB,
 at most 9.4 times its 128 KiB time. On the previous revision, with the same harness and a 60-second timeout
 (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix (" -x.y" repeated then
 "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s; the fence-contents shape
-took at most 0.06 s there and guards the new reading of fence contents, not the change. Of the 20 older shapes,
-closed-args-linear repeats a token with one parse and did not catch that argument tail; the two whitespace-run
-shapes were added when an earlier revision did not finish 128 KiB within 60 s, and ten others when an earlier
-revision exceeded the bound, each measured only to a 60-second timeout.
+took at most 0.06 s there and guards the new reading of fence contents, not the change. Of the older shapes,
+closed-args-linear repeats a token with one parse and did not catch that argument tail; the whitespace-run shapes
+(whitespace-run-linear and item-list-whitespace-linear) were added when an earlier revision did not finish 128 KiB
+within 60 s, and some others when an earlier revision exceeded the bound, each measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)

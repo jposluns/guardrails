@@ -24,9 +24,12 @@ THE CASES (every child runs in the git fixture below, and every event but startu
                    interpreter start, the dispatcher's import and one json.loads;
   bash-<size>      Bash, a command of exactly the dispatcher's command budget (_COMMIT_MAX_COMMAND, read from
                    the dispatcher; 65536 characters at this writing, so the case is bash-64kib): at most 64
-                   read-only `git log` segments joined by && naming quoted absolute paths, padded to the exact
-                   length (the commit grammar refuses a command of more than 64 segments at once, so more
-                   segments would end that scan early);
+                   read-only `git log` segments joined by && (the commit grammar refuses a command of more than
+                   64 segments at once, so more segments would end that scan early), each naming up to two
+                   quoted absolute paths and then distinct backquote substitutions `:N` to its share, padded to
+                   the exact length: the shared lexer's command reading lexes each substitution's body as a
+                   command of its own and every hook that asks for that reading judges the segments it adds
+                   (about 7,400 bodies at 64 KiB, no more than that reading's body budget lexes);
   write-<size>     Write, a content of 1, 4 and 16 MiB of lines `password = "${DB_PASSWORD}"`: each line
                    reaches the secrets scan's credential-assignment and entropy checks and holds a
                    placeholder, so no line ends the scan early;
@@ -178,6 +181,13 @@ SEGMENT_LIMIT = 64
 SEGMENT_HEAD = "git log --oneline -n 1 --"
 SEGMENT_JOIN = " && "
 SEGMENT_MIN = len(SEGMENT_HEAD) + 2   # the head, a space and a one-character pad word
+SEGMENT_PATHS = 2                     # the quoted absolute paths a segment names, room allowing
+SEGMENT_BODY = " `:{}`"               # a backquote substitution, its number distinct across the command
+# The shared lexer's command reading charges each body it lexes its length and READ_BODY_CHARGE against a
+# budget of READ_BUDGET per command (the dispatcher's _READ_BODY_LIMIT and _READ_BODY_COST at this writing):
+# the Bash case holds no more bodies than that budget lexes, so the reading runs to its end.
+READ_BUDGET = 1 << 19
+READ_BODY_CHARGE = 64
 
 FEATURE = "measure/feature"
 ORPHAN = "measure/orphan"
@@ -399,7 +409,9 @@ def command_budget(script):
 
 def bash_command(cap, repo):
     """A Bash command of exactly cap characters: at most SEGMENT_LIMIT read-only `git log` segments joined
-    by ' && ', each naming quoted absolute paths under repo and padded with one plain word to its share."""
+    by ' && ', each naming up to SEGMENT_PATHS quoted absolute paths under repo, then backquote substitutions
+    (SEGMENT_BODY) numbered from 0 across the command, so no two bodies are alike, while their charge stays
+    within READ_BUDGET, and padded with one plain word to its share."""
     if "'" in str(repo):
         raise MeasureError("the fixture path {} holds a single quote, which the quoted paths cannot carry"
                            .format(repo))
@@ -409,16 +421,23 @@ def bash_command(cap, repo):
         raise MeasureError("a command budget of {} characters is below one {}-character segment"
                            .format(cap, SEGMENT_MIN))
     segments = []
+    body = 0
+    charge = 0
     for number in range(count):
         size = total // count + (1 if number < total % count else 0)
         text = SEGMENT_HEAD
-        path = 0
-        while True:
+        for path in range(SEGMENT_PATHS):
             word = " '{}/dir {:02d}/file {:03d}.txt'".format(repo, number, path)
             if len(text) + len(word) + 2 > size:
                 break
             text += word
-            path += 1
+        while True:
+            word = SEGMENT_BODY.format(body)
+            if len(text) + len(word) + 2 > size or charge + len(word) - 3 + READ_BODY_CHARGE > READ_BUDGET:
+                break  # the body is the word less its blank and two backquotes
+            text += word
+            charge += len(word) - 3 + READ_BODY_CHARGE
+            body += 1
         segments.append(text + " " + "p" * (size - len(text) - 1))
     return SEGMENT_JOIN.join(segments)
 
@@ -657,7 +676,7 @@ def build_cases(first, repo, cap, write_sizes, files, commits):
              Case("bash-" + _size_name(cap), "Bash",
                   {"command": bash_command(cap, repo), "description": "measure hook latency"}, None, None,
                   "Bash, a {}-character command (the dispatcher's command budget): read-only git log segments "
-                  "joined by &&, quoted absolute paths".format(cap))]
+                  "joined by &&, quoted absolute paths and distinct backquote substitutions".format(cap))]
     for size in write_sizes:
         cases.append(Case("write-" + _size_name(size), "Write",
                           {"file_path": str(repo / "measure" / "latency-probe.txt"), "content": write_content(size)},
@@ -1234,6 +1253,20 @@ def _bash_vectors():
             wrong.append((cap, len(command), len(segments), quoted))
     if len(bash_command(65536, repo).split(SEGMENT_JOIN)) != SEGMENT_LIMIT:
         wrong.append("a 65536-character command is not cut into the full segment count")
+    # The command reading's bodies: numbered 0 up with no gap or repeat (so the reading lexes each one, none
+    # read again from its reuse cache), at least 64 in each segment of a 65536-character command, and their
+    # charge (each body's length and READ_BODY_CHARGE) within READ_BUDGET, so the reading runs to its end. With
+    # a short fixture path more bodies fit than the budget lexes, so there the budget, not the length, stops
+    # them: one more body would pass it.
+    for path, budget_bound in ((repo, False), ("/r", True)):
+        command = bash_command(65536, path)
+        numbers = [int(found) for found in re.findall(r"`:([0-9]+)`", command)]
+        charge = sum(len(":{}".format(found)) + READ_BODY_CHARGE for found in numbers)
+        following = len(":{}".format(len(numbers))) + READ_BODY_CHARGE  # the charge of the next body
+        if (len(command) != 65536 or numbers != list(range(len(numbers))) or len(numbers) < 64 * SEGMENT_LIMIT
+                or charge > READ_BUDGET or (budget_bound and charge + following <= READ_BUDGET)
+                or any(segment.count("'") != 2 * SEGMENT_PATHS for segment in command.split(SEGMENT_JOIN))):
+            wrong.append(("bodies", path, len(numbers), charge))
     for cap, path in ((SEGMENT_MIN - 1, repo), (512, "/fixture'root/repo")):
         try:
             bash_command(cap, path)

@@ -368,7 +368,7 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -974,8 +974,9 @@ class _LexPlaces:
     context returns: "quote" for a single- or double-quoted string in a word (a redirect target's included),
     "code" for a substitution or expansion a double-quoted string holds (_read_word skips it whole, so nothing
     inside it is recorded apart from the body below), "comment" for a '#' comment the lex reads to the end of
-    its line, and "heredoc" for the body of a quoted here-document the lex skips (the commit message form's
-    body in a substitution included, from its '<<' to the ')' that closes it). An ANSI-C $'...' quote and an
+    its line, "heredoc" for the body of a quoted here-document the lex skips (the commit message form's body in
+    a substitution included, from its '<<' to the ')' that closes it), and "body" for such a body whose end the
+    lex cannot prove is where bash ends it (the span comment in _lex_pass). An ANSI-C $'...' quote and an
     escape are not recorded. The spans of one pass nest or are disjoint, and each pass clears the list
     first, so it holds the last pass's spans (_SubstHeredocRetry); a lex that resumes a fork (_LexFork) would
     lose the spans before it, so a recording lex is one reading lexed from the start. Outside the context
@@ -2315,11 +2316,16 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
     record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
     a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
-    list) passes it; the default False keeps every record."""
+    list) passes it; the default False keeps every record.
+
+    Inside _CommandReading the command reading follows the readings above, the segments of each read from its
+    command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
+    WORDS, above _COMMAND_LEAD_WORDS); outside it nothing is added. A command reading that reaches its body
+    budget raises _ReadingLimitError in partial mode too (COST, above _COMMAND_LEAD_WORDS)."""
     try:
         readings = _lex_readings(command, partial, locale, skip_empty)
     except _UncertainHashError as exc:
-        if not partial:
+        if not partial or isinstance(exc, _ReadingLimitError):
             raise
         return _lex_resume_partial(command, exc, locale, skip_empty)
     if partial:
@@ -2337,9 +2343,12 @@ def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
     prefix without a second pass over that text, unless the error marks a reading that failed to lex
     (reading_failed), where a partial lex recovers every reading's segments and the caller must lex partially
     in full (_gate_recovered_sink); exc must come from a lex of this same command with this locale and
-    skip_empty, whose state the fork carries."""
+    skip_empty, whose state the fork carries. Inside _CommandReading the command reading of the recovered
+    segments follows them (_with_command_readings)."""
     lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
-    readings = _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed]
+    readings = _with_command_readings(
+        _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
+        skip_empty, "`" in command)
     return ([seg for segs, _complete, _open in readings for seg in segs],
             all(done for _segs, done, _open in readings), readings[-1][2])
 
@@ -2360,7 +2369,12 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     substitution that main's skip reads otherwise, main's reading follows (_beside_main_reading): one more
     reading and one more pass per call, made only where such a reading made one pass, so seventeen readings may
     be returned and the pass bound holds. Inside
-    _SubstHeredocFloor the list is main's reading alone (_main_reading), one pass.
+    _SubstHeredocFloor the list is main's reading alone (_main_reading), one pass. These bounds count the lexer's
+    own readings and lexes of command. Inside _CommandReading the list also holds the command reading of each
+    reading it changes, and in partial mode the last reading once more, so up to thirty-five entries, and that
+    reading makes lexes of its own beyond the bounds above: one partial call of this function, with those bounds,
+    on each distinct backquote body at each depth, up to the context's body budget, past which it raises
+    _ReadingLimitError (COST, above _COMMAND_LEAD_WORDS).
 
     A lex stopped at an uncertain '#' its reading does not map at a word boundary, or at the start of a
     redirect target, hands over where it stopped (_LexFork), and both readings of that '#' resume there
@@ -2375,9 +2389,11 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
     Raises _UncertainHashError beyond that bound, at a '#' in or right after a backquote substitution,
     and when a reading fails to lex for another reason after an uncertain '#' was read (a ValueError the
     plain lex raises before any uncertain '#' propagates unchanged); in partial mode a reading that fails for
-    another reason returns its recovered segments, as a partial lex does."""
+    another reason returns its recovered segments, as a partial lex does. Inside _CommandReading the command
+    reading of each reading it changes follows the list, on both exits (_with_command_readings)."""
     if _SubstHeredocs.main_lex:
-        return [_main_reading(command, partial, locale, skip_empty)]
+        return _with_command_readings([_main_reading(command, partial, locale, skip_empty)], partial, locale,
+                                      skip_empty, "`" in command)
     readings = []
     misread = False
     pending = [({}, None)]
@@ -2405,7 +2421,9 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
         else:
             readings.append(lexed)
             misread = misread or body
-    return _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings
+    return _with_command_readings(
+        _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings, partial,
+        locale, skip_empty, "`" in command)
 
 
 def _hash_reading_with(reading, at, comment):
@@ -2603,11 +2621,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # pops its parenthesis), so the span is recorded as a here-document body
                         # ONLY when nothing is open on the stack AND no '(' and no backquote appears
                         # anywhere before the body, quoted or not; every other body records as
-                        # "code", which the bare-'&' narrowing never lifts (fail closed), while the
+                        # "body", which the bare-'&' narrowing never lifts (fail closed), while the
                         # segments are unchanged for every other reader of this lex.
                         trusted = (not nest and command.find("(", 0, body_at) == -1
                                    and command.find("`", 0, body_at) == -1)
-                        _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "code"))
+                        _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "body"))
                     del pending_heredocs[:]
                     seg_start[0] = i
                 if fork is not None and tail_key is None:
@@ -2785,6 +2803,554 @@ def _segments(command, locale=False, skip_empty=False):
     each line with it set and unset. skip_empty is passed to _lex_command, for a caller that reads nothing
     from a segment with no word and no redirect."""
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command, locale=locale, skip_empty=skip_empty)]
+
+
+# A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS AND IN ITS BACKQUOTES. The lexer splits a command at its separators
+# and keeps the words of each segment in order, so a reserved word that opens or continues a compound command
+# stays at the head of the argv of the segment it begins ('if git diff; then' reads ['if', 'git', 'diff'], and
+# 'for x do git diff; done' reads ['for', 'x', 'do', 'git', 'diff']), and an unquoted backquote substitution is
+# text glued into the words around it, split where its body holds a separator ('x=`make | head`' reads
+# ['x=`make'] and ['head`']). A guard that finds its command word at the head of a segment, or behind the few
+# words its own finder passes over, does not see the command there. The command reading adds, for a guard that
+# asks for it (_CommandReading), one more reading of the command after the lexer's own readings: each segment
+# read from its command word, past the reserved words before it (_command_start, _read_past), and the commands
+# of each backquote substitution, its body lexed as a command line of its own, before the segment that opens it
+# (_read_segments). The lexer's own readings come first and unchanged, so a guard that judges every segment it
+# is given decides at least as strictly as without the reading, the contract the readings of an uncertain '#'
+# keep (_lex_command). Outside _CommandReading every lex returns what it returned before this reading existed.
+#
+# NOT READ, disclosed: a '$(...)' substitution inside a double-quoted string (the word reader skips it whole,
+# _read_word), the command an eval word or an sh -c or bash -c string holds (one the shell builds at run time
+# from a word's text), and a backquote body nested more than _SUBSTITUTION_DEPTH deep. OVER-READ, the safe
+# direction: a quoted reserved word ("'if' git diff" runs a command named if) is passed over as an unquoted one
+# is, a backquote in text that bash reads as data (inside a '${...}' operand) is read as a substitution, from a
+# place where the scan cannot tell how bash quotes the text after it every run of text between two backquotes
+# is read as a possible body (_backquote_bodies, _backquote_runs), and the bodies of one segment's
+# substitutions, and the readings of a body's uncertain '#', are read together in the one added reading, so a
+# guard that reads segments in order can read a sequence no single reading of the body holds. So the text after
+# a here-document operator is read too, a quoted here-document's body included ('gh pr create --body "$(cat
+# <<'EOF' ... `git diff` ... EOF)"' reads git diff as a command, where bash runs only cat), and a body's
+# commands stand between the record that opens it and the record before that one, so a pipe from that record
+# reads as feeding the body's first command (_read_segments).
+#
+# COST. Inside one _CommandReading context each distinct text is scanned for backquotes once and each distinct
+# body is lexed once at each depth, and every later reading that holds it reuses the result (_CommandReading.scans
+# and .reads), so the readings of an uncertain '#', which hold the same backquotes, lex a body once between
+# them. Each body lexed charges its length and _READ_BODY_COST to the context's budget of _READ_BODY_LIMIT for
+# each reading its lex returns, and each body read again from .reads charges 1, so the budget bounds both the
+# body text lexed and the bodies visited; a read that would spend more raises _ReadingLimitError. That error is
+# an _UncertainHashError, so a ValueError, and the path a guard takes for a command the lexer cannot judge (a
+# raw fallback, or a partial lex that raises it again) can allow a command that main's reading denies, so each
+# guard that asks for the command reading catches it before any other lex error and gives the strictest
+# decision it gives a Bash command: a deny (_reading_limit_deny), or the note of git_stash_ref, which never
+# denies one. A command whose bodies spend the budget so never gets a decision looser than main's, whatever it
+# runs; the cost is a disclosed over-deny of such a command (about 7,500 short distinct bodies, or 512 KiB of
+# body text) where nothing in it is a guard's subject.
+#
+# The words _command_start passes over at the head of a segment: the reserved words that can stand right before
+# a command word. 'time' (with its -p and a '--'), 'coproc' (with the NAME of a named coprocess), 'function NAME'
+# and 'for NAME do' or 'select NAME do' are read there too (_command_start).
+_COMMAND_LEAD_WORDS = frozenset(("!", "{", "if", "then", "elif", "else", "do", "while", "until"))
+# The reserved words that open a compound command: 'coproc NAME' followed by one names a coprocess whose body
+# comes after NAME (coproc C { git diff; }), while 'coproc' followed by any other word runs that word.
+_COMPOUND_OPENERS = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
+# How many backquote bodies deep the command reading reads a nested substitution (_read_commands).
+_SUBSTITUTION_DEPTH = 16
+# The characters at which the backquote scan (_backquote_bodies) decides something: a backslash, a quote, a
+# backquote, a '#', a parenthesis, a closing brace, a '$' that opens an ANSI-C quote, a '$(' or a '${', and a
+# here-document or here-string operator.
+_BACKQUOTE_SCAN_RE = re.compile(r"[\\'\"`#()}]|\$[('{]|<<<?")
+# The end of a backquote body: the next backslash (which escapes the character after it) or backquote.
+_BACKQUOTE_CLOSE_RE = re.compile(r"[\\`]")
+# A backslash that escapes a '$', a backquote or a backslash inside a backquote body, which bash removes
+# before it runs the body; inside a body that stands right inside a double-quoted string bash removes one that
+# escapes a double quote too (_BACKQUOTE_DQ_ESCAPE_RE), as bash 5.3 read "`echo \"a\"`".
+_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([$`\\])")
+_BACKQUOTE_DQ_ESCAPE_RE = re.compile(r"\\([$`\\\"])")
+# The word case at the start of a word: a pattern of a case command ends at a ')' that closes no parenthesis,
+# so the backquote scan cannot tell which ')' closes a substitution that holds one (_backquote_bodies).
+_BACKQUOTE_CASE_RE = re.compile(r"(?<![^\s;&|()<>])case(?![^\s;&|()<>])")
+# The body budget of one _CommandReading context (COST, above): the characters of body text it lexes, each body
+# charged its length and _READ_BODY_COST for the calls a lex makes whatever the length.
+_READ_BODY_LIMIT = 1 << 19
+_READ_BODY_COST = 64
+
+
+class _ReadingLimitError(_UncertainHashError):
+    """Raised inside _CommandReading when lexing one more backquote body would spend more than the context's
+    body budget (_READ_BODY_LIMIT, COST above _COMMAND_LEAD_WORDS). It is an _UncertainHashError with no '#'
+    (at is None), and every guard that asks for the command reading catches it before its other lex errors and
+    denies (_reading_limit_deny), or gives its note where it never denies, rather than take the path it takes
+    for a command the lexer cannot judge, which can allow; a partial lex raises it too, rather than resuming
+    (_lex_command), and the body reader never reads it as a body that does not lex (_read_commands)."""
+
+
+def _reading_limit_texts(rule, subject):
+    """The (reason, banner) of the deny a guard gives when the command reading spends its body budget
+    (_ReadingLimitError, COST above _COMMAND_LEAD_WORDS): rule names the rule, subject what the guard cannot
+    rule out in the bodies left unread; the banner names the rule's id."""
+    return ("AIQT rule {}: this command holds more backquote substitution text than the shared lexer's command "
+            "reading reads within its budget ({} characters of body text, each body counted with {} more), so "
+            "this guard cannot rule out {} in the bodies left unread, and the fallback it takes for a command it "
+            "cannot read could allow what a full reading denies; it is denied rather than allowed unread "
+            "(check-fails-closed-on-unreadable). Use fewer backquote substitutions, write long text to a file and "
+            "pass the file, or split the command.".format(rule, _READ_BODY_LIMIT, _READ_BODY_COST, subject),
+            "AIQT guardrail: denied a command whose backquote substitutions are past the command reading's budget "
+            "(rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
+def _reading_limit_deny(rule, subject):
+    """The deny of _reading_limit_texts(rule, subject)."""
+    return _deny(*_reading_limit_texts(rule, subject))
+
+
+class _CommandReading:
+    """A context in which a lex adds the command reading after its own readings (A COMMAND'S SUBJECT PAST ITS
+    COMPOUND WORDS, above _COMMAND_LEAD_WORDS, and _with_command_readings); outside it every lex returns what it
+    returns without that reading. added counts the segments the command reading added in the context's lexes,
+    and the context object holds that count once it exits, so a caller can tell the lexer's own segments from
+    the added ones (diff_source_pretool); origins, a list when the caller asks for it (origins=True), holds one
+    (index, body) pair per added segment: the index, in the lexer's own segments, of the segment it was read
+    from or whose text opens the backquote substitution that holds it, and body True for a segment of such a
+    substitution. depth counts the backquote bodies being lexed inside one another (_read_commands). scans and
+    reads hold, for the context's lexes, each text already scanned for backquotes and each body already read
+    (COST above _COMMAND_LEAD_WORDS), and budget what is left of the body budget. It restores the previous
+    setting on exit, as _WordSpellings does."""
+
+    on = False
+    added = 0
+    depth = 0
+    origins = None
+    scans = None
+    reads = None
+    budget = 0
+
+    def __init__(self, origins=False):
+        self.want_origins = origins
+
+    def __enter__(self):
+        self.was = (_CommandReading.on, _CommandReading.added, _CommandReading.origins, _CommandReading.scans,
+                    _CommandReading.reads, _CommandReading.budget)
+        _CommandReading.on = True
+        _CommandReading.added = 0
+        _CommandReading.origins = [] if self.want_origins else None
+        _CommandReading.scans = {}
+        _CommandReading.reads = {}
+        _CommandReading.budget = _READ_BODY_LIMIT
+        return self
+
+    def __exit__(self, *exc_info):
+        self.added = _CommandReading.added
+        self.origins = _CommandReading.origins
+        (_CommandReading.on, _CommandReading.added, _CommandReading.origins, _CommandReading.scans,
+         _CommandReading.reads, _CommandReading.budget) = self.was
+        return False
+
+
+def _command_start(argv):
+    """The index of the command word of a segment whose words are argv, past what can stand before it at the
+    head of a segment: the reserved words of _COMMAND_LEAD_WORDS ('!', '{', if, then, elif, else, do, while,
+    until) in any number and order, 'time' with a -p and a '--' after it, 'coproc' with the NAME of a named
+    coprocess (one a compound opener follows, _COMPOUND_OPENERS), 'function NAME', and 'for NAME do' or
+    'select NAME do' (a loop with no 'in' list, whose body starts in the same segment). 0 for a segment that
+    starts with its command word or holds no word. A loop header with a list ('for x in a b', 'select x in a')
+    and a case header ('case $x in') run no command: their words are a name and a list, so they read
+    len(argv). Only an index is returned, so the caller slices every list parallel to argv and keeps their
+    records (_read_past)."""
+    n = len(argv)
+    i = 0
+    while i < n:
+        word = argv[i]
+        if word in _COMMAND_LEAD_WORDS:
+            i += 1
+        elif word == "time":
+            i += 1
+            if i < n and argv[i] == "-p":
+                i += 1
+            if i < n and argv[i] == "--":
+                i += 1
+        elif word == "coproc":
+            i += 2 if i + 2 < n and argv[i + 2] in _COMPOUND_OPENERS else 1
+        elif word == "function":
+            i += 2
+        elif word in ("for", "select"):
+            if i + 2 >= n or argv[i + 2] != "do":
+                return n
+            i += 3
+        elif word == "case":
+            return n
+        else:
+            break
+    return min(i, n)
+
+
+def _read_past(seg):
+    """seg read from its command word (_command_start): seg itself when it starts there, else a copy whose argv,
+    argv_opaque and argv_leading_tilde hold the words from the command word on, every other field (its
+    redirects, raw text, separator and opaque flag) unchanged. Where seg's argv carries the spelling records of a
+    lex inside _WordSpellings, the copy's argv is a _SpelledWords holding the records of the words it keeps, so
+    a reader of the record (_git_local_alias, _git_alias_defined_at) reads the copy as it reads a segment the
+    lexer built; a copy with no word keeps a plain empty list, as the lexer gives a segment with none."""
+    argv = seg.argv
+    start = _command_start(argv)
+    if not start:
+        return seg
+    words = argv[start:]
+    spelling = getattr(argv, "spelling", None)
+    if spelling is not None and words:
+        words = _SpelledWords(words, spelling[start:])
+    return seg._replace(argv=words, argv_opaque=seg.argv_opaque[start:],
+                        argv_leading_tilde=seg.argv_leading_tilde[start:])
+
+
+def _backquote_bodies(text):
+    """The outermost backquote command substitutions of text, one reading of a command as the lexer read it
+    (_read_segments): a list of (start, body) pairs in text order, start the index of the opening backquote and
+    body the text up to the closing one with each backslash that escapes a '$', a backquote or a backslash
+    removed, and in a body that stands right inside a double-quoted string one that escapes a double quote too,
+    as bash removes them before it runs the body (so a substitution nested in it, its backquotes escaped once,
+    opens when the body is read). The body ends at the next backquote no backslash escapes, or at the end of
+    text.
+
+    The scan holds the contexts bash opens, innermost last: a double-quoted string, a '$(' substitution,
+    another parenthesis (a subshell, an arithmetic expansion or command, an array, a process substitution) and
+    a '${' expansion, so a quote inside a '$(...)' that a double-quoted string holds opens a string of that
+    substitution's own, as in bash ('echo "$(echo " #")" `x`' runs x). A backquote opens a body in every one
+    of them, never inside a single-quoted or ANSI-C $'...' string or after a backslash. Inside a double-quoted
+    string only a '$(', a '${', a backslash and the closing quote change anything; inside a '${' a double quote
+    opens a string of its own and the first '}' outside one closes it, as bash 5.3 read '${x:-{a} #}'. A '#' at
+    the start of a word at the top level (at the start of text, or after a blank, a newline or one of ; & | < >
+    that no backslash escapes) starts a comment to the end of its line, whose backquotes open nothing; a '#'
+    inside a word, or after an escaped blank, is text.
+
+    Where bash's quoting of the text that follows cannot be told from here, the scan reads every run of text
+    between two backquotes from that place on as a possible body (_backquote_runs), an over-read in the safe
+    direction: a '#' at the start of a word inside a substitution or parenthesis (a comment in a subshell, word
+    text in an arithmetic expansion), after a ')' (a comment after a subshell, word text after a substitution)
+    or after an escaped newline, a single quote or ANSI-C quote inside a '${', a here-document operator (its
+    body, quoted or not, reads quotes as text), and a ')' that closes a substitution or parenthesis holding the
+    word case (a case pattern's ')' closes none). Linear in the length of text."""
+    bodies = []
+    n = len(text)
+    i = 0
+    stack = []  # (kind, the number of case words before it) for each open context: '"', '$(', '(' or '{'
+    escaped = -1  # the index right after the last character a backslash escaped
+    cases = [found.start() for found in _BACKQUOTE_CASE_RE.finditer(text)] if "case" in text else []
+    seen = 0  # how many case words start before i, counted where a context opens or closes
+    while True:
+        match = _BACKQUOTE_SCAN_RE.search(text, i)
+        if match is None:
+            return bodies
+        i = match.start()
+        token = match.group()
+        c = token[0]
+        kind = stack[-1][0] if stack else ""
+        if c == "\\":
+            i += 2
+            escaped = i
+        elif c == "`":
+            end = i + 1
+            while True:
+                close = _BACKQUOTE_CLOSE_RE.search(text, end)
+                if close is None:
+                    end = n
+                    break
+                end = close.start()
+                if text[end] == "`":
+                    break
+                end += 2
+            escape = _BACKQUOTE_DQ_ESCAPE_RE if kind == '"' else _BACKQUOTE_ESCAPE_RE
+            bodies.append((i, escape.sub(r"\1", text[i + 1:min(end, n)])))
+            i = end + 1
+        elif token in ("$(", "${"):
+            while seen < len(cases) and cases[seen] < i:
+                seen += 1
+            if token == "${":
+                stack.append(("{", seen))
+            elif text[i + 2:i + 3] == "(":
+                # '$((': an arithmetic expansion, closed by two ')', or a substitution that opens a subshell.
+                stack.append(("(", seen))
+                stack.append(("(", seen))
+                i += 1
+            else:
+                stack.append(("$(", seen))
+            i += 2
+        elif kind == '"':
+            if c == '"':
+                stack.pop()
+            i += 1
+        elif c == '"':
+            stack.append(('"', 0))
+            i += 1
+        elif kind == "{":
+            if c == "'":
+                return bodies + _backquote_runs(text, i)
+            if c == "}":
+                stack.pop()
+            i += 1
+        elif c == "'":
+            close = text.find("'", i + 1)
+            if close < 0:
+                return bodies
+            i = close + 1
+        elif token == "$'":
+            i += 2
+            while i < n and text[i] != "'":
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+        elif c == "(":
+            while seen < len(cases) and cases[seen] < i:
+                seen += 1
+            stack.append(("(", seen))
+            i += 1
+        elif c == ")":
+            if stack:
+                while seen < len(cases) and cases[seen] < i:
+                    seen += 1
+                if seen > stack[-1][1]:
+                    return bodies + _backquote_runs(text, i)
+                stack.pop()
+            i += 1
+        elif c == "<":
+            if token == "<<":
+                return bodies + _backquote_runs(text, i)
+            i += 3
+        elif c == "#":
+            before = text[i - 1] if i else "\n"
+            if escaped == i:
+                if before == "\n":
+                    return bodies + _backquote_runs(text, i)
+                i += 1
+            elif before in " \t\n;&|<>(":
+                if stack:
+                    return bodies + _backquote_runs(text, i)
+                newline = text.find("\n", i)
+                if newline < 0:
+                    return bodies
+                i = newline
+            elif before == ")":
+                return bodies + _backquote_runs(text, i)
+            else:
+                i += 1
+        else:
+            i += 1
+
+
+def _backquote_runs(text, at):
+    """The possible backquote bodies of text from index at on, where the backquote scan cannot tell how bash
+    quotes that text (_backquote_bodies): the text between each backquote no backslash escapes and the next one,
+    and after the last one to the end of text, with the backslashes bash removes from a body removed, and a run
+    that holds an escaped double quote read a second time with that backslash removed too, as in a body right
+    inside a double-quoted string. Every body bash can run there is one of these runs: a body holds no backquote
+    that no backslash escapes, and a backslash run in single-quoted text ends before any backquote it could
+    seem to escape, which is single-quoted text too. A list of (start, body) pairs in text order, linear in the
+    length of text."""
+    marks = []
+    i = at
+    while True:
+        close = _BACKQUOTE_CLOSE_RE.search(text, i)
+        if close is None:
+            break
+        i = close.start()
+        if text[i] == "\\":
+            i += 2
+            continue
+        marks.append(i)
+        i += 1
+    runs = []
+    for number, start in enumerate(marks):
+        body = text[start + 1:marks[number + 1] if number + 1 < len(marks) else len(text)]
+        runs.append((start, _BACKQUOTE_ESCAPE_RE.sub(r"\1", body)))
+        if '\\"' in body:
+            runs.append((start, _BACKQUOTE_DQ_ESCAPE_RE.sub(r"\1", body)))
+    return runs
+
+
+def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks=True):
+    """The command reading of one reading of a command (A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS, above
+    _COMMAND_LEAD_WORDS): segments, that reading's _Segment records in order, each read from its command word
+    (_read_past), with the commands of each backquote substitution the reading's text holds (_backquote_bodies,
+    read by _read_commands) inserted before the record that opens it. Every record keeps its own separator, so
+    the record before the opener now has the body's commands as its next records: a pipe that record ends with
+    is read, in this added reading, as feeding the body's first command rather than the opener ('git diff |
+    less -p "`head -1 f`"' reads git diff piped into head), an over-read in the safe direction, since the lexer's
+    own segments are judged first and unchanged (OVER-READ, above _COMMAND_LEAD_WORDS). The text is rebuilt
+    from the records' raw text and separators
+    rather than taken from the command, so it is this reading's text: the body of a quoted here-document,
+    which no record holds, is not in it, and a body the lexer split at a separator inside it ('x=`make | head`')
+    is read whole. A record that ends at a newline or at the end of the text has no separator, so a newline
+    stands for it in the rebuilt text, and a comment ends there and a body that spans lines keeps its line
+    break. Inside _CommandReading a text already scanned is not scanned again (_CommandReading.scans). Returns
+    segments itself, the same list, when the reading changes nothing, so a caller can tell (is) that it adds
+    nothing; locale and skip_empty are passed to the lex of each body. origins, when a list, gets one (index,
+    body) pair per segment returned when the reading changes something (_CommandReading). ticks False says the
+    text the records were lexed from holds no backquote, so no record's raw text, a slice of that text, holds
+    one, and the records are not searched for one. Past the last record that opens a body only the records
+    with a word are visited, so a long run of separators costs one pass over its records per reading."""
+    bodies = ()
+    if ticks and any("`" in seg.raw for seg in segments):
+        text = "".join([seg.raw + (seg.sep_after or "\n") for seg in segments])
+        scans = _CommandReading.scans
+        bodies = None if scans is None else scans.get(text)
+        if bodies is None:
+            bodies = _backquote_bodies(text)
+            if scans is not None:
+                scans[text] = bodies
+    out = []
+    pairs = []
+    changed = False
+    at = 0
+    index = 0
+    number = 0
+    # The records are walked one by one only up to the one that opens the last body, to place each body.
+    while index < len(bodies) and number < len(segments):
+        seg = segments[number]
+        end = at + len(seg.raw)
+        while index < len(bodies) and bodies[index][0] < end:
+            commands = _read_commands(bodies[index][1], locale, skip_empty)
+            out.extend(commands)
+            pairs.extend([(number, True)] * len(commands))
+            changed = changed or bool(commands)
+            index += 1
+        read = _read_past(seg)
+        out.append(read)
+        pairs.append((number, False))
+        changed = changed or read is not seg
+        at = end + len(seg.sep_after or "\n")
+        number += 1
+    # Past it no body opens, so a record is read anew only where a word stands before its command word
+    # (_command_start): a record with no word, as each of a long run of separators is, is passed over, and
+    # each of the readings of an uncertain '#', which share such a run, adds no call per record of it.
+    rest = segments[number:] if number else segments
+    past = [at for at, seg in enumerate(rest, number) if seg.argv and _command_start(seg.argv)]
+    if not changed and not past:
+        return segments
+    shift = len(out) - number
+    out.extend(rest)
+    for at in past:
+        out[at + shift] = _read_past(segments[at])
+    if origins is not None:
+        origins.extend(pairs)
+        origins.extend([(at, False) for at in range(number, len(segments))])
+    return out
+
+
+def _read_commands(body, locale=False, skip_empty=False):
+    """The commands of a backquote substitution's body for the command reading (_read_segments): the body lexed
+    as a command line of its own and partially (what the lexer recovers before a construct it cannot read, as
+    _lex_command's partial mode returns it), each of the body's readings read as _read_segments reads one, its
+    own nested substitutions included, in turn. A body _SUBSTITUTION_DEPTH bodies deep or deeper reads nothing,
+    and so does one the lexer recovers nothing of. The lex is one the guard does not make for itself, so it
+    leaves the state a guard reads around its own lex as it found it: the stops a partial lex records
+    (_LexStops), the places a lex records (_LexPlaces) and the count of here-document floors
+    (_SubstHeredocs.reads); and it is made with the command reading off, so the body's own readings are not
+    returned beside its read ones (each read one holds every segment of the reading it reads). Inside
+    _CommandReading a body already read at this depth is not lexed again (_CommandReading.reads) and charges 1
+    to the context's budget, and a body lexed charges its length and _READ_BODY_COST for each reading its lex
+    returns, raising _ReadingLimitError where that would spend more than is left (COST above
+    _COMMAND_LEAD_WORDS)."""
+    depth = _CommandReading.depth
+    if depth >= _SUBSTITUTION_DEPTH:
+        return []
+    reads = _CommandReading.reads
+    key = (body, locale, skip_empty, depth)
+    if reads is not None:
+        out = reads.get(key)
+        _CommandReading.budget -= 1 if out is not None else len(body) + _READ_BODY_COST
+        if _CommandReading.budget < 0:
+            raise _ReadingLimitError("the command reading reached its body budget of {} characters".format(
+                _READ_BODY_LIMIT))
+        if out is not None:
+            return out
+    saved = (_CommandReading.on, _LexStops.at, _LexPlaces.spans, _SubstHeredocs.reads)
+    _CommandReading.on = False
+    _CommandReading.depth += 1
+    _LexStops.at = None
+    _LexPlaces.spans = None
+    try:
+        try:
+            readings = [segs for segs, _complete, _open in _lex_readings(body, True, locale, skip_empty)]
+        except _UncertainHashError as exc:
+            readings = [_lex_resume_partial(body, exc, locale, skip_empty)[0]]
+        if reads is not None and len(readings) > 1:
+            # A body with readings of its own was lexed once per reading: each further one is charged too.
+            _CommandReading.budget -= (len(readings) - 1) * (len(body) + _READ_BODY_COST)
+            if _CommandReading.budget < 0:
+                raise _ReadingLimitError("the command reading reached its body budget of {} characters".format(
+                    _READ_BODY_LIMIT))
+        out = []
+        for segs in readings:
+            out.extend(_read_segments(segs, locale, skip_empty))
+    except _ReadingLimitError:
+        raise
+    except ValueError:
+        out = []
+    finally:
+        _CommandReading.on, _LexStops.at, _LexPlaces.spans, _SubstHeredocs.reads = saved
+        _CommandReading.depth -= 1
+    if reads is not None:
+        reads[key] = out
+    return out
+
+
+def _with_command_readings(readings, partial, locale=False, skip_empty=False, ticks=True):
+    """readings, the list of one lex's readings of a command as _lex_readings returns it (one entry per reading:
+    its segments, or in partial mode its (segments, complete, in_progress)), followed inside _CommandReading by
+    the command reading of each reading it changes (_read_segments), and readings itself outside it. An added
+    reading keeps the partial-mode flags of the reading it reads, and in partial mode, where any reading is
+    added, the last reading follows the added ones again, so the list still ends with the segments of the last
+    reading, and the complete and in_progress flags _lex_command returns are the ones it returns without the
+    command reading. The segments added are counted in _CommandReading.added, and where the context keeps
+    origins each added segment's (index, body) pair is put there, its index counted in the segments of the
+    readings joined in order, as _lex_command returns them. ticks False says the command the readings were
+    lexed from holds no backquote (_read_segments), so the readings of its uncertain '#' are not searched for
+    one each."""
+    if not _CommandReading.on:
+        return readings
+    added = []
+    origins = _CommandReading.origins
+    pairs = []
+    offset = 0
+    for reading in readings:
+        segments = reading[0] if partial else reading
+        found = [] if origins is not None else None
+        read = _read_segments(segments, locale, skip_empty, found, ticks)
+        if read is not segments:
+            added.append((read,) + tuple(reading[1:]) if partial else read)
+            if found is not None:
+                pairs.extend([(offset + index, body) for index, body in found])
+        offset += len(segments)
+    if not added:
+        return readings
+    if partial:
+        added.append(readings[-1])
+        pairs.extend([(offset - len(readings[-1][0]) + index, False) for index in range(len(readings[-1][0]))])
+    _CommandReading.added += sum(len(reading[0] if partial else reading) for reading in added)
+    if origins is not None:
+        origins.extend(pairs)
+    return readings + added
+
+
+def _lex_command_read(command, partial=False, locale=False, skip_empty=False):
+    """_lex_command with the command reading (_CommandReading): the segments of the lexer's own readings, then
+    those of the command reading of each reading it changes (_with_command_readings)."""
+    with _CommandReading():
+        return _lex_command(command, partial, locale, skip_empty)
+
+
+def _segments_read(command, locale=False, skip_empty=False):
+    """_segments with the command reading (_CommandReading): the (argv, sep_after) of each segment
+    _lex_command_read returns, read through _segments itself."""
+    with _CommandReading():
+        return _segments(command, locale, skip_empty)
+
+
+def _lex_readings_read(command, partial=False, locale=False, skip_empty=False):
+    """_lex_readings with the command reading: the lexer's own readings, then the command reading of each one it
+    changes (_with_command_readings), each still its own entry, so a guard that reads one reading at a time
+    never reads a sequence across two."""
+    with _CommandReading():
+        return _lex_readings(command, partial, locale, skip_empty)
 
 
 # A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
@@ -3698,6 +4264,77 @@ def _diff_proof_pager(segments):
     return len(stage2.argv) == 1 and stage2.argv[0] in _PAGERS
 
 
+# The reserved words that open a compound command, each with the word that closes it (_diff_compound_console).
+_COMPOUND_CLOSERS = {"{": "}", "if": "fi", "while": "done", "until": "done", "for": "done", "select": "done",
+                     "case": "esac"}
+
+
+def _diff_compound_console(segments):
+    """For the lexer's own segments of a command, a list parallel to them: True where the output of the command
+    a segment runs reaches the console as far as the compound commands around it decide, False where it does not.
+    A compound's output goes where the redirects and pipe of the segment its closing word stands in send it
+    ('{ git diff; } > out.txt', 'if true; then git diff; fi | less'), so a segment inside a compound whose closing
+    segment does not reach the console (_seg_stdout_reaches_console) is False, and so is one inside a compound
+    this reading does not see closed. A function body's output goes where each call of the function sends it
+    ('function f { git diff; }; f > out.txt', 'f() { git diff; }; f | less'): a segment inside one is False when
+    the function is called and no call of it reaches the console, and a function never called keeps the
+    console. A segment inside no compound is True: its own redirects and pipe decide (_is_console_dump)."""
+    stack = []  # [opening word, index of the closing segment or None, function name or None], innermost last
+    enclosing = []
+    name = None  # a function name read before the compound that is its body
+    for index, seg in enumerate(segments):
+        argv = list(seg.argv)
+        start = _command_start(argv)
+        word = argv[start] if start < len(argv) else ""
+        if not start and word in ("}", "fi", "done", "esac"):
+            for depth in range(len(stack) - 1, -1, -1):
+                if _COMPOUND_CLOSERS[stack[depth][0]] == word:
+                    stack[depth][1] = index
+                    del stack[depth:]
+                    break
+        lead = argv[:start]
+        k = 0
+        while k < len(lead):
+            if lead[k] == "function" and k + 1 < len(lead):
+                name = lead[k + 1]
+                k += 2
+                continue
+            if lead[k] in _COMPOUND_CLOSERS:
+                stack.append([lead[k], None, name])
+                name = None
+                if lead[k] in ("for", "select", "case"):
+                    break  # the rest of the segment is the loop's or case's header, or its 'do'
+            k += 1
+        enclosing.append(tuple(stack))
+        if start < len(argv):
+            name = None  # a command ran here, so no compound body follows a name read before it
+        if (seg.sep_after == "(" and start == len(argv) - 1 and index + 1 < len(segments)
+                and not segments[index + 1].argv and segments[index + 1].sep_after == ")"):
+            name = argv[start]  # 'NAME()': the compound after it is the function's body
+    calls = {}
+    for index, seg in enumerate(segments):
+        argv = list(seg.argv)
+        start = _command_start(argv)
+        if start < len(argv):
+            calls.setdefault(argv[start], []).append(index)
+    verdicts = {}
+
+    def console(compound):
+        key = id(compound)
+        if key not in verdicts:
+            closer = compound[1]
+            reached = (closer is not None
+                       and _seg_stdout_reaches_console(segments[closer], segments, closer) == "console")
+            if reached and compound[2] is not None:
+                called = [at for at in calls.get(compound[2], ()) if at > closer]
+                reached = not called or any(
+                    _seg_stdout_reaches_console(segments[at], segments, at) == "console" for at in called)
+            verdicts[key] = reached
+        return verdicts[key]
+
+    return [all(console(compound) for compound in around) for around in enclosing]
+
+
 def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
@@ -3724,7 +4361,15 @@ def diff_source_pretool(data):
     quotes, a compound, an extra option, a dynamic redirect, a non-pager pipe) is a console-readability
     CONVENTION, not a hazard, so it ALLOWS with an informational note rather than prompting. Across a compound
     or multiple producers, a CONFIRMED console dump anywhere still DENIES (deny outranks the allow-note), so a
-    multi-command form is never admitted on one safe segment when another is a confirmed dump. A command
+    multi-command form is never admitted on one safe segment when another is a confirmed dump. A producer
+    behind the reserved words of a compound command ('if git diff', '{ git diff; }', 'for x do git diff') or
+    inside a backquote substitution is also read as its own command (the command reading, _CommandReading), so
+    a confirmed dump there DENIES as the bare form does; the closed proofs read the lexer's own segments only,
+    so an added segment never earns one. A producer read past a compound's reserved words writes where the
+    compound's closing word sends its output, so '{ git diff; } > out.txt', 'if true; then git diff; fi |
+    less' and 'function f { git diff; }; f > out.txt' ALLOW with the note as a compound does, while a producer
+    in a backquote substitution is judged as one in a '$(...)' substitution is (x=`git diff` DENIES as
+    x=$(git diff) does, and so does coproc git diff, whose output a coprocess captures). A command
     carrying a '#' whose comment reading depends on context (the shared lexer's comment rule) is judged on
     the segments of both readings of each such '#'; one the lexer cannot judge that way (_UncertainHashError)
     DENIES an apparent producer its text names (_hash_doubt_names) as a possible dump rather than taking the
@@ -3750,7 +4395,18 @@ def diff_source_pretool(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
     reads = _SubstHeredocs.reads
     try:
-        segments = _lex_command(command)
+        # The command reading (_CommandReading) adds, after the lexer's own segments, a producer behind a
+        # reserved word or inside a backquote substitution read as its own command: possibles and the dump
+        # test below read every segment, while the closed proofs read the lexer's own segments alone (own), so
+        # an added segment can deny or note but never earn a proof. The origins say which own segment each
+        # added one was read from, for the destination of the compound around it (_diff_compound_console).
+        with _CommandReading(origins=True) as reading:
+            segments = _lex_command(command)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the fallback below can note or allow a dump that main's
+        # reading denies, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that dumps a patch to "
+                                   "the console")
     except _UncertainHashError:
         # The fallback would only note an apparent producer; one behind a '#' whose comment reading the
         # lexer could not judge under both readings is treated as the confirmed console dump it may be, and
@@ -3767,6 +4423,7 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
+    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
     # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
     # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
     possibles = [(index, seg) for index, seg in enumerate(segments)
@@ -3776,20 +4433,29 @@ def diff_source_pretool(data):
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
     if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
                          or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-                         or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+                         or _diff_proof_realfile(own) or _diff_proof_pager(own)):
         if _SubstHeredocs.reads != reads:
             return _diff_source_fallback(command)
         return _allow()
     # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
-    # compound), and any remaining producer-capable-but-unproven form ASKS.
+    # compound), and any remaining producer-capable-but-unproven form ASKS. A segment the command reading read
+    # past a compound command's reserved words writes where that compound's closing word sends its output, so
+    # it is a confirmed dump only where that reaches the console too (_diff_compound_console); a segment of a
+    # backquote substitution is judged as main judges one of a '$(...)' substitution, by its own redirects.
+    compound = _diff_compound_console(own) if reading.added else ()
     for index, seg in possibles:
+        if index >= len(own):
+            origin, body = reading.origins[index - len(own)]
+            if not body and not compound[origin]:
+                continue
         if _is_console_dump(seg, segments, index):
             return _deny(
-                "AIQT rule cnsdif (no-console-diff-dumps): this command renders a version-control diff to "
-                "the console, burying the review surface under a raw dump. Use a summary form (--stat, "
-                "--name-only, --name-status, --numstat), redirect the diff to a real file (> file), or "
-                "pipe it into a pager (| less), not the console.",
-                "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
+                "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
+                "patch is not redirected to a real file or piped into a pager where the diff command stands, "
+                "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
+                "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
+                "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
+                "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
     return _allow_note(
         "AIQT guardrail (rule cnsdif, no-console-diff-dumps): this command is producer-capable (it can "
         "render a version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed "
@@ -4236,6 +4902,11 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # about 7.3 microseconds of CPU time per character to read (1.9 s at 256 KiB, 7.1 s at 1 MiB), so a command of
 # this length costs up to about 1 s, a tenth of the timeout; that margin is for a host several times slower than
 # the one measured and for the other PreToolUse hooks the platform runs on the same command at the same time.
+# The command reading this reader asks for (_segments_read, COST above _COMMAND_LEAD_WORDS) adds to that: its
+# body budget bounds the backquote bodies it lexes and visits per lex, and a command of four uncertain '#', a
+# locale quote and glued backquote bodies, one alike body repeated or every body distinct, took up to about 0.53 s
+# of CPU time for the whole handler at 64 KiB and 0.35 s at this length, where the budget ran out and the
+# handler's fallback decided (single runs on one host).
 # That bound holds only while each regex the reader runs on a word, and each one the fallback runs on a command of
 # this length that the tokenizer cannot parse, costs time linear in the length it scans: CO_AUTHOR_RE and the
 # user.name context of _RAW_IDENTITY_CONTEXTS take each whitespace run whole, since giving a run back one character
@@ -4342,7 +5013,8 @@ def find_ai_authorship(command):
     line was left unread, because it could not be parsed or was past the bounds (_CMTIDN_RUN_DEPTH), and
     nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
     command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
-    fallback."""
+    fallback. Raises _ReadingLimitError when the command reading of the command or of any run line spends its
+    body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it."""
     if len(command) > _CMTIDN_READ_LIMIT:
         raise ValueError(_CMTIDN_TOO_LONG)
     bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
@@ -4350,6 +5022,8 @@ def find_ai_authorship(command):
     try:
         hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
                               {})
+    except _ReadingLimitError:
+        raise
     except ValueError:
         if not unread[0]:
             raise
@@ -4391,8 +5065,12 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
             # skip_empty: this reader decides on each segment's words, and the equality below lets one
             # reading serve for both locales by comparing the kept (argv, sep_after) records, so nothing
             # it reads comes from a segment with no word and no redirect; a long run of separators builds
-            # and feeds it no record.
-            segments = _segments(command, locale=locale, skip_empty=True)
+            # and feeds it no record. The command reading (_CommandReading) adds each segment read from its
+            # command word and the commands of each backquote substitution, so a git command behind 'for NAME
+            # do', which the finder below does not pass over, or inside backquotes is read too.
+            segments = _segments_read(command, locale=locale, skip_empty=True)
+        except _ReadingLimitError:
+            raise  # the command reading spent its budget: the handler denies, never a line left unread
         except ValueError as exc:
             error = error or exc
             continue
@@ -4574,6 +5252,12 @@ def commit_identity(data):
     reads = _SubstHeredocs.reads
     try:
         hit = find_ai_authorship(command)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the raw fallback below can allow an identity that main's
+        # reading finds, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("cmtidn (commit-identity)", "a git command recording an AI identity (a "
+                                   "co-author trailer, an --author value, a git identity variable or a "
+                                   "user.name or user.email value)")
     except _UncertainHashError as exc:
         # A '#' the lexer could not judge under both readings, in the command itself under each locale
         # reading: the raw scan also reads the text with its backslash-newlines, quote characters and
@@ -4808,10 +5492,23 @@ _ABSPTH_OPENER_SPECIAL_RE = re.compile(r"[\\'\"`$(){}]")
 # body: it removes a backslash-newline there before it looks for the delimiter line, and it expands a '$' or
 # backquote form. A body holding any of them is read, whatever form it takes.
 _ABSPTH_BODY_SPECIAL_RE = re.compile(r"[\\$`]")
-# A whole run of an odd number of backslashes, three or more, right before a '>'. Inside a backquote
-# substitution bash turns each '\\' into '\' and keeps a '\>' before it reads the command there, so such a run
-# leaves the '>' an operator at some nesting depth of backquotes (_abspth_unread_truncation).
-_ABSPTH_HALVED_RUN_RE = re.compile(r"(?<!\\)\\\\\\(?:\\\\)*(?=>)")
+# A whole run of two or more backslashes right before a '>'. Inside a backquote substitution bash turns each
+# '\\' into '\' and keeps a '\>' before it reads the command there, so an odd run of three or more leaves a
+# '>' an operator at some nesting depth of backquotes, and any such run before '>>' leaves its first '>'
+# escaped and its second a truncating '>' at some depth (_abspth_unread_truncation, _abspth_halved_run).
+_ABSPTH_HALVED_RUN_RE = re.compile(r"(?<!\\)\\\\+(?=>)")
+
+
+def _abspth_halved_run(match):
+    """The text _abspth_unread_truncation's second reading puts for a backslash run _ABSPTH_HALVED_RUN_RE
+    matched: one backslash before a '>>', so its first '>' reads as escaped and its second as a truncating
+    operator (bash 5.3.9 writes 'a >' to out.txt for echo `echo a \\\\>> out.txt`, the shell seeing two
+    backslashes); two before a single '>' after an odd run, so that '>' reads as an operator; and the run
+    unchanged before a single '>' after an even run, which the first reading already reads as an operator."""
+    run = match.group(0)
+    if match.string.startswith(">>", match.end()):
+        return "\\"
+    return "\\\\" if len(run) % 2 else run
 
 
 def _abspth_unread_truncation(command, stop):
@@ -4829,11 +5526,15 @@ def _abspth_unread_truncation(command, stop):
     escape outside a backquote substitution. Inside one, bash first turns each pair of backslashes into one
     and leaves a backslash before a '>' in place, then reads the command there, so where the command holds a
     backquote anywhere, the text is read a second time with each odd run of three or more backslashes before
-    a '>' cut to two (_ABSPTH_HALVED_RUN_RE), and a truncating operator that reading finds is returned too.
-    Such a run leaves the '>' an operator at some nesting depth of backquotes, a single backslash never does,
-    and the first reading already reads an even run as an operator. The second reading over-denies where the
+    a '>' cut to two and each run of two or more before a '>>' cut to one (_ABSPTH_HALVED_RUN_RE,
+    _abspth_halved_run), and a truncating operator that reading finds is returned too. An odd run leaves a
+    single '>' an operator at some nesting depth of backquotes, a single backslash never does, and the first
+    reading already reads an even run as an operator; before a '>>', a run of two or more leaves the first
+    '>' escaped and the second a truncating '>' at some depth (two backslashes inside one backquote
+    substitution), while the first reading reads an append there. The second reading over-denies where the
     run is quoted, outside any backquote substitution, or at a depth that leaves the '>' escaped (five
-    backslashes inside one, three inside two), as the caller discloses. Like the lex, neither reading models
+    backslashes inside one, three inside two) or the '>>' an append (four backslashes inside one), as the
+    caller discloses. Like the lex, neither reading models
     a command that parses its argument again (eval, bash -c). At most one span is left out unread: the text
     from the line after the opener of the here-document the lex stopped at up to the first line that is
     exactly its delimiter (leading tabs stripped for the <<- form), that line included, and only where every
@@ -4905,12 +5606,614 @@ def _abspth_unread_truncation(command, stop):
             return "a truncating redirection ('{}') to the relative or unverified target {!r}".format(op, target)
     # A backquote anywhere in the command may open a substitution around this text. The reading above is
     # kept whole, so this only adds denials: the text is read again with each odd run of three or more
-    # backslashes before a '>' cut to two, so that '>' reads as an operator. The text read again holds no
-    # such run, so the call below does not read a third time.
+    # backslashes before a '>' cut to two, so that '>' reads as an operator, and each run of two or more
+    # before a '>>' cut to one, so that its second '>' reads as a truncating operator (_abspth_halved_run).
+    # The text read again holds no run that changes again, so the call below does not read a third time.
     if "`" in command:
-        tail = _ABSPTH_HALVED_RUN_RE.sub(r"\\\\", command[stop:])
+        tail = _ABSPTH_HALVED_RUN_RE.sub(_abspth_halved_run, command[stop:])
         if tail != command[stop:]:
             return _abspth_unread_truncation(command[:stop] + tail, stop)
+    return None
+
+
+# The most substitutions _AbspthReader reads one inside another ('$(...)', '<(...)', '${ cmd; }', '${...}', a
+# backquote substitution); one nested deeper is read by _abspth_unread_truncation instead (_AbspthUnsure).
+_ABSPTH_NEST_LIMIT = 16
+# The backslash pairs bash removes from a backquote substitution's text before it reads that text as a command:
+# a backslash before a backquote, '$' or backslash, and, where a double-quoted string holds the substitution,
+# also one before '"' (bash 5.3.9 prints a > out.txt and writes nothing for echo "`echo \"a > out.txt\"`").
+_ABSPTH_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$])")
+_ABSPTH_DQ_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$\"])")
+# A word that is a variable assignment up to its '=' ('a=', 'a+=', 'a[1]='): a '(' right after it opens an
+# array's word list, not a subshell.
+_ABSPTH_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=$")
+# The reserved words after which bash still accepts a reserved word (its reserved_word_acceptable), beside the
+# operators, separators and closers _AbspthReader.commands handles itself.
+_ABSPTH_COMMAND_WORDS = frozenset(("if", "then", "else", "elif", "fi", "while", "until", "do", "done", "!", "time"))
+
+
+class _AbspthUnsure(Exception):
+    """Raised by _AbspthReader where it cannot tell how bash reads the text from index at on: a construct it does
+    not model, an unterminated quote or substitution, a token bash rejects as a syntax error, or a bound passed.
+    The caller reads the command from there with _abspth_unread_truncation, the fail-closed reading, except in
+    the second known miss, where the raw scan resumes past the operator."""
+
+    def __init__(self, at):
+        Exception.__init__(self, at)
+        self.at = at
+
+
+class _AbspthFound(Exception):
+    """Raised by _AbspthReader at the first truncating redirect whose target it cannot show absolute; reason names
+    it as bash_absolute_paths' deny message does."""
+
+    def __init__(self, reason):
+        Exception.__init__(self, reason)
+        self.reason = reason
+
+
+class _AbspthReader:
+    """bash_absolute_paths' second reading of a command, for the deny tier: it reads the text as it models bash
+    5.3's parser reading it, and finds each truncating redirect ('>', '>|', '&>', or '>&' to a file) that model
+    has bash perform anywhere in it, at the top level or in any command, process or '${ cmd; }' substitution, a
+    double-quoted one included. The model has three known misses, where bash truncates and this reading does not
+    yet find it (_abspth_read_truncation lists them too): a command substitution inside single quotes in an
+    arithmetic context; a truncating redirect whose target word the reader cannot read, where the raw scan
+    resumes past the operator; and a quote glued to the '}' that closes a double-quoted '${ cmd; }' or
+    '${| cmd; }'. The shared lexer reads none of these the way bash does where it matters here: it skips a
+    double-quoted substitution whole, ending it at the first ')' or '}' (a case pattern's ')' or a here-document
+    body line holding one included), reads an unquoted backquote substitution's text with top-level backslash
+    rules, and ends a here-document body only at its exact delimiter line.
+
+    How bash reads, as modelled here. A '$(...)' or '<(...)' ends at the ')' its grammar closes it with, and a
+    '${ cmd; }' or '${| cmd; }' at the '}' that stands where a reserved word may: a case pattern's ')' and a
+    '}' that is a command's argument do not end one, and inside '${ ... }' such a '}' ends it even with a word
+    character after it (bash 5.3.9 prints bx for echo "${ echo b; }x"). A reserved word ('case', 'esac', '{',
+    '}', '[[', 'for' and the rest) is one only where bash accepts one: at the start of the text, after a
+    separator, an operator, '(' or ')', a '{' or '}', ';;', '((...))', ']]', or one of _ABSPTH_COMMAND_WORDS,
+    never after another word (bash runs '}' as a command for echo "${ x=1 }; echo c; }"). A backquote
+    substitution ends at its first unescaped backquote, and its text, with the backslash pairs bash removes
+    there taken out (_ABSPTH_BACKQUOTE_ESCAPE_RE, _ABSPTH_DQ_BACKQUOTE_ESCAPE_RE), is read as a command of its
+    own. A '#' that starts a token starts a comment to the end of its line, the first token after '$(' included.
+    A '((' where a command may start, or after 'for', is arithmetic when its parentheses close as '))' (no
+    redirect, here-document or comment is read in it), else a subshell; a '$((' is arithmetic on the same
+    test, else a command substitution starting with a subshell. A '${...}' expansion ends at its first '}' that
+    no quote or escape holds; it runs each substitution in it, and inside double quotes or a here-document
+    body also one between single quotes there (bash 5.3.9 writes out.txt for echo "${u:-'$(echo a > out.txt)'}").
+    A here-document's body starts after the newline that ends its operator's line and ends at a line that is
+    its delimiter (after leading tabs for the <<- form); inside a '$(...)' or '<(...)' bash also ends it at a
+    line that STARTS with the delimiter and has a ')' later on that line, and inside a '${ cmd; }' at one with a
+    '}' (_abspth_early_end), and then reads the rest of that line as commands. That test belongs to the
+    substitution bash is parsing: a top-level body, one in a subshell or group outside any substitution, and one
+    in a backquote substitution's text (which bash parses only when it runs it) end only at the delimiter line.
+    The body under an unquoted delimiter is read for the substitutions bash expands in it.
+
+    Anything else that would change where a substitution ends or what runs as a command raises _AbspthUnsure at
+    that index: a '$[...]', a 'coproc', a '(' where neither a command nor an array may start (an extglob
+    pattern), a token bash rejects (a ')' or ';;' with nothing open for it), a body line under an unquoted
+    delimiter ending in a backslash, a second here-document after one bash ended early, an unterminated quote,
+    substitution or arithmetic, more than _ABSPTH_NEST_LIMIT substitutions one inside another, and more failed
+    '((' arithmetic tries than budget allows. A redirect inside '[[ ... ]]' is a comparison there and is not
+    read. Each target is decoded and classed as the lexer classes one (_read_word, _classify_redirect): a
+    descriptor, an unquoted current-user tilde, a process substitution and an absolute static path pass; a
+    relative or opaque target, or one with no word, raises _AbspthFound. Like the lexer it does not model a
+    command that parses its argument again (eval, bash -c) or alias expansion. Each method takes the index n the
+    text it reads ends at, so a substitution in a here-document body or a single-quoted part of a '${...}' cannot
+    run past it. The reading is linear in the text's length apart from each failed '((' try, which costs the
+    text it read and is charged to budget (a one-element list shared by every reader of one command), and each
+    backquote substitution's text, copied once per level that holds it."""
+    __slots__ = ("text", "depth", "budget")
+
+    def __init__(self, text, depth, budget):
+        self.text = text
+        self.depth = depth
+        self.budget = budget
+
+    def commands(self, i, n, closer):
+        """Read commands from text[i:n] up to the ')' or '}' closer that ends the substitution they are in (None
+        for the whole text to n): the index just past that closer, or n. A case statement is a list
+        [state, part] on the stack: "subject", "in", "pattern" (part "start", "need" or "have": before a first
+        pattern, after a '(' or '|', after a word) and "body"."""
+        text = self.text
+        stack = []
+        pending = []  # (delimiter, strip_tabs, quoted) of each here-document whose body follows the next newline
+        cmd = True  # a reserved word may start here
+        loop = False  # the token before was 'for' or 'select', so a '((' here is arithmetic
+        name = False  # the token before was 'function', so the word here is a name and a command may follow it
+        while True:
+            if i >= n:
+                if closer is not None:
+                    raise _AbspthUnsure(n)
+                return n
+            c = text[i]
+            top = stack[-1] if stack else None
+            case = top if isinstance(top, list) else None
+            if c in " \t":
+                i += 1
+                continue
+            if c == "\\" and text.startswith("\\\n", i):
+                i += 2
+                continue
+            if c == "\n":
+                if case is not None and (case[0] == "subject" or (case[0] == "pattern" and case[1] != "start")):
+                    raise _AbspthUnsure(i)
+                i += 1
+                if pending:
+                    i = self.bodies(i, n, pending, closer)
+                    pending = []
+                cmd = True
+                continue
+            if c == "#":
+                end = text.find("\n", i, n)
+                i = n if end < 0 else end
+                continue
+            if case is not None and case[0] == "pattern":
+                if c == ")" and case[1] == "have":
+                    case[0] = "body"
+                    cmd = True
+                    i += 1
+                    continue
+                if (c == "|" and case[1] == "have") or (c == "(" and case[1] == "start"):
+                    case[1] = "need"
+                    i += 1
+                    continue
+                if c in _METACHARS or case[1] == "have":
+                    raise _AbspthUnsure(i)
+                j = self.word(i, n)
+                if case[1] == "start" and text[i:j] == "esac":
+                    stack.pop()
+                    cmd = True
+                else:
+                    case[1] = "have"
+                i = j
+                continue
+            if case is not None and case[0] in ("subject", "in") and c in _METACHARS:
+                raise _AbspthUnsure(i)
+            if c in _METACHARS:
+                if c == ")":
+                    if top in ("(", "[("):
+                        stack.pop()
+                        cmd = True
+                        i += 1
+                        continue
+                    if top is None and closer == ")" and not pending:
+                        return i + 1
+                    raise _AbspthUnsure(i)
+                if c == "(":
+                    if top in ("[[", "[("):
+                        stack.append("[(")
+                        i += 1
+                        continue
+                    j = i + 1
+                    while j < n and text[j] in " \t":
+                        j += 1
+                    if j < n and text[j] == ")" and not loop:
+                        i = j + 1  # a function definition's '()'
+                        cmd = True
+                        continue
+                    if not (cmd or loop):
+                        raise _AbspthUnsure(i)
+                    if text.startswith("((", i):
+                        end, arith = self.arith(i + 2, n)
+                        if arith:
+                            i = end
+                            cmd = True
+                            loop = False
+                            continue
+                    if loop:
+                        raise _AbspthUnsure(i)
+                    stack.append("(")
+                    i += 1
+                    cmd = True
+                    continue
+                loop = name = False
+                if c == ";":
+                    if text.startswith((";;", ";&"), i):
+                        if case is None or case[0] != "body":
+                            raise _AbspthUnsure(i)
+                        case[0], case[1] = "pattern", "start"
+                        i += 3 if text.startswith(";;&", i) else 2
+                    else:
+                        i += 1
+                    cmd = True
+                    continue
+                op, kind, oplen = _match_operator(text, i, n)
+                if kind == "sep":
+                    i += oplen
+                    cmd = True
+                    continue
+                if op in ("<(", ">("):
+                    i = self.nested(i + 2, n, ")")
+                    cmd = False
+                    continue
+                if op == "<<":
+                    if text.startswith("<<<", i):
+                        i = self.operand(i + 3, n)
+                    else:
+                        parsed = _parse_heredoc_delim(text, i + 2, n)
+                        if parsed is None:
+                            raise _AbspthUnsure(i)
+                        quoted, delim, strip_tabs, i = parsed
+                        pending.append((delim, strip_tabs, quoted))
+                    cmd = False
+                    continue
+                if top in ("[[", "[("):
+                    i += oplen  # a comparison inside '[[ ... ]]', not a redirect
+                    continue
+                i = self.redirect(op, i + oplen, n)
+                cmd = False
+                continue
+            j = self.word(i, n)
+            word = text[i:j].replace("\\\n", "")
+            reserved = cmd and top not in ("[[", "[(")
+            if case is not None and case[0] == "subject":
+                case[0] = "in"
+            elif case is not None and case[0] == "in":
+                if word != "in":
+                    raise _AbspthUnsure(i)
+                case[0], case[1] = "pattern", "start"
+            elif top == "[[" and word == "]]":
+                stack.pop()
+                cmd = True
+            elif reserved and c == "}" and (word == "}" or closer == "}"):
+                # A '}' bash reads as the reserved word: it closes the innermost '{' group, or, with none open, the
+                # '${ cmd; }' this text is in, a word character glued after it included.
+                if top == "{" and word == "}":
+                    stack.pop()
+                    i = j
+                    continue
+                if top is None and closer == "}" and not pending:
+                    return i + 1
+                raise _AbspthUnsure(i)
+            elif reserved and word == "case":
+                stack.append(["subject", "start"])
+                cmd = False
+            elif reserved and word == "esac":
+                if case is None:
+                    raise _AbspthUnsure(i)
+                stack.pop()
+            elif reserved and word in ("{", "[["):
+                stack.append(word)
+                cmd = word == "{"
+            elif reserved and word in ("for", "select"):
+                loop = True
+                cmd = False
+            elif reserved and word == "function":
+                name = True
+                cmd = False
+            elif reserved and word == "coproc":
+                raise _AbspthUnsure(i)
+            elif reserved and word in _ABSPTH_COMMAND_WORDS:
+                cmd = True
+            elif name:
+                name = False
+                cmd = True
+            elif j < n and text[j] == "(" and _ABSPTH_ASSIGN_RE.match(word):
+                j = self.array(j + 1, n)
+                cmd = False
+            else:
+                loop = False
+                cmd = False
+            i = j
+
+    def word(self, i, n):
+        """The index just past the one word starting at text[i], read as modelled on bash reading an unquoted
+        word, each substitution in it read as commands (_AbspthReader.dollar, _AbspthReader.backquote)."""
+        text = self.text
+        while i < n:
+            c = text[i]
+            if c in " \t\n" or c in _METACHARS:
+                return i
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                end = text.find("'", i + 1, n)
+                if end < 0:
+                    raise _AbspthUnsure(i)
+                i = end + 1
+            elif c == '"':
+                i = self.dquote(i + 1, n)
+            elif c == "`":
+                i = self.backquote(i, n, False)
+            elif c == "$":
+                i = self.dollar(i, n, False)
+            else:
+                i += 1
+        return n
+
+    def dquote(self, i, n):
+        """The index just past the double-quoted string whose text starts at text[i]."""
+        text = self.text
+        start = i - 1
+        while i < n:
+            c = text[i]
+            if c == '"':
+                return i + 1
+            if c == "\\":
+                i += 2
+            elif c == "`":
+                i = self.backquote(i, n, True)
+            elif c == "$":
+                i = self.dollar(i, n, True)
+            else:
+                i += 1
+        raise _AbspthUnsure(start)
+
+    def quoted(self, i, n, dq):
+        """Read text[i:n] as modelled on bash expanding the text of a double-quoted string (dq True) or of a
+        here-document body under an unquoted delimiter (dq False): each substitution in it is read as commands,
+        and one that does not end before n raises _AbspthUnsure. A backquote substitution's '\\"' stays escaped
+        in a body, where reading it as a quote could hide a redirect."""
+        text = self.text
+        while i < n:
+            c = text[i]
+            if c == "\\":
+                i += 2
+            elif c == "`":
+                i = self.backquote(i, n, dq)
+            elif c == "$":
+                i = self.dollar(i, n, True)
+            else:
+                i += 1
+
+    def dollar(self, i, n, quoted):
+        """The index just past the '$' form at text[i]: a '$(...)' or '$((...))', a '${ cmd; }' or '${| cmd; }',
+        a '${...}' expansion, or, where quoted is False, an ANSI-C $'...' or locale $"..." string; a bare '$' and
+        the character after it are plain text."""
+        text = self.text
+        nxt = text[i + 1] if i + 1 < n else ""
+        if nxt == "[":
+            raise _AbspthUnsure(i)
+        if not quoted and nxt == "'":
+            k = i + 2
+            while k < n:
+                if text[k] == "\\":
+                    k += 2
+                elif text[k] == "'":
+                    return k + 1
+                else:
+                    k += 1
+            raise _AbspthUnsure(i)
+        if not quoted and nxt == '"':
+            return self.dquote(i + 2, n)
+        if nxt not in ("(", "{"):
+            return i + 1
+        if self.depth >= _ABSPTH_NEST_LIMIT:
+            raise _AbspthUnsure(i)
+        self.depth += 1
+        try:
+            if nxt == "(":
+                if text.startswith("$((", i):
+                    end, arith = self.arith(i + 3, n)
+                    if arith:
+                        return end
+                return self.commands(i + 2, n, ")")
+            if i + 2 < n and text[i + 2] in " \t\n|":
+                return self.commands(i + (3 if text[i + 2] == "|" else 2), n, "}")
+            return self.param(i + 2, n, quoted)
+        finally:
+            self.depth -= 1
+
+    def nested(self, i, n, closer):
+        """commands(i, n, closer) one substitution deeper: a process substitution's text."""
+        if self.depth >= _ABSPTH_NEST_LIMIT:
+            raise _AbspthUnsure(i)
+        self.depth += 1
+        try:
+            return self.commands(i, n, closer)
+        finally:
+            self.depth -= 1
+
+    def param(self, i, n, quoted):
+        """The index just past the '}' that ends the '${...}' expansion whose text starts at text[i]. Single quotes
+        hold a '}' there; inside double quotes (quoted True) bash still runs a substitution between them."""
+        text = self.text
+        start = i - 2
+        while i < n:
+            c = text[i]
+            if c == "}":
+                return i + 1
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                end = text.find("'", i + 1, n)
+                if end < 0:
+                    raise _AbspthUnsure(i)
+                if quoted:
+                    self.quoted(i + 1, end, True)
+                i = end + 1
+            elif c == '"':
+                i = self.dquote(i + 1, n)
+            elif c == "`":
+                i = self.backquote(i, n, quoted)
+            elif c == "$":
+                i = self.dollar(i, n, quoted)
+            else:
+                i += 1
+        raise _AbspthUnsure(start)
+
+    def backquote(self, i, n, dq):
+        """The index just past the backquote substitution opened at text[i], whose text, with the backslash pairs
+        bash removes there taken out (dq True inside a double-quoted string), is read as a command of its own. An
+        _AbspthUnsure from that text is raised at i, the text's own indices meaning nothing here."""
+        text = self.text
+        k = i + 1
+        while k < n and text[k] != "`":
+            k += 2 if text[k] == "\\" else 1
+        if k >= n or self.depth >= _ABSPTH_NEST_LIMIT:
+            raise _AbspthUnsure(i)
+        inner = (_ABSPTH_DQ_BACKQUOTE_ESCAPE_RE if dq else _ABSPTH_BACKQUOTE_ESCAPE_RE).sub(r"\1", text[i + 1:k])
+        try:
+            _AbspthReader(inner, self.depth + 1, self.budget).commands(0, len(inner), None)
+        except _AbspthUnsure:
+            raise _AbspthUnsure(i) from None
+        return k + 1
+
+    def arith(self, i, n):
+        """(end, True) where the arithmetic whose text starts at text[i], just after its '((', closes with '))'
+        ending just before end; (index, False) where its parentheses close with a single ')' first, so bash reads
+        a subshell there instead. A failed try charges what it read to budget."""
+        text = self.text
+        start = i
+        level = 0
+        while i < n:
+            c = text[i]
+            if c == "\\":
+                i += 2
+                continue
+            if c == "'":
+                end = text.find("'", i + 1, n)
+                if end < 0:
+                    raise _AbspthUnsure(i)
+                i = end + 1
+                continue
+            if c == '"':
+                i = self.dquote(i + 1, n)
+                continue
+            if c == "`":
+                i = self.backquote(i, n, False)
+                continue
+            if c == "$":
+                i = self.dollar(i, n, False)
+                continue
+            if c == "(":
+                level += 1
+            elif c == ")":
+                if level:
+                    level -= 1
+                elif text.startswith("))", i):
+                    return i + 2, True
+                else:
+                    self.budget[0] -= i - start + 1
+                    if self.budget[0] < 0:
+                        raise _AbspthUnsure(start)
+                    return i, False
+            i += 1
+        raise _AbspthUnsure(start)
+
+    def array(self, i, n):
+        """The index just past the ')' that ends the array word list whose text starts at text[i]."""
+        text = self.text
+        while i < n:
+            c = text[i]
+            if c in " \t\n":
+                i += 1
+            elif c == "\\" and text.startswith("\\\n", i):
+                i += 2
+            elif c == "#":
+                end = text.find("\n", i, n)
+                i = n if end < 0 else end
+            elif c == ")":
+                return i + 1
+            elif c in _METACHARS:
+                raise _AbspthUnsure(i)
+            else:
+                i = self.word(i, n)
+        raise _AbspthUnsure(n)
+
+    def operand(self, i, n):
+        """The index just past the word a here-string's '<<<' at text[i - 3] takes."""
+        text = self.text
+        while i < n and text[i] in " \t":
+            i += 1
+        if i >= n or text[i] == "\n" or text[i] in _METACHARS:
+            raise _AbspthUnsure(i)
+        return self.word(i, n)
+
+    def redirect(self, op, i, n):
+        """The index just past the target of the redirect operator op that ends at text[i]; raises _AbspthFound
+        where op truncates and the target is relative, opaque or missing."""
+        text = self.text
+        while i < n and text[i] in " \t":
+            i += 1
+        if text.startswith(("<(", ">("), i):
+            return self.nested(i + 2, n, ")")  # a process substitution target is a pipe, not a path
+        if i >= n or text[i] == "\n" or text[i] in _METACHARS or text[i] == "#":
+            if op in _ABSPTH_TRUNCATING_OPS:
+                raise _AbspthFound("a truncating redirection ('{}') whose target it could not read".format(op))
+            raise _AbspthUnsure(i)
+        end = self.word(i, n)
+        if op in _ABSPTH_TRUNCATING_OPS:
+            try:
+                target, t_opaque, started, _digits, t_ltilde, _end = _read_word(text, i, n)
+            except ValueError:
+                started = False
+            if not started:
+                raise _AbspthFound("a truncating redirection ('{}') whose target it could not read".format(op))
+            redirect = _classify_redirect(op, None, target, t_opaque, t_ltilde)
+            if (redirect.target_class != "descriptor" and not redirect.target_leading_tilde
+                    and (redirect.target_class == "opaque" or not _is_absolute(target))):
+                raise _AbspthFound("a truncating redirection ('{}') to the relative or unverified target {!r}"
+                                   .format(op, target))
+        return end
+
+    def bodies(self, i, n, pending, closer):
+        """Read the bodies of the here-documents in pending, in order, from text[i], just after the newline that
+        ends their operators' line: the index where bash reads on, after the last body's delimiter line, or
+        inside a line where bash ended the last body early (_abspth_early_end, with closer the token that ends
+        the substitution this text is in). A body under an unquoted delimiter is read for its substitutions."""
+        text = self.text
+        last = len(pending) - 1
+        for index, (delim, strip_tabs, quoted) in enumerate(pending):
+            start = end = i
+            while i < n:
+                eol = text.find("\n", i, n)
+                stop = n if eol < 0 else eol
+                line = text[i:stop]
+                body = line.lstrip("\t") if strip_tabs else line
+                if body == delim:
+                    end = i
+                    i = stop + 1 if eol >= 0 else n
+                    break
+                early = _abspth_early_end(line, delim, strip_tabs, closer)
+                if early >= 0:
+                    if index != last:
+                        raise _AbspthUnsure(i)
+                    end = i
+                    i += early
+                    break
+                if not quoted and (len(line) - len(line.rstrip("\\"))) % 2:
+                    raise _AbspthUnsure(i)  # bash joins this line to the next before it looks for the delimiter
+                i = stop + 1 if eol >= 0 else n
+                end = i
+            if not quoted:
+                self.quoted(start, end, False)
+        return i
+
+
+def _abspth_early_end(line, delim, strip_tabs, closer):
+    """Where bash 5.3 ends a here-document body early at line, a body line read while it parses a substitution
+    that closer ends (')' for '$(...)' or '<(...)', '}' for '${ cmd; }' or '${| cmd; }', None for none): the
+    index in line just past the delimiter, where bash reads on as commands, or -1. Bash ends the body there when
+    the line, after its leading tabs for the <<- form, STARTS with the delimiter and holds closer anywhere after
+    it, quoted, escaped or in a comment alike (bash 5.3.9 writes out.txt for x=$(cat <<'EOF', hi, EOFabc def),
+    echo y > out.txt, EOF, ) on six lines, running abc def first). A line that is exactly the delimiter ends the
+    body as at the top level, which the caller tests first. Outside a substitution (closer None) and in a
+    backquote substitution's text, which bash parses only when it runs it, no line ends a body early."""
+    if closer is None:
+        return -1
+    body = line.lstrip("\t") if strip_tabs else line
+    if body.startswith(delim) and closer in body[len(delim):]:
+        return len(line) - len(body) + len(delim)
+    return -1
+
+
+def _abspth_read_truncation(command, scanned):
+    """bash_absolute_paths' deny tier for the commands bash runs where the shared lexer does not read them as
+    commands (_AbspthReader): a reason naming the first truncating redirect the reader finds to a relative or
+    opaque target, else None. Where the reader cannot tell how bash reads the text from some index on, that text
+    is read by _abspth_unread_truncation instead, unless scanned (where the caller's unread-text scan started,
+    None where it did not run) is at or before that index. Not yet judged, so None can come back where bash
+    truncates: a command substitution inside single quotes in an arithmetic context (bash runs it); a truncating
+    redirect whose target word the reader cannot read, where the raw scan resumes past the operator; and a quote
+    glued to the '}' that closes a double-quoted '${ cmd; }' or '${| cmd; }'."""
+    try:
+        _AbspthReader(command, 0, [4 * len(command) + 64]).commands(0, len(command), None)
+    except _AbspthFound as found:
+        return found.reason
+    except _AbspthUnsure as unsure:
+        if scanned is None or unsure.at < scanned:
+            return _abspth_unread_truncation(command, unsure.at)
     return None
 
 
@@ -4935,6 +6238,16 @@ def bash_absolute_paths(data):
     nothing from there on, so a truncating redirect operator that _abspth_unread_truncation reads in that text
     whose target the raw text does not show absolute DENIES (that scan states how it reads a backslash and
     what it does not model), a '>' in quoted text, a here-string or a comment there included.
+    The commands bash runs where the lex does not read them as commands (in a command substitution a
+    double-quoted string holds, in an unquoted backquote substitution's text as bash reads it, and after a line
+    where bash ends a here-document opened inside a substitution) are read for the deny tier by
+    _abspth_read_truncation, after the segments, whether the full lex parsed the command or not: it reads the
+    whole command as _AbspthReader models bash's parser, and a truncating redirect it finds whose target it
+    cannot show absolute DENIES, with a message that the target could not be read as absolute. Where it cannot
+    tell how bash reads the text from some index on, the text from there is read by _abspth_unread_truncation.
+    It does not yet judge three shapes bash runs (the residue lists them): a command substitution inside single
+    quotes in an arithmetic context, a truncating redirect whose target word it cannot read (the raw scan
+    resumes past the operator), and a quote glued to the '}' closing a double-quoted '${ cmd; }' or '${| cmd; }'.
     The guard reads the segments of its full lex where that lex parses the whole command and no floor moved,
     and lexes the command a second time, partially, only where the full lex raises past the uncertain-'#'
     fallback or main's reading of a body a lex read fails (the floor below), so on a command holding
@@ -4989,6 +6302,7 @@ def bash_absolute_paths(data):
     # on, or one whose failed main's reading leaves segments only a partial lex recovers (MAIN'S DECISION AS
     # A FLOOR), is lexed again below.
     segments = None
+    scanned = None  # where the unread-text scan below started, if it ran
     reads = _SubstHeredocs.reads
     try:
         segments = _lex_command(command, skip_empty=True)
@@ -5020,7 +6334,8 @@ def bash_absolute_paths(data):
                 "blank before such a '#' outside any grouping or substitution.")
     except ValueError as exc:
         # stop is set by _lex_pass on every error it raises; the whole command is read if it is ever absent.
-        unread = _abspth_unread_truncation(command, getattr(exc, "stop", 0))
+        scanned = getattr(exc, "stop", 0)
+        unread = _abspth_unread_truncation(command, scanned)
         if unread is not None:
             return _deny(
                 "AIQT rule abspth (absolute-paths): this command holds a construct the shared lexer does not "
@@ -5076,6 +6391,23 @@ def bash_absolute_paths(data):
             "not denied.)".format("; ".join(seen)),
             "AIQT guardrail: denied a truncating redirect to a relative/unverified target that could zero the "
             "wrong file (rule abspth); name an absolute, verified target.")
+    # The commands bash runs where the lex does not read them as commands: in a substitution a double-quoted
+    # string holds, in an unquoted backquote substitution's text as bash reads it, and after a line where bash
+    # ends a here-document opened in a substitution (_abspth_read_truncation).
+    placed = _abspth_read_truncation(command, scanned)
+    if placed is not None:
+        return _deny(
+            "AIQT rule abspth (absolute-paths): this command holds text that bash reads as commands but that "
+            "this guard's lexer reads as one word or as data (the text of a command substitution inside double "
+            "quotes, a backquote substitution's text once bash removes its escaping backslashes, or the text "
+            "after a line where bash ends a here-document opened inside a substitution), and that text carries "
+            "{}, so this guard could not read that redirect's target as absolute. A truncating redirect ZEROES "
+            "its target, so aimed at a cwd-dependent relative or unverified path it can destroy the WRONG file; "
+            "it is denied rather than run unread (check-fails-closed-on-unreadable). Name an ABSOLUTE target for "
+            "the redirect (for example '> /abs/path/out'). (An append '>>', a descriptor duplication such as "
+            "'2>&1', a relative cd, or a read '<' redirect is only a convention nudge, not denied.)".format(placed),
+            "AIQT guardrail: denied a truncating redirect inside a substitution whose target this guard could not "
+            "read as absolute (rule abspth, fail-closed); name an absolute target.")
     if reasons:
         seen = []
         for reason in reasons:  # de-duplicate while preserving order so the banner stays bounded
@@ -6518,7 +7850,10 @@ def git_explicit_binding(data):
     ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY a PUBLISH ('git push') in the SAME command
     DENIES-and-educates - the breadth selector sweeps in unrelated modified/untracked content and the push
     then publishes it irreversibly, so it is not waved through. A plain 'git commit -m' and a scoped
-    'git add <path>' are not breadth and are unaffected. It never asks. A '#' whose comment reading the
+    'git add <path>' are not breadth and are unaffected. It never asks. The command reading (_CommandReading)
+    is one more reading after the lexer's own, judged on its own like them: each segment read from its command
+    word, past a compound command's reserved words ('if git add -A && git push; then', '{ ...; }'), with the
+    commands of each backquote substitution before the segment that opens it. A '#' whose comment reading the
     shared lexer CAN judge under both readings is judged one reading at a time, because both scans here are
     order-sensitive: the strictest decision across the readings stands (a deny on any reading, then the
     first reading's note), and the breadth-then-push or cd-then-mutation order is never read across a
@@ -6553,8 +7888,17 @@ def git_explicit_binding(data):
         # state (a breadth stage before a push, a directory change before a mutation) that is real only
         # within one reading, so each reading is judged on its own and the strictest decision across the
         # readings stands (a deny on any reading wins, then the first reading's note); state carried over
-        # a reading boundary would invent a sequence no single reading holds.
-        readings = _lex_readings(command, skip_empty=True)
+        # a reading boundary would invent a sequence no single reading holds. The command reading
+        # (_CommandReading) is one more reading of its own, after the lexer's: each segment read from its
+        # command word, past a compound command's reserved words, with the commands of each backquote
+        # substitution, so a breadth stage and a push inside a compound or a substitution are read in order.
+        readings = _lex_readings_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the fallback below can note a publish that main's reading
+        # denies, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree breadth stage "
+                                   "(git add -A, git commit -a) followed by a git push that publishes whatever "
+                                   "the tree holds")
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -6657,14 +8001,14 @@ def git_stash_ref(data):
     options or assignments are not resolved. Simple quote fragments ARE decoded by the shared lexer;
     fragmentation/obfuscation that does not resolve to recognized command/verb tokens is not covered.
     The shared segmenter splits ordinary separators (`;`, `|`, `&&`, `||`, newlines) and `(...)`
-    subshells but does NOT structurally parse `{...}` brace groups or shell control-flow
-    constructs, so a bare pop/apply is missed only when an UNPEELED brace or shell-keyword token
-    occupies the command-word position of `git`'s segment: for example a `{` group opener, or a
-    control keyword such as `if`, `elif`, `else`, `while`, `until`, `then`, or `do` immediately
-    preceding `git` in the same segment (these examples are illustrative, not exhaustive); a `git
-    stash pop` that a `;` or newline delimits into its own segment IS seen and warns. git_discard's
-    generic fallback may still note the missed same-segment form, and extending the shared segmenter
-    to those forms is a family-wide follow-on.
+    subshells, and the command reading (_CommandReading) reads each segment from its command word,
+    past the reserved words a compound command puts before it (a `{` group opener, `!`, `if`,
+    `then`, `elif`, `else`, `do`, `while`, `until`, `time`, `coproc`, `function NAME`, `for NAME do`,
+    `select NAME do`, _command_start), and reads the commands of each backquote substitution, so a
+    bare pop/apply there warns as a bare one does. Still not read: a `$(...)` inside a double-quoted
+    string, a command an eval word or an `sh -c` string holds, and a backquote body nested more than
+    _SUBSTITUTION_DEPTH (16) deep; a command whose backquote bodies spend the command reading's body
+    budget gets the note, whatever its text names (_ReadingLimitError).
     Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
     value-taking option can make its value look like an operand and falsely allow; re-validate on a
     git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
@@ -6702,8 +8046,19 @@ def git_stash_ref(data):
             "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
-        # and no redirect is not built at all.
-        segments = _segments(command, skip_empty=True)
+        # and no redirect is not built at all. The command reading (_CommandReading) adds each segment read
+        # from its command word, past a compound command's reserved words, and the commands of each backquote
+        # substitution, so '{ git stash pop; }' and 'if git stash pop; then :; fi' are read as git commands.
+        segments = _segments_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: a bare pop/apply in the bodies left unread cannot be ruled
+        # out, so the note stands, this guard's strictest decision (COST above _COMMAND_LEAD_WORDS).
+        return _allow_note(
+            "AIQT expbnd (explicit-binding-over-ambient-context): this command holds more backquote substitution "
+            "text than the shared lexer's command reading reads within its budget, so a bare git stash pop/apply "
+            "in it cannot be ruled out; one acts on the top of the stash stack, ambient shared state that may not "
+            "be the entry you mean. Run 'git stash list', then name the entry explicitly, for example "
+            "\"git stash apply 'stash@{2}'\".")
     except _UncertainHashError:
         # A stash verb behind a '#' whose comment reading the lexer could not judge under both readings keeps
         # the note it would earn, and so does a command whose quoting the fallback text does not decode,
@@ -9617,7 +10972,9 @@ def _uncertain_line_lossy(command):
     found = []
     for line in _join_continuations(command)[0].split("\n"):
         try:
-            line_segments = _segments(line, skip_empty=True)  # a segment with no word names no verb
+            # A segment with no word names no verb; the command reading (_CommandReading) also names a verb
+            # behind a compound command's reserved words or inside a backquote substitution.
+            line_segments = _segments_read(line, skip_empty=True)
         except ValueError:
             continue  # a line the lexer cannot read alone contributes no name
         for tokens, _sep in line_segments:
@@ -12557,6 +13914,12 @@ _BRNROT_BUILT = (
     "fail-safe. " + _GIT_BUILT_WORD_FIX + " The CI branch-root gate remains the authoritative backstop.",
     "AIQT guardrail: denied a git command whose options hold a word built at run time, which may create a branch "
     "from an unchecked start (rule brnrot); quote the expansion or spell the option literally.")
+# A command whose backquote bodies spend the command reading's body budget (_ReadingLimitError), on any of the
+# three lexes branch_root makes: the partial recovery and its open-grammar allow could pass a creation that
+# main's reading denies.
+_BRNROT_READ_LIMIT = _reading_limit_texts(
+    "brnrot (branch-rooted-on-live-main)", "a git command that creates a branch from an orphaned or unchecked "
+    "start")
 
 
 def branch_root(data):
@@ -12564,7 +13927,12 @@ def branch_root(data):
     a hazard class (an orphan/unrooted branch dispatches work onto a retired root), so a confirmed orphan
     start DENIES, and a form this guard cannot prove rooted (an ambiguous/--orphan creation form, a
     dir-change or ambient repository-view override, an unresolved ancestry) also DENIES-and-educates
-    fail-safe, naming the reachable correct action. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
+    fail-safe, naming the reachable correct action. A creation behind the reserved words of a compound command
+    ('if git switch --orphan x', '{ git checkout --orphan x; }', 'for y do git switch --orphan x') or inside a
+    backquote substitution is read as its own command too (the command reading, _CommandReading), after the
+    lexer's own segments and with their spelling records, and a command whose backquote bodies spend that
+    reading's body budget DENIES on any of its lexes (_ReadingLimitError), never the partial recovery's
+    open-grammar allow. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
     command-local '-C <dir>'/'--work-tree' redirect that RESOLVES to a concrete directory has its ancestry
     checked THERE (the -C fleet convention is honoured, not blocked): a rooted start ALLOWS, while a target
     that is not a rooted repository DENIES fail-safe via the ancestry-unknown path ('-C $VAR', '-C
@@ -12617,9 +13985,13 @@ def branch_root(data):
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
         # and no redirect is not built at all, here, in the partial reread or in main's floor reread. Each lex
-        # records each word's spelling for the git alias reading below (_WordSpellings).
+        # records each word's spelling for the git alias reading below (_WordSpellings), and adds the command
+        # reading (_CommandReading): each segment read from its command word, past a compound command's
+        # reserved words, its spelling records kept, and the commands of each backquote substitution.
         with _WordSpellings():
-            segments = _segments(command, skip_empty=True)
+            segments = _segments_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        return _deny(*_BRNROT_READ_LIMIT)
     except ValueError as exc:
         # The lexer saw nothing past a '#' whose comment reading it could not judge under both readings, so
         # a branch-creating git verb its text names cannot be proven rooted: it denies rather than take the
@@ -12650,7 +14022,9 @@ def branch_root(data):
         try:
             with _WordSpellings(), _LexStops() as stops:
                 segments = [(seg.argv, seg.sep_after)
-                            for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+                            for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
+        except _ReadingLimitError:
+            return _deny(*_BRNROT_READ_LIMIT)  # not the open-grammar allow below
         except ValueError:
             if named:
                 return _deny(*_BRNROT_UNCLASSIFIED)  # a git alias the text may define, read from the text alone
@@ -12661,9 +14035,12 @@ def branch_root(data):
     if _SubstHeredocs.reads != reads:
         # A lex read a here-document body that main's lexer reads otherwise, and main's reading fails: the
         # segments main's partial lex recovers, past the body, are judged too.
-        with _SubstHeredocFloor(), _WordSpellings():
-            segments = segments + [(seg.argv, seg.sep_after)
-                                   for seg in _lex_command(command, partial=True, skip_empty=True)[0]]
+        try:
+            with _SubstHeredocFloor(), _WordSpellings():
+                segments = segments + [(seg.argv, seg.sep_after)
+                                       for seg in _lex_command_read(command, partial=True, skip_empty=True)[0]]
+        except _ReadingLimitError:
+            return _deny(*_BRNROT_READ_LIMIT)
 
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
@@ -15946,6 +17323,9 @@ def commit_msg_subst(data):
     recognized git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or
     $( command substitution (a command-injection hazard the shell runs before git sees the argument). Hooks
     never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>.
+    A git commit behind the reserved words of a compound command ('if git commit ...', '{ git commit ...; }',
+    'time -p git commit ...', 'for x do git commit ...') or inside a backquote substitution is read as its own
+    command too (the command reading, _CommandReading), after the lexer's own segments.
     Behind a '#' whose comment reading the shared lexer cannot judge under both readings, the raw fallback
     reads _hash_doubt_scan, and a command whose quoting that scan does not decode (_hash_doubt_opaque)
     DENIES. Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION
@@ -15972,8 +17352,15 @@ def commit_msg_subst(data):
     reads = _SubstHeredocs.reads
     try:
         # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
-        # none, so no such segment is built (_lex_command's skip_empty).
-        segments = _lex_command(command, skip_empty=True)
+        # none, so no such segment is built (_lex_command's skip_empty). The command reading (_CommandReading)
+        # adds each segment read from its command word, past a compound command's reserved words, and the
+        # commands of each backquote substitution, so a commit inside 'if ...; then' or backquotes is read.
+        segments = _lex_command_read(command, skip_empty=True)
+    except _ReadingLimitError:
+        # The command reading spent its body budget: the raw fallback below can allow a substitution that
+        # main's reading denies, so it denies (COST above _COMMAND_LEAD_WORDS).
+        return _reading_limit_deny("sectvl (tool-argument-validation)", "a backtick or $( command substitution in "
+                                   "a git commit argument, which the shell runs before git sees the argument")
     except _UncertainHashError:
         # A '#' the lexer could not judge under both readings: the raw scan also reads the text with its
         # backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and a command
@@ -19108,7 +20495,7 @@ def _orch_foreground_detach_kind(command):
 # The places the shared lexer may put a bare `&` the foreground scan reads, for that `&` to read as no detach
 # (_orch_foreground_detach_lexed), as _LexPlaces span kinds: a single- or double-quoted string, a '#'
 # comment, and a quoted here-document's body. They are the only narrowing of the scan's detach. A
-# here-document body whose end the lexer cannot prove is where bash ends it records as "code", not
+# here-document body whose end the lexer cannot prove is where bash ends it records as "body", not
 # "heredoc" (the span comment in _lex_pass), so it is never a lifting place.
 _ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
 
@@ -19175,7 +20562,7 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     top level of the command, with nothing open on the nesting stack and no '(' and no backquote
     anywhere before the body (inside a command or process substitution or backquotes bash 5.3 can end a
     body at a line that merely STARTS with the delimiter when a ')' or a backquote follows it on that
-    line, running what this lex would read as body, so such a body records as "code" and is never
+    line, running what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
     close the lex itself resolves; (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
@@ -20959,9 +22346,17 @@ def orch_truncation_guard(data):
     # judged on the segments of both readings, so a '| head' that either reading reaches denies. A parse
     # error falls through to the unprovable allow-note below (nothing proven), except at such a '#' the
     # lexer cannot judge under both readings: that '#' is exactly where one reading ends the line and the
-    # other reads on into a possible '| head', so it denies.
+    # other reads on into a possible '| head', so it denies. The command reading (_CommandReading) adds the
+    # commands of each backquote substitution, read whole, so a pipe into a sink inside one ('x=`make | head`',
+    # which the lexer splits at the '|' into words that keep the backquotes) is read as a pipe too.
     try:
-        _segs = _segments(command)
+        _segs = _segments_read(command)
+    except _ReadingLimitError:
+        # The command reading spent its body budget (COST above _COMMAND_LEAD_WORDS): it denies as at a '#'
+        # below, with a reason that names the budget rather than a '#' the command need not hold.
+        return _reading_limit_deny("trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness)", "a "
+                                   "producer piped into a truncating sink (head/tail) that would discard its "
+                                   "output and exit status")
     except _UncertainHashError:
         return _deny(
             "AIQT rules trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness): this "
