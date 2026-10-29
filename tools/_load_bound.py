@@ -32,10 +32,10 @@ of a completed run, whatever bound fired, never filed as cannot-evaluate: a fail
 wanted success, and in the tools/check_gensrc_failclose.py probes, where a nonzero --check exit is the
 wanted rejection of a corrupt target, that status stands as the rejection (after the same post-probe
 containment validation a completed rejection gets). An own exit of 0 beside a stop proves less than a
-completed 0 (the stop may have cut the result short), so each caller states its own treatment, every
-one conservative. run() has three callers in this repository: _run_check in
-tools/check_gensrc_failclose.py, leg_selftest in tools/check_hooks_preview.py, and the pl239 dispatch
-cases of tools/selftest_aiqt_hooks.py (_pl239_launch). tools/check_hooks_preview.py files it as
+completed 0 (the stop may have cut the result short), so each caller states its own treatment at its
+call site, every one conservative; among them, _run_check in tools/check_gensrc_failclose.py,
+leg_selftest in tools/check_hooks_preview.py and the pl239 dispatch cases of
+tools/selftest_aiqt_hooks.py (_pl239_launch) state theirs as follows. tools/check_hooks_preview.py files it as
 unverifiable (cannot-evaluate); the pl239 cases of tools/selftest_aiqt_hooks.py retry it exactly like a
 clean bound stop when no stderr was captured, ending cannot-evaluate; only the
 tools/check_gensrc_failclose.py probes let it stand as a completed 0, because exit 0 on a corrupt
@@ -141,9 +141,8 @@ members survive it, orphaned; it is armed only where libc prctl is available (el
 itself survives this process's death, as before); an exec of a set-user-id or set-group-id program
 clears it; it fires on the death of the SPAWNING THREAD, so run() must be called from a thread
 that lives until the child is stopped, which run() itself ensures by blocking the spawning thread
-until the stop completes: that holds on every caller path in this repository, since the three
-callers named above each call run() on their process's main thread (none of their files starts a
-thread); a parent killed between the fork and the child's prctl cannot
+until the stop completes, so the requirement rests on run()'s own blocking, not on which thread a
+caller uses; a parent killed between the fork and the child's prctl cannot
 be protected after the fact, so the preexec detects it (the recorded pid is no longer the parent)
 and the child exits with UNARMED_EXIT instead of running unarmed, exactly as it does where the
 host refuses the prctl itself (a seccomp or LSM policy can return nonzero without raising): on
