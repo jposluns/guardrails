@@ -299,6 +299,10 @@ fix-id = 11
 review-round = 21
 
 [[path]]
+path = "tools/check_verifier_delivery.py"
+review-round = 7
+
+[[path]]
 path = "tools/gen_enforcement_register.py"
 fix-id = 1
 review-round = 6

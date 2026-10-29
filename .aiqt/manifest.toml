@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "639b5f35fd727418b7be55047878d9fa5f651a8832d94cd595e6b0f681008eb2"
+tree-sha256 = "8004b61c9db64c68ee7ff1b813a4fda82dca8962540cc03a3006b429c2bf7865"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -936,8 +936,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".aiqt/tracker-label-baseline.toml"
-bytes = 6138
-sha256 = "5f35ea8a5727959efd2088e0276addff24f784f2f20da79fb21719a51372227f"
+bytes = 6207
+sha256 = "1c1b6308cf155e8f4e7dbb50d87721d7e5907299ee674e3e4626ef286ef2fe2b"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
