@@ -45,9 +45,10 @@ Exit convention (matches the repo's gates):
      not hold as a regular file of its own (missing, a symlink, or resolving outside it) are each
      named as drift, never as a bound that cannot be derived. LIMIT: a change that also records the
      new count and digest in _ROSTER_PIN passes; the pin makes a roster change a deliberate third
-     edit, and does not judge whether the change is right. Three rows are also pinned as exact
-     tuples, so for those alone a changed argument list, or a script changed to another file that
-     exists, is drift too
+     edit, and does not judge whether the change is right. The opf-pack-manifest-selftest,
+     opf-adopt-observe-selftest, opf-import-batch-selftest and opf-import-complete-selftest rows
+     are also pinned as exact tuples, so for those alone a changed argument list, or a script
+     changed to another file that exists, is drift too
   2  malformed input or a harness error (fail-closed): no opf/tools/ directory (opf/ absent included),
      an opf/tools/ entry that cannot be checked (an OSError other than a missing entry: a directory
      that cannot be searched), an argument the gate does not recognise (--ci-job=VALUE included: the
