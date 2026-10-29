@@ -46,37 +46,116 @@ subprocess.run launches (a launch built
 through a variable is outside its reach); and the end-to-end probe poisons two representative
 variables, the allowlist unit checks covering the rest of the GIT_-prefixed family.
 
-  selftest_git_fixture_env.py                              exit 0 on pass, 1 on assertion failure
-  selftest_git_fixture_env.py --execution-report ABS_PATH  also write the executed check IDs as JSON
+This module is the suite family's SHARED ENGINE: the checks run through four registered runners, each
+of which assigns SUITE_ID and hands its lane callable to main(). tools/selftest_git_fixture_env_core.py
+carries the scrub unit checks, the routing/scope/trust checks, the roster checks, the
+member-timeout and member-close controls, the maintenance-pin scan and the end-to-end leak
+probe; tools/selftest_git_fixture_env_config_combined.py, tools/selftest_git_fixture_env_config_malformed.py
+and tools/selftest_git_fixture_env_config_system.py carry the three config-injection lanes,
+split into their own suites so they run in parallel in CI. Run directly, this module runs
+nothing and exits 2 (cannot evaluate).
 
-Exit 2 is a harness/setup error, including bad arguments, no git binary, no writable temp directory,
-a failed report write, or an unreadable, malformed, or suite-missing expectation manifest.
+  <runner>.py                              exit 0 on pass, 1 on assertion failure
+  <runner>.py --execution-report ABS_PATH  also write the executed check IDs as JSON
+
+Exit 2 is cannot-evaluate: a harness/setup error, including bad arguments, no git binary, no writable
+temp directory, a failed report write, or an unreadable, malformed, or suite-missing expectation
+manifest; and a bounded child that reached its time bound (see _run_bounded): a config-injection
+member (_run_config_member) or a corpus leak lane (_run_corpus, _run_corpus_imported); and an OPF
+lifecycle probe still running at its own bound (_lifecycle_probe in
+tools/selftest_git_fixture_env_config_system.py, recorded the same way, its message naming the last
+stage the probe reported). A member
+reached its time bound, so this run is no verdict on that member: the timeout is listed under SELF-TEST
+CANNOT EVALUATE, never as a failure of that member. A finding is folded into the cannot-evaluate
+list only when it is attributed to a recorded timeout (see _timeout_cause and
+_registered_offenders: the finding's own result is that timeout's message, which names the member,
+or it lists only members whose run timed out with no hook, monitor or exposure evidence, or, for a
+check over several scenarios, every scenario that did not time out matched; see
+_partial_timeout_cause); every other finding is definite and outranks cannot-evaluate, so the run
+exits 1 (SELF-TEST FAIL, with the timeouts listed beside it). TIMING ALONE IS NEVER A DEFINITE
+FINDING: an observation whose only evidence of a defect is timing (a deadline missed, a signal
+late, a signal the harness owed but never sent, a completion budget exceeded) is recorded under
+cannot-evaluate, which fails the run closed and is never a pass; a definite finding needs
+non-timing evidence the code under test produced (state it left, an exit status, a refusal
+record or a message). An observation carrying ANY recorded timeout keeps only the explicit
+_STATE_EVIDENCE allowlist of final-state fields compared and stands every other field down
+(_scenario_timeout_record), so no timeout site decides per field what stays definite. A definite finding over a lane never
+names a member whose run only timed out: that member is listed by its own timeout message under
+cannot evaluate (_registered_offenders, _lifecycle_finding). tools/check_selftest_execution.py treats any child exit outside {0, 1}
+as CANNOT EVALUATE and itself exits 2 (its self-test leg st/child-rc2-2), so a timeout never reads as
+a pass or as a code failure there either.
+
+Only those children are bounded this way (the lifecycle probe keeps its own subprocess timeout and
+records reaching it as above). The suite's own git probes and fixture setup commands
+keep their 60 s subprocess timeouts, and reaching one of those raises (a traceback, exit 1) instead
+of becoming cannot-evaluate; the other helper children keep the timeout handling each documents.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import ast
+import errno
 import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
-import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:
-    sys.exit("error: selftest_git_fixture_env.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
+import _selftest_exit_report  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 CORPUS_SELFTEST = ROOT / "tools" / "selftest_aiqt_corpus.py"
-SUITE_ID = "git-fixture-env-selftest"
+# Assigned by each registered runner before main() runs; None fails _expected_check_ids
+# closed (exit 2), so running the engine with no runner never reads as a pass.
+SUITE_ID = None
+
+# The four registered runners over this engine; each assigns SUITE_ID and hands its lane
+# callable to main(). The config-lane exclusions below keep every one of them out of the
+# config-injection roster, so no lane ever re-runs a git-fixture-env suite recursively.
+_SUITE_RUNNERS = (
+    "tools/selftest_git_fixture_env_core.py",
+    "tools/selftest_git_fixture_env_config_combined.py",
+    "tools/selftest_git_fixture_env_config_malformed.py",
+    "tools/selftest_git_fixture_env_config_system.py",
+)
 FAILURES = []
+CANNOT_EVALUATE = []
+# finding text -> the timeout messages it is attributed to (see _verdict).
+TIMEOUT_CAUSED = {}
 EXECUTED = []
 _EXECUTED_SET = set()
 
@@ -103,14 +182,38 @@ POISON_VARS = {
 SENTINEL = "AIQT_FIXTURE_ENV_SENTINEL"
 
 
-def check(name, got, want):
+def check(name, got, want, cause=None):
+    """Record one check. A mismatch whose result is wholly a timeout (cause, or _timeout_cause(got)
+    when cause is None) is attributed to those timeout messages in TIMEOUT_CAUSED; _verdict folds
+    it into cannot-evaluate only when each of them was recorded."""
     if name in _EXECUTED_SET:
         print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
         sys.exit(2)
     _EXECUTED_SET.add(name)
     EXECUTED.append(name)
     if got != want:
-        FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+        finding = "{}: got {!r}, want {!r}".format(name, got, want)
+        FAILURES.append(finding)
+        cause = _timeout_cause(got) if cause is None else tuple(cause)
+        if cause:
+            TIMEOUT_CAUSED[finding] = cause
+
+
+def _is_timeout(value):
+    return isinstance(value, str) and value.startswith("TIMEOUT: ")
+
+
+def _timeout_cause(got):
+    """The timeout messages a mismatching member result is wholly explained by, or () when any
+    part of it is not: the result is a timeout message (which names the member), or it is a list
+    of one member's registered argument variants (_member_result's exit-code column) each either
+    exit 0 or a timeout message."""
+    if _is_timeout(got):
+        return (got,)
+    if isinstance(got, list) and any(_is_timeout(value) for value in got) and all(
+            _is_timeout(value) or (type(value) is int and value == 0) for value in got):
+        return tuple(value for value in got if _is_timeout(value))
+    return ()
 
 
 def _poison_environ():
@@ -377,8 +480,22 @@ def _caller_env_archive_only():
 
 CONFIG_EXCLUSIONS = {
     "all": {
-        ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest"):
-            "This suite cannot recursively launch itself; its controls run here directly.",
+        ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-core"):
+            "A git-fixture-env lane cannot recursively launch a git-fixture-env suite;"
+            " the suite's controls run inside its four registered runners.",
+        ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-config-combined"):
+            "A git-fixture-env lane cannot recursively launch a git-fixture-env suite;"
+            " the suite's controls run inside its four registered runners.",
+        ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-config-malformed"):
+            "A git-fixture-env lane cannot recursively launch a git-fixture-env suite;"
+            " the suite's controls run inside its four registered runners.",
+        ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-config-system"):
+            "A git-fixture-env lane cannot recursively launch a git-fixture-env suite;"
+            " the suite's controls run inside its four registered runners.",
+        ("tools/measure_hook_latency.py",):
+            "A bare launch is a real timing measurement of the shipped hooks, not a self-test:"
+            " minutes at its defaults, and the hooks' own git calls drop GIT_CONFIG_NOSYSTEM by"
+            " design; its self-test stays in this roster as the hook-latency-selftest suite step.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -427,7 +544,8 @@ def _registered_selftests(root=ROOT):
     commands = set()
     for relative, extract in (("tools/run_all_checks.sh", extract_local),
                               ("opf/tools/run_all_checks.sh", extract_local),
-                              (".github/workflows/quality.yml", extract_ci)):
+                              (".github/workflows/quality.yml", extract_ci),
+                              (".github/workflows/msg-leaks.yml", extract_ci)):
         source, read_diagnostic = read_runner_text(root / relative, relative)
         if read_diagnostic is not None:
             raise ValueError("{}: registry diagnostics: {}".format(
@@ -519,6 +637,18 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
     bypass and exits nonzero; _require_wrapper_observed then fails the run
     closed instead of accepting an unobserved, apparently clean result.
     _prepared_before_pool_control pins the preparation ordering itself.
+    The members run on the pool's worker threads (_run_bounded inline there). When the pool's
+    results raise (an interrupt reaching the main thread, or a failed member), closing is set
+    FIRST, as a plain store (so no signal handler raises once the main thread takes the registry
+    lock) and then under the lock (so a worker still in its setup steps, the positive control,
+    can never start a member after the sweep), then no queued member starts and every registered
+    member group is killed (_signal_member_groups) BEFORE the wait for the workers, and every
+    running member stops waiting (_run_member), so that wait never runs to a member's bound.
+    config/member-close-on-interrupt pins it with a real SIGINT,
+    config/member-failed-no-late-launch with a failed member and a worker that reaches its member
+    only after the sweep, and config/member-close-signal-sweep with a signal at every point of
+    this branch through main()'s closes and restore. A caller that catches that raise and goes on
+    clears closing again (_reopen_members).
     """
     import shlex
     from concurrent.futures import ThreadPoolExecutor
@@ -602,8 +732,25 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
             private = stage / "member-{:03d}".format(index)
             private.mkdir()
             prepared.append(prepare(private, argv))
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
             results = dict(pool.map(run, prepared))
+        except BaseException:
+            # An interrupt or a failed member: closing is set (a plain store before the lock is
+            # taken, then under the lock), no queued member starts, and every running one is
+            # killed now, so the wait below returns at once instead of at each member's bound.
+            _MEMBERS["closing"] = True
+            try:
+                with _MEMBERS_LOCK:
+                    _MEMBERS["closing"] = True
+            except RegistryLockTimeout as exc:
+                # The plain store already refuses every later start; the refusal is recorded.
+                _lock_refused("failed-member branch", exc)
+            pool.shutdown(wait=False, cancel_futures=True)
+            _signal_member_groups()
+            raise
+        finally:
+            pool.shutdown(wait=True)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     marker.write_bytes(b"")
@@ -650,102 +797,6 @@ def _await_holder_ready(holder, seconds=60):
         raise HolderNotReady("unexpected readiness line {!r}".format(line))
 
 
-def _wrapper_bypass_control(base, env, marker, monitor_marker):
-    """POSITIVE CONTROL for the fall-through tripwire and its fail-closed guard.
-    Mechanism leg: hold an observer-shaped wrapper open for writing from a live
-    child (the ETXTBSY condition a concurrently forked child creates) and exec
-    git through the member-shaped PATH: CPython's exec PATH search skips the
-    busy wrapper and continues, so without the tripwire the REAL git would run
-    unobserved, a false clean. The tripwire must intercept (rc 66, bypass
-    recorded, wrapper silent), _require_wrapper_observed must refuse the
-    recorded bypass, and the released leg must run the wrapper itself with the
-    tripwire silent; this leg's PATH is pinned to the two controlled
-    directories only.
-    Production leg: _config_results itself runs one synthetic member whose
-    member launch holds the REAL observer wrapper open for writing and launches
-    git; the run must fail closed with the bypass diagnostic naming the member,
-    never return a clean result."""
-    import shlex
-    from unittest.mock import patch
-
-    probe = base / "bypass-control"
-    trap = probe / "fallback-trap"
-    trap.mkdir(parents=True)
-    wrapper_log = probe / "wrapper-log"
-    bypass_log = probe / "bypass-log"
-    for path in (wrapper_log, bypass_log):
-        path.write_bytes(b"")
-    wrapper = probe / "git"
-    wrapper.write_text("#!/bin/sh\nprintf 'wrapper\\n' >> {}\n".format(
-        shlex.quote(str(wrapper_log))), encoding="utf-8")
-    wrapper.chmod(0o700)
-    tripwire = trap / "git"
-    tripwire.write_text("#!/bin/sh\nprintf 'bypassed\\n' >> {}\nexit 66\n".format(
-        shlex.quote(str(bypass_log))), encoding="utf-8")
-    tripwire.chmod(0o700)
-    probe_env = {"PATH": str(probe) + os.pathsep + str(trap)}
-
-    def launch():
-        try:
-            done = subprocess.run(["git"], env=probe_env, capture_output=True, timeout=60)
-            rc = done.returncode
-        except (OSError, subprocess.SubprocessError) as exc:
-            rc = "control launch failed: {}".format(exc)
-        return (rc, bypass_log.read_bytes(), wrapper_log.read_bytes())
-
-    holder_code = "\n".join((
-        "import sys",
-        "handle = open(sys.argv[1], 'ab')",
-        "print('held', flush=True)",
-        "sys.stdin.read()",
-        "handle.close()",
-    ))
-    holder = subprocess.Popen([sys.executable, "-I", "-B", "-c", holder_code, str(wrapper)],
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    try:
-        try:
-            _await_holder_ready(holder)
-            held = launch()
-        except HolderNotReady as exc:
-            held = "HolderNotReady: {}".format(exc)
-        try:
-            _require_wrapper_observed(bypass_log, "control")
-            refused = "guard accepted a recorded bypass"
-        except ValueError as exc:
-            refused = str(exc).startswith("config observer wrapper was bypassed")
-    finally:
-        holder.stdin.close()
-        holder.stdout.close()
-        try:
-            holder.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            holder.kill()
-            holder.wait(timeout=60)
-    for path in (wrapper_log, bypass_log):
-        path.write_bytes(b"")
-    released = launch()
-
-    def bypassing_member(argv, member_env):
-        busy = Path(member_env["PATH"].split(os.pathsep)[0]) / "git"
-        with open(busy, "ab"):
-            done = subprocess.run(["git", "config", "--get", "user.name"], env=member_env,
-                                  capture_output=True, timeout=60)
-        return done.returncode
-
-    outcome = "member bypass returned a clean result"
-    try:
-        with patch.object(sys.modules[__name__], "_run_config_member", bypassing_member):
-            _config_results((("tools/bypass-control-probe", "--self-test"),),
-                            env, marker, monitor_marker)
-    except ValueError as exc:
-        message = str(exc)
-        outcome = (message.startswith("config observer wrapper was bypassed")
-                   and "member run: tools/bypass-control-probe --self-test" in message)
-    check("config/wrapper-bypass-fails-closed",
-          (held, refused, released, outcome),
-          ((66, b"bypassed\n", b""), True, (0, b"", b"wrapper\n"), True))
-
-
 _WRITE_RECORDERS = []
 _WRITE_AUDIT_INSTALLED = False
 
@@ -757,91 +808,6 @@ def _dispatch_write_audit(event, args):
         recorder(event, args)
 
 
-def _prepared_before_pool_control(env, marker, monitor_marker):
-    """DETERMINISTIC guard for the root-cause ordering in _config_results (no
-    stress, no timing): every file a member will exec (the observer wrapper,
-    the tripwire, the copied hooks and fsmonitor) must be written and chmodded
-    on the MAIN thread before the worker pool is constructed. A CPython audit
-    hook records every open-for-write, chmod, rename, link and symlink with its
-    thread and whether the pool exists yet; each synthetic member snapshots the
-    executable files in its private tree from inside the pool. Moving member
-    preparation back into the pooled body turns this red on every run, whether
-    or not a fork happens to race a write. The red member chmods its own
-    wrapper from inside the pool and must be flagged, so a recorder that sees
-    nothing cannot pass; the required files and the every-executable-was-seen
-    leg keep the clean member from passing vacuously. File-descriptor-only
-    operations (os.fchmod, a write through an inherited descriptor) are outside
-    what these audit events name."""
-    import concurrent.futures
-    import threading
-    from unittest.mock import patch
-
-    global _WRITE_AUDIT_INSTALLED
-    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-    target = {"open": 0, "os.chmod": 0, "os.rename": 1, "os.link": 1, "os.symlink": 1}
-    main_thread = threading.main_thread().ident
-    pool_started = []
-    events = []
-    snapshots = {}
-
-    def record(event, args):
-        if event not in target or (event == "open" and not args[2] & write_flags):
-            return
-        path = args[target[event]]
-        if not isinstance(path, int):
-            events.append((os.path.abspath(os.fsdecode(path)), event,
-                           threading.get_ident() == main_thread and not pool_started))
-
-    class MarkedPool(concurrent.futures.ThreadPoolExecutor):
-        def __init__(self, *args, **kwargs):
-            pool_started.append(True)
-            super().__init__(*args, **kwargs)
-
-    def snapshot_member(argv, member_env):
-        private = member_env["PATH"].split(os.pathsep)[0]
-        found = set()
-        for folder, _, names in os.walk(private):
-            for name in names:
-                path = os.path.join(folder, name)
-                if os.path.isfile(path) and os.stat(path).st_mode & 0o111:
-                    found.add(os.path.abspath(path))
-        snapshots[argv[0]] = (private, found)
-        if argv[0].endswith("-red"):
-            os.chmod(os.path.join(private, "git"), 0o700)
-        return 0
-
-    required = ["git", os.path.join("fallback-trap", "git"), os.path.join("caller", "fsmonitor"),
-                os.path.join("caller", "config-hooks", "pre-commit")]
-
-    def verdict(member):
-        if member not in snapshots:
-            return "member did not run: " + member
-        private, found = snapshots[member]
-        written = {path for path, _, _ in events}
-        return (sorted(set(required) - {os.path.relpath(p, private) for p in found}),
-                sorted(os.path.relpath(p, private) for p in found - written),
-                sorted({(os.path.relpath(p, private), event)
-                        for p, event, early in events if p in found and not early}))
-
-    clean, red = "tools/prepared-before-pool-probe", "tools/prepared-before-pool-probe-red"
-    if not _WRITE_AUDIT_INSTALLED:
-        sys.addaudithook(_dispatch_write_audit)
-        _WRITE_AUDIT_INSTALLED = True
-    _WRITE_RECORDERS.append(record)
-    try:
-        with patch.object(concurrent.futures, "ThreadPoolExecutor", MarkedPool), patch.object(
-                sys.modules[__name__], "_run_config_member", snapshot_member):
-            _config_results(((clean, "--self-test"), (red, "--self-test")),
-                            env, marker, monitor_marker)
-        got = (bool(pool_started), verdict(clean), verdict(red))
-    except ValueError as exc:
-        got = "config run raised: {}".format(exc)
-    finally:
-        _WRITE_RECORDERS.remove(record)
-    check("config/executables-prepared-before-pool", got,
-          (True, ([], [], []), ([], [], [("git", "os.chmod")])))
-
-
 def _member_result(results, member, column):
     """Legacy IDs report derived runs, including every registered argument variant."""
     values = [value[column] for argv, value in results.items() if _command_identity(argv)[0] == member]
@@ -849,188 +815,6 @@ def _member_result(results, member, column):
         return "missing registered member: " + member
     want = 0 if column == 0 else b""
     return want if all(value == want for value in values) else values
-
-
-def _roster_checks():
-    from unittest.mock import patch
-    import check_ci_parity
-    import check_selftest_execution
-
-    local = "tools/run_all_checks.sh"
-    opf = "opf/tools/run_all_checks.sh"
-    ci = ".github/workflows/quality.yml"
-    real_reader = check_ci_parity.read_runner_text
-    local_text, local_diagnostic = real_reader(ROOT / local, local)
-    ci_text, ci_diagnostic = real_reader(ROOT / ci, ci)
-    # The live registries must come through the byte-level reader clean;
-    # everything below mutates these texts.
-    check("roster/live-registry-reads", (local_diagnostic, ci_diagnostic),
-          (None, None))
-    if local_diagnostic is not None or ci_diagnostic is not None:
-        return
-    binding = ('dir=$(dirname -- "$0") || exit 2\n'
-               '[ -n "$dir" ] || exit 2\n'
-               'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2')
-    # The valid failure-state initializers, so an empty-roster fixture reaches
-    # its own guard rather than the missing-initializer diagnostic.
-    state = 'failed=0\nfailed_names=""\n'
-    # The real dispatcher definition, so a fixture that declares a gate
-    # reaches its own guard rather than the definition-order diagnostic.
-    definition_start = local_text.index("run_gate() {")
-    definition = local_text[
-        definition_start:local_text.index("\n}\n", definition_start) + 3]
-
-    def add_local(command):
-        # Keep the exact terminal summary last so each fixture reaches its own guard.
-        summary = 'if [ "$failed" -ne 0 ]; then\n'
-        if local_text.count(summary) != 1:  # explicit, not an assert: python -O strips asserts
-            raise AssertionError("the runner's terminal summary is not unique")
-        return local_text.replace(summary, command + "\n" + summary, 1)
-
-    def refusal():
-        try:
-            _registered_selftests()
-        except ValueError as exc:
-            return str(exc)
-        return ""
-
-    scratch = Path(tempfile.mkdtemp(prefix="roster-fixture-"))
-
-    def disk_reader(name, relative, data):
-        """Write the fixture to a REAL file and redirect only the path, so
-        the raw fixture bytes flow through the actual byte-level reader;
-        injecting already-decoded text here formerly hid Path.read_text()'s
-        universal-newline translation from every roster fixture."""
-        fixture = scratch / name.replace("/", "-")
-        fixture.write_bytes(data if isinstance(data, bytes)
-                            else data.encode("utf-8"))
-        target = ROOT / relative
-
-        def read(path, source, reader=None):
-            return real_reader(fixture if path == target else path,
-                               source, reader=reader)
-        return read
-
-    # Require THIS guard's diagnostic: an unrelated downstream refusal is not
-    # evidence that the intended guard ran. Bad commands augment a valid roster.
-    for check_id, relative, text, diagnostic in (
-            ("roster/empty-local-refused", local, state, local + ": empty registry"),
-            ("roster/unparseable-local-refused", local,
-             add_local('\nrun_gate "cont" python3 -I -B tools/check_secrets.py \\\n  --self-test\n'),
-             local + ": registry diagnostics:"),
-            ("roster/empty-opf-refused", opf, binding + "\n" + state + "exit 0\n",
-             opf + ": empty registry"),
-            ("roster/standalone-scaffold-refused", opf, binding + "\n" + binding + "\nexit 0\n",
-             "unsupported standalone runner scaffold"),
-            # The byte-level reader refuses the form feed on the raw
-            # bytes at read time; the shared adapter's raw-text screen
-            # stays behind it for text that arrives already decoded
-            # (vector 26 pins that screen directly).
-            ("roster/standalone-text-format-refused", opf,
-             binding + "\n" + state
-             + 'run_gate "probe-selftest" python3 -I -B tools/check_secrets.py --self-test\n'
-             + "# hidden\fexit 0\n",
-             opf + ": registry diagnostics:"),
-            ("roster/unparseable-ci-refused", ci,
-             ci_text + '\n      - run: python3 -I -B tools/check_secrets.py --self-test | cat\n',
-             ci + ": registry diagnostics:"),
-            # A reviewed masked expression survives extraction only in the CI
-            # workflow; the selection guard must still refuse the masked
-            # member as a dynamic self-test argument.
-            ("roster/dynamic-arguments-refused", ci,
-             ci_text + '\n      - name: Dynamic probe'
-                       '\n        run: python3 -I -B tools/check_secrets.py'
-                       ' --self-test --base "$PUSH_BEFORE"\n',
-             "dynamic self-test arguments:"),
-            # In the LOCAL runner the same spelling is refused at extraction:
-            # the gate-word character allowlist admits no expansion, so a
-            # masked flag value never reaches selection there.
-            ("roster/local-masked-flag-refused", local,
-             add_local('\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$PUSH_BEFORE"\n'),
-             local + ": registry diagnostics:"),
-            ("roster/launcher-refused", local,
-             add_local('\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n'),
-             "unsupported self-test launcher:"),
-            ("roster/empty-selftests-refused", local,
-             state + definition
-             + 'run_gate "live" python3 -I -B tools/check_secrets.py\n',
-             local + ": empty self-test roster"),
-            ("roster/prefixed-invalid-suite-refused", local,
-             add_local('\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest --extra\n'),
-             "unparseable suite invocation:"),
-            # codex qa10 MAJOR-1: Path.read_text() translated a planted
-            # carriage return into a newline BEFORE any screen ran, so a
-            # \r-hidden gate line in a REAL runner file on disk read as a
-            # clean extra gate and the roster stayed green. Every fixture
-            # in this table is now written to disk and read through the
-            # actual byte-level reader; the two \r fixtures fail against
-            # any decode-first reader, whose universal-newline translation
-            # erases the byte ahead of a text screen.
-            ("roster/local-carriage-return-refused", local,
-             add_local('# hidden\rrun_gate "cr-probe" python3 -I -B tools/check_secrets.py --self-test'),
-             local + ": registry diagnostics:"),
-            ("roster/opf-carriage-return-refused", opf,
-             binding + "\n" + state + definition
-             + 'run_gate "probe-selftest" python3 -I -B tools/check_secrets.py --self-test\n'
-             + '# hidden\rrun_gate "cr-shadow" python3 -I -B tools/check_secrets.py --self-test\n'
-             + "exit 0\n",
-             opf + ": registry diagnostics:"),
-            # U+2028 (spelled via chr to keep this source ASCII) survives a
-            # UTF-8 decode, so only the byte-level screen refuses it at
-            # read time with the raw-byte diagnostic.
-            ("roster/ci-line-separator-refused", ci,
-             ci_text + "# probe" + chr(0x2028) + "trailer\n",
-             ci + ": registry diagnostics:"),
-    ):
-        with patch.object(check_ci_parity, "read_runner_text",
-                          disk_reader(check_id, relative, text)):
-            got = refusal()
-        check(check_id, got.startswith(diagnostic), True)
-
-    # A parser/member provenance mismatch must not silently drop a selected member.
-    extract = check_ci_parity.extract_local
-    def missing_origin(text):
-        result = extract(text)
-        return result._replace(origins={})
-    with patch.object(check_ci_parity, "extract_local", missing_origin):
-        got = refusal()
-    check("roster/missing-origin-refused",
-          got.startswith("cannot recover exact self-test arguments:"), True)
-
-    stale = ("tools/check_secrets.py", "--self-test", "--stale-exclusion")
-    with patch.dict(CONFIG_EXCLUSIONS["all"], {stale: "Synthetic stale exclusion."}):
-        got = refusal()
-    check("roster/stale-exclusion-refused",
-          got.startswith("stale or unreasoned all exclusion:"), True)
-
-    extra = '\nrun_gate "argument-probe" python3 -I -B tools/check_secrets.py --self-test --red-on-revert\n'
-    read = disk_reader("roster-registered-arguments", local, add_local(extra))
-    with patch.object(check_ci_parity, "read_runner_text", read):
-        roster = _registered_selftests()
-    check("roster/registered-arguments", ("tools/check_secrets.py", "--self-test",
-                                         "--red-on-revert") in roster, True)
-
-    suites = check_selftest_execution._manifest_suites(CHECKS_MANIFEST)
-    extra = '\nrun_gate "new-suite" python3 -I -B ./tools/check_selftest_execution.py --suite roster-probe\n'
-    read = disk_reader("roster-prefixed-suite-expanded", local, add_local(extra))
-    with patch.object(check_ci_parity, "read_runner_text", read), patch.object(
-            check_selftest_execution, "_manifest_suites", return_value=suites + [
-                {"id": "roster-probe", "runner": "tools/check_secrets.py",
-                 "expected-check-ids": ["probe"]}]):
-        roster = _registered_selftests()
-    check("roster/prefixed-suite-expanded",
-          ("./tools/check_selftest_execution.py", "--suite", "roster-probe") in roster
-          and ("tools/check_secrets.py",) in roster, True)
-
-    extra = '\nrun_gate "recursive-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest\n'
-    read = disk_reader("roster-prefixed-recursion", local, add_local(extra))
-    with patch.object(check_ci_parity, "read_runner_text", read):
-        roster = _registered_selftests()
-    check("roster/prefixed-recursion-excluded",
-          ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest") not in roster
-          and ("./tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest") not in roster
-          and ("tools/selftest_git_fixture_env.py",) not in roster, True)
-    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _system_pin_probe(base, lifecycle):
@@ -1058,38 +842,17 @@ def _system_pin_probe(base, lifecycle):
         return pins, dict(os.environ) == saved
 
 
-def _system_pin_checks(base):
-    import types
-    # Level 0 parse and compile: the mutant must not follow -O/-OO.
-    tree = _optlevel.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
-    assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
-                   and any(ast.unparse(t) == "os.environ['PATH']" for t in node.targets)]
-    if len(assignments) != 1:
-        raise ValueError("cannot uniquely mutate lifecycle PATH installation")
-    assignments[0].value = _optlevel.parse('saved.get("PATH", os.defpath)', mode="eval").body
-    mutant = types.ModuleType("fixture_path_mutant")
-    exec(compile(ast.fix_missing_locations(tree), "<path-removal-mutant>", "exec", optimize=0),
-         mutant.__dict__)
-    pins, restored = _system_pin_probe(base, _git_fixture_env.fixture_git_lifecycle)
-    check("env/lifecycle-system-pins", pins, (0, ["1", os.devnull]))
-    check("env/lifecycle-restores-caller", restored, True)
-    pins, restored = _system_pin_probe(base, mutant.fixture_git_lifecycle)
-    check("env/lifecycle-path-removal-red", (pins, restored), ((0, ["", ""]), True))
-
-
-def _config_injection_lane(base):
-    """CONFIG-INJECTION: no inherited GIT_* pins may hide the caller's on-disk poison.
-    Each member gets rc and hook-byte assertions; neither one substitutes for the other.
-    A real commit first proves the marker hooks execute under this caller configuration.
-    Hooks/ignore poison cannot see read-only git calls. The fsmonitor marker covers
-    index reads; malformed HOME/XDG config also covers reads such as rev-parse.
-    Commands come from the shell/Quality registries, with exact script arguments.
-    Literal legacy IDs below report results; they never select which commands run.
-    The legacy /hooks IDs assert both hook and fsmonitor marker bytes. Separate
-    malformed-config runs exclude the two real-checkout archive readers, which
-    retain caller config by contract. System poison uses a PATH shim, never /etc.
-    Hardcoded absolute executables, a replaced PATH, and repository-local config
-    remain outside the shim's coverage; see _config_results."""
+def _config_poison_fixture(base):
+    """The shared CONFIG-INJECTION poison tree and control repository, built identically for
+    the three config-lane suites (combined, malformed and system; see _SUITE_RUNNERS): the
+    caller HOME/XDG config, hook, ignore, attributes and fsmonitor poison, the hook and
+    fsmonitor marker files, the deliberately UNSCRUBBED environment, and a committed control
+    repository (with one untracked file) whose commit ran under the poison, so the caller
+    hooks demonstrably execute under this configuration before any lane result is read. This
+    helper only BUILDS the fixture; every check() verdict over it belongs to the lane
+    runners. Commands come from the shell/Quality registries, with exact script arguments.
+    Hardcoded absolute executables, a replaced PATH, and repository-local config remain
+    outside the observer shim's coverage; see _config_results."""
     import shlex
 
     roster = _registered_selftests()
@@ -1143,291 +906,3197 @@ def _config_injection_lane(base):
         subprocess.run(["git", "-C", str(control), "-c", "gc.auto=0",
                         "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false", *args],
                        env=env, check=True, capture_output=True, timeout=60)
-    check("config/injection-control", bool(marker.read_bytes()), True)
     (control / "untracked").write_text("dirt\n", encoding="utf-8")
-    # Exercise each on-disk source independently, including HOME's fallback.
-    for ignore_id, attributes_id, mode in (
-            ("config/explicit-ignore-control", "config/explicit-attributes-control", "explicit"),
-            ("config/xdg-ignore-control", "config/xdg-attributes-control", "xdg"),
-            ("config/home-ignore-control", "config/home-attributes-control", "home"),
-    ):
-        probe_env = dict(env)
-        if mode != "explicit":
-            probe_env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
-                             GIT_CONFIG_NOSYSTEM="1")
-        if mode == "home":
-            probe_env.pop("XDG_CONFIG_HOME")
-        probe = subprocess.run(["git", "-C", str(control), "status", "--porcelain"],
-                               env=probe_env, capture_output=True, timeout=60, check=True)
-        check(ignore_id, probe.stdout, b"")
-        probe = subprocess.run(["git", "-C", str(control), "check-attr", "fixture-poison", "--", "seed"],
-                               env=probe_env, capture_output=True, timeout=60, check=True)
-        check(attributes_id, probe.stdout, b"seed: fixture-poison: set\n")
-    for archive_id, pin in (
-            ("config/archive-attributes-live", False),
-            ("config/archive-attributes-neutralized", True),
-    ):
-        import io
-        import tarfile
-        args = ["-c", "core.attributesFile=/dev/null"] if pin else []
-        archive = subprocess.run(["git", "-C", str(control), "-c", "gc.auto=0",
-                                  "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                                  *args, "archive", "HEAD"],
-                                 env=env, capture_output=True, timeout=60, check=True)
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-            names = tar.getnames()
-        check(archive_id, "seed" in names, pin)
-    monitor_marker.write_bytes(b"")
-    probe = subprocess.run(["git", "-C", str(control), "ls-files"], env=env,
-                           capture_output=True, timeout=60)
-    check("config/combined-fsmonitor-control", (probe.returncode, bool(monitor_marker.read_bytes())),
-          (0, True))
-    _wrapper_bypass_control(base, env, marker, monitor_marker)
-    _prepared_before_pool_control(env, marker, monitor_marker)
-    combined = _config_results(roster, env, marker, monitor_marker)
-    check("config/registered-combined", [argv for argv, value in combined.items()
-                                       if value != (0, b"", b"", b"")], [])
-    for rc_id, hooks_id, member in (
-            ("config/selftest_aiqt_corpus/rc", "config/selftest_aiqt_corpus/hooks",
-             "tools/selftest_aiqt_corpus.py"),
-            ("config/selftest_orch_hooks/rc", "config/selftest_orch_hooks/hooks",
-             "tools/selftest_orch_hooks.py"),
-            ("config/selftest_aiqt_hooks/rc", "config/selftest_aiqt_hooks/hooks",
-             "tools/selftest_aiqt_hooks.py"),
-            ("config/_qa_adapter/rc", "config/_qa_adapter/hooks",
-             "tools/_qa_adapter.py"),
-            ("config/check_record_drift/rc", "config/check_record_drift/hooks",
-             "tools/check_record_drift.py"),
-            ("config/check_mistakes_register/rc", "config/check_mistakes_register/hooks",
-             "tools/check_mistakes_register.py"),
-            ("config/check_version_monotonicity/rc", "config/check_version_monotonicity/hooks",
-             "tools/check_version_monotonicity.py"),
-            ("config/check_release_build/rc", "config/check_release_build/hooks",
-             "tools/check_release_build.py"),
-            ("config/check_release_delta/rc", "config/check_release_delta/hooks",
-             "tools/check_release_delta.py"),
-            ("config/check_record_sections/rc", "config/check_record_sections/hooks",
-             "tools/check_record_sections.py"),
-            ("config/check_portability/rc", "config/check_portability/hooks",
-             "tools/check_portability.py"),
-            ("config/gen_manifest/rc", "config/gen_manifest/hooks",
-             "tools/gen_manifest.py"),
-            ("config/check_manifest/rc", "config/check_manifest/hooks",
-             "tools/check_manifest.py"),
-            ("config/check_branch_root/rc", "config/check_branch_root/hooks",
-             "tools/check_branch_root.py"),
-            ("config/check_gensrc_failclose/rc", "config/check_gensrc_failclose/hooks",
-             "tools/check_gensrc_failclose.py"),
-            ("config/selftest_ci_status/rc", "config/selftest_ci_status/hooks",
-             "tools/selftest_ci_status.py"),
-            ("config/check_opf_init/rc", "config/check_opf_init/hooks",
-             "opf/tools/check_opf_init.py"),
-            ("config/check_opf_upgrade/rc", "config/check_opf_upgrade/hooks",
-             "opf/tools/check_opf_upgrade.py"),
-            ("config/check_opf_doctor/rc", "config/check_opf_doctor/hooks",
-             "opf/tools/check_opf_doctor.py"),
-            ("config/_opf_init_operation/rc", "config/_opf_init_operation/hooks",
-             "opf/tools/_opf_init_operation.py"),
-            ("config/_opf_oplock/rc", "config/_opf_oplock/hooks",
-             "opf/tools/_opf_oplock.py"),
-            ("config/_opf_observe/rc", "config/_opf_observe/hooks",
-             "opf/tools/_opf_observe.py"),
-            ("config/opf/rc", "config/opf/hooks",
-             "opf/tools/opf.py"),
-    ):
-        check(rc_id, _member_result(combined, member, 0), 0)
-        check(hooks_id, (_member_result(combined, member, 1),
-                         _member_result(combined, member, 2)), (b"", b""))
-
-    # No hooks or ignore poison in these lanes: read-only production helpers
-    # must be tested independently of fixture writes.
-    for path in (ignore, attributes, xdg / "git" / "ignore", xdg / "git" / "attributes",
-                 home / ".config" / "git" / "ignore", home / ".config" / "git" / "attributes",
-                 home / ".config" / "git" / "config"):
-        path.unlink()
-    fsconfig = '[core]\n\tfsmonitor = {}\n'.format(json.dumps(str(monitor)))
-    malformed = "[invalid\n"
-    (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
-    (xdg / "git" / "config").write_text(fsconfig, encoding="utf-8")
-    probe = subprocess.run(["git", "-C", str(control), "ls-files"], env=env,
-                           capture_output=True, timeout=60)
-    check("config/fsmonitor-control", (probe.returncode, bool(monitor_marker.read_bytes())),
-          (0, True))
-    (home / ".gitconfig").write_text(malformed, encoding="utf-8")
-    probe = subprocess.run(["git", "-C", str(control), "rev-parse", "HEAD"], env=env,
-                           capture_output=True, timeout=60)
-    check("config/malformed-control", probe.returncode != 0, True)
-    (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
-    (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
-    probe = subprocess.run(["git", "-C", str(control), "rev-parse", "HEAD"], env=env,
-                           capture_output=True, timeout=60)
-    check("config/xdg-malformed-control", probe.returncode != 0, True)
-
-    for fs_rc_id, fs_marker_id, member in (
-            ("config/check_manifest/fsmonitor-rc", "config/check_manifest/fsmonitor",
-             "tools/check_manifest.py"),
-            ("config/gen_manifest/fsmonitor-rc", "config/gen_manifest/fsmonitor",
-             "tools/gen_manifest.py"),
-            ("config/check_record_sections/fsmonitor-rc", "config/check_record_sections/fsmonitor",
-             "tools/check_record_sections.py"),
-            ("config/_qa_adapter/fsmonitor-rc", "config/_qa_adapter/fsmonitor",
-             "tools/_qa_adapter.py"),
-    ):
-        (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
-        (xdg / "git" / "config").write_text(fsconfig, encoding="utf-8")
-        monitor_marker.write_bytes(b"")
-        rc = _run_config_member((member, "--self-test"), env)
-        check(fs_rc_id, rc, 0)
-        check(fs_marker_id, monitor_marker.read_bytes(), b"")
-    (home / ".gitconfig").write_text(malformed, encoding="utf-8")
-    (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
-    malformed_results = _config_results(
-        [argv for argv in roster if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]],
-        env, marker, monitor_marker)
-    check("config/registered-malformed", [argv for argv, value in malformed_results.items()
-                                        if value != (0, b"", b"", b"")], [])
-    for malformed_id, member in (
-            ("config/selftest_aiqt_corpus/malformed", "tools/selftest_aiqt_corpus.py"),
-            ("config/selftest_orch_hooks/malformed", "tools/selftest_orch_hooks.py"),
-            ("config/selftest_aiqt_hooks/malformed", "tools/selftest_aiqt_hooks.py"),
-            ("config/_qa_adapter/malformed", "tools/_qa_adapter.py"),
-            ("config/check_record_drift/malformed", "tools/check_record_drift.py"),
-            ("config/check_mistakes_register/malformed", "tools/check_mistakes_register.py"),
-            ("config/check_version_monotonicity/malformed", "tools/check_version_monotonicity.py"),
-            ("config/check_record_sections/malformed", "tools/check_record_sections.py"),
-            ("config/check_portability/malformed", "tools/check_portability.py"),
-            ("config/gen_manifest/malformed", "tools/gen_manifest.py"),
-            ("config/check_manifest/malformed", "tools/check_manifest.py"),
-            ("config/check_branch_root/malformed", "tools/check_branch_root.py"),
-            ("config/check_gensrc_failclose/malformed", "tools/check_gensrc_failclose.py"),
-            ("config/selftest_ci_status/malformed", "tools/selftest_ci_status.py"),
-            ("config/check_opf_init/malformed", "opf/tools/check_opf_init.py"),
-            ("config/check_opf_upgrade/malformed", "opf/tools/check_opf_upgrade.py"),
-            ("config/check_opf_doctor/malformed", "opf/tools/check_opf_doctor.py"),
-            ("config/_opf_init_operation/malformed", "opf/tools/_opf_init_operation.py"),
-            ("config/_opf_oplock/malformed", "opf/tools/_opf_oplock.py"),
-            ("config/_opf_observe/malformed", "opf/tools/_opf_observe.py"),
-            ("config/opf/malformed", "opf/tools/opf.py"),
-    ):
-        check(malformed_id, _member_result(malformed_results, member, 0), 0)
-
-    # Simulate an installed system config without writing /etc. Reassert its path
-    # only when a child did not disable or explicitly replace system configuration.
-    system = base / "system-gitconfig"
-    system.write_text(config, encoding="utf-8")
-    empty_home = base / "system-lane-home"
-    empty_home.mkdir()
-    bin_dir = base / "system-bin"
-    bin_dir.mkdir()
-    real_git = shutil.which("git")
-    if real_git is None:
-        raise ValueError("system lane requires git")
-    wrapper = bin_dir / "git"
-    wrapper.write_text(
-        '#!/bin/sh\n'
-        'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then\n'
-        '  export GIT_CONFIG_SYSTEM={}\n'
-        'fi\nexec {} "$@"\n'.format(shlex.quote(str(system)), shlex.quote(real_git)),
-        encoding="utf-8")
-    wrapper.chmod(0o700)
-    system_env = dict(env, HOME=str(empty_home), XDG_CONFIG_HOME=str(empty_home),
-                      PATH=str(bin_dir) + os.pathsep + env.get("PATH", os.defpath))
-    monitor_marker.write_bytes(b"")
-    probe = subprocess.run(["git", "-C", str(control), "ls-files"], env=system_env,
-                           capture_output=True, timeout=60)
-    check("config/system-control", (probe.returncode, bool(monitor_marker.read_bytes())),
-          (0, True))
-    system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
-    check("config/registered-system", [argv for argv, value in system_results.items()
-                                     if value != (0, b"", b"", b"")], [])
-    return system_results
+    return {"roster": roster, "env": env, "home": home, "xdg": xdg, "hooks": hooks,
+            "marker": marker, "monitor": monitor, "monitor_marker": monitor_marker,
+            "ignore": ignore, "attributes": attributes, "config": config,
+            "control": control}
 
 
-def _run_config_member(member, env):
+# Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
+# CONFIG_MEMBER_BOUND_DEFAULT. config/member-bound-table pins this table (every key an exact
+# registered roster argv, each override, the default), config/member-bound-opf-selftest pins
+# the opf.py --self-test entry, config/member-bound-reaches-run pins that _run_config_member
+# hands the looked-up bound to _run_bounded, and config/member-roster-figures pins the SIZING_*
+# constants below against _registered_selftests() through _roster_figures and prints the
+# figures it derives (all in _member_bound_checks); none of them reads this comment, and none
+# of them tests any sizing.
+# Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
+# (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
+# READ FROM SOURCE (read from the member's own code, not measured). The exceptions are the five
+# tools/check_opf_standalone_closure.py --self-test --ci-job entries, sized outside SIZING: their
+# MEASURED figures are standalone runs of the pre-split whole self-test (and one of the
+# opf-closure-c member when it held one leg) and their ESTIMATED figure scales the latest
+# whole-self-test run by load alone, not by the SIZING formula (their shared comment gives both),
+# and the tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose
+# MEASURED figures are standalone runs (its own comment), fed to the SIZING formula.
+#
+# CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
+# member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
+# measured): opf/tools/opf.py --self-test grants its blocked-isolation leg alone
+# 31 * _deadline_case_budget(180) = 31 * (180 + 5 + 1) = 5766 s (the isolation matrix's 31 cases,
+# each its 180 s timeout plus the 5 s fixture cleanup grace and the 1 s receipt allowance), and its
+# regression runner bounds that leg at 5766 + 30 = 5796 s (the 30 s launch margin); that is one leg,
+# so the whole self-test grants itself more. The tools/check_selftest_execution.py members set no
+# internal bound of their own (the CI job timeout is their outer bound). The kill-timeout rule
+# ("A kill timeout outlives the wait it bounds", AGENTS.md) asks that a bound meant to let a command
+# finish be sized above the budget the command grants itself; it allows a deliberately shorter
+# deadline where cutting the work short is the explicit intent, provided reaching it is attributed
+# to the deadline rather than reported as a failure of the callee. Every bound in this table takes
+# that exception: none of them is offered as a bound above its member's whole self-granted budget.
+# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each but the
+# five tools/check_opf_standalone_closure.py --self-test --ci-job entries and the
+# child-status-coverage-selftest entry is sized from config-lane runs MEASURED on this host, see
+# SIZING; those five are sized from standalone runs of the pre-split whole self-test, see their
+# shared comment, and that one from standalone runs, see its own comment); each entry
+# stays a deliberate shorter deadline relative to the member's self-granted budget, yet each
+# formula-sized entry is sized above the member's measured runs (lane runs, or standalone runs for
+# the child-status-coverage-selftest entry) so that the member finishes under the load the SIZING
+# factor covers;
+# reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
+# and never a pass, because this lane owns no member's verdict.
+# Every roster member is a registered step or the runner behind a registered --suite step
+# (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
+# and that step runs the member to completion under no deadline from this suite, so no member's
+# pass or fail depends on this bound. This lane asks a different question (does the
+# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor). The
+# roster is every registered self-test except CONFIG_EXCLUSIONS["all"] (the four git-fixture-env
+# suite runners and the bare hook-latency measurement, whose self-test stays in the roster as its
+# --suite step); the combined and system lanes rerun every roster member, the malformed lane
+# every one outside CONFIG_EXCLUSIONS["malformed"], the fsmonitor pass four of them under
+# --self-test (its _run_config_member calls), and the bound caps how long one stalled rerun can
+# hold that answer back. Cutting a rerun short leaves the question unanswered, never answered
+# wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing definite was found), never a
+# FAIL of that member and never a pass.
+#
+# SIZING. MEASURED (2026-10-12, 24-CPU host, nice 10, every bound lifted to 10800 s): the suite's
+# own _config_results (four workers, run through main() with its lanes replaced) under the combined
+# lane's injected configuration, rebuilt by a copy of that lane's setup code (NOT a call to
+# _config_injection_lane itself), over opf.py, check_opf_record.py --red-on-revert,
+# _opf_adopt_observe.py, check_release_delta.py and check_opf_init.py --self-test plus six shorter
+# opf/tools self-tests (_opf_adopt.py, _opf_oplock.py, _opf_init_operation.py,
+# check_opf_upgrade.py, check_opf_homes.py and check_opf_doctor.py), eleven members then (ten
+# now in SIZING_MEASURED), twice (load5 24.02 to 29.29, then 29.29 to 33.68); once over the whole
+# combined roster as registered then, SIZING_ACCOUNT_ROSTER (load5 27.35 to 32.99); and once
+# under the malformed lane's configuration over those eleven members less its exclusion, ten
+# members then (nine now in SIZING_MALFORMED_MEASURED, load5 30.01 to 32.14). Every member
+# exited 0 with no hook, fsmonitor or exposure record in every run. Each entry below gives its
+# lane time per run.
+# SIZING_ACCOUNT_ROSTER is the set _registered_selftests() returns at commit e5191908, the parent
+# of the commit that recorded these runs; a member registered later is outside the account.
+# The closure gate's leg-bounds change, merged with main on 2026-10-15, 2026-10-17, 2026-10-18,
+# 2026-10-19 and 2026-10-20, registers two such members, tools/check_opf_standalone_closure.py
+# --self-test --ci-job opf-closure-a and --ci-job opf-closure-b (its CI steps, one per closure CI
+# job since the split). Counted by _roster_figures on the merged tree of 2026-10-20 (a dated
+# record, not pinned: config/member-roster-figures prints the live figures), the roster is 118
+# members, 116 of them in the malformed lane, 17 of them outside the account. On 2026-10-23 the
+# change registers a third, --ci-job opf-closure-c (then the closure job that held
+# opf-homes-selftest alone), and then a fourth and a fifth, --ci-job opf-closure-d and
+# --ci-job opf-closure-e (added when every closure leg whose command these lanes run was bounded
+# at or above its deadline here, since the closure work then no longer fit in fewer than five
+# jobs), so each of those three counts is three higher on a tree carrying all three new members.
+# One measured member, opf/tools/check_opf_upgrade.py --self-test (one of the six shorter
+# opf/tools self-tests, timed in every run), was later removed with the store-upgrade engine, so
+# the account constants below omit it: 100 account members, 88 timed, 10 measured in the
+# combined lane and 9 in the malformed lane. The runs and times recorded here are unchanged.
+# NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
+# malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
+# and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
+# attributes files removed, its four members run one at a time).
+# The opf.py --self-test times above and below and its 3600 s entry were sized before the
+# 2026-10-13 merge added the opf-write-guard delegate to opf.py --self-test; the delegate's own
+# self-test, MEASURED standalone on the merged tree (2026-10-13), exited 0 in 0.23 s wall, so the
+# entry is not resized for it.
+# ESTIMATED: bound = the slowest MEASURED lane time * 20 / 3, rounded up to a multiple of 300 s;
+# the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
+# (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
+# bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
+# that reached a bound has no known length, so no bound here is shown to cover it (below).
+# Roster coverage: the account of the whole-roster run gives a time or an upper bound for
+# SIZING_ACCOUNT_TIMED of the SIZING_ACCOUNT_ROSTER members. Five took over 180 s and carry the
+# five formula-sized entries below. Nine more are named here (the six shorter opf/tools self-tests,
+# check_python_floor.py, check_release_cut.py --self-test --red-on-revert and
+# check_selftest_execution.py --suite orch-behaviour-selftest), the slowest 142.55 s; and 75 are
+# REPORTED by that account as each 62.42 s or less, with no per-member time and no names given.
+# The other account members, which the account does not name, have no recorded time; nor does a
+# member registered after the account unless SIZING_LATER_MEASURED records a measurement of it.
+# Their default bound is NOT sized from a measurement. _roster_figures derives the live counts
+# from these constants (members, malformed-lane members, members outside the account, members
+# with no recorded time, malformed-lane members not measured in that lane), and
+# config/member-roster-figures prints them with one line per member outside the account.
+# A bound sized from a measurement taken after the account (an entry whose own comment says it
+# was sized outside SIZING) is allowed only when SIZING_LATER_MEASURED maps its argv to a
+# one-line citation of that measurement; _roster_figures reports any other CONFIG_MEMBER_BOUNDS
+# key with no measurement behind it. A later measurement counts as a recorded time for a member
+# outside the account. It never lowers the count of malformed-lane members not measured in that
+# lane, which reflects only the account's malformed-lane run, nor the account's own count of
+# members with no recorded time, whose members the account does not name.
+# The five tools/check_opf_standalone_closure.py --self-test --ci-job entries are such bounds:
+# the members have standalone times of the pre-split whole self-test only, but for one standalone
+# time of the opf-closure-c member when it held one leg, none a config-lane time, and each carries
+# its own entry below, sized outside SIZING. On the merged tree of 2026-10-20
+# (counted by _roster_figures; dated, not pinned), 29 roster members had no time in the account:
+# 27 had no recorded time (the 12 account members the account does not name, and the 15 later
+# members SIZING_LATER_MEASURED does not cover), and the closure gate's two self-test halves had
+# pre-split standalone times only; 106 malformed-lane members were not measured in that lane.
+# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry.
+# On the tree of 2026-10-24 (counted by _roster_figures; dated, not pinned), which carries all
+# five --ci-job members and two later members more (tools/check_rule_placement.py and the
+# rule-placement-selftest suite run), the roster had 123 members, 121 of them in the malformed
+# lane; 29 had no recorded time (the 12 account members the account does not name, and the 17
+# later members SIZING_LATER_MEASURED does not cover), 34 had no time in the account (those 29 and
+# the five --ci-job members), and 111 malformed-lane members were not measured in that lane
+# (config/member-roster-figures prints the live figures).
+# The child-status change (2026-10-17) registers four more members, each outside the account
+# and with no recorded time: opf/tools/_child_status.py --self-test,
+# tools/check_child_status_coverage.py, and tools/check_selftest_execution.py --suite
+# child-status-selftest and the same with --suite child-status-coverage-selftest. Of these, only
+# the --suite child-status-coverage-selftest member has a later measurement since (2026-10-29,
+# standalone runs, no config-lane time known): it carries a SIZING_LATER_MEASURED entry and its own
+# entry below, sized outside SIZING by the SIZING formula; the other three still have no recorded
+# time.
+# For every member, reaching its bound is cannot-evaluate, never a pass.
+# The factor is 40 / 24 * 4. 40 / 24 covers load5 40 under the model that wall time grows in
+# proportion to load5 once load5 exceeds the 24 CPUs, and not below (every measured run had load5
+# above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
+# what that model does not explain: the REPORTED (not reproduced here) opf.py --self-test lane runs
+# of 1192 s and the four that reached the then 1200 s default, at least 2.2 times its slowest
+# measured lane time. Each bound stays below 5766 s (see CHOICE).
+CONFIG_MEMBER_BOUND_DEFAULT = 1200
+CONFIG_MEMBER_BOUNDS = {
+    # MEASURED lane times (see SIZING): 650.49 s, 709.77 s, 734.81 s (whole roster) and 683.69 s
+    # (malformed). ESTIMATED: 734.81 * 20 / 3 = 4898.7, so 5100 s. REPORTED by the earlier sizing,
+    # not reproduced here (2026-10-07, load5 about 12 to 14 on a 16-CPU host): one standalone
+    # nice 10 run took 582.30 s wall and passed; a 1200 s bound was reached twice in the lanes at
+    # load5 above 20.
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 5100,
+    # MEASURED lane times (see SIZING): 482.53 s, 529.80 s, 510.39 s (whole roster) and 493.53 s
+    # (malformed). ESTIMATED: 529.80 * 20 / 3 = 3532.0, so 3600 s. REPORTED by the earlier sizing,
+    # not reproduced here (2026-10-12, load5 about 18 to 21): one standalone nice 10 run took
+    # 467.16 s wall and 255.64 s CPU and passed; lane runs of 730 s and 1192 s, and four lane
+    # reruns that reached the 1200 s default in config/opf/rc or config/opf/malformed.
+    ("opf/tools/opf.py", "--self-test"): 3600,
+    # MEASURED lane times (see SIZING): 265.55 s, 259.96 s, 257.71 s (whole roster) and 261.91 s
+    # (malformed). ESTIMATED: 265.55 * 20 / 3 = 1770.3, so 1800 s.
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"): 1800,
+    # MEASURED lane times (see SIZING): 214.08 s, 243.45 s and 189.62 s (whole roster); the
+    # malformed lane excludes this member. ESTIMATED: 243.45 * 20 / 3 = 1623.0, so 1800 s.
+    ("tools/check_release_delta.py", "--self-test"): 1800,
+    # MEASURED lane times (see SIZING): 207.87 s, 220.76 s, 229.02 s (whole roster) and 219.70 s
+    # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
+    ("opf/tools/check_opf_init.py", "--self-test"): 1800,
+    # The closure gate's self-test runs as FIVE registered members since the closure CI work was
+    # split between CI jobs (--ci-job: the gate partitions its legs between the jobs, and the flip
+    # runs in the job whose legs hold opf-tooling-selftest); this comment sizes all five. Each part
+    # sweeps only its own part of the current roster, plus the same fast vectors, so each part's
+    # sweep is a proper part of the whole self-test's over the same tree; that is NOT a subset of
+    # what the measured pre-split runs below swept, since opf-closure-c holds two legs
+    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) absent from the tree those runs
+    # measured. Every part keeps the whole self-test's 3600 s entry as a
+    # deliberate shorter deadline rather than a bound sized from a run of its own.
+    # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
+    # reached the 1200 s default, so they have no known length and none is fed to the formula).
+    # Every run below is of the PRE-SPLIT whole self-test (one sweep over every leg plus the flip).
+    # MEASURED (2026-10-13, load5 about 29 to 36 on a 24-CPU host): one complete run took 1313 s
+    # wall on the pre-fix tree and 1345 s with its leg bounds, both passed; the 1200 s default was
+    # reached in all three config lanes on three consecutive runs at that load.
+    # MEASURED (2026-10-14, plain, load5 about 20 to 24 on the same 24-CPU host): with the member's
+    # added cleanup vectors one complete run took 1497 s wall and passed. That run predates the
+    # member's import-batch leg and its re-measured leg table, so it no longer sizes this bound.
+    # MEASURED (2026-10-15, plain, on a shared 24-CPU host, load5 22.8 at the start and 32.6 at the
+    # end), at the member's legs, leg table and vectors of that date, recorded at a revision whose
+    # opf/ subtree is git tree 7bf8107f4c6d23f5c89298ef121af566f5e48614 (the tree its leg table was
+    # measured at): one complete run took 1667.7 s wall and passed. The member's vectors and the opf/
+    # tree its legs run have changed since, so for this tree that run time is INFERRED, not measured,
+    # and so is the estimate below, which scales it.
+    # ESTIMATED (SIZING's model that wall time grows in proportion to load5 once load5 exceeds the
+    # CPU count, applied to that standalone run): 3600 s, about 2.2 times that run (3600 / 1667.7 =
+    # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
+    # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
+    # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
+    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case, READ FROM
+    # SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
+    # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
+    # runs, and the 350 s vector allowance), 12732 s (opf-closure-a), 8775 s (b), 7780 s (c),
+    # 8570 s (d) and 9526 s (e), and below each CI job's worst case (20793 s, 17800 s, 15810 s,
+    # 17390 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
+    # as the default's comment above sanctions: this lane owns no member's
+    # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
+    # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
+    # its leg bound, ended by a signal, or its flip is not evaluated, the member itself exits 2, and
+    # this lane reads any non-zero member exit as a definite offender (_split_offenders: only this
+    # suite's own recorded timeout is cannot-evaluate), so under lane load such a trip reads here as
+    # a FAIL of the member, not as cannot-evaluate. Each of those inner leg bounds is itself a
+    # deliberate shorter deadline (the member says so beside _LEG_CEILING_S), held, for each leg
+    # whose command is a member here, at or above this table's deadline for that command plus the
+    # member's 60 s launch margin, so that the closure never kills such a leg before this lane would.
+    # The opf-closure-c entry was 1800 s while that member swept opf-homes-selftest alone, sized above
+    # its then worst case, 1620 s; it now sweeps five legs, so it takes the 3600 s of the others.
+    # MEASURED (2026-10-23, at the tree of that one-leg member, plain, on a 24-CPU host, load5 5.4 at
+    # the start and 5.9 at the end): one complete standalone run of it took 110.3 s wall and passed,
+    # its homes leg 53.4 s. No config-lane time of any of the five members is known.
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 3600,
+    # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
+    # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
+    # known length and none is fed to the formula; the same lanes had passed on the same tree in an
+    # earlier run).
+    # MEASURED (2026-10-29, CI, the "Child-status coverage self-test (execution-reconciled)" step of
+    # the Execution-reconciled self-tests job, this same command run standalone): started 00:21:14Z,
+    # completed 00:34:30Z, 796 s wall, passed.
+    # MEASURED (2026-10-29, on an 80-CPU host, load5 about 6): one standalone run of
+    # tools/check_child_status_coverage.py --self-test (the self-test this suite runs) took 604.9 s
+    # wall.
+    # ESTIMATED: 796 * 20 / 3 = 5306.7, so 5400 s.
+    ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): 5400,
+}
+# The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
+# from them and config/member-roster-figures pins them against _registered_selftests().
+# SIZING_ACCOUNT_ROSTER: every argv the whole-roster run covered, as registered when it was taken.
+SIZING_ACCOUNT_ROSTER = frozenset({
+    ("opf/tools/_journal.py", "--self-test"),
+    ("opf/tools/_opf_adopt.py", "--self-test"),
+    ("opf/tools/_opf_adopt_apply.py", "--self-test"),
+    ("opf/tools/_opf_adopt_hook.py", "--self-test"),
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"),
+    ("opf/tools/_opf_init.py", "--self-test"),
+    ("opf/tools/_opf_init_contract.py", "--self-test"),
+    ("opf/tools/_opf_init_operation.py", "--self-test"),
+    ("opf/tools/_opf_init_substrate.py", "--self-test"),
+    ("opf/tools/_opf_observe.py", "--self-test"),
+    ("opf/tools/_opf_oplock.py", "--self-test"),
+    ("opf/tools/_opf_pack_manifest.py", "--self-test"),
+    ("opf/tools/check_opf_doctor.py", "--self-test"),
+    ("opf/tools/check_opf_drift.py", "--self-test"),
+    ("opf/tools/check_opf_homes.py", "--self-test"),
+    ("opf/tools/check_opf_init.py", "--self-test"),
+    ("opf/tools/check_opf_init_contract.py", "--self-test"),
+    ("opf/tools/check_opf_init_observe.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/check_opf_init_p0.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/check_opf_prompt_pack.py", "--self-test"),
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/opf.py", "--self-test"),
+    ("opf/tools/selftest_commonmark_conformance.py",),
+    ("opf/tools/selftest_commonmark_headings.py",),
+    ("tools/_qa_adapter.py", "--self-test"),
+    ("tools/aei_backlog_md.py", "--self-test"),
+    ("tools/audit_reference.py", "--self-test"),
+    ("tools/check_applies.py", "--self-test"),
+    ("tools/check_artifact_checksums.py", "--self-test"),
+    ("tools/check_branch_root.py", "--self-test"),
+    ("tools/check_byte_canon.py", "--self-test"),
+    ("tools/check_ci_parity.py", "--self-test"),
+    ("tools/check_cited_standards.py", "--self-test"),
+    ("tools/check_clauses.py", "--self-test"),
+    ("tools/check_crosswalk.py", "--self-test"),
+    ("tools/check_derived_command_parameters.py", "--self-test"),
+    ("tools/check_entry_guard.py",),
+    ("tools/check_footer.py", "--self-test"),
+    ("tools/check_gensrc_failclose.py", "--self-test"),
+    ("tools/check_git_option_table.py", "--self-test"),
+    ("tools/check_hooks_preview.py", "--self-test"),
+    ("tools/check_install_page.py", "--self-test"),
+    ("tools/check_instruction_budget.py",),
+    ("tools/check_instruction_budget.py", "--self-test"),
+    ("tools/check_internal_names.py", "--self-test"),
+    ("tools/check_license_qualification.py", "--self-test"),
+    ("tools/check_manifest.py", "--self-test"),
+    ("tools/check_mistakes_register.py", "--self-test"),
+    ("tools/check_msg_leaks.py", "--self-test"),
+    ("tools/check_newtab.py", "--self-test"),
+    ("tools/check_no_dashes.py", "--self-test"),
+    ("tools/check_opf_enforce_platforms.py", "--self-test"),
+    ("tools/check_overclaim.py", "--self-test"),
+    ("tools/check_portability.py", "--self-test"),
+    ("tools/check_python_floor.py",),
+    ("tools/check_python_launcher_isolation.py", "--self-test"),
+    ("tools/check_record_drift.py", "--self-test"),
+    ("tools/check_record_sections.py", "--self-test"),
+    ("tools/check_reference_facts.py", "--self-test"),
+    ("tools/check_release_build.py", "--self-test"),
+    ("tools/check_release_cut.py", "--self-test", "--red-on-revert"),
+    ("tools/check_release_delta.py", "--self-test"),
+    ("tools/check_secrets.py", "--self-test"),
+    ("tools/check_selftest_execution.py", "--self-test"),
+    ("tools/check_selftest_execution.py", "--suite", "ci-status-behaviour-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "entry-guard-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "instruction-budget-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "orch-behaviour-selftest"),
+    ("tools/check_selftest_execution.py", "--suite", "python-floor-selftest"),
+    ("tools/check_site.py", "--self-test"),
+    ("tools/check_site_versions.py", "--self-test"),
+    ("tools/check_sized_instructions.py", "--self-test"),
+    ("tools/check_standards_currency.py", "--self-test"),
+    ("tools/check_version_monotonicity.py", "--self-test"),
+    ("tools/conformance.py", "--self-test"),
+    ("tools/doctor.py", "--self-test"),
+    ("tools/gen_char_policy.py", "--self-test"),
+    ("tools/gen_crosswalk.py", "--self-test"),
+    ("tools/gen_cursor.py", "--self-test"),
+    ("tools/gen_disclosure.py", "--self-test"),
+    ("tools/gen_enforceability.py", "--self-test"),
+    ("tools/gen_enforcement_register.py", "--self-test"),
+    ("tools/gen_first_pin_demo.py", "--self-test"),
+    ("tools/gen_gensrc.py", "--self-test"),
+    ("tools/gen_hooks.py", "--self-test"),
+    ("tools/gen_install.py", "--self-test"),
+    ("tools/gen_manifest.py", "--self-test"),
+    ("tools/gen_reference_facts.py", "--self-test"),
+    ("tools/gen_renderers.py", "--self-test"),
+    ("tools/gen_rules.py", "--self-test"),
+    ("tools/gen_skill.py", "--self-test"),
+    ("tools/gen_worker_pack.py", "--self-test"),
+    ("tools/import_cwe.py", "--self-test"),
+    ("tools/migrate.py", "--self-test"),
+    ("tools/pin.py", "--self-test"),
+    ("tools/selftest_aiqt_corpus.py",),
+    ("tools/selftest_aiqt_hooks.py",),
+    ("tools/selftest_ci_status.py",),
+    ("tools/selftest_opf_render.py",),
+    ("tools/selftest_orch_hooks.py",),
+})
+# How many SIZING_ACCOUNT_ROSTER members the account gives a time or an upper bound for.
+SIZING_ACCOUNT_TIMED = 88
+# The members of the two shorter-roster combined-lane runs (each timed again in the whole-roster
+# run) that are still registered.
+SIZING_MEASURED = frozenset({
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/opf.py", "--self-test"),
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"),
+    ("tools/check_release_delta.py", "--self-test"),
+    ("opf/tools/check_opf_init.py", "--self-test"),
+    ("opf/tools/_opf_adopt.py", "--self-test"),
+    ("opf/tools/_opf_oplock.py", "--self-test"),
+    ("opf/tools/_opf_init_operation.py", "--self-test"),
+    ("opf/tools/check_opf_homes.py", "--self-test"),
+    ("opf/tools/check_opf_doctor.py", "--self-test"),
+})
+# The SIZING_MEASURED members the malformed-lane run measured, written out rather than computed
+# from CONFIG_EXCLUSIONS, so a later change to that lane's exclusions on a measured member is
+# reported instead of silently moving what the run is said to have covered.
+SIZING_MALFORMED_MEASURED = frozenset({
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"),
+    ("opf/tools/opf.py", "--self-test"),
+    ("opf/tools/_opf_adopt_observe.py", "--self-test"),
+    ("opf/tools/check_opf_init.py", "--self-test"),
+    ("opf/tools/_opf_adopt.py", "--self-test"),
+    ("opf/tools/_opf_oplock.py", "--self-test"),
+    ("opf/tools/_opf_init_operation.py", "--self-test"),
+    ("opf/tools/check_opf_homes.py", "--self-test"),
+    ("opf/tools/check_opf_doctor.py", "--self-test"),
+})
+# Measurements taken after the account: registered argv -> a one-line citation of where that
+# measurement, and its config-lane times when any are known, are recorded (normally the bound
+# entry's own comment). A CONFIG_MEMBER_BOUNDS key needs its argv here or in SIZING_MEASURED.
+SIZING_LATER_MEASURED = {
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): (
+        "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
+        " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): (
+        "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
+        " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): (
+        "Standalone runs of the pre-split whole self-test, and one of this member when it held one"
+        " leg (2026-10-23, 110.3 s), no config-lane time known: see the shared CONFIG_MEMBER_BOUNDS"
+        " comment."),
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): (
+        "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
+        " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): (
+        "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
+        " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): (
+        "Standalone runs only (2026-10-29, CI 796 s, local 604.9 s), no config-lane time known:"
+        " see this member's CONFIG_MEMBER_BOUNDS comment."),
+}
+# After the process-group kill: the bounded drain of output still held by a descendant that left
+# the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
+# to be confirmed empty (_member_group_empty).
+CONFIG_MEMBER_DRAIN_SECONDS = 30
+CONFIG_MEMBER_REAP_SECONDS = 5
+CONFIG_MEMBER_EMPTY_SECONDS = 5
+# The corpus leak lanes' bound (_run_corpus, _run_corpus_imported).
+CORPUS_BOUND = 300
+# The maintenance probe's polling deadline for an unterminated final trace2 event to be completed
+# by the process still appending to the file; a read finishing at or past it fails the probe, even
+# one that found the event complete (_trace2_maintenance_children).
+TRACE2_TAIL_SECONDS = 10
+# Linux's PIDFD_SIGNAL_PROCESS_GROUP (include/uapi/linux/pidfd.h, Linux 6.9 and later): a
+# pidfd_send_signal flag that signals the process group the pidfd's process leads.
+PIDFD_SIGNAL_PROCESS_GROUP = getattr(signal, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 2)
+
+
+def _config_member_bound(member):
+    return CONFIG_MEMBER_BOUNDS.get(tuple(member), CONFIG_MEMBER_BOUND_DEFAULT)
+
+
+def _roster_figures(roster):
+    """The live roster figures derived from the frozen sizing account, and the problems that stop
+    that account applying to roster (the registered roster, _registered_selftests()). Pure:
+    nothing is launched or read. figures: members; malformed (members in the malformed lane);
+    later (the sorted members outside SIZING_ACCOUNT_ROSTER); no_recorded_time (the account
+    members it gives no time for, plus each later member SIZING_LATER_MEASURED does not cover);
+    malformed_unmeasured (malformed-lane members outside SIZING_MALFORMED_MEASURED). problems, in
+    this order: an account member no longer registered (the account's counts no longer say which
+    registered members they cover); a measured member outside the account, or a malformed-lane
+    measurement outside SIZING_MEASURED; a measured member whose malformed-lane membership
+    differs from what was measured; a stale or unreasoned SIZING_LATER_MEASURED entry (not
+    registered, or its citation not one nonblank line); a CONFIG_MEMBER_BOUNDS key in neither
+    SIZING_MEASURED nor SIZING_LATER_MEASURED."""
+    members = {tuple(argv) for argv in roster}
+    malformed = {argv for argv in members
+                 if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]}
+    problems = ["sizing account member not registered: {!r}".format(argv)
+                for argv in sorted(SIZING_ACCOUNT_ROSTER - members)]
+    problems += ["measured member outside the sizing account: {!r}".format(argv)
+                 for argv in sorted(SIZING_MEASURED - SIZING_ACCOUNT_ROSTER)]
+    problems += ["malformed-lane measurement outside SIZING_MEASURED: {!r}".format(argv)
+                 for argv in sorted(SIZING_MALFORMED_MEASURED - SIZING_MEASURED)]
+    problems += ["malformed-lane membership changed on a measured member: {!r}".format(argv)
+                 for argv in sorted(SIZING_MEASURED)
+                 if (_command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"])
+                 != (argv in SIZING_MALFORMED_MEASURED)]
+    # One nonblank line means no line-boundary character at all, not just LF and CR: splitlines
+    # recognizes the full set (VT, FF, FS, GS, RS, NEL and the Unicode separators), and the
+    # padding makes a leading or trailing boundary split too.
+    problems += ["stale or unreasoned later measurement: {!r}".format(argv)
+                 for argv, citation in sorted(SIZING_LATER_MEASURED.items())
+                 if argv not in members or not citation.strip()
+                 or len(("x" + citation + "x").splitlines()) != 1]
+    problems += ["bound with no measurement behind it: {!r}".format(argv)
+                 for argv in sorted(CONFIG_MEMBER_BOUNDS)
+                 if argv not in SIZING_MEASURED and argv not in SIZING_LATER_MEASURED]
+    later = sorted(members - SIZING_ACCOUNT_ROSTER)
+    figures = {"members": len(members), "malformed": len(malformed), "later": later,
+               "no_recorded_time": len(SIZING_ACCOUNT_ROSTER) - SIZING_ACCOUNT_TIMED
+               + len([argv for argv in later if argv not in SIZING_LATER_MEASURED]),
+               "malformed_unmeasured": len(malformed - SIZING_MALFORMED_MEASURED)}
+    return figures, problems
+
+
+# THE MEMBER REGISTRY. Every bounded child (_run_bounded) leads its own session and process group
+# and is registered here when it starts (_start_member_group), as a _MemberGroup; it is removed
+# only once its group is confirmed empty (_end_member_group). "closing" is set by main()'s finally
+# and the suite's close (_close_members), by the failed-member branch of the config pool
+# (_config_results) and by the first SIGINT or SIGTERM while main() runs (_close_on_signal); once
+# it is set no member starts. The lock is held across the closing test, the Popen and the
+# registration, so a member either is registered before the close takes its list or never starts.
+# THE MAIN THREAD NEVER TAKES THE LOCK WHILE A SIGNAL CAN RAISE: every main-thread path that takes
+# it during a run (the close, the failed-member branch) first stores closing = True as a PLAIN
+# store, with no lock, so _close_on_signal is a no-op before the lock is ever taken there (a
+# handler raising between the acquire and the protected range of a with statement would leave the
+# lock held). Every acquire is also BOUNDED (_RegistryLock, REGISTRY_LOCK_SECONDS): one not granted
+# raises RegistryLockTimeout, which each caller reports AND records in _MEMBERS["refused"]
+# (_lock_refused), so no path blocks forever on it and a refusal at any of the five sites (a member
+# start, a release, a kill sweep, any of the close's own three acquires, the config pool's
+# failed-member branch) makes the run cannot-evaluate (_final_verdict) even when a later close gets
+# the lock and ends cleanly. config/member-close-lock pins the bound;
+# config/member-close-unresolved-verdict pins the persistence at each of the five sites
+# ("start-timeout", "release-timeout", "sweep-refused", "failed-refused"), the close at each of its
+# three acquires ("close-refused", "close-wait-refused", "close-left-refused").
+REGISTRY_LOCK_SECONDS = 60
+
+
+class RegistryLockTimeout(RuntimeError):
+    """The member registry lock was not granted within REGISTRY_LOCK_SECONDS."""
+
+
+class _RegistryLock:
+    """The registry's threading.Lock, taken by a with statement under a bounded acquire."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def acquire(self, timeout=-1):
+        return self._lock.acquire(True, timeout)
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        if not self.acquire(REGISTRY_LOCK_SECONDS):
+            raise RegistryLockTimeout("the member registry lock was not granted within {} s".format(
+                REGISTRY_LOCK_SECONDS))
+        return self
+
+    def __exit__(self, *exc_info):
+        self.release()
+
+
+_MEMBERS_LOCK = _RegistryLock()
+# "raised": the strongest SIGINT or SIGTERM raised so far in this run, by _close_on_signal or by
+# _raise_held (None until one has), so a later drain never ranks below it. "held": EVERY SIGINT or
+# SIGTERM _close_on_signal deferred because closing was set or one had already raised, in the
+# order received (none is dropped); main() raises the strongest after its second close and the
+# restore (_raise_held), and _reopen_members raises it when it clears closing. Inside a run, closing
+# is cleared only by _reopen_members (the controls that drive the failed-member branch on purpose,
+# and _closing_refusal_control, which sets and clears closing alone and never restores the whole
+# registry, so a signal held inside it is raised right after it). "refused": every registry lock
+# refusal of this run (_lock_refused).
+_MEMBERS = {"closing": False, "raised": None, "held": [], "refused": [], "groups": set()}
+# How often a member's wait (_run_member) looks at closing: a member whose wait sees it set stops
+# waiting and runs its own cleanup at once, instead of waiting on to its bound.
+MEMBER_WAIT_SLICE_SECONDS = 0.5
+
+
+def _lock_refused(what, exc):
+    """Record a registry lock refusal (exc, a RegistryLockTimeout, met by what) in
+    _MEMBERS["refused"] and return the message: main()'s verdict reads every refusal of the run,
+    so it stays cannot-evaluate even when a later close gets the lock and ends cleanly."""
+    message = "{}: {}".format(what, exc)
+    _MEMBERS["refused"].append(message)
+    return message
+
+
+class _MemberGroup:
+    """One bounded child's process group: proc, the Popen of its leader (the group id is
+    proc.pid); pidfd, os.pidfd_open of the leader taken at spawn while it was an unreaped child
+    (None where unavailable); ended, set once its own thread's cleanup has run."""
+    __slots__ = ("proc", "pidfd", "ended")
+
+    def __init__(self, proc, pidfd):
+        self.proc, self.pidfd, self.ended = proc, pidfd, False
+
+
+def _start_member_group(argv, cwd, env):
+    """Start argv as the leader of a new session and process group and register it; raise
+    subprocess.SubprocessError, starting nothing, once the suite is closing (RegistryLockTimeout,
+    starting nothing, when the registry lock is not granted)."""
+    with _MEMBERS_LOCK:
+        if _MEMBERS["closing"]:
+            raise subprocess.SubprocessError("the suite is closing: no new member starts")
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, errors="replace",
+                                start_new_session=True)
+        try:
+            pidfd = os.pidfd_open(proc.pid)
+        except (AttributeError, OSError):  # no pidfd here: the group is named by number
+            pidfd = None
+        group = _MemberGroup(proc, pidfd)
+        _MEMBERS["groups"].add(group)
+    return group
+
+
+def _signal_member_group(group, sig):
+    """Send sig to every process in group's process group; return False when it was not sent
+    (below), and raise ProcessLookupError when the group has no process left. With a pidfd, the
+    kernel addresses the group through the leader's own pid record (pidfd_send_signal with
+    PIDFD_SIGNAL_PROCESS_GROUP), which a reused pid number never names, so this is exact before
+    AND after the leader is reaped. Without one (no pidfd, or a kernel before Linux 6.9 refusing
+    the flag with EINVAL) the group is named by number (os.killpg), which is exact while the
+    leader is unreaped (its pid, and with it the group id, stays allocated until the reap); after
+    the reap only signal 0 is sent by number (a reused number is then only probed, never
+    signalled), and any other signal returns False unsent."""
+    if group.pidfd is not None:
+        try:
+            signal.pidfd_send_signal(group.pidfd, sig, None, PIDFD_SIGNAL_PROCESS_GROUP)
+            return True
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
+    if sig and group.proc.returncode is not None:
+        return False
+    os.killpg(group.proc.pid, sig)
+    return True
+
+
+def _signal_member_groups():
+    """SIGKILL every registered member group, under the registry lock (so a group whose pidfd is
+    being released is never signalled through it); return the problems met, a lock not granted
+    among them."""
+    problems = []
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
-                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace", timeout=1200)
-        if proc.returncode:
-            print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
-                  file=sys.stderr)
-        return proc.returncode
+        with _MEMBERS_LOCK:
+            for group in list(_MEMBERS["groups"]):
+                try:
+                    _signal_member_group(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except Exception as exc:  # reported, never raised
+                    problems.append("group {} kill refused ({}: {})".format(
+                        group.proc.pid, type(exc).__name__, exc))
+    except RegistryLockTimeout as exc:
+        problems.append(_lock_refused("no group signalled", exc))
+    return problems
+
+
+def _stop_member_group(group):
+    """Bounded cleanup of a bounded child that must end, on EVERY exit of its wait: SIGKILL its
+    whole process group (_signal_member_group; never conditioned on the leader's returncode, so a
+    descendant left in the group after the leader exited or was reaped dies too), falling back to
+    the leader alone when the group kill is refused; then drain its output for at most
+    CONFIG_MEMBER_DRAIN_SECONDS and reap the leader for at most CONFIG_MEMBER_REAP_SECONDS.
+    Returns the problems met ([] when clean); a step that raises is recorded and the cleanup goes
+    on. It runs on the member's own thread, never the main thread (_run_bounded), so no signal
+    handler raises inside it."""
+    proc, problems = group.proc, []
+    try:
+        _signal_member_group(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception as exc:  # any refusal is reported, never raised
+        problems.append("group kill refused ({}: {}); killed the leader alone, so a "
+                        "descendant in its group may survive".format(type(exc).__name__, exc))
+        try:
+            proc.kill()
+        except Exception as kill_exc:
+            problems.append("leader kill failed ({}: {})".format(type(kill_exc).__name__,
+                                                                 kill_exc))
+    try:
+        proc.communicate(timeout=CONFIG_MEMBER_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        problems.append("output still held after the {} s drain; the pipes are closed "
+                        "unread".format(CONFIG_MEMBER_DRAIN_SECONDS))
+    except Exception as exc:
+        problems.append("drain failed ({}: {})".format(type(exc).__name__, exc))
+    if proc.returncode is None:
+        try:
+            proc.wait(timeout=CONFIG_MEMBER_REAP_SECONDS)
+        except Exception as exc:
+            problems.append("leader not reaped within {} s ({}: {})".format(
+                CONFIG_MEMBER_REAP_SECONDS, type(exc).__name__, exc))
+    return problems
+
+
+def _member_group_empty(group):
+    """None once group's process group is confirmed empty (signal 0 finds no process in it,
+    polled for at most CONFIG_MEMBER_EMPTY_SECONDS), else the problem. Without a pidfd and after
+    the leader's reap, the probe is by number, so a reused number reads as not empty (a false
+    alarm, never a kill)."""
+    deadline = time.monotonic() + CONFIG_MEMBER_EMPTY_SECONDS
+    while True:
+        try:
+            _signal_member_group(group, 0)
+        except ProcessLookupError:
+            return None
+        except Exception as exc:
+            return "group {} emptiness not confirmed ({}: {})".format(
+                group.proc.pid, type(exc).__name__, exc)
+        if time.monotonic() >= deadline:
+            return ("group {} still has a process {} s after the cleanup; it stays registered "
+                    "for the suite's close".format(group.proc.pid, CONFIG_MEMBER_EMPTY_SECONDS))
+        time.sleep(0.05)
+
+
+def _release_member_group(group):
+    """Remove a group confirmed empty from the registry and close its pidfd, exactly once; None,
+    or the problem when the registry lock is not granted (the group then stays registered, and the
+    refusal is recorded for main()'s verdict, _lock_refused)."""
+    try:
+        with _MEMBERS_LOCK:
+            _MEMBERS["groups"].discard(group)
+            fd, group.pidfd = group.pidfd, None
+    except RegistryLockTimeout as exc:
+        return _lock_refused("group {} not released".format(group.proc.pid), exc)
+    if fd is not None:
+        os.close(fd)
+    return None
+
+
+def _end_member_group(group, sink, banner, timed_out):
+    """Kill and reap group (_stop_member_group), release it once it is confirmed empty
+    (_member_group_empty; a group not confirmed stays registered for the suite's close), and
+    close its pipes. Every problem, and an exception escaping the cleanup, is reported as ONE line
+    on sink through _report_guarded: banner, a header naming the outcome (a recorded timeout when
+    timed_out is truthy, else the wait that ended otherwise), then the problems; none is raised,
+    so the outcome the cleanup follows (a return, or an exception already propagating) stands."""
+    try:
+        problems = _stop_member_group(group)
+    except BaseException as exc:
+        problems = ["cleanup raised ({}: {})".format(type(exc).__name__, exc)]
+    try:
+        unconfirmed = _member_group_empty(group)
+    except BaseException as exc:
+        unconfirmed = "emptiness check raised ({}: {})".format(type(exc).__name__, exc)
+    group.ended = True
+    if unconfirmed is None:
+        unconfirmed = _release_member_group(group)
+    if unconfirmed is not None:
+        problems.append(unconfirmed)
+    for stream in (group.proc.stdout, group.proc.stderr):
+        try:
+            stream.close()
+        except OSError:
+            pass
+    if problems:
+        _report_guarded("{}cleanup after {}: {}".format(
+            banner, "that timeout was incomplete (the timeout stays cannot-evaluate)"
+            if timed_out else "the wait ended was incomplete (that outcome stands)",
+            "; ".join(problems)), sink)
+
+
+def _close_members():
+    """THE SUITE'S CLOSE (main() runs it twice on every exit): set closing, FIRST as a plain store
+    with no lock held (so _close_on_signal is a no-op before this takes the registry lock), then
+    under the lock (so no member starts after it); SIGKILL every registered group, wait (bounded)
+    until every registered group's own thread has run its cleanup, then SIGKILL and probe whatever
+    is still registered, releasing each group now confirmed empty. Returns the problems met, a
+    group still not confirmed empty and a registry lock not granted (the close then stops) among
+    them. Each of its three with statements takes the lock through the bounded acquire, and a
+    refusal at each is pinned ("close-refused", "close-wait-refused", "close-left-refused")."""
+    _MEMBERS["closing"] = True
+    problems = []
+    try:
+        with _MEMBERS_LOCK:
+            _MEMBERS["closing"] = True
+        problems += _signal_member_groups()
+        deadline = time.monotonic() + (CONFIG_MEMBER_DRAIN_SECONDS + CONFIG_MEMBER_REAP_SECONDS
+                                       + CONFIG_MEMBER_EMPTY_SECONDS + 10)
+        while True:
+            with _MEMBERS_LOCK:
+                pending = [group for group in _MEMBERS["groups"] if not group.ended]
+            if not pending or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        problems += ["group {} cleanup still running at the close's deadline".format(
+            group.proc.pid) for group in pending]
+        with _MEMBERS_LOCK:
+            left = [group for group in _MEMBERS["groups"] if group.ended]
+        if left:
+            problems += _signal_member_groups()
+            for group in left:
+                unconfirmed = _member_group_empty(group)
+                if unconfirmed is None:
+                    unconfirmed = _release_member_group(group)
+                if unconfirmed is not None:
+                    problems.append(unconfirmed)
+    except RegistryLockTimeout as exc:
+        problems.append(_lock_refused("close stopped", exc))
+    return problems
+
+
+def _close_on_signal(signum, frame):
+    """main()'s SIGINT and SIGTERM handler, FIRST RAISE THEN DEFER: the first one, while closing is
+    clear and none has raised, sets closing (no member starts after it), records itself in raised
+    and raises (_raise_signal_exception), so main()'s finally closes every member group. Every
+    later one (once one has raised, or once closing is set by main()'s finally, the close or the
+    config pool's failed-member branch) is DEFERRED, never raised: each deferred one is appended to
+    held, in order, and main() raises the strongest of the run's signals once, after its second
+    close and the restore (_raise_held: SIGTERM over SIGINT), so no second or later signal can cut
+    either close short, and none is dropped. It never takes the registry lock, and it never raises
+    while the main thread holds it: every main-thread path that takes the lock during a run sets
+    closing first. (Residual: CPython clears a signal's pending flag before it calls the handler, so
+    a handler cut off at its own entry, before its first statement, by a newly arrived signal whose
+    handler raises is lost; the sweep injects nothing inside this function for that reason.)"""
+    if _MEMBERS["closing"] or _MEMBERS["raised"]:
+        _MEMBERS["held"].append(signum)
+        return
+    _MEMBERS["closing"] = True
+    _MEMBERS["raised"] = signum
+    _raise_signal_exception(signum)
+
+
+def _raise_signal_exception(signum):
+    """Raise what signum's default disposition means here: KeyboardInterrupt for SIGINT (Python's
+    default handler), SystemExit(128 + signum) for SIGTERM (143, the default action's exit code)."""
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+
+def _raise_held():
+    """THE DEFERRED-SIGNAL PRECEDENCE. When _close_on_signal deferred any signal (held, every one in
+    the order received), clear held, record the strongest of the run's signals in raised, and raise
+    it once: the strongest of the one raised before (raised, by _close_on_signal or by an earlier
+    drain) and every held one, SIGTERM over SIGINT whatever the order, so SystemExit 143 whenever a
+    SIGTERM was received and KeyboardInterrupt otherwise. Recording it keeps the precedence across
+    every drain: a SIGTERM held inside a control and raised by _reopen_members still outranks a
+    SIGINT held during main()'s later closes, so a terminate request delivered before the restore
+    is not downgraded to a KeyboardInterrupt a caller may catch, and a later SIGTERM replaces an
+    earlier SIGINT's exception still propagating. Residual, disclosed by main(): a SIGINT
+    delivered after SIGINT's restore takes the restored disposition instead, and one handled at
+    or after this drain's entry raises before held is read, so the signals still held, a SIGTERM
+    among them, are then dropped. Nothing when none was
+    deferred: the exception already propagating, if any, stands. main() calls it after its second
+    close and the restore, and _reopen_members when it clears closing. config/member-close-handlers
+    pins the precedence across a control and main()'s closes (the "split-..." scenarios)."""
+    held, _MEMBERS["held"] = _MEMBERS["held"], []
+    if held:
+        _MEMBERS["raised"] = (signal.SIGTERM if signal.SIGTERM in [_MEMBERS["raised"]] + held
+                              else signal.SIGINT)
+        _raise_signal_exception(_MEMBERS["raised"])
+
+
+def _reopen_members():
+    """Clear closing after a control drove _config_results into its failed-member branch on
+    purpose and caught the raise (production never clears it inside a run: that raise ends the
+    suite), or after _closing_refusal_control. A SIGINT or SIGTERM deferred while closing was set
+    is raised now (_raise_held, which records it, so main()'s final drain never ranks below it),
+    closing set again, instead of being lost."""
+    _MEMBERS["closing"] = False
+    if _MEMBERS["held"]:
+        _MEMBERS["closing"] = True
+        _raise_held()
+
+
+def _install_signal_handlers(previous):
+    """Install _close_on_signal for SIGINT (when it has Python's default handler) and SIGTERM
+    (when it has the default action), on the main thread only, recording {signum: previous} in
+    previous for _restore_signal_handlers BEFORE each install, so a signal raising right after the
+    install still leaves the caller's disposition recorded. A signal the caller set to be ignored,
+    or gave its own handler, is left as it is."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for name, default in (("SIGINT", signal.default_int_handler), ("SIGTERM", signal.SIG_DFL)):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        current = signal.getsignal(signum)
+        if current == default:
+            previous[signum] = current
+            signal.signal(signum, _close_on_signal)
+
+
+def _restore_signal_handlers(previous):
+    """Restore the dispositions _install_signal_handlers recorded, ONCE, after main()'s second
+    close, in REVERSE order of installation, so SIGTERM is restored first and SIGINT (whose restored
+    handler raises) last: a SIGINT arriving between the two finds _close_on_signal and is deferred,
+    and one arriving after SIGINT's restore raises with SIGTERM already restored, never leaving
+    _close_on_signal installed. main() then raises a deferred signal (_raise_held).
+    config/member-close-signal-sweep pins the order (the signal.signal calls made here are
+    recorded) and a signal at every point of this function."""
+    for signum in reversed(list(previous)):
+        signal.signal(signum, previous[signum])
+
+
+def _finish_members():
+    """Run the suite's close (_close_members) and report its problems on stdout; return them.
+    Idempotent: main() runs it twice, with the close handlers installed throughout."""
+    problems = _close_members()
+    if problems:
+        _report_guarded("MEMBER CLOSE: {}".format("; ".join(problems)), sys.stdout)
+    return problems
+
+
+def _final_verdict(code, unresolved, refused=()):
+    """main()'s exit code after the suite's close. code is _suite_main's (0 when nothing was found);
+    unresolved, the problems main()'s second close still met (a group not confirmed empty, a kill
+    refused, a registry lock not granted), and refused, every registry lock refusal of the run
+    (_lock_refused at its five sites: a member start, a release, a kill sweep, any of the close's
+    own three acquires and the config pool's failed-member branch, even one a later close made
+    good), make the
+    run cannot-evaluate: 0 becomes 2, a definite failure's 1 and a harness error's 2
+    stand, and the problems are listed. The PASS line is printed here, after the close, and only
+    for a run that is still 0."""
+    problems = list(unresolved) + [entry for entry in refused if entry not in unresolved]
+    if problems:
+        note = ("the suite's close left member process groups unresolved" if unresolved else
+                "the member registry lock was refused during the run")
+        print(("  also cannot evaluate ({}):" if code == 1 else
+               "SELF-TEST CANNOT EVALUATE: {}:").format(note), flush=True)
+        for problem in problems:
+            print("  - " + problem, flush=True)
+        return code or 2
+    if code == 0:
+        print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
+              "tools/selftest_checks.toml".format(len(EXECUTED)), flush=True)
+    return code
+
+
+def _report_guarded(text, sink):
+    """Print a secondary diagnostic line on sink. A stream that refuses it loses that line: the
+    diagnostic never replaces the result it accompanies or an exception already propagating."""
+    try:
+        print(text, file=sink, flush=True)
+    except Exception:  # a refused secondary diagnostic is dropped, never raised
+        pass
+
+
+def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, report=None):
+    """Run argv under a time bound; return (returncode, stdout, stderr), or (message, "", "") for
+    a launch error (str(exc)) or a timeout ("TIMEOUT: ..."). The child leads its own session and
+    process group (the start_new_session and killpg pattern of opf/tools/_opf_pack_manifest.py),
+    so its cleanup kills the WHOLE group: a grandchild holding the output pipe, or one left behind
+    by a leader that already exited, dies with it.
+    A timeout is RECORDED FIRST, in cannot_evaluate (default CANNOT_EVALUATE), and announced as
+    banner + message on report (default sys.stdout, never stderr: the cannot-evaluate path is a
+    stdout report plus exit 2, and the execution gate requires the suite's error stream to hold
+    only declared bytes); only then is the child cleaned up. An OSError, SubprocessError or
+    ValueError from the wait is returned as its message; any other exception from the wait or the
+    timeout handler (the message, the record, the announcement) propagates unchanged.
+    THE MEMBER NEVER RUNS ON THE MAIN THREAD. Called from the main thread, this starts the child,
+    waits for it and cleans it up on a separate thread and joins it (the result, or the exception
+    it raised, is handed back); called from any other thread (the config lanes' pool workers) it
+    does so inline. CPython raises a signal handler's exception only on the main thread, so no
+    interrupt can land between Popen and the registration, inside communicate() (whose own
+    interrupt handling reaps the leader), or inside the cleanup. An interrupt reaching the main
+    thread while it waits propagates at once; the member's group stays registered and main()'s
+    close kills it (_close_members). The wait is taken in slices of MEMBER_WAIT_SLICE_SECONDS, and
+    once closing is set the member stops waiting and runs its own cleanup (its result is then the
+    message "<label> was stopped by the suite's close (no result)"), so after an interrupt or a
+    failed member no member thread waits on to its bound.
+    CLEANUP ON EVERY EXIT OF THE WAIT: the child is registered when it starts
+    (_start_member_group), and a finally ends its group however the wait ends, a normal return
+    included (_end_member_group: the group SIGKILL, the bounded drain and reap, the bounded
+    confirmation that the group is empty, then the release). THE OUTCOME WINS: the return or the
+    exception already propagating is never replaced by the cleanup; a cleanup problem is reported
+    as one line on the same stream (_report_guarded).
+    config/member-timeout-record-before-cleanup, config/member-timeout-cleanup-on-raise,
+    config/member-timeout-diagnostic-guarded, config/member-timeout-interrupt-cleanup,
+    config/member-off-main-thread, config/member-grandchild-after-normal-exit and
+    config/member-close-on-interrupt pin that order and those guards.
+    DISCLOSED RESIDUALS: without a pidfd process-group signal (no os.pidfd_open, or Linux before
+    6.9) a group whose leader was already reaped (a normal return) is not killed, since its
+    number could then name a reused group, so a descendant left in it survives there, the group
+    stays registered (the emptiness probe finds it) and the close's problems make the run
+    cannot-evaluate; config/member-grandchild-after-normal-exit pins BOTH paths on every kernel
+    (the pidfd path where the kernel has it, and the fallback forced with a flag the kernel
+    refuses with EINVAL): retention, then release once the survivor is killed. Which path the CI
+    runner's kernel takes is not known here. A thread other than the member's own could also read
+    the leader as unreaped just before the member thread reaps it and signal the number then. A
+    descendant that moved itself to another process group (setsid or setpgid) survives the kill
+    and can hold the member's output pipe: on a normal wait the member then waits to its bound, and
+    after the bound, or once closing is set (an interrupt, a failed member, the close), its cleanup
+    drains for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are closed. After an interrupt
+    the member thread therefore ends within MEMBER_WAIT_SLICE_SECONDS + CONFIG_MEMBER_DRAIN_SECONDS
+    + CONFIG_MEMBER_REAP_SECONDS + CONFIG_MEMBER_EMPTY_SECONDS (about 40.5 s), inside the close's
+    own wait (that sum minus the slice, plus 10 s); config/member-close-on-interrupt pins that
+    with a setsid pipe holder. In its own session the child has no controlling terminal: a read of
+    an inherited terminal fails."""
+    args = (argv, cwd, env, bound, label, banner, cannot_evaluate, report)
+    if threading.current_thread() is not threading.main_thread():
+        return _run_member(*args)
+    outcome = []
+
+    def member():
+        try:
+            outcome.append((_run_member(*args), None))
+        except BaseException as exc:  # handed back to the main thread and raised there
+            outcome.append((None, exc))
+
+    worker = threading.Thread(target=member, name="bounded member")
+    worker.start()
+    worker.join()
+    result, exc = outcome[0]
+    if exc is not None:
+        raise exc
+    return result
+
+
+def _run_member(argv, cwd, env, bound, label, banner, cannot_evaluate, report):
+    """_run_bounded's body, on a thread other than the main thread."""
+    sink = sys.stdout if report is None else report
+    try:
+        group = _start_member_group(argv, cwd, env)
     except (OSError, subprocess.SubprocessError) as exc:
-        return str(exc)
-
-
-def _manifest_setup_failures(base):
-    """A failed add or commit must raise even when the earlier init succeeded."""
-    import gen_manifest
-
-    original = gen_manifest._git
+        return str(exc), "", ""
+    except RegistryLockTimeout as exc:
+        message = "TIMEOUT: {} (cannot evaluate)".format(_lock_refused(
+            "{} not started".format(label), exc))
+        (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+        print(banner + message, file=sink, flush=True)
+        return message, "", ""
+    proc, recorded = group.proc, []
+    deadline = time.monotonic() + bound
     try:
-        for check_id, operation in (
-                ("setup/gen-manifest-add-checked", "add"),
-                ("setup/gen-manifest-commit-checked", "commit"),
-        ):
-            def fake_git(root, *args):
-                return subprocess.CompletedProcess(args, int(args[0] == operation))
-            gen_manifest._git = fake_git
+        while True:
             try:
-                gen_manifest._build_fixture(base / ("failed-" + operation))
-            except subprocess.CalledProcessError:
-                refused = True
-            else:
-                refused = False
-            check(check_id, refused, True)
+                stdout, stderr = proc.communicate(timeout=min(
+                    MEMBER_WAIT_SLICE_SECONDS, max(deadline - time.monotonic(), 0)))
+                break
+            except subprocess.TimeoutExpired:
+                if _MEMBERS["closing"]:
+                    return "{} was stopped by the suite's close (no result)".format(label), "", ""
+                if time.monotonic() < deadline:
+                    continue
+                message = "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(label,
+                                                                                      bound)
+                (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+                recorded.append(message)
+                print(banner + message, file=sink, flush=True)
+                return message, "", ""
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                return str(exc), "", ""
+        return proc.returncode, stdout, stderr
     finally:
-        gen_manifest._git = original
+        _end_member_group(group, sink, banner, recorded)
 
 
+def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=None):
+    """Run one registered member under its bound (_config_member_bound) through _run_bounded;
+    return its exit code, or a string for a launch error or a timeout. A member that exits
+    non-zero has its output printed on report (default sys.stdout, never stderr), so the
+    execution gate reads a real member failure as the suite's FAIL (exit 1), not as undeclared
+    stderr (cannot evaluate)."""
+    bound = _config_member_bound(member) if bound is None else bound
+    rc, stdout, stderr = _run_bounded(
+        [sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]], ROOT, env, bound,
+        " ".join(member), "CONFIG-INJECTION ", cannot_evaluate, report)
+    if not isinstance(rc, str) and rc:
+        print("CONFIG-INJECTION {}:\n{}".format(member, stdout + stderr),
+              file=sys.stdout if report is None else report, flush=True)
+    return rc
 
-def _manifest_extra_setup_failures():
-    """Execute each standalone setup expression with a failing git result.
-    These are the eight stale/binok/marker calls outside _build_fixture; parsing
-    the actual expressions catches removal of their check_returncode calls.
-    This bounded probe does not simulate the rest of the generator's self-test.
-    """
-    tree = _optlevel.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
-    owners = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-              and n.name == "_self_test_main_isolated"]
-    for check_id, fixture, operation in (
-            ("setup/gen-manifest-stale-add", "stale", "add"),
-            ("setup/gen-manifest-stale-commit", "stale", "commit"),
-            ("setup/gen-manifest-binok-init", "binok", "init"),
-            ("setup/gen-manifest-binok-add", "binok", "add"),
-            ("setup/gen-manifest-binok-commit", "binok", "commit"),
-            ("setup/gen-manifest-marker-init", "marker", "init"),
-            ("setup/gen-manifest-marker-add", "marker", "add"),
-            ("setup/gen-manifest-marker-commit", "marker", "commit"),
-    ):
-        expressions = [n for owner in owners for n in ast.walk(owner)
-                       if isinstance(n, ast.Expr) and any(
-                           isinstance(call, ast.Call) and _call_name(call) == "_git"
-                           and len(call.args) >= 2 and isinstance(call.args[0], ast.Name)
-                           and call.args[0].id == fixture
-                           and isinstance(call.args[1], ast.Constant)
-                           and call.args[1].value == operation for call in ast.walk(n))]
-        refused = False
-        if len(expressions) == 1:
-            def failed_git(*args):
-                return subprocess.CompletedProcess(args, 1)
-            try:
-                exec(compile(ast.Module(body=expressions, type_ignores=[]),
-                             "<fixture-setup-probe>", "exec", optimize=0),
-                     {"_git": failed_git, fixture: Path("/unused-fixture")})
-            except subprocess.CalledProcessError:
-                refused = True
-        check(check_id, refused, True)
+
+def _split_offenders(results, recorded=None):
+    """The registered argv whose config run was not clean, split in results order into
+    (definite, timed_out, timeout messages). A member is timed_out when its run only TIMED OUT:
+    its exit-code slot is a timeout message (which names it) recorded in recorded (default
+    CANNOT_EVALUATE), with no hook, monitor or exposure evidence. A timed-out member that also
+    leaked, an unrecorded timeout message, and every other unclean result are definite."""
+    recorded = CANNOT_EVALUATE if recorded is None else recorded
+    clean = (0, b"", b"", b"")
+    definite, timed_out, causes = [], [], []
+    for argv, value in results.items():
+        if value == clean:
+            continue
+        if (isinstance(value, tuple) and len(value) == 4 and _is_timeout(value[0])
+                and value[1:] == (b"", b"", b"") and value[0] in recorded):
+            timed_out.append(argv)
+            causes.append(value[0])
+        else:
+            definite.append(argv)
+    return definite, timed_out, tuple(causes)
+
+
+def _registered_offenders(results, recorded=None):
+    """(offenders, cause) for a config lane's check (_split_offenders). When any definite
+    offender exists, offenders lists ONLY the definite ones and cause is (): the FAIL never names
+    a member whose run only timed out, which is reported by its own recorded timeout message on
+    the cannot-evaluate list instead. Otherwise offenders lists the timed-out members and cause
+    their timeout messages, so the finding is attributed to those timeouts."""
+    definite, timed_out, causes = _split_offenders(results, recorded)
+    if definite:
+        return definite, ()
+    return timed_out, causes
+
+
+def _pid_state(pid, proc_root="/proc"):
+    """"alive", "dead", or "cannot-evaluate: ..." for pid, read from proc_root/<pid>/stat. A
+    zombie or dead state is "dead" (a killed orphan awaiting its reaper); an absent entry is
+    "dead" only while proc_root/self proves the process table readable. Unreadable or malformed
+    evidence is cannot-evaluate, never "dead"."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8") as stat:
+            state = stat.read().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        if os.path.isdir(os.path.join(proc_root, "self")):
+            return "dead"
+        return "cannot-evaluate: {} has no self entry".format(proc_root)
+    except (OSError, ValueError, IndexError) as exc:
+        return "cannot-evaluate: {}: {}".format(type(exc).__name__, exc)
+    if state in ("Z", "X", "x"):
+        return "dead"
+    if state in ("R", "S", "D", "T", "t", "W", "P", "I", "K"):
+        return "alive"
+    return "cannot-evaluate: unknown state {!r}".format(state)
+
+
+# The child for config/member-timeout-main-verdict: main() runs with its lanes replaced by one
+# real config-member timeout under the production defaults (the default bound lookup with a
+# short default, CANNOT_EVALUATE, sys.stdout), a finding attributed to it, and in the definite
+# scenario one unrelated definite finding; the expectation set is the executed set.
+_MAIN_VERDICT_CHILD = "\n".join((
+    "import os, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "member, scenario = sys.argv[2], sys.argv[3]",
+    "suite.CONFIG_MEMBER_BOUND_DEFAULT = 5",
+    "def lanes(base):",
+    "    suite.check('probe/attributed-rc', suite._run_config_member((member,), dict(os.environ)), 0)",
+    "    if scenario == 'definite':",
+    "        suite.check('probe/definite', 1, 0)",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "sys.exit(suite.main(None, lanes))",
+))
+MAIN_VERDICT_EXPECTED = [(True, True, True, False, False, True, ""),
+                         (True, True, False, True, True, True, "")]
+
+
+# The children for config/lane-return-fail-closed: main() runs with an injected lane whose
+# return value must never read as a pass. Four vectors, each exiting 0 on an engine whose
+# _suite_main returns a non-None lane value unchecked (the reverted guard), and 2 here: a
+# lane that executes nothing and returns 0; one that runs every expected id with failures
+# and returns 0; a missing expectation manifest with a 0 return; and a pending
+# cannot-evaluate record with a 0 return. The child takes the vector index, the probe id,
+# the pending record text and the absent manifest name through argv, so all four vectors
+# share one child source with no vector-specific literals.
+_LANE_RETURN_CHILD = "\n".join((
+    "import sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "vector, probe_id = int(sys.argv[2]), sys.argv[4]",
+    "if vector == 2:",
+    "    suite.CHECKS_MANIFEST = suite.Path(sys.argv[3]) / sys.argv[6]",
+    "else:",
+    "    suite._expected_check_ids = lambda: {probe_id}",
+    "if vector == 3:",
+    "    suite.CANNOT_EVALUATE.append(sys.argv[5])",
+    "def lanes(base):",
+    "    if vector == 1:",
+    "        for check_id in sorted(suite._expected_check_ids()):",
+    "            suite.check(check_id, False, True)",
+    "    if vector == 3:",
+    "        suite.check(probe_id, True, True)",
+    "    return 0",
+    "sys.exit(suite.main(None, lanes))",
+))
+# The vector index each child receives, with the name its observation row carries.
+LANE_RETURN_VECTORS = (
+    (0, "runs-nothing-0"),
+    (1, "all-expected-fail-0"),
+    (2, "missing-manifest-0"),
+    (3, "pending-cannot-evaluate-0"),
+)
+LANE_RETURN_EXPECTED = [("runs-nothing-0", 2, True, False),
+                        ("all-expected-fail-0", 2, True, False),
+                        ("missing-manifest-0", 2, True, False),
+                        ("pending-cannot-evaluate-0", 2, True, False)]
+
+
+def _lane_return_fail_closed(fixture):
+    """One (vector name, exit code, harness error named, PASS line printed) observation per
+    LANE_RETURN_VECTORS row, or that row timeout message when its child reached the bound;
+    config/lane-return-fail-closed compares this against LANE_RETURN_EXPECTED: every vector
+    must exit 2 with the harness error on its own (captured) stderr and no PASS line."""
+    observed = []
+    pending = "TIMEOUT: injected pending record (cannot evaluate)"
+    for index, name in LANE_RETURN_VECTORS:
+        rc, out, err = _run_bounded(
+            [sys.executable, "-I", "-B", "-c", _LANE_RETURN_CHILD, str(ROOT / "tools"),
+             str(index), str(fixture), "probe/lane-return", pending,
+             "absent-selftest-checks.toml"], str(fixture), dict(os.environ), 300,
+            "lane-return child ({})".format(name), "CONTROL ")
+        if _is_timeout(rc):
+            observed.append(rc)
+            continue
+        observed.append((name, rc, "SELF-TEST HARNESS ERROR" in err,
+                         "SELF-TEST PASS" in out))
+    return observed
+
+
+def _partial_timeout_cause(observed, expected):
+    """The timeout messages a per-scenario observation list is attributed to: its timed-out
+    entries, and only when every entry that did NOT time out equals its own expectation. A
+    definite mismatch in any other entry returns (), so the finding stays definite (exit 1)."""
+    timeouts = tuple(entry for entry in observed if _is_timeout(entry))
+    if timeouts and len(observed) == len(expected) and all(
+            _is_timeout(entry) or entry == want for entry, want in zip(observed, expected)):
+        return timeouts
+    return ()
+
+
+def _main_verdict_scenarios(sleeper, fixture, run=None):
+    """Run _MAIN_VERDICT_CHILD for the attributed and the definite scenario through run (default
+    _run_bounded); return (observed, cause) for config/member-timeout-main-verdict. An entry is
+    the scenario's observation tuple, or its timeout message when that child reached its own
+    bound; cause is _partial_timeout_cause against MAIN_VERDICT_EXPECTED, so one scenario's
+    timeout never hides the other scenario's definite mismatch."""
+    run = _run_bounded if run is None else run
+    observed = []
+    for scenario, want_rc in (("attributed", 2), ("definite", 1)):
+        line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(
+            sleeper)
+        rc, out, err = run(
+            [sys.executable, "-I", "-B", "-c", _MAIN_VERDICT_CHILD, str(ROOT / "tools"),
+             str(sleeper), scenario], str(fixture), dict(os.environ), 300,
+            "member-timeout-main-verdict child ({})".format(scenario), "CONTROL ")
+        if _is_timeout(rc):
+            observed.append(rc)
+            continue
+        observed.append((rc == want_rc, line in out, "SELF-TEST CANNOT EVALUATE" in out,
+                         "SELF-TEST FAIL" in out, "probe/definite" in out,
+                         "probe/attributed-rc" in out, err))
+    return observed, _partial_timeout_cause(observed, MAIN_VERDICT_EXPECTED)
+
+
+# The member fixture for config/member-grandchild-after-normal-exit and the _CLOSE_PROBE_CHILD
+# checks, run as <fixture> <folder> <tag> <mode>: it records "pid starttime" in
+# <folder>/<tag>.leader, starts a grandchild in the member's own process group with its stdio on
+# /dev/null (so the grandchild never holds the member's pipes) that records itself in
+# <folder>/<tag>.grandchild and sleeps, then either sleeps (mode "sleep") or exits 0 once the
+# grandchild is recorded (mode "exit"). Mode "setsid" instead starts a grandchild that calls
+# setsid (leaving the member's group, so the group kill never reaches it) and keeps the member's
+# stdout, a pipe holder, and then sleeps.
+_GROUP_MEMBER_FIXTURE = "\n".join((
+    "import os, subprocess, sys, time",
+    "def stamp(path):",
+    "    with open('/proc/self/stat', encoding='utf-8') as stat:",
+    "        start = stat.read().rsplit(')', 1)[1].split()[19]",
+    "    with open(path + '.tmp', 'w', encoding='utf-8') as out:",
+    "        out.write('{} {}'.format(os.getpid(), start))",
+    "    os.replace(path + '.tmp', path)",
+    "if sys.argv[1] in ('--grandchild', '--setsid'):",
+    "    if sys.argv[1] == '--setsid':",
+    "        os.setsid()",
+    "    stamp(sys.argv[2])",
+    "    time.sleep(600)",
+    "    sys.exit(0)",
+    "folder, tag, mode = sys.argv[1:4]",
+    "stamp(os.path.join(folder, tag + '.leader'))",
+    "holder = mode == 'setsid'",
+    "subprocess.Popen([sys.executable, '-I', '-B', __file__, '--setsid' if holder else",
+    "                  '--grandchild', os.path.join(folder, tag + '.grandchild')],",
+    "                 stdin=subprocess.DEVNULL, stdout=None if holder else subprocess.DEVNULL,",
+    "                 stderr=subprocess.DEVNULL)",
+    "deadline = time.monotonic() + 60",
+    "while not os.path.exists(os.path.join(folder, tag + '.grandchild')):",
+    "    if time.monotonic() > deadline:",
+    "        sys.exit(3)",
+    "    time.sleep(0.05)",
+    "if mode in ('sleep', 'setsid'):",
+    "    time.sleep(600)",
+))
+
+# The child for the member-close checks (_member_close_controls): main() with its lanes replaced,
+# in its own interpreter (the suite's signal handlers are process-wide), with a 90 s member bound,
+# a 3 s drain and a 2 s registry-lock bound. Scenarios: "pooled", two members through the
+# production _config_results pool, a REAL SIGINT to the main thread once both run; "communicate",
+# one member through _run_bounded from the main thread, the SIGINT sent once the member thread is
+# inside the real subprocess communicate(); "leader-first", the same with the member's leader
+# killed alone first, so communicate() itself reaps it; "setsid", the same with a setsid pipe
+# holder (the member thread must stop waiting at once, not at its bound); "sigterm", the same with
+# a process-directed SIGTERM; "install", a real SIGINT delivered inside the installation of the
+# SIGINT handler; "close", a member left running on a non-main thread when the lanes return and a
+# real SIGINT at the ENTRY of each close (both deferred, the handler installed at both entries,
+# and _raise_held raising once after the second close); "split-<inside>-<after>" (T for a SIGTERM,
+# I for a SIGINT, each sent to the main thread and handled before the next is sent), the signals
+# <inside> sent inside _closing_refusal_control (held there and raised by _reopen_members right
+# after it), then the signals <after> one at the ENTRY of each of main()'s closes in turn (held
+# there): "split-T-I", "split-T-II", "split-TI-I" and "split-IT-I" must each end in SystemExit 143,
+# the precedence holding across the control's drain and main()'s final one;
+# "lock", the registry lock wrapped so a real SIGINT is raised right after an acquire by the main
+# thread: _close_members called directly with closing clear, a 2 s loop of _close_members under
+# real SIGINTs from another thread (each interrupted close must leave the lock free), a member
+# start and a close with the lock held by another thread (each must give up at the lock bound),
+# then main() with the wrapper armed for the close; "failed", the production pool with member a
+# failing its positive control (ValueError) once member b's worker is running (so the branch's
+# cancel_futures never cancels b) and member b reaching its member only after the kill sweep.
+# Member b times the sweep in stages: it first waits on member a's raise (set however member a's
+# branch ends; its expiry is a harness handshake when member a's positive control was observed
+# at all, and the "missing" member a observed when the code under test never ran it), then on
+# the sweep wrapper's entry (the failed-member branch calling the kill sweep), then on the
+# wrapper's release of the harness lock holders (harness-owned), then on the real sweep's
+# return. TIMING ALONE IS NEVER A DEFINITE FINDING: every expiry of one of these bounds,
+# whoever was slow, only ever records WHICH bound was reached, and the parent grades every
+# reached bound cannot-evaluate (fail closed, never a pass, _scenario_timeout_record); the
+# monitor likewise records under "unsent" every signal it owed but returned without sending
+# (a reached registration or in-communicate bound), and the parent stands down every field
+# outside the _STATE_EVIDENCE allowlist while that allowlist stays compared; a
+# definite finding needs non-timing evidence the code under test produced (its outcome, the
+# registry and recorded process state it left, a refusal record, the "evidence" flags below).
+# Member a takes its "sent" stamp only AFTER every harness preparation of its own (the lock
+# holder's start and acquire), right before its injected failure or its deliberate handshake
+# expiry raises, and the sweep wrapper adds the measured release time to "stalls", which the
+# timeliness report discounts, so a harness-held release rarely reaches the completion budget;
+# when anything does reach it, that too is cannot-evaluate, never definite. The sweep wrapper
+# appends to "branch_swept" when its caller is _config_results itself, and the report's
+# "evidence" extra carries, read AFTER main() ended, whether the failed-member branch called
+# the kill sweep and that the wrapper's caller check discriminates (a sweep called here,
+# outside _config_results, is not counted). Both appends run synchronously inside the sweep
+# call, with no bound between the call and the append, and every bound of this scenario
+# raises INTO the failed-member handler (the injected ValueError, a HandshakeTimeout and the
+# positive control's own TimeoutExpired all surface where the pool's results are consumed),
+# so a bound can only enter the branch, never skip it: a False flag is a code fact, which is
+# why "evidence" sits on the _STATE_EVIDENCE allowlist, kept compared under any recorded
+# timeout. Whether member a's positive control ran and whether member a raised is the
+# "member_a" extra, OFF the allowlist: the positive control's 60 s subprocess bound sits
+# between member a's worker entering run and those flags, so a merely slow git leaves both
+# False with the code healthy (round 17), and no earlier flag is bound-free either (an
+# entered-run marker would rest on the pool consuming results in order, a property of the
+# code under test, and would still leave a window between the worker's dequeue and the
+# marker). A WRONG member_a IS NEVER DEFINITE: member a takes its "sent" stamp only after
+# a_arrived is set (failed-signal's interrupt is armed by member a too), and a_raises is set
+# in a finally the pool's waiting shutdown joins, so any member_a other than [True, True]
+# leaves the send list empty, the timeliness field False and the completion budget
+# recorded, which stands member_a down; only a right member_a is ever compared. A pool that
+# never ran member a is therefore fail closed, never a pass: the main thread blocks on
+# member a's pending result until the parent's 300 s bound ends the child (cannot
+# evaluate, no report), or member b's 120 s wait records the "member a observed" bound and
+# the budget is reached, which stands the run down;
+# "failed-signal", the same with the lock wrapper armed for the failed-member branch;
+# "failed-handshake", the same with member b never reporting running, so member a's handshake
+# (1 s here) expires and member a raises HandshakeTimeout, never the injected failure;
+# "failed-stalled", the deterministic twin of the slow positive control: ONE member, whose
+# injected failure raises BEFORE a_arrived is set, before any handshake and before any send,
+# so member a's arrival and raise and the send list hold, in every run on any host, exactly
+# the state a merely slow git leaves them in, while the branch still sweeps and every
+# compared field (member_a [False, False] included) is structural; the empty send list is
+# the scenario itself, deliberate (_DELIBERATE_EMPTY_SEND), so nothing stands down in a
+# healthy run and a producer tied to those facts on code this run executes, not also
+# dependent on any other state that differs from a slow "failed" run, mismatches
+# definitely (what it does not reach is THE RESIDUAL stated in _allowlist_producers);
+# only a positive control slower than its 60 s bound is recorded (as the reached bound
+# "positive control a observed") and stands the run down, cannot-evaluate, never definite. Every
+# wait the child makes is bounded, and an expiry is recorded under one of two keys by WHO sets
+# the state waited on. HARNESS-ARRANGED state (member b arrived or running, member a's raise
+# reaching member b once its positive control was observed, a lock holder's own acquire granted,
+# the sweep wrapper's release of those holders, the members' grandchild records
+# written by the fixture, a monitor, holder or sender thread finished) expires into the extras
+# ("handshake"): the harness could not arrange the scenario, so the parent records that run
+# as a harness timeout, cannot-evaluate (_handshake_expired), unless it is the scenario's own
+# deliberate expiry; a kind naming a thread its bounded join left alive (its entry ends
+# " finished") replaces the whole observation, and every other kind stands down every field
+# outside the _STATE_EVIDENCE allowlist (_scenario_timeout_record). State only the CODE UNDER TEST sets (the members' registration,
+# _start_member_group; a member thread inside the real communicate, which _run_bounded owns;
+# member a's positive control observed at all; the failed-member branch entering its kill sweep
+# and the real sweep returning; a delivered signal's deferral growing
+# held) expires into the extras ("missing"), naming the reached bound; the parent grades BOTH
+# keys cannot-evaluate (_scenario_timeout_record): a reached bound is timing alone, whoever was
+# slow, so it fails the run closed and is never a pass, and it is never a definite finding
+# either; the defect has to show in the _STATE_EVIDENCE fields, which stay compared beside
+# the recorded timeout;
+# "unresolved", a member exiting 0 whose group's emptiness probes raise PermissionError (main()
+# must exit 2 and never print PASS), then the injection removed and _close_members releasing the
+# group; "release-timeout", a member exiting 0 whose release is refused (another thread takes the
+# registry lock right after the member's kill and holds it past a 0.2 s lock bound, freeing it once
+# _run_bounded returns, so main()'s closes then release the group cleanly), and "start-timeout",
+# a member start refused the same way (its timeout recorded only in a private list);
+# "sweep-refused", "close-refused", "close-wait-refused", "close-left-refused" and "failed-refused",
+# the same refusal (lock bound 0.2 s) at the first close's kill sweep, at each of the first close's
+# own three acquires (its first, the wait for the members' cleanup, the sweep of the groups left;
+# the extras name the refused with statement's line offset, _close_lock_sites), and at the
+# failed-member branch's acquire (member a failing as in "failed", the lanes catching the ValueError and clearing
+# closing with _reopen_members, as the suite's own failed-member controls do), each of which
+# main() must still end with exit 2, the CANNOT EVALUATE line, no PASS line and one recorded
+# refusal; "closing-control", _closing_refusal_control with a real SIGINT at its _run_bounded
+# entry: the start refused with the SIGINT held and closing set inside, then the SIGINT raised
+# right after the control (nothing after it in the lanes runs), so main() ends in
+# KeyboardInterrupt; "late-monitor", the monitor's in_communicate observation gated (held) until
+# main()'s teardown releases it right before the post-main worker joins, the member's own 10 s
+# bound ending main() first. The teardown installs a deferring SIGINT/SIGTERM handler across the
+# joins (with a 0.05 s drain for a process-directed signal still in flight) and then reinstalls
+# exactly what main() left, so a worker's signal delivered during a join is absorbed and recorded
+# as the "late <name>" handshake instead of destroying the report; a non-deliberate late
+# signal is timing alone (no stamp can prove who was slow), so _scenario_timeout_record grades
+# it cannot-evaluate, never definite: every field outside the _STATE_EVIDENCE allowlist is
+# stood down and the allowlist stays compared; the few statements between
+# main()'s end and that install are the disclosed residual window. It prints one PROBE-REPORT
+# line: the outcome, how many groups are still
+# registered after main(), every recorded process's state (_recorded_states), whether main() ended
+# within 30 s of every signal or injected failure (less the stalls the harness's own lock-holder
+# releases measurably spent inside that window; a False here is the completion budget
+# reached, which the parent records and stands down as cannot-evaluate, never definite), and
+# the extras: the handlers restored after
+# main() and a real SIGINT raising again, the lock free, the PASS and CANNOT EVALUATE lines, and
+# each scenario's own observations.
+_CLOSE_PROBE_CHILD = "\n".join((
+    "import contextlib, io, json, os, random, signal, sys, threading, time",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]",
+    "suite.CONFIG_MEMBER_BOUND_DEFAULT = 90",
+    "suite.CONFIG_MEMBER_DRAIN_SECONDS = 3",
+    "suite.REGISTRY_LOCK_SECONDS = 0.2 if scenario.endswith('-refused') else 2",
+    "main_id, sent, extra, fire, workers, stalls = threading.main_thread().ident, [], {}, [], [], []",
+    "def interrupt():",
+    "    sent.append(time.monotonic())",
+    "    signal.pthread_kill(main_id, signal.SIGINT)",
+    "class HandshakeTimeout(Exception):",
+    "    pass",
+    "def handshake(event, bound, what):",
+    "    if not event.wait(bound):",
+    "        extra.setdefault('handshake', []).append(what)",
+    "        raise HandshakeTimeout('{} not within {} s'.format(what, bound))",
+    "SIGNALS = {'I': signal.SIGINT, 'T': signal.SIGTERM}",
+    "def deliver(code):",
+    "    count = len(suite._MEMBERS['held'])",
+    "    sent.append(time.monotonic())",
+    "    signal.pthread_kill(main_id, SIGNALS[code])",
+    "    deadline = time.monotonic() + 10",
+    "    while len(suite._MEMBERS['held']) == count:",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('missing', []).append('signal ' + code + ' deferred')",
+    "            break",
+    "real_acquire = suite._MEMBERS_LOCK.acquire",
+    "def acquire(timeout=-1):",
+    "    got = real_acquire(timeout)",
+    "    if got and fire and threading.current_thread() is threading.main_thread():",
+    "        del fire[:]",
+    "        interrupt()",
+    "    return got",
+    "suite._MEMBERS_LOCK.acquire = acquire",
+    "def lock_free():",
+    "    free = suite._MEMBERS_LOCK.acquire(0)",
+    "    if free:",
+    "        suite._MEMBERS_LOCK.release()",
+    "    return free",
+    "def hold_lock(bound=30):",
+    "    taken, done = threading.Event(), threading.Event()",
+    "    def holder():",
+    "        got = real_acquire(10)",
+    "        if got:",
+    "            taken.set()",
+    "        if not done.wait(bound):",
+    "            extra.setdefault('handshake', []).append('lock hold expired')",
+    "        if got:",
+    "            suite._MEMBERS_LOCK.release()",
+    "    thread = threading.Thread(target=holder, daemon=True)",
+    "    thread.start()",
+    "    if not taken.wait(30):",
+    "        extra.setdefault('handshake', []).append('lock held')",
+    "    def release():",
+    "        done.set()",
+    "        thread.join(30)",
+    "        if thread.is_alive():",
+    "            extra.setdefault('handshake', []).append('lock holder finished')",
+    "    return release",
+    "def over_bound(started, bound, what, sink=None):",
+    "    if time.monotonic() - started < bound:",
+    "        return False",
+    "    (extra.setdefault('missing', []) if sink is None else sink).append(what)",
+    "    return True",
+    "def ready(tags, bound=60):",
+    "    deadline = time.monotonic() + bound",
+    "    while len(suite._MEMBERS['groups']) != len(tags):",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('missing', []).append('members registered')",
+    "            return False",
+    "        time.sleep(0.05)",
+    "    while not all(os.path.exists(os.path.join(folder, tag + '.grandchild'))",
+    "                  for tag in tags):",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('handshake', []).append('member records')",
+    "            return False",
+    "        time.sleep(0.05)",
+    "    return True",
+    "def in_communicate():",
+    "    for ident, frame in sys._current_frames().items():",
+    "        while ident != main_id and frame is not None:",
+    "            if frame.f_code.co_name == 'communicate' and frame.f_code.co_filename.endswith(",
+    "                    'subprocess.py'):",
+    "                return True",
+    "            frame = frame.f_back",
+    "    return False",
+    "gate = threading.Event()",
+    "real_in_communicate = in_communicate",
+    "def gated_in_communicate():",
+    "    seen = real_in_communicate()",
+    "    if seen:",
+    "        gate.wait(150)",
+    "    return seen",
+    "if scenario == 'late-monitor':",
+    "    in_communicate = gated_in_communicate",
+    "def monitor(tags, bound=60):",
+    "    owed = 'SIGTERM' if scenario == 'sigterm' else 'SIGINT'",
+    "    if not ready(tags, bound):",
+    "        extra.setdefault('unsent', []).append(owed)",
+    "        return",
+    "    deadline = time.monotonic() + bound",
+    "    while scenario != 'pooled' and not in_communicate():",
+    "        if time.monotonic() >= deadline:",
+    "            extra.setdefault('missing', []).append('member in communicate')",
+    "            extra.setdefault('unsent', []).append(owed)",
+    "            return",
+    "        time.sleep(0.01)",
+    "    if scenario == 'leader-first':",
+    "        with open(os.path.join(folder, 'a.leader'), encoding='utf-8') as record:",
+    "            os.kill(int(record.read().split()[0]), signal.SIGKILL)",
+    "    if scenario == 'sigterm':",
+    "        sent.append(time.monotonic())",
+    "        os.kill(os.getpid(), signal.SIGTERM)",
+    "    else:",
+    "        interrupt()",
+    "def member(tag, mode='sleep'):",
+    "    return (fixture, folder, tag, mode)",
+    "def argv(tag, mode='sleep'):",
+    "    return [sys.executable, '-I', '-B', *member(tag, mode)]",
+    "def pool(tags):",
+    "    poison = suite.Path(folder) / 'poison'",
+    "    poison.mkdir()",
+    "    marker, monitor_marker = poison / 'marker', poison / 'monitor'",
+    "    marker.write_bytes(b'')",
+    "    monitor_marker.write_bytes(b'')",
+    "    env = {'PATH': os.environ.get('PATH', os.defpath), 'HOME': folder,",
+    "           'XDG_CONFIG_HOME': folder}",
+    "    suite._config_results(tuple(member(tag) for tag in tags), env, marker, monitor_marker)",
+    "def stray():",
+    "    thread = threading.Thread(target=suite._run_bounded, args=(argv('a'), folder,",
+    "                              dict(os.environ), 30, 'close probe', 'PROBE '))",
+    "    workers.append(('stray member', thread))",
+    "    thread.start()",
+    "    ready(('a',))",
+    "def direct():",
+    "    previous = signal.signal(signal.SIGINT, suite._close_on_signal)",
+    "    try:",
+    "        suite._MEMBERS.update(closing=False, raised=None, held=[])",
+    "        fire.append(True)",
+    "        try:",
+    "            problems, raised = suite._close_members(), None",
+    "        except KeyboardInterrupt:",
+    "            problems, raised = None, 'KeyboardInterrupt'",
+    "        del fire[:]",
+    "        return [raised, lock_free(), problems]",
+    "    finally:",
+    "        suite._MEMBERS['closing'] = True",
+    "        signal.signal(signal.SIGINT, previous)",
+    "def loop(seconds):",
+    "    stop, hits, stuck = threading.Event(), [0], []",
+    "    def sender():",
+    "        while not stop.is_set():",
+    "            signal.pthread_kill(main_id, signal.SIGINT)",
+    "            time.sleep(random.uniform(0, 0.002))",
+    "    previous = signal.signal(signal.SIGINT, suite._close_on_signal)",
+    "    thread = threading.Thread(target=sender, daemon=True)",
+    "    thread.start()",
+    "    end = time.monotonic() + seconds",
+    "    try:",
+    "        while True:",
+    "            try:",
+    "                if time.monotonic() >= end:",
+    "                    break",
+    "                suite._MEMBERS.update(closing=False, raised=None, held=[])",
+    "                problems = suite._close_members()",
+    "                if problems:",
+    "                    stuck.append(problems)",
+    "                    break",
+    "            except KeyboardInterrupt:",
+    "                hits[0] += 1",
+    "    finally:",
+    "        suite._MEMBERS['closing'] = True",
+    "        stop.set()",
+    "        thread.join(30)",
+    "        if thread.is_alive():",
+    "            extra.setdefault('handshake', []).append('signal sender finished')",
+    "        signal.signal(signal.SIGINT, previous)",
+    "    print('LOCK-LOOP interrupts {}'.format(hits[0]), flush=True)",
+    "    return [stuck, lock_free()]",
+    "def held_elsewhere():",
+    "    release = hold_lock()",
+    "    try:",
+    "        suite._MEMBERS['closing'], record, started = False, [], time.monotonic()",
+    "        rc = suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                                dict(os.environ), 30, 'held probe', 'PROBE ', record)[0]",
+    "        problems = suite._close_members()",
+    "        over_bound(started, 20, 'held probe within bound')",
+    "        return [suite._is_timeout(rc), record == [rc],",
+    "                ['not granted' in problem for problem in problems]]",
+    "    finally:",
+    "        release()",
+    "        suite._MEMBERS['closing'] = True",
+    "def lanes(base):",
+    "    if scenario == 'pooled':",
+    "        thread = threading.Thread(target=monitor, args=(('a', 'b'),), daemon=True)",
+    "        workers.append(('monitor', thread))",
+    "        thread.start()",
+    "        pool(('a', 'b'))",
+    "    elif scenario == 'failed-refused':",
+    "        try:",
+    "            pool(('a', 'b'))",
+    "        except ValueError as exc:",
+    "            extra['caught'] = str(exc)",
+    "        suite._reopen_members()",
+    "    elif scenario == 'failed-stalled':",
+    "        pool(('a',))",
+    "    elif scenario.startswith('failed'):",
+    "        pool(('a', 'b'))",
+    "    elif scenario == 'closing-control' or scenario.startswith('split-'):",
+    "        inside, after = scenario.split('-')[1:] if scenario != 'closing-control' else ('', '')",
+    "        real_bounded, real_close = suite._run_bounded, suite._close_members",
+    "        def close():",
+    "            index = len(extra.get('closes', []))",
+    "            if index < len(after):",
+    "                deliver(after[index])",
+    "            extra.setdefault('closes', []).append(list(suite._MEMBERS['held']))",
+    "            return real_close()",
+    "        if after:",
+    "            suite._close_members = close",
+    "        def bounded(*args, **kwargs):",
+    "            if inside:",
+    "                for code in inside:",
+    "                    deliver(code)",
+    "            else:",
+    "                interrupt()",
+    "            result = real_bounded(*args, **kwargs)",
+    "            extra['control'] = [result[0], list(suite._MEMBERS['held']),",
+    "                                suite._MEMBERS['closing']]",
+    "            return result",
+    "        suite._run_bounded = bounded",
+    "        try:",
+    "            extra['rc'] = suite._closing_refusal_control(suite.Path(folder),",
+    "                                                         suite.subprocess.Popen)",
+    "        finally:",
+    "            suite._run_bounded = real_bounded",
+    "        extra['after'] = True",
+    "    elif scenario in ('close-refused', 'sweep-refused'):",
+    "        name = '_close_members' if scenario == 'close-refused' else '_signal_member_groups'",
+    "        real_step = getattr(suite, name)",
+    "        def refused_once():",
+    "            setattr(suite, name, real_step)",
+    "            release = hold_lock()",
+    "            try:",
+    "                return real_step()",
+    "            finally:",
+    "                release()",
+    "        setattr(suite, name, refused_once)",
+    "        sent.append(time.monotonic())",
+    "    elif scenario in ('close-wait-refused', 'close-left-refused'):",
+    "        real_close, sites, releases = suite._close_members, [], []",
+    "        target = 2 if scenario == 'close-wait-refused' else 3",
+    "        def site_acquire(timeout=-1):",
+    "            caller = sys._getframe(2)",
+    "            if caller.f_code is real_close.__code__ and caller.f_lineno not in sites:",
+    "                sites.append(caller.f_lineno)",
+    "                if len(sites) == target:",
+    "                    extra['site'] = caller.f_lineno - real_close.__code__.co_firstlineno",
+    "                    releases.append(hold_lock())",
+    "            return acquire(timeout)",
+    "        def refused_at_site():",
+    "            suite._close_members, suite._MEMBERS_LOCK.acquire = real_close, site_acquire",
+    "            try:",
+    "                return real_close()",
+    "            finally:",
+    "                suite._MEMBERS_LOCK.acquire = acquire",
+    "                for release in releases:",
+    "                    release()",
+    "        suite._close_members = refused_at_site",
+    "        sent.append(time.monotonic())",
+    "    elif scenario in ('close', 'lock'):",
+    "        stray()",
+    "        if scenario == 'lock':",
+    "            fire.append(True)",
+    "        else:",
+    "            real_close = suite._close_members",
+    "            def close():",
+    "                extra.setdefault('protected', []).append(",
+    "                    signal.getsignal(signal.SIGINT) is suite._close_on_signal)",
+    "                interrupt()",
+    "                return real_close()",
+    "            suite._close_members = close",
+    "    elif scenario == 'unresolved':",
+    "        suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                           dict(os.environ), 90, 'unresolved probe', 'PROBE ')",
+    "        sent.append(time.monotonic())",
+    "    elif scenario.endswith('-timeout'):",
+    "        suite.REGISTRY_LOCK_SECONDS = 0.2",
+    "        record, real_stop, releases = [], suite._stop_member_group, []",
+    "        def stop(group):",
+    "            problems = real_stop(group)",
+    "            releases.append(hold_lock())",
+    "            return problems",
+    "        if scenario == 'start-timeout':",
+    "            releases.append(hold_lock())",
+    "        else:",
+    "            suite._stop_member_group = stop",
+    "        try:",
+    "            rc = suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                                    dict(os.environ), 90, 'lock probe', 'PROBE ', record)[0]",
+    "        finally:",
+    "            for release in releases:",
+    "                release()",
+    "        extra['run'] = [str(rc)[:9], len(record)]",
+    "        sent.append(time.monotonic())",
+    "    else:",
+    "        thread = threading.Thread(target=monitor, args=(('a',),), daemon=True)",
+    "        workers.append(('monitor', thread))",
+    "        thread.start()",
+    "        suite._run_bounded(argv('a', 'setsid' if scenario == 'setsid' else 'sleep'), folder,",
+    "                           dict(os.environ), 10 if scenario == 'late-monitor' else 90,",
+    "                           'probe', 'PROBE ')",
+    "real_signal, real_pidfd, real_killpg = signal.signal, signal.pidfd_send_signal, os.killpg",
+    "if scenario == 'lock':",
+    "    extra['monitor_pin'] = []",
+    "    for pin_tags in (('never',), ()):",
+    "        monitor(pin_tags, 0.1)",
+    "        extra['monitor_pin'].append([extra.pop('missing', None), extra.pop('unsent', None),",
+    "                                     len(sent)])",
+    "    release, expiry_deadline = hold_lock(0.2), time.monotonic() + 30",
+    "    while (time.monotonic() < expiry_deadline",
+    "           and 'lock hold expired' not in (extra.get('handshake') or ())):",
+    "        time.sleep(0.01)",
+    "    release()",
+    "    # seen and free are read only AFTER release() joined the holder: a holder paused",
+    "    # between recording its expiry and releasing the lock can never pin free=False, and",
+    "    # a holder the join left alive is 'lock holder finished', whole replacement.",
+    "    seen, free = (extra.get('handshake') or []).count('lock hold expired'), lock_free()",
+    "    if seen:",
+    "        extra['handshake'].remove('lock hold expired')",
+    "        if not extra['handshake']:",
+    "            del extra['handshake']",
+    "    else:",
+    "        extra.setdefault('handshake', []).append('expiry pin')",
+    "    extra['expiry_pin'] = [min(seen, 1), free]",
+    "    pin_sink = []",
+    "    extra['bound_pin'] = [over_bound(time.monotonic() - 1, 0.5, 'pin', pin_sink),",
+    "                          list(pin_sink), over_bound(time.monotonic(), 3600, 'pin',",
+    "                          pin_sink), list(pin_sink)]",
+    "    extra['direct'], extra['loop'], extra['held'] = direct(), loop(2), held_elsewhere()",
+    "    del sent[:]",
+    "elif scenario == 'install':",
+    "    def installing(signum, handler):",
+    "        old = real_signal(signum, handler)",
+    "        if handler is suite._close_on_signal and signum == signal.SIGINT and not sent:",
+    "            interrupt()",
+    "        return old",
+    "    signal.signal = installing",
+    "elif scenario.startswith('failed'):",
+    "    swept, b_running, b_arrived = threading.Event(), threading.Event(), threading.Event()",
+    "    a_arrived, a_raises, late, releases = threading.Event(), threading.Event(), [], []",
+    "    sweep_entered, released, branch_swept = threading.Event(), threading.Event(), []",
+    "    real_sweep, real_observed = suite._signal_member_groups, suite._require_wrapper_observed",
+    "    real_member = suite._run_config_member",
+    "    def sweep():",
+    "        frame = sys._getframe(1)",
+    "        while frame is not None and frame.f_code.co_name != '_config_results':",
+    "            frame = frame.f_back",
+    "        if frame is not None:",
+    "            branch_swept.append(True)",
+    "        sweep_entered.set()",
+    "        if releases:",
+    "            start = time.monotonic()",
+    "            for release in releases:",
+    "                release()",
+    "            del releases[:]",
+    "            stalls.append(time.monotonic() - start)",
+    "        released.set()",
+    "        problems = real_sweep()",
+    "        swept.set()",
+    "        return problems",
+    "    def observed(bypass, what):",
+    "        real_observed(bypass, what)",
+    "        if what.startswith('positive control') and what.endswith(' a sleep'):",
+    "            if scenario == 'failed-stalled':",
+    "                # The deterministic twin of a merely slow git (round 20): member a",
+    "                # fails WITHOUT arriving, so a_arrived, a_raises and the send list",
+    "                # leave this run in the exact state a slow positive control leaves",
+    "                # a 'failed' run in, in every run, on any host.",
+    "                raise ValueError('injected failed member a')",
+    "            a_arrived.set()",
+    "            try:",
+    "                if scenario == 'failed-handshake':",
+    "                    try:",
+    "                        handshake(b_arrived, 30, 'member b arrived')",
+    "                        handshake(b_running, 1, 'member b running')",
+    "                    finally:",
+    "                        sent.append(time.monotonic())",
+    "                else:",
+    "                    handshake(b_running, 30, 'member b running')",
+    "                    if scenario == 'failed-signal':",
+    "                        fire.append(True)",
+    "                    if scenario == 'failed-refused':",
+    "                        releases.append(hold_lock())",
+    "                    sent.append(time.monotonic())",
+    "                raise ValueError('injected failed member a')",
+    "            finally:",
+    "                a_raises.set()",
+    "        if what.startswith('positive control') and what.endswith(' b sleep'):",
+    "            b_arrived.set()",
+    "            if scenario != 'failed-handshake':",
+    "                b_running.set()",
+    "            if not a_raises.wait(120):",
+    "                if a_arrived.is_set():",
+    "                    extra.setdefault('handshake', []).append('member a raised')",
+    "                else:",
+    "                    extra.setdefault('missing', []).append('member a observed')",
+    "            elif not sweep_entered.wait(30):",
+    "                extra.setdefault('missing', []).append('kill sweep')",
+    "            elif not released.wait(30):",
+    "                extra.setdefault('handshake', []).append('lock released')",
+    "            elif not swept.wait(30):",
+    "                extra.setdefault('missing', []).append('kill sweep finished')",
+    "    def run_member(member_argv, env, *rest, **kwargs):",
+    "        rc = real_member(member_argv, env, *rest, **kwargs)",
+    "        late.append([member_argv[2], rc])",
+    "        return rc",
+    "    suite._signal_member_groups, suite._require_wrapper_observed = sweep, observed",
+    "    suite._run_config_member = run_member",
+    "    extra['late'] = late",
+    "elif scenario == 'unresolved':",
+    "    def unreadable(real):",
+    "        def probe(target, sig, *rest):",
+    "            if sig == 0:",
+    "                raise PermissionError(1, 'injected unreadable group')",
+    "            return real(target, sig, *rest)",
+    "        return probe",
+    "    signal.pidfd_send_signal, os.killpg = unreadable(real_pidfd), unreadable(real_killpg)",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "captured = io.StringIO()",
+    "try:",
+    "    with contextlib.redirect_stdout(captured):",
+    "        outcome = 'returned {}'.format(suite.main(None, lanes))",
+    "except KeyboardInterrupt:",
+    "    outcome = 'KeyboardInterrupt'",
+    "except SystemExit as exc:",
+    "    outcome = 'SystemExit {}'.format(exc.code)",
+    "except Exception as exc:",
+    "    outcome = '{}: {}'.format(type(exc).__name__, exc)",
+    "ended = time.monotonic()",
+    "del fire[:]",
+    "def absorb(signum, frame):",
+    "    extra.setdefault('handshake', []).append('late ' + signal.Signals(signum).name)",
+    "left = [real_signal(signal.SIGINT, absorb), real_signal(signal.SIGTERM, absorb)]",
+    "signal.signal, signal.pidfd_send_signal, os.killpg = real_signal, real_pidfd, real_killpg",
+    "gate.set()",
+    "for name, thread in workers:",
+    "    thread.join(120)",
+    "    if thread.is_alive():",
+    "        extra.setdefault('handshake', []).append(name + ' finished')",
+    "time.sleep(0.05)",
+    "real_signal(signal.SIGINT, left[0])",
+    "real_signal(signal.SIGTERM, left[1])",
+    "registered = len(suite._MEMBERS['groups'])",
+    "if scenario.startswith('failed'):",
+    "    # member a's arrival and raise sit BEHIND the positive control's 60 s subprocess",
+    "    # bound: a merely slow git leaves both False with the code healthy, so they are",
+    "    # the member_a extra, off the _STATE_EVIDENCE allowlist (a wrong member_a always",
+    "    # comes with the completion budget recorded, so it is never definite; in",
+    "    # 'failed-stalled' the empty send list is the scenario itself, deliberate, and",
+    "    # member_a [False, False] is compared definitely). evidence keeps only the",
+    "    # branch facts no bound shapes; producer-map pins what it reads, and the",
+    "    # 'failed-stalled' run pins part of the same class BY VALUE; what neither",
+    "    # reaches is THE RESIDUAL the suite's _allowlist_producers states.",
+    "    if scenario == 'failed-stalled' and outcome.startswith('TimeoutExpired'):",
+    "        # Only a positive control slower than its 60 s bound reaches here: the",
+    "        # reached bound is recorded and the run stands down, cannot-evaluate,",
+    "        # never a definite mismatch on a merely slow host.",
+    "        extra.setdefault('missing', []).append('positive control a observed')",
+    "    extra['member_a'] = [a_arrived.is_set(), a_raises.is_set()]",
+    "    extra['evidence'] = [bool(branch_swept)]",
+    "    witnessed = len(branch_swept)",
+    "    sweep()",
+    "    extra['evidence'].append(len(branch_swept) == witnessed)",
+    "if scenario == 'unresolved':",
+    "    problems = suite._close_members()",
+    "    extra['released'] = [problems, len(suite._MEMBERS['groups'])]",
+    "if scenario.endswith(('-timeout', '-refused')):",
+    "    extra['refused'] = len(suite._MEMBERS['refused'])",
+    "restored = [signal.getsignal(signal.SIGINT) is signal.default_int_handler,",
+    "            signal.getsignal(signal.SIGTERM) == signal.SIG_DFL]",
+    "try:",
+    "    signal.pthread_kill(main_id, signal.SIGINT)",
+    "    restored.append(False)",
+    "except KeyboardInterrupt:",
+    "    restored.append(True)",
+    "extra.update(restored=restored, lock_free=lock_free(), lines=[",
+    "    'SELF-TEST PASS' in captured.getvalue(),",
+    "    'SELF-TEST CANNOT EVALUATE' in captured.getvalue()])",
+    "print(captured.getvalue(), end='', flush=True)",
+    "print('PROBE-REPORT ' + json.dumps([outcome, registered, suite._recorded_states(folder),",
+    "      bool(sent) and all(ended - when - sum(stalls) < 30 for when in sent), extra]), flush=True)",
+))
+
+
+# The child config/member-close-signal-sweep runs (python3 -I -B -c, argv: the tools directory):
+# THE SIGNAL-BOUNDARY SWEEP of main(), over two suite bodies: "body" returns 0; "branch" drives
+# the config pool's REAL failed-member branch (_config_results with an empty roster and a stub pool
+# whose map raises ValueError, so main() ends in that ValueError when no signal is sent). The
+# registry holds one group whose own cleanup has run, and the only stubs are the process-touching
+# ones (the group kill is recorded, its emptiness probe finds the group empty), the pool, a recorder
+# around _close_members and a recorder of the signal.signal calls _restore_signal_handlers makes;
+# main(), _finish_members, _close_members, the kill sweep, the release, the bounded registry lock
+# (0.01 s here), the failed-member branch and the handlers are the production ones. Each run
+# delivers REAL signals (signal.raise_signal, so the handler installed at that point runs) at one
+# point of the window from the body's first line through the end of _restore_signal_handlers:
+# "line", a SIGINT, and separately a SIGTERM, at every line event (sys.settrace); "instruction", the
+# same before every bytecode instruction (sys.monitoring); "pair", a first signal at every line
+# event and a second of the other kind at every later line event of that run (sys.monitoring:
+# CPython drops a trace function that raised, so sys.settrace cannot deliver a second signal after a
+# first that raised). A signal is sent only while its handler is _close_on_signal, or, for SIGINT,
+# the restored default handler (a SIGTERM restored to its default action would end the child);
+# nothing is injected inside _close_on_signal itself (a handler cut off at its entry is the residual
+# main() discloses; after its entry it has no signal-delivery point before it records the signal).
+# Every run must end with EXACTLY the outcome the deferred-signal precedence gives for the signals
+# sent (_raise_held: SIGTERM over SIGINT whatever the order; a SIGINT after SIGINT's restore raises
+# there, and the strongest held one, if any, replaces it; with no signal, the body's own outcome),
+# no close cut short, at least one close completed clean, the registry empty, the lock free, the
+# handlers restored by exactly the calls SIGTERM then SIGINT and nothing left deferred. It prints
+# one SWEEP-REPORT line: each body's baseline run, per body, mode and first signal the runs made and
+# the first five failing ones (point, offset of the second, the signals sent with how each was
+# handled and whether it raised, the outcome, the expected one, each close's problems, groups left,
+# the restores), the functions the window reached and the seconds taken. Model-only points: a signal
+# at the failed-member branch's except line or at its plain closing store raises before the branch's
+# cancel and kill sweep (main()'s closes still end every group, which the run requires); those
+# instructions (exception match, forward jump, constant and global loads, the dict store) include no
+# call, function entry or backward jump, the points where CPython runs a Python signal handler, so a
+# real signal cannot raise there.
+_CLOSE_SWEEP_CHILD = "\n".join((
+    "import concurrent.futures, contextlib, io, json, shutil, signal, sys, tempfile, time",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "suite.REGISTRY_LOCK_SECONDS = 0.01",
+    "tempfile.tempdir = tempfile.mkdtemp(prefix='member-close-sweep-')",
+    "M, TOOL = sys.monitoring, sys.monitoring.DEBUGGER_ID",
+    "SUITE_FILE = suite.main.__code__.co_filename",
+    "RESTORE = suite._restore_signal_handlers.__code__",
+    "HANDLER = suite._close_on_signal.__code__",
+    "OUTCOME = {signal.SIGINT: 'KeyboardInterrupt', signal.SIGTERM: 'SystemExit 143'}",
+    "def body(report_path, lanes):",
+    "    code = 0",
+    "    return code",
+    "class Pool:",
+    "    def __init__(self, max_workers):",
+    "        pass",
+    "    def map(self, fn, items):",
+    "        raise ValueError('injected failed member')",
+    "    def shutdown(self, wait=True, cancel_futures=False):",
+    "        pass",
+    "concurrent.futures.ThreadPoolExecutor = Pool",
+    "def branch(report_path, lanes):",
+    "    suite._config_results((), {}, None, None)",
+    "    return 0",
+    "BODIES = {body.__code__: 'returned 0', branch.__code__: 'ValueError: injected failed member'}",
+    "class Proc:",
+    "    pid, returncode, stdout, stderr = 0, 0, None, None",
+    "def signal_group(group, sig):",
+    "    if sig == 0:",
+    "        raise ProcessLookupError(3, 'the group is empty')",
+    "    st['kills'] += 1",
+    "    return True",
+    "real_close, real_signal = suite._close_members, signal.signal",
+    "def close():",
+    "    st['closes'].append(None)",
+    "    problems = real_close()",
+    "    st['closes'][-1] = problems",
+    "    return problems",
+    "def recording_signal(signum, handler):",
+    "    if sys._getframe(1).f_code is RESTORE:",
+    "        st['restores'].append(int(signum))",
+    "    return real_signal(signum, handler)",
+    "suite._close_members, signal.signal = close, recording_signal",
+    "suite._signal_member_group = signal_group",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "st = {}",
+    "def send(sig):",
+    "    handler = signal.getsignal(sig)",
+    "    how = ('ours' if handler is suite._close_on_signal else",
+    "           'restored' if handler is signal.default_int_handler else None)",
+    "    if how is None:",
+    "        return",
+    "    entry = [int(sig), how, False]",
+    "    st['sent'].append(entry)",
+    "    try:",
+    "        signal.raise_signal(sig)",
+    "    except BaseException:",
+    "        entry[2] = True",
+    "        raise",
+    "def step(code):",
+    "    if code.co_filename != SUITE_FILE and code not in BODIES:",
+    "        return False",
+    "    if not st['open']:",
+    "        if code is not st['body']:",
+    "            return True",
+    "        st['open'] = True",
+    "    if st['shut'] or code is HANDLER:",
+    "        return True",
+    "    if code is RESTORE:",
+    "        st['restoring'] = True",
+    "    elif st['restoring']:",
+    "        st['shut'] = True",
+    "        return True",
+    "    st['n'] += 1",
+    "    st['names'].add(code.co_name)",
+    "    plan = st['plan']",
+    "    if plan[0] == st['n']:",
+    "        st['first'] = st['n']",
+    "        send(plan[1])",
+    "    elif st['sent'] and plan[2] and st['n'] == st['first'] + plan[2]:",
+    "        send(plan[3])",
+    "    return True",
+    "def tracer(frame, event, arg):",
+    "    if event == 'call':",
+    "        code = frame.f_code",
+    "        return tracer if code.co_filename == SUITE_FILE or code in BODIES else None",
+    "    if event == 'line':",
+    "        step(frame.f_code)",
+    "    return tracer",
+    "def on_event(code, where):",
+    "    return None if step(code) else M.DISABLE",
+    "def lock_free():",
+    "    free = suite._MEMBERS_LOCK.acquire(0)",
+    "    if free:",
+    "        suite._MEMBERS_LOCK.release()",
+    "    return free",
+    "def strongest(sigs):",
+    "    return OUTCOME[signal.SIGTERM if signal.SIGTERM in sigs else signal.SIGINT]",
+    "def expected(sent, baseline):",
+    "    ours = [sig for sig, how, raised in sent if how == 'ours']",
+    "    if any(how == 'restored' for sig, how, raised in sent):",
+    "        held = [sig for sig, how, raised in sent if how == 'ours' and not raised]",
+    "        return strongest(ours) if held else 'KeyboardInterrupt'",
+    "    return strongest(ours) if ours else baseline",
+    "def run(how, suite_body, plan):",
+    "    st.clear()",
+    "    st.update(open=False, shut=False, restoring=False, n=0, first=0, plan=plan, sent=[],",
+    "              closes=[], kills=0, names=set(), restores=[], body=suite_body.__code__)",
+    "    group = suite._MemberGroup(Proc(), None)",
+    "    group.ended = True",
+    "    suite._MEMBERS['groups'].clear()",
+    "    suite._MEMBERS['groups'].add(group)",
+    "    suite._suite_main = suite_body",
+    "    real_signal(signal.SIGINT, signal.default_int_handler)",
+    "    real_signal(signal.SIGTERM, signal.SIG_DFL)",
+    "    if how == 'trace':",
+    "        sys.settrace(tracer)",
+    "    else:",
+    "        M.restart_events()",
+    "        M.set_events(TOOL, M.events.LINE if how == 'line' else M.events.INSTRUCTION)",
+    "    try:",
+    "        with contextlib.redirect_stdout(io.StringIO()):",
+    "            outcome = 'returned {}'.format(suite.main(None, None))",
+    "    except KeyboardInterrupt:",
+    "        outcome = 'KeyboardInterrupt'",
+    "    except SystemExit as exc:",
+    "        outcome = 'SystemExit {}'.format(exc.code)",
+    "    except BaseException as exc:",
+    "        outcome = '{}: {}'.format(type(exc).__name__, exc)",
+    "    finally:",
+    "        sys.settrace(None)",
+    "        M.set_events(TOOL, 0)",
+    "    sent, closes = st['sent'], st['closes']",
+    "    want = expected(sent, BODIES[st['body']])",
+    "    good = (outcome == want and None not in closes and [] in closes",
+    "            and (sent or len(closes) == 2) and not suite._MEMBERS['groups'] and lock_free()",
+    "            and st['restores'] == [signal.SIGTERM, signal.SIGINT]",
+    "            and signal.getsignal(signal.SIGINT) is signal.default_int_handler",
+    "            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL",
+    "            and suite._MEMBERS['held'] == [])",
+    "    return (st['first'] != 0, sent, good,",
+    "            [outcome, want, closes, len(suite._MEMBERS['groups']), st['restores']])",
+    "def sweep_mode(suite_body, how, pairs, first, second):",
+    "    points, bad, point = 0, [], 1",
+    "    while len(bad) < 5:",
+    "        offset = 1 if pairs else 0",
+    "        while True:",
+    "            reached, sent, good, seen = run(how, suite_body, (point, first, offset, second))",
+    "            if not sent:",
+    "                break",
+    "            names.update(st['names'])",
+    "            points += 1",
+    "            if not good:",
+    "                bad.append([point, offset, sent, seen])",
+    "            if not pairs or len(sent) < 2 or len(bad) >= 5:",
+    "                break",
+    "            offset += 1",
+    "        if not reached:",
+    "            break",
+    "        point += 1",
+    "    return [points, bad]",
+    "def sweep():",
+    "    report = {}",
+    "    for prefix, suite_body in (('', body), ('branch ', branch)):",
+    "        baseline = run('trace', suite_body, (0, 0, 0, 0))",
+    "        report[prefix + 'baseline'] = [baseline[2], baseline[3]]",
+    "        for how, pairs, label in (('trace', False, 'line'),",
+    "                                  ('instruction', False, 'instruction'),",
+    "                                  ('line', True, 'pair')):",
+    "            for first, second in ((signal.SIGINT, signal.SIGTERM),",
+    "                                  (signal.SIGTERM, signal.SIGINT)):",
+    "                report['{}{} {}'.format(prefix, label, signal.Signals(first).name)] = (",
+    "                    sweep_mode(suite_body, how, pairs, first, second))",
+    "    report['names'] = sorted(names)",
+    "    return report",
+    "M.use_tool_id(TOOL, 'member close sweep')",
+    "M.register_callback(TOOL, M.events.LINE, on_event)",
+    "M.register_callback(TOOL, M.events.INSTRUCTION, on_event)",
+    "started, names = time.monotonic(), set()",
+    "try:",
+    "    report = sweep()",
+    "finally:",
+    "    shutil.rmtree(tempfile.tempdir, ignore_errors=True)",
+    "report['seconds'] = round(time.monotonic() - started, 1)",
+    "print('SWEEP-REPORT ' + json.dumps(report), flush=True)",
+))
+
+
+def _read_record(path):
+    """The (pid, start time) pair a _GROUP_MEMBER_FIXTURE record holds, read as bytes."""
+    with open(path, "rb") as record:
+        pid, start = record.read().decode("ascii").split()
+    return int(pid), start
+
+
+def _recorded_states(folder):
+    """{record name: state} for every <tag>.leader and <tag>.grandchild record in folder (written
+    by _GROUP_MEMBER_FIXTURE): "alive" only when /proc shows that pid live (_pid_state) AND its
+    start time equals the recorded one, so a reused pid never reads as the recorded process;
+    otherwise "dead", or "cannot-evaluate: ..." for unreadable evidence."""
+    states = {}
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith((".leader", ".grandchild")):
+            continue
+        try:
+            pid, start = _read_record(os.path.join(folder, name))
+            state = _pid_state(pid)
+            if state == "alive":
+                with open("/proc/{}/stat".format(pid), "rb") as stat:
+                    if stat.read().decode("ascii", "replace").rsplit(")", 1)[1].split()[19] \
+                            != start:
+                        state = "dead"
+        except FileNotFoundError:
+            state = "dead"
+        except (OSError, ValueError, IndexError) as exc:
+            state = "cannot-evaluate: {}: {}".format(type(exc).__name__, exc)
+        states[name] = state
+    return states
+
+
+def _kill_recorded(folder):
+    """Harness cleanup: SIGKILL every recorded process still alive with its recorded start time,
+    through a pidfd opened BEFORE the start time is re-read, so the signal reaches that process
+    and never a later one reusing its pid. Never builds its list from a command-line pattern."""
+    for name, state in _recorded_states(folder).items():
+        if state != "alive":
+            continue
+        try:
+            fd = os.pidfd_open(_read_record(os.path.join(folder, name))[0])
+        except (OSError, ValueError):
+            continue
+        try:
+            if _recorded_states(folder).get(name) == "alive":
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+def _pidfd_group_signal_supported():
+    """True when this process can signal a process group through a pidfd
+    (_signal_member_group's exact path): os.pidfd_open exists and the kernel accepts
+    PIDFD_SIGNAL_PROCESS_GROUP. Probed with signal 0 through a pidfd of this process: the flag
+    addresses the group this pid leads, so ProcessLookupError (no such group: this process leads
+    none) or success both mean the flag was accepted; a kernel without it raises EINVAL."""
+    try:
+        fd = os.pidfd_open(os.getpid())
+    except (AttributeError, OSError):
+        return False
+    try:
+        signal.pidfd_send_signal(fd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+# The _CLOSE_PROBE_CHILD handshakes whose expiry is the scenario itself: in "failed-handshake"
+# member b never reports running, so member a's 1 s handshake expires and nothing is injected; in
+# "late-monitor" the monitor deliberately fires only after main() ended, so its SIGINT is absorbed
+# by the teardown's deferring handler and recorded as the "late SIGINT" handshake.
+_DELIBERATE_HANDSHAKES = dict([("failed-handshake", ("member b running",)),
+                               ("late-monitor", ("late SIGINT",))])
+
+# The scenarios whose EMPTY send list is the scenario itself: "failed-stalled" owes no signal
+# by construction (its one member fails without arriving, deterministically, so nothing is
+# ever sent and the completion budget measures nothing), the same way _DELIBERATE_HANDSHAKES
+# names each scenario's own deliberate expiry. Only the completion-budget record is exempt:
+# a reached code-owned bound, an owed signal or an expired handshake in such a run is still
+# recorded and stands the observation down. The "record-map" vectors pin both halves.
+_DELIBERATE_EMPTY_SEND = ("failed-stalled",)
+
+
+def _handshake_expired(scenario, extra):
+    """The harness-timeout message for a _CLOSE_PROBE_CHILD run one of whose handshakes expired
+    (extra["handshake"], beyond the scenario's deliberate one); None when every handshake was
+    met. The "handshake" extras hold ONLY state the harness's own threads arrange (member b's
+    arrival and report, member a's raise reaching member b once member a's positive control was
+    observed, a holder thread's own acquire granted, the sweep wrapper's release of those
+    holders, the members' grandchild records written by the fixture, a monitor, holder or sender
+    thread finished) and the signals the teardown absorbed after main() ("late <name>");
+    progress the code under test owns (the members' registration, a member thread inside the
+    real communicate, member a's positive control observed at all, the failed-member branch
+    entering its kill sweep and the real sweep returning, a delivered signal's deferral) expires
+    into the "missing" extras instead, which _scenario_timeout_record records as its own
+    reached-bound timeout, never folded here: timing alone is never a definite finding, so a
+    reached code-owned bound is cannot-evaluate too, fail closed, never a pass, and the defect
+    has to show in the _STATE_EVIDENCE fields, which stay compared beside the recorded timeout. A
+    handshake the handshake() helper raised expired
+    BEFORE the injected failure could be sent, so that failure is never sent after one of those;
+    a holder or release expiry ("lock held", "lock holder finished", "lock released") only
+    records its entry and the run continues, member a's raise included. How the parent grades
+    each expiry, including the late-signal rule, is _scenario_timeout_record's."""
+    expired = [what for what in extra.get("handshake") or ()
+               if what not in _DELIBERATE_HANDSHAKES.get(scenario, ())]
+    if not expired:
+        return None
+    return "TIMEOUT: member-close child ({}): handshake not met: {} (cannot evaluate)".format(
+        scenario, ", ".join(expired))
+
+
+# THE ALLOWLIST: the only fields of a _CLOSE_PROBE_CHILD observation that stay definite when
+# the observation carries ANY recorded timeout (a reached code-owned bound, an owed signal
+# never sent, the completion budget, an expired harness handshake of any kind, the expiry
+# pin). A field may sit here only because its value is read from FINAL state, after main()
+# ended and after every worker, holder and sender thread was joined, so no scheduling delay
+# can have produced it; every field outside this tuple (the outcome, the registry count, the
+# recorded process states, the timeliness, the printed lines and every other extras key) can
+# be shaped by WHEN something ran, so under any recorded timeout it stands down (_stood_down),
+# cannot-evaluate, never definite, with no per-site choice a new timeout site could forget.
+# Each entry's justification traces its producer to its read with no bound, timeout or
+# scheduling delay between the fact and the read, and names the vector pinning it:
+# - "restored": whether main() left the handlers restored. Producer: main()'s restore path
+#   either ran or did not by the time main() ended; read by getsignal and a real SIGINT
+#   raised AFTER the report's join loop, a direct read of final handler state with no wait
+#   in it. A thread a bounded join left alive, the one remaining way timing could still
+#   change the handlers, replaces the whole observation (the alive-kind record-map vector),
+#   so only a defect in the restore itself, never a slow thread, makes this false (the
+#   restoration and stray-defect record-map vectors keep that defect definite).
+# - "lock_free": the registry lock's final state. Producer: the last joined holder's
+#   release (or leak); read by a zero-timeout acquire AFTER the join loop, so the read
+#   itself carries no bound, and a joined holder has released or leaked for good. A holder
+#   still alive is "lock holder finished", whole replacement (the alive-kind record-map
+#   vector); the expiry-pin record-map vectors pin the stand-down of the timing-shaped
+#   pin fields beside it.
+# - "evidence": whether the failed-member branch itself called the kill sweep, and that
+#   the sweep wrapper's caller check discriminates. Producer: the wrapper appends to
+#   branch_swept synchronously inside the sweep call (the frame walk is pure computation),
+#   so the append IS the fact and no bound sits between the fact and the post-main read;
+#   every bound of the failed scenarios raises INTO the handler that calls the sweep, so a
+#   bound can only make the branch run, never skip it, and the second flag comes from a
+#   direct post-main call. The slow-positive-control record-map vectors are CLASSIFIER
+#   pins (the mapping, on a hand-written observation): flags at their want beside the
+#   60 s positive-control bound make the run cannot-evaluate, never a definite mismatch,
+#   while a false flag beside the same record stays definite. That the child's flags
+#   ARE at their want then rests on the producer pin ("producer-map" below) and the
+#   "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers). Member a's own
+#   arrival and raise came OFF this entry (round 17): that 60 s bound sits between
+#   member a's worker entering run and those flags, so a merely slow git leaves them
+#   False with the code healthy; they are the "member_a" extra, never definite when
+#   wrong (a wrong member_a leaves the send list empty, so the completion budget is
+#   recorded beside it and it stands down).
+# THE PRODUCER PIN, two independent nets, neither complete: the "producer-map" entry
+# (_allowlist_producers) pins, read from the child's source and fail closed on the
+# constructs it refuses, the exact names every write of each entry above reads, closed
+# over their origins through the forms it traces, so a producer re-tied to timing
+# (member a's arrival or raise, the send list, a stall) through one of those forms, by a
+# read that adds a name to the pinned signature, fails definitively in a healthy run
+# too; "producer-oracle" pins that discrimination, one probe per rule it names, on
+# mutated copies of the child source. THE VALUE PIN: the
+# "failed-stalled" scenario holds member a's arrival and raise and the send list,
+# deterministically and in every run, in the exact state a merely slow git leaves them
+# in, with every compared field structural, so an edit tying an allowlisted field to
+# those facts, on code that run executes, yields there the value a slow-git run would
+# give it (a wrong VALUE, reflection and module attributes included) unless it also
+# depends on ANY other state that differs between the two runs (the scenario's name,
+# member b's presence or absence, the exception outcome's text and similar); a stall's
+# presence is pinned the same way by "failed-refused" (stalls nonempty) beside "failed"
+# (stalls empty). Neither net catches more than its own mechanics reach: the value pin
+# catches a producer only by a compared field differing from its want (a missing report
+# included) in a run the scenarios make within their bounds, and the oracle only by a
+# refusal or by a change to a pinned signature (a traced read adding a name to it, or a
+# name leaving it). So ANY producer that neither net catches passes both nets, whatever the
+# condition under which it changes an allowlisted field (what a slow positive control
+# alters: arrival, raise, send list, member b's presence, the exception outcome's text; a
+# stall's length; the Python version, wall clock or environment; or anything else) and
+# whatever carries it (a form the oracle neither traces nor refuses, or a traced test whose
+# names are all pinned already, such as pinned_version's if sys.version_info >= (3, 99) or
+# a pure-local gate such as if len(branch_swept) > 1): THE RESIDUAL, stated in
+# _allowlist_producers beside the oracle's DISCLOSED BOUNDARIES, whose named residual
+# probes are examples of it, not the class. Only a run in which that condition holds where
+# the producer runs can catch it (a slow positive control is one such run, for a condition
+# it alters), and such a catch is never a pin.
+# A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
+# hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
+# still poison any field, the allowlist included (a live holder owns the lock; a live
+# monitor can raise), so it replaces the whole observation (_scenario_timeout_record).
+# The record-map pins this tuple's exact membership VERBATIM and the stand-down of every
+# extras key the child writes, so adding any key (late, direct, member_a or a new one) or
+# removing one fails a vector; the producer-map pins what each kept key reads.
+_STATE_EVIDENCE = ("evidence", "lock_free", "restored")
+
+
+def _stood_down(entry, message):
+    """entry (a 7-field observation, or its want) stood down under a recorded timeout: every
+    field outside the _STATE_EVIDENCE allowlist becomes message (the outcome, the registry
+    count, the recorded process states, the timeliness) or is dropped (every extras key off
+    the allowlist), and the extras carry stood_down=message. _scenario_timeout_record applies
+    it to the observed side and _stood_down_wants mirrors it onto the want, keyed on that
+    marker, so every comparison timing could shape is neutral on both sides while a mismatch
+    in an allowlisted field stays a definite finding."""
+    down = {key: value for key, value in entry[6].items() if key in _STATE_EVIDENCE}
+    down["stood_down"] = message
+    return entry[:1] + (message, message, message, message, message, down)
+
+
+def _scenario_timeout_record(scenario, observation, extra, recorded=None):
+    """The got entry for one _CLOSE_PROBE_CHILD observation, under the rule that TIMING ALONE
+    IS NEVER A DEFINITE FINDING: an observation whose only evidence of a defect is timing (a
+    deadline missed, a signal late, a signal never sent, a completion budget exceeded, a
+    merely slow thread) is recorded as a timeout (default CANNOT_EVALUATE), which fails the
+    run closed (exit 2) and is never a pass. Every timeout record, whatever produced it, is
+    graded by ONE rule instead of a per-site choice of fields: a "missing" entry (a bounded
+    wait on code-owned state reached its bound) and an "unsent" entry (the monitor returned
+    without sending a signal the harness owed) are popped and recorded; a False timeliness
+    field (the completion budget) is recorded, unless the unsent record already covers the
+    empty send list or the scenario owes no signal by construction (_DELIBERATE_EMPTY_SEND,
+    whose other records stay graded like any scenario's); a non-deliberate expired handshake
+    is recorded by _handshake_expired.
+    When ANYTHING was recorded, an expired kind naming a thread its bounded join left alive
+    (its entry ends " finished") replaces the whole observation with the recorded message (a
+    live thread can poison every field, the allowlist included), and otherwise the
+    observation is stood down to the last recorded message by _stood_down: only the
+    _STATE_EVIDENCE allowlist stays compared, mirrored on the wants side by
+    _stood_down_wants, so a restoration defect, a held lock or a false evidence flag beside
+    the timeout is STILL A DEFINITE FINDING while every field timing could shape is neutral.
+    No field stays definite through a per-timeout decision: a new timeout site gets the
+    stand-down for free, and widening or narrowing the allowlist fails the "record-map"
+    vectors, which pin each mapping, the _STATE_EVIDENCE tuple's exact membership verbatim
+    and the stand-down of every extras key the child writes (member_a, late, direct and the
+    rest), so admitting any existing child field fails a vector too."""
+    sink = CANNOT_EVALUATE if recorded is None else recorded
+    messages = []
+    missing = extra.pop("missing", None)
+    if missing:
+        messages.append("TIMEOUT: member-close child ({}): code-owned bound reached: {} "
+                        "(cannot evaluate)".format(scenario, ", ".join(missing)))
+    unsent = extra.pop("unsent", None)
+    if unsent:
+        messages.append("TIMEOUT: member-close child ({}): owed signal never sent: {} "
+                        "(cannot evaluate)".format(scenario, ", ".join(unsent)))
+    if (not unsent and scenario not in _DELIBERATE_EMPTY_SEND
+            and isinstance(observation, tuple) and len(observation) == 7
+            and observation[5] is False):
+        messages.append("TIMEOUT: member-close child ({}): completion budget reached "
+                        "(cannot evaluate)".format(scenario))
+    expired_message = _handshake_expired(scenario, extra)
+    if expired_message is not None:
+        messages.append(expired_message)
+    sink.extend(messages)
+    if not messages:
+        return observation
+    message = messages[-1]
+    if not (isinstance(observation, tuple) and len(observation) == 7):
+        return message
+    expired = [what for what in extra.get("handshake") or ()
+               if what not in _DELIBERATE_HANDSHAKES.get(scenario, ())]
+    if any(what.endswith(" finished") for what in expired):
+        return message
+    return _stood_down(observation, message)
+
+
+def _stood_down_wants(observed, wants):
+    """The wants with _scenario_timeout_record's stand-downs mirrored, because timing alone
+    is never a definite finding: an observed entry _stood_down reshaped carries the recorded
+    timeout message under its "stood_down" extras key, and the matching want is reshaped by
+    the same _stood_down with the same allowlist, so every comparison timing could shape is
+    neutral while the _STATE_EVIDENCE fields are still compared and a mismatch there stays a
+    definite finding. Every other entry's want is returned unchanged; an observed extras
+    dict can carry the marker through no other path (the child never writes a "stood_down"
+    extra, its own "unsent" extra is a list of signal names and is popped before comparison,
+    and a whole-observation replacement is a plain message, never a tuple). The "record-map"
+    entry pins the substitutions and the pass-through."""
+    adjusted = []
+    for entry, want in zip(observed, wants):
+        if (isinstance(entry, tuple) and len(entry) == 7
+                and isinstance(want, tuple) and len(want) == 7):
+            extras = entry[6] if isinstance(entry[6], dict) else {}
+            if _is_timeout(extras.get("stood_down")):
+                want = _stood_down(want, extras["stood_down"])
+        adjusted.append(want)
+    return adjusted
+
+
+def _close_lock_sites(close=None):
+    """Every acquisition of the registry lock in _close_members, read from the source, in source
+    order, each as (line offset from its def line, form): form "with" for a with statement
+    directly on _MEMBERS_LOCK (the bounded acquire, _RegistryLock.__enter__) and "acquire" for a
+    direct _MEMBERS_LOCK.acquire(...) call; EVERY other reference to the lock's name in the
+    function (a bare release, the raw ._lock, an alias, the name passed on, an ATTRIBUTE named
+    _MEMBERS_LOCK, as in a module-object access, or the STRING constant "_MEMBERS_LOCK", as in a
+    globals() subscript or a getattr call) comes back as "unrecognized", never skipped. config/member-close-unresolved-verdict requires exactly one "with" per
+    refused-site scenario ("close-refused", "close-wait-refused" and "close-left-refused" refuse
+    the first, second and third through the bounded acquire), so a fourth acquisition, a direct
+    acquire call or an unrecognized form fails that pin definitively, and a site that stopped
+    taking the lock through the bounded acquire is refused nowhere and fails its scenario. Raises
+    LookupError, which the caller records as cannot-evaluate, when the source cannot be read or
+    no def NAMED _close_members sits at its recorded line (a def under any other name there, the
+    renamed-def mutant, is never accepted), never an empty fail-open result. close (default
+    _close_members) is the function whose recorded file and line are read: the "close-oracle"
+    control passes probes written to the fixture, so the renamed-def mutant stays pinned.
+    Syntactic limit, disclosed: only references inside _close_members' own body that spell the
+    name _MEMBERS_LOCK as the bare global name, as an attribute of any value, or as that exact
+    string constant are seen; an acquisition through another name bound to the lock (an alias
+    made outside the function, a parameter, a container holding it), through a string built at
+    run time, or inside a helper it calls is outside this oracle (the helpers' own acquisitions
+    have their own refusal scenarios)."""
+    close = _close_members if close is None else close
+    first = close.__code__.co_firstlineno
+    filename = close.__code__.co_filename
+    try:
+        with open(filename, encoding="utf-8") as source:
+            tree = ast.parse(source.read())
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise LookupError("the close-lock-site oracle cannot read {}: {}".format(filename, exc))
+    for node in tree.body:
+        if (isinstance(node, ast.FunctionDef) and node.lineno == first
+                and node.name == "_close_members"):
+            break
+    else:
+        raise LookupError("the close-lock-site oracle found no def named _close_members at line "
+                          "{} of {}: it cannot read _close_members".format(first, filename))
+    parents = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    sites = []
+    for name in ast.walk(node):
+        if (isinstance(name, ast.Attribute) and name.attr == "_MEMBERS_LOCK") or (
+                isinstance(name, ast.Constant) and name.value == "_MEMBERS_LOCK"):
+            sites.append((name.lineno - first, "unrecognized"))
+            continue
+        if not (isinstance(name, ast.Name) and name.id == "_MEMBERS_LOCK"):
+            continue
+        parent = parents.get(name)
+        grand = parents.get(parent)
+        if isinstance(parent, ast.withitem) and parent.context_expr is name:
+            sites.append((parents[parent].lineno - first, "with"))
+        elif (isinstance(parent, ast.Attribute) and parent.attr == "acquire"
+                and isinstance(grand, ast.Call) and grand.func is parent):
+            sites.append((grand.lineno - first, "acquire"))
+        else:
+            sites.append((name.lineno - first, "unrecognized"))
+    return sorted(sites)
+
+
+def _sweep_call_sites(config=None):
+    """Every reference to _signal_member_groups in _config_results, read from the source in
+    source order like _close_lock_sites, each as (line offset from the def line, form): form
+    "except-before-wait" for a call directly on that name inside an except handler of a try
+    statement whose finally block waits for the workers (a shutdown(...) call carrying
+    wait=True in its finalbody), AND with no worker wait inside the handler itself before
+    the call: shutdown(...) waits unless it carries a literal wait=False, so any shutdown
+    call positioned before the sweep call in the handler without that literal refuses the
+    form (the "sweep-oracle" bare, positional and cancel probes pin this rule: a bare
+    shutdown(), a positional shutdown(True, ...) and shutdown(wait=True,
+    cancel_futures=False) each refuse, so a detector counting only a literal wait=True,
+    or exempting a literal False on any keyword, fails them). The except handler's body
+    then runs the kill sweep
+    before any wait for the workers, so the sweep precedes that wait STRUCTURALLY, a
+    source-order fact with no
+    deadline involved. EVERY other reference (a call outside such a handler, the call moved
+    after the wait into the finally block, a call after a handler-body wait, a bare name, an
+    attribute or a string constant spelling of the name) comes back "unrecognized", never
+    skipped. config/member-failed-no-late-launch requires exactly one "except-before-wait"
+    site ("sweep-site"), so the mutant that moves the kill sweep after the worker wait,
+    turns the handler's own shutdown into a waiting one, or removes the sweep, fails that
+    pin definitively. Raises LookupError, which the caller records as cannot-evaluate (never
+    a fail-open empty result), when the source cannot be read or no def NAMED
+    _config_results sits at its recorded line; the "sweep-oracle" entry pins this
+    discrimination on compiled probes. The same syntactic limits as _close_lock_sites apply:
+    a sweep called through another name bound to it, or a worker wait spelled through
+    anything but a shutdown call (a join, a future's result), is outside this oracle (the
+    sweep wrapper's runtime caller witness, the second "evidence" flag, and member b's
+    staged bounds cover the ordering dynamically, fail closed)."""
+    config = _config_results if config is None else config
+    first = config.__code__.co_firstlineno
+    filename = config.__code__.co_filename
+    try:
+        with open(filename, encoding="utf-8") as source:
+            tree = ast.parse(source.read())
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise LookupError("the sweep-site oracle cannot read {}: {}".format(filename, exc))
+    for node in tree.body:
+        if (isinstance(node, ast.FunctionDef) and node.lineno == first
+                and node.name == "_config_results"):
+            break
+    else:
+        raise LookupError("the sweep-site oracle found no def named _config_results at line "
+                          "{} of {}: it cannot read _config_results".format(first, filename))
+    parents = {}
+    for parent in ast.walk(node):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def waited_finally(handler):
+        wrapper = parents.get(handler)
+        if not isinstance(wrapper, ast.Try):
+            return False
+        for final in wrapper.finalbody:
+            for inner in ast.walk(final):
+                if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "shutdown"
+                        and any(key.arg == "wait" and isinstance(key.value, ast.Constant)
+                                and key.value.value is True for key in inner.keywords)):
+                    return True
+        return False
+
+    def waits_before(handler, call):
+        # A worker wait inside the handler ITSELF, before the sweep call, breaks the pinned
+        # ordering exactly as the finally wait would. shutdown(...) waits unless it carries
+        # a literal wait=False, so any shutdown call in the handler without that literal,
+        # positioned before the sweep call, refuses the form (fail closed: the site comes
+        # back "unrecognized" and the one-site pin fails definitively). The "bare" and
+        # "positional" sweep-oracle probes pin the literal rule: a detector counting only
+        # a literal wait=True accepts both and fails their vectors; the "cancel" probe
+        # (wait=True, cancel_futures=False) pins that the exemption reads the wait
+        # keyword itself, so a detector exempting any literal False keyword fails it.
+        for inner in ast.walk(handler):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "shutdown"
+                    and not any(key.arg == "wait" and isinstance(key.value, ast.Constant)
+                                and key.value.value is False for key in inner.keywords)
+                    and (inner.lineno, inner.col_offset) < (call.lineno, call.col_offset)):
+                return True
+        return False
+
+    sites = []
+    for name in ast.walk(node):
+        if (isinstance(name, ast.Attribute) and name.attr == "_signal_member_groups") or (
+                isinstance(name, ast.Constant) and name.value == "_signal_member_groups"):
+            sites.append((name.lineno - first, "unrecognized"))
+            continue
+        if not (isinstance(name, ast.Name) and name.id == "_signal_member_groups"):
+            continue
+        parent = parents.get(name)
+        form = "unrecognized"
+        if isinstance(parent, ast.Call) and parent.func is name:
+            ancestor = parents.get(parent)
+            while ancestor is not None and not isinstance(
+                    ancestor, (ast.ExceptHandler, ast.FunctionDef)):
+                ancestor = parents.get(ancestor)
+            if (isinstance(ancestor, ast.ExceptHandler) and waited_finally(ancestor)
+                    and not waits_before(ancestor, parent)):
+                form = "except-before-wait"
+        sites.append((name.lineno - first, form))
+    return sorted(sites)
+
+
+# The methods through which a name of the child is taken to gain a value: a call of one of
+# these on the bare name (anywhere in the child, a helper's body included) is one of that
+# name's origins, with its arguments' reads, in _allowlist_producers.
+_PRODUCER_MUTATORS = ("append", "extend", "insert", "add", "update", "setdefault")
+
+# Reflective builtins that can reach any binding without spelling its name: ANY use of one of
+# these names in the child is "unrecognized" (fail closed), so a producer reaching state
+# through them is refused. getattr, setattr and delattr are refused the same way unless
+# called directly on an import-bound module object, whose attribute state is a disclosed
+# boundary of the oracle.
+_REFLECTIVE_NAMES = ("globals", "vars", "locals", "eval", "exec", "compile", "__import__")
+
+
+def _allowlist_producers(source=None):
+    """The producer pin of the _STATE_EVIDENCE allowlist, read from the _CLOSE_PROBE_CHILD
+    source (source, default _CLOSE_PROBE_CHILD) and never run: a dict giving, for each
+    allowlisted extras key, the sorted names its producers READ, and under "unrecognized"
+    every construct this oracle refuses, as (line, form). The record-map vectors pin the
+    classifier (which fields a recorded timeout keeps); this pins what feeds the kept
+    fields, and the "failed-stalled" scenario pins part of the same class BY VALUE (its run
+    holds member a's arrival and raise and the send list in the slow-git state while every
+    compared field is structural), so a child that ties evidence, lock_free or restored to
+    member a's arrival or raise or to the send list fails a check even in a healthy run,
+    where no timeout ever exercises the classifier, when this oracle traces the tie
+    through a read that adds a name to a pinned signature or the stalled run executes it
+    as a slow run would; THE RESIDUAL below is what neither net catches. A stall's
+    presence is pinned by "failed-refused" (stalls nonempty) beside "failed" (stalls
+    empty).
+    A producer is every write of an allowlisted key: extra['<key>'] = value (a tuple target
+    is paired element by element), extra['<key>'].<mutator>(args) and extra.update(<key>=
+    value). Its reads are the names loaded in the written value, plus the names loaded in
+    the test of every if, while or conditional expression enclosing the write and in every
+    operand short-circuiting ahead of it inside an enclosing and/or, closed transitively
+    over each read name's origins in the child: an assignment to the name at module scope
+    or under a global declaration (paired the same way; a walrus included), a subscript
+    store into it (the index's reads included), a _PRODUCER_MUTATORS call on it, a call
+    taking the bare non-module name as an argument (the whole call is read: the callee may
+    bind or mutate it), each origin with its own enclosing tests up to the enclosing def,
+    and, for a module-level def, the names its body loads that it does not bind.
+    FAIL CLOSED on the extras dict: EVERY reference through the NAME extra that could
+    write an allowlisted key comes back "unrecognized", never skipped: a subscript with a
+    non-constant key, an allowlisted key read in any other way (an alias), deleted or
+    augmented, a method call other than setdefault, pop, get and update, or one of those
+    naming an allowlisted key or a non-constant key (update with positional or **
+    arguments included), an attribute not called, a rebinding other than the one binding
+    to {}, and a bare use other than as an element of the report list passed to json.dumps
+    (reaching the dict WITHOUT the name extra is reflection or a module attribute, below).
+    FAIL CLOSED on the carriers: for every name in an allowlisted signature whose origins
+    show a mutable literal (branch_swept and restored in the committed child, plus
+    whatever an edit routes into a signature), EVERY occurrence of that name outside the
+    recognised origin forms is "<name> escape", never skipped: a del, a non-mutator
+    method call (clear, pop), a bound method or attribute taken, an alias made of it, a
+    bare use in a test or anywhere else. Recognised: an origin target, a mutator
+    receiver, a bare call argument (an origin itself) and a traced producer value.
+    FAIL CLOSED on reflection: any use of a _REFLECTIVE_NAMES name anywhere in the child
+    is "unrecognized", and so is getattr, setattr or delattr except called directly on an
+    import-bound module object. Raises LookupError, which the caller records as
+    cannot-evaluate, when the source does not parse. Each "producer-oracle" probe (listed
+    beside the probes in _member_close_controls) names the rule it is built to pin; that
+    is one probe per named rule, not a proof that every rule has one.
+    DISCLOSED BOUNDARIES, each named here exactly because this oracle does NOT read it:
+    state routed through an attribute of an import-bound module object (a store like
+    sys.<attr> = ..., the suite's patched attributes, getattr or setattr on a module) is
+    not traced; control reaching a write or an origin through anything but the enclosing
+    if, while and conditional tests and short-circuits is not read (an early return or
+    raise, a for loop, a try, a with, a match, an assert, a def whose call sites gate
+    it); a name bound inside a def is not expanded (its loads are reported as the bare
+    name); the suite code the child calls is not read (the reads stop at the name suite).
+    Two probes pin boundaries at their empty diff: a module attribute store (moduleattr,
+    which feeds no allowlisted field) and a for gate on member a's arrival in the
+    post-main reads (forloop, which the "failed-stalled" value pin catches, arrival being
+    absent there).
+    THE RESIDUAL, a disclosure and not a guarantee, stated as the literal complement of
+    what the two nets catch, each by its own mechanics. The value pin catches a producer
+    only by a compared field differing from its want (a missing report included) in a run
+    the scenarios make within their bounds (the deterministic "failed-stalled" included).
+    This oracle catches a producer only by a refusal (an "unrecognized" entry) or by a
+    change to a pinned signature: a traced read that adds a name to it, or a name leaving
+    it. So ANY producer that neither net catches passes BOTH nets, whatever the condition
+    under which it changes evidence, lock_free or restored: what a slow positive control
+    alters (member a's arrival or raise, the send list, member b's presence or absence
+    (b_arrived, b_running, late), the exception outcome's text (ValueError in the stalled
+    run, TimeoutExpired in a slow one)), the scenario's name, a stall's length, the Python
+    version, wall clock or environment, timing of any other kind, or anything else; and
+    whatever carries it: a form this oracle neither traces nor refuses (a for, try or
+    assert gate, an early return, a module attribute, a form not listed here), or a form it
+    traces whose reads are all names already in the pinned signature. Two EXAMPLES of the
+    latter, not the class: pinned_version (if sys.version_info >= (3, 99):
+    branch_swept[:] = [] before the evidence read, a traced if whose test loads only sys,
+    already pinned, under a condition no run on a Python before 3.99 reproduces) and a
+    pure-local gate (a traced test loading only pinned names, such as if
+    len(branch_swept) > 1:, wherever no run within the bounds makes it hold). The value pin
+    catches a producer keyed on one of the facts named above only where some run within its
+    bounds reproduces that fact (failed-stalled for arrival, raise and the send list, on
+    the code that run executes, where forloop shows the catch, so it is outside THE
+    RESIDUAL; failed-handshake for a handshake expiry; failed-refused for a stall's
+    presence); the stalled run never executes member b's path or run_member (its one member
+    raises inside observed first; its pinned late=[] shows it), and differs from a slow
+    "failed" run in the other facts named above. The residual probes named here are
+    EXAMPLES, not the class: round 20's R1 (a for gate on member a's raise after
+    run_member's late append, raisegate), R2 (the same gate spelled try/assert, trygate)
+    and R4 (a for gate on the send list there, sendgate), and its gate on the scenario's
+    name (scenariogate: a for gate on scenario == 'failed-stalled' or member a's arrival
+    before the evidence read); round 21's gate on member b's absence (bgate: a for gate on
+    member a's arrival and b_arrived before the evidence read) and on the outcome text
+    (outcomegate: a for gate on outcome.startswith('TimeoutExpired') and member a's arrival
+    before the evidence read); round 22's gate on the outcome text alone (outcomeonlygate:
+    a for gate on outcome.startswith('TimeoutExpired') before the evidence read, tied to no
+    arrival, raise or send list); round 24's gate on a stall's length (stallgate: a for
+    gate on max(stalls) > 0.5 before the evidence read, stalls holding how long
+    "failed-refused" took to release its lock holders, a length no scenario arranges and a
+    slow positive control, which leaves stalls empty, does not produce); round 25's
+    pinned_version, above. The nine residual probes are recorded in "producer-oracle" at
+    their empty diff, so an oracle or scenario change that starts catching one fails that
+    pin and must update this text. Only a run in which the residual producer's condition
+    holds where the producer runs can catch it (a slow positive control is one such run,
+    for a condition it alters: a "failed" run whose member-a positive control reaches its
+    60 s bound can leave the field wrong beside the recorded timeout and, the allowlist
+    staying compared, report a definite mismatch); such a catch is intermittent, depends on
+    the host or the condition, and is never a pin."""
+    source = _CLOSE_PROBE_CHILD if source is None else source
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise LookupError("the allowlist producer oracle cannot parse the child: {}".format(exc))
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    imports, declared = set(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                imports.add((alias.asname or alias.name).partition(".")[0])
+        elif isinstance(node, ast.Global):
+            owner = parents.get(node)
+            while owner is not None and not isinstance(owner, defs):
+                owner = parents.get(owner)
+            if owner is not None:
+                declared.setdefault(owner, set()).update(node.names)
+
+    def module_scope(node):
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, defs):
+                return False
+            ancestor = parents.get(ancestor)
+        return True
+
+    def global_store(name, node):
+        # A store that binds the module-level name: at module scope, or under a global
+        # declaration of that name in the enclosing def (its VALUE reads are traced; the
+        # call sites gating such a def are a disclosed control boundary).
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, defs):
+                return isinstance(ancestor, defs[:2]) and name in declared.get(ancestor, ())
+            ancestor = parents.get(ancestor)
+        return True
+
+    def loads(node):
+        return {name.id for name in ast.walk(node)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)}
+
+    def tests(node):
+        found, below, ancestor = set(), node, parents.get(node)
+        while ancestor is not None and not isinstance(ancestor, defs):
+            if isinstance(ancestor, (ast.If, ast.While, ast.IfExp)) and below is not ancestor.test:
+                found |= loads(ancestor.test)
+            elif isinstance(ancestor, ast.BoolOp) and below in ancestor.values:
+                for prior in ancestor.values[:ancestor.values.index(below)]:
+                    found |= loads(prior)
+            below, ancestor = ancestor, parents.get(ancestor)
+        return found
+
+    def free(function):
+        bound = {arg.arg for arg in ast.walk(function.args) if isinstance(arg, ast.arg)}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+                bound.add(node.id)
+            elif isinstance(node, defs[:2]) and node is not function:
+                bound.add(node.name)
+        return {name for statement in function.body for name in loads(statement)} - bound
+
+    def paired(target, value):
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+                return [pair for part, piece in zip(target.elts, value.elts)
+                        for pair in paired(part, piece)]
+            return [pair for part in target.elts for pair in paired(part, value)]
+        if isinstance(target, ast.Starred):
+            return paired(target.value, value)
+        return [(target, value)]
+
+    # Beside each origin, "sanctioned" collects the exact Name nodes the recognised forms
+    # account for; the carrier sweep below refuses every other occurrence of a carrier.
+    origins, sanctioned = {}, set()
+    unrecognized, bindings = [], []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _REFLECTIVE_NAMES:
+            unrecognized.append((node.lineno, node.id + " reference"))
+        elif isinstance(node, ast.Name) and node.id in ("getattr", "setattr", "delattr"):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node and parent.args
+                    and isinstance(parent.args[0], ast.Name) and parent.args[0].id in imports):
+                unrecognized.append((node.lineno, node.id + " reference"))
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
+            for target in getattr(node, "targets", None) or [node.target]:
+                for part, value in paired(target, node.value):
+                    if isinstance(part, ast.Name) and global_store(part.id, node):
+                        origins.setdefault(part.id, []).append((value, node))
+                        sanctioned.add(id(part))
+                    elif isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name):
+                        origins.setdefault(part.value.id, []).extend(
+                            [(value, node), (part.slice, node)])
+                        sanctioned.add(id(part.value))
+        elif (isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name)
+                and global_store(node.target.id, node)):
+            origins.setdefault(node.target.id, []).append((node.value, node))
+            sanctioned.add(id(node.target))
+        elif isinstance(node, defs[:2]) and module_scope(node):
+            origins.setdefault(node.name, []).append((node, node))
+        elif isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                    and node.func.attr in _PRODUCER_MUTATORS):
+                origins.setdefault(node.func.value.id, []).extend(
+                    (value, node) for value in node.args + [key.value for key in node.keywords])
+                sanctioned.add(id(node.func.value))
+            receiver = node.func
+            while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                receiver = receiver.value
+            if not (isinstance(receiver, ast.Name) and receiver.id == "extra"):
+                # A bare name passed to any call (the extras writers aside, which the scan
+                # below traces) may be bound or mutated by the callee: the whole call is
+                # that name's origin. An import-bound module passed on is the disclosed
+                # module-attribute boundary instead.
+                for value in node.args + [key.value for key in node.keywords]:
+                    part = value.value if isinstance(value, ast.Starred) else value
+                    if isinstance(part, ast.Name) and part.id not in imports:
+                        origins.setdefault(part.id, []).append((node, node))
+                        sanctioned.add(id(part))
+
+    writers = {key: [] for key in _STATE_EVIDENCE}
+    for name in ast.walk(tree):
+        if not (isinstance(name, ast.Name) and name.id == "extra"):
+            continue
+        parent, form = parents.get(name), None
+        grand = parents.get(parent)
+        if isinstance(name.ctx, ast.Store):
+            statement = grand if isinstance(parent, (ast.Tuple, ast.List)) else parent
+            values = [value for target in getattr(statement, "targets", ())
+                      for part, value in paired(target, statement.value) if part is name]
+            if (values and not bindings and module_scope(statement)
+                    and isinstance(values[0], ast.Dict) and not values[0].keys):
+                bindings.append(name.lineno)
+            else:
+                form = "rebinding"
+        elif isinstance(parent, ast.Subscript) and parent.value is name:
+            key = parent.slice.value if isinstance(parent.slice, ast.Constant) else None
+            if not isinstance(key, str):
+                form = "dynamic key"
+            elif key not in _STATE_EVIDENCE:
+                pass
+            elif isinstance(parent.ctx, ast.Store):
+                statement = (parents.get(grand) if isinstance(grand, (ast.Tuple, ast.List))
+                             else grand)
+                values = [value for target in getattr(statement, "targets", ())
+                          for part, value in paired(target, statement.value) if part is parent]
+                if values:
+                    writers[key].extend(values)
+                    sanctioned.update(id(v) for v in values if isinstance(v, ast.Name))
+                else:
+                    form = key + " store"
+            elif (isinstance(parent.ctx, ast.Load) and isinstance(grand, ast.Attribute)
+                    and grand.attr in _PRODUCER_MUTATORS
+                    and isinstance(parents.get(grand), ast.Call)
+                    and parents[grand].func is grand):
+                values = (parents[grand].args
+                          + [keyword.value for keyword in parents[grand].keywords])
+                writers[key].extend(values)
+                sanctioned.update(id(v) for v in values if isinstance(v, ast.Name))
+            else:
+                form = key + " reference"
+        elif isinstance(parent, ast.Attribute) and parent.value is name:
+            call = grand if isinstance(grand, ast.Call) and grand.func is parent else None
+            if call is None or parent.attr not in ("setdefault", "pop", "get", "update"):
+                form = "." + parent.attr
+            elif parent.attr == "update":
+                if call.args or any(keyword.arg is None for keyword in call.keywords):
+                    form = ".update arguments"
+                for keyword in call.keywords:
+                    if keyword.arg in _STATE_EVIDENCE:
+                        writers[keyword.arg].append(keyword.value)
+                        if isinstance(keyword.value, ast.Name):
+                            sanctioned.add(id(keyword.value))
+            elif not (call.args and isinstance(call.args[0], ast.Constant)
+                      and isinstance(call.args[0].value, str)
+                      and call.args[0].value not in _STATE_EVIDENCE):
+                form = "." + parent.attr + " key"
+        elif not (isinstance(parent, ast.List) and isinstance(grand, ast.Call)
+                  and isinstance(grand.func, ast.Attribute) and grand.func.attr == "dumps"
+                  and isinstance(grand.func.value, ast.Name) and grand.func.value.id == "json"):
+            form = "bare"
+        if form is not None:
+            unrecognized.append((name.lineno, form))
+
+    def signature(values):
+        seen, pending = set(), set()
+        for value in values:
+            pending |= loads(value) | tests(value)
+        while pending:
+            read = pending.pop()
+            if read in seen:
+                continue
+            seen.add(read)
+            for value, site in origins.get(read, ()):
+                pending |= (free(value) if isinstance(value, defs[:2])
+                            else loads(value) | tests(site))
+        return sorted(seen)
+
+    found = {key: signature(values) for key, values in writers.items()}
+    # THE CARRIER SWEEP, closed world: a carrier is a signature name whose origins show a
+    # mutable literal (so its OBJECT can carry state into a producer; extra has its own
+    # scan above, and an import-bound module is the disclosed boundary). Every occurrence
+    # of a carrier the recognised forms did not account for is refused, so a deletion, a
+    # clear, a pop, an alias or any new spelling of a touch fails the pin instead of
+    # passing silently.
+    mutable = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.SetComp, ast.DictComp)
+    closure = {name for key in _STATE_EVIDENCE for name in found[key]}
+    carriers = {name for name in closure
+                if name != "extra" and name not in imports
+                and any(isinstance(value, mutable) for value, _ in origins.get(name, ()))}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id in carriers
+                and id(node) not in sanctioned):
+            unrecognized.append((node.lineno, node.id + " escape"))
+    found["unrecognized"] = sorted(unrecognized)
+    return found
+
+
+def _slow_control_record(source=None):
+    """The "failed-stalled" slow-control record, read from the _CLOSE_PROBE_CHILD source
+    (source, default _CLOSE_PROBE_CHILD) and never run: the sorted names of the facts that do
+    NOT hold, so the committed child gives []. The record is what keeps a stalled run on a
+    merely slow host cannot-evaluate: its positive control reaching the 60 s bound ends main()
+    in TimeoutExpired, the deliberate empty send list records no budget, and without the
+    reached bound "positive control a observed" in the "missing" extras nothing would stand
+    the run down, so its outcome would be a definite mismatch. No healthy run reaches the
+    record, so this reads it instead. A BINDING of a name below is every node of the child
+    that binds it: a store or del, an import (plain, dotted, which binds its first name,
+    or with as), a def or class name, an except-as name, a match capture and a parameter;
+    a wildcard import is NOT one (its names are not in the source; NOT READ, below).
+    "record": exactly one statement of the child is extra.setdefault('missing',
+    []).append('positive control a observed'). "gate": its
+    enclosing if, with no else, tests exactly scenario == 'failed-stalled' and
+    outcome.startswith('TimeoutExpired') and holds that statement alone, inside the body of
+    the module-level if scenario.startswith('failed'), and scenario has exactly one
+    binding, the statement scenario, folder, fixture = sys.argv[2], sys.argv[3],
+    sys.argv[4]. "kept": every use of the key 'missing' in the child (the constant
+    'missing' anywhere, a keyword missing= on any call) is either the call
+    extra.setdefault('missing', []) inside, through conditional expressions only, the
+    receiver of an append call, or sits in the body of the module-level if scenario ==
+    'lock', which no failed scenario enters (scenario's one binding is part of "gate"), so
+    no statement of the child, after the gate or in a def called after it, pops, deletes,
+    clears or rebinds the record THROUGH THE KEY; removing it without the key (clear,
+    popitem, a rebinding of extra, a dynamic key, __delitem__) is refused by "producer-map"
+    (_allowlist_producers, the extras dict's fail-closed rules), not here, and reaching the
+    dict or the record's list without the name extra (a module attribute such as
+    sys.modules, gc) is read by neither. "outcome": the child has exactly one module-level
+    try calling main(), every binding of outcome is inside it, and that try statement is
+    exactly the committed one: its body, its handler sequence (KeyboardInterrupt,
+    SystemExit, then Exception, each with its committed name and its one committed
+    statement, the last outcome = '{}: {}'.format(type(exc).__name__, exc)), no else and
+    no finally. So a TimeoutExpired that reaches this try out of main() is caught by no
+    earlier handler and no nested try, and yields the prefix the gate tests unless an edit
+    in the NOT READ class below changes what the try or the gate evaluates. NOT READ, each
+    named route an EXAMPLE of that class, a route that can keep the record out of the
+    report while this reader still gives []: whether a TimeoutExpired reaches this try at
+    all (the suite code main() runs, and the child's replacements of suite attributes on
+    that path, such as the sweep wrapper, can swallow or replace it); a binding made by a
+    wildcard import (from <module> import *), which can bind outcome or scenario unseen
+    (sys.outcome = ..., then from sys import *); a rebinding, by ANY binding form (a
+    wildcard import included) or by a module-attribute store (through the builtins module
+    or any other), of ANY name the pinned try loads (contextlib and redirect_stdout,
+    captured, suite, lanes, type, and the handlers' exception names KeyboardInterrupt,
+    SystemExit and Exception), the try itself still parsing to the committed one
+    (KeyboardInterrupt = TimeoutExpired makes the first handler catch the timeout; a
+    contextlib whose redirect_stdout raises on exit replaces it inside the try); a store
+    into the child's own globals through a module attribute (__main__.outcome,
+    __main__.scenario, sys.modules['__main__'].outcome), which binds no name, so neither
+    "gate" nor "outcome" sees it; a store into an attribute of an object the try or the
+    gate evaluates (the exception class's __name__ or __str__:
+    suite.subprocess.TimeoutExpired.__name__ = 'Slow' turns the handler's outcome into
+    'Slow: ...'), which binds no name either; a write to the child's namespace through a
+    function's __globals__ or a frame's globals (handle.__globals__['outcome'] = ...,
+    sys._getframe().f_globals['outcome'] = ...), which binds no name either; an exit or
+    raise between the gate and the report (an assert, raise, sys.exit or os._exit after the
+    record, in the child or a def it calls), so no PROBE-REPORT line is printed and the run
+    reads as a missing report, not a timeout; and any change to how the report is written
+    (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
+    exact by construction: this reader does not read ANY edit, by any route, that changes
+    what the pinned try or the gate evaluates, or whether the record reaches the printed
+    report, without a change it parses as a fact that does not hold (it then still gives
+    []); every route named above is an EXAMPLE of that class, not its bound. The probes
+    exceptbind and ctxclass (the rebinding route), wildcard and mainattr (the wildcard and
+    own-globals routes), exitafter, clsname (the attribute-store route) and funcglobals
+    (the __globals__ route) each hold ONE instance AT [] (disclosed, not read); the class,
+    not those instances, is what this reader does not read.
+    Raises LookupError, which the caller records as cannot-evaluate, when the source does
+    not parse."""
+    source = _CLOSE_PROBE_CHILD if source is None else source
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise LookupError("the slow-control reader cannot parse the child: {}".format(exc))
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def shape(text):
+        return ast.dump(ast.parse(text).body[0])
+
+    def binds(name):
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                bound = None if isinstance(node.ctx, ast.Load) else node.id
+            elif isinstance(node, ast.alias):
+                bound = (node.asname or node.name).partition(".")[0]
+            elif isinstance(node, ast.MatchMapping):
+                bound = node.rest
+            elif isinstance(node, ast.arg):
+                bound = node.arg
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                   ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+                bound = node.name
+            else:
+                continue
+            if bound == name:
+                found.append(node)
+        return found
+
+    def statement(node):
+        while node is not None and not isinstance(node, ast.stmt):
+            node = parents.get(node)
+        return node
+
+    def appended(use):
+        # The key as extra.setdefault('missing', []) inside, through conditional
+        # expressions only, the receiver of an append call: a use that only adds.
+        call = parents.get(use)
+        if not (isinstance(call, ast.Call) and ast.dump(call) == keyed):
+            return False
+        receiver = parents.get(call)
+        while isinstance(receiver, ast.IfExp):
+            receiver = parents.get(receiver)
+        caller = parents.get(receiver)
+        return (isinstance(receiver, ast.Attribute) and receiver.attr == "append"
+                and isinstance(caller, ast.Call) and caller.func is receiver)
+
+    record = shape("extra.setdefault('missing', []).append('positive control a observed')")
+    gate = shape("if scenario == 'failed-stalled' and outcome.startswith('TimeoutExpired'):"
+                 "\n    extra.setdefault('missing', []).append('positive control a observed')")
+    failed = ast.dump(ast.parse("scenario.startswith('failed')", mode="eval").body)
+    bound = shape("scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]")
+    lock = ast.dump(ast.parse("scenario == 'lock'", mode="eval").body)
+    keyed = ast.dump(ast.parse("extra.setdefault('missing', [])", mode="eval").body)
+    run = shape("try:\n    with contextlib.redirect_stdout(captured):\n"
+                "        outcome = 'returned {}'.format(suite.main(None, lanes))\n"
+                "except KeyboardInterrupt:\n    outcome = 'KeyboardInterrupt'\n"
+                "except SystemExit as exc:\n    outcome = 'SystemExit {}'.format(exc.code)\n"
+                "except Exception as exc:\n"
+                "    outcome = '{}: {}'.format(type(exc).__name__, exc)")
+    missing = []
+    records = [node for node in ast.walk(tree)
+               if isinstance(node, ast.stmt) and ast.dump(node) == record]
+    if len(records) != 1:
+        missing.append("record")
+    branch = parents.get(records[0]) if records else None
+    outer = parents.get(branch)
+    scenarios = binds("scenario")
+    if not (branch is not None and ast.dump(branch) == gate
+            and isinstance(outer, ast.If) and outer in tree.body
+            and ast.dump(outer.test) == failed and branch in outer.body
+            and len(scenarios) == 1 and ast.dump(statement(scenarios[0])) == bound):
+        missing.append("gate")
+    locked = {node for test in tree.body
+              if isinstance(test, ast.If) and ast.dump(test.test) == lock
+              for held in test.body for node in ast.walk(held)}
+    uses = [node for node in ast.walk(tree)
+            if (isinstance(node, ast.Constant) and node.value == "missing")
+            or (isinstance(node, ast.keyword) and node.arg == "missing")]
+    if not all(appended(use) or use in locked for use in uses):
+        missing.append("kept")
+    runs = [node for node in tree.body if isinstance(node, ast.Try)
+            and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "main" for call in ast.walk(node))]
+    if not (len(runs) == 1
+            and all(any(node is part for part in ast.walk(runs[0]))
+                    for node in binds("outcome"))
+            and ast.dump(runs[0]) == run):
+        missing.append("outcome")
+    return sorted(missing)
+
+
+def _oracle_down_sites(got, oracle_down):
+    """config/member-close-unresolved-verdict's stand-down when the close-lock-site oracle raised
+    LookupError (oracle_down, its recorded timeout message): ONLY the site= entries, the one
+    field the oracle informs, are stood down. The "close-sites" entry becomes the timeout message
+    (attributed, cannot-evaluate). Each refused-site scenario's observation keeps every definite
+    field, and its recorded site entry, which cannot be checked without the oracle, is replaced
+    by the timeout message on the observed side and expected verbatim on the wants side, so the
+    one comparison the oracle informs is neutral while every other mismatch stays definite; a
+    scenario that never recorded a site entry (the refusal never reached its target acquire)
+    keeps that absence, a definite mismatch the child reports without the oracle. Returns the
+    site= expectations for ("close-wait-refused", "close-left-refused"). The synthetic
+    "down-map" entry pins this mapping on a probe got whatever the real oracle's health."""
+    got["close-sites"] = oracle_down
+    for name in ("close-wait-refused", "close-left-refused"):
+        entry = got.get(name)
+        if isinstance(entry, tuple) and len(entry) == 7 and "site" in entry[6]:
+            entry[6]["site"] = oracle_down
+    return [oracle_down, oracle_down]
+
+
+def _closing_refusal_control(fixture, spawn):
+    """The config/member-closing-refuses-start control: _run_bounded with closing set and Popen
+    replaced by spawn (the caller's stand-in, which may record any start); returns _run_bounded's
+    code, the launch-error message when nothing started. It sets ONLY closing and clears only closing, through
+    _reopen_members, never by restoring the whole registry: a SIGINT or SIGTERM received inside the
+    control is deferred (held, as everywhere closing is set) and raised right after it, never
+    erased. Closing already set on entry (never the case inside a run) is left set. The probe
+    scenario "closing-control" pins it with a real SIGINT inside the control, and the "split-..."
+    scenarios a SIGTERM held here outranking a SIGINT held during main()'s later closes."""
+    import io
+    from unittest.mock import patch
+
+    reopen = not _MEMBERS["closing"]
+    _MEMBERS["closing"] = True
+    try:
+        with patch.object(subprocess, "Popen", spawn):
+            return _run_bounded([sys.executable, "-I", "-B", "-c", "pass"], str(fixture),
+                                dict(os.environ), 60, "closing control", "CONTROL ", [],
+                                io.StringIO())[0]
+    finally:
+        if reopen:
+            _reopen_members()
+
+
+# The _CLOSE_SWEEP_CHILD report config/member-close-signal-sweep requires: each body's clean
+# baseline (outcome, expected outcome, both closes clean, no group left, restores SIGTERM then
+# SIGINT), every mode with runs and none failing, and every window function reached.
+_SWEEP_MODES = tuple(body + mode + " " + name for body in ("", "branch ")
+                     for mode in ("line", "instruction", "pair") for name in ("SIGINT", "SIGTERM"))
+_SWEEP_REACHED = ("__enter__", "__exit__", "_close_members", "_config_results", "_finish_members",
+                  "_member_group_empty", "_release_member_group", "_restore_signal_handlers",
+                  "_signal_member_groups", "body", "branch", "main")
+_SWEEP_WANT = (
+    [[True, [outcome, outcome, [[], []], 0, [int(signal.SIGTERM), int(signal.SIGINT)]]]
+     for outcome in ("returned 0", "ValueError: injected failed member")],
+    [[mode, True, []] for mode in _SWEEP_MODES], [])
+
+
+def _sweep_observed(rc, out, err):
+    """config/member-close-signal-sweep's observation of one _CLOSE_SWEEP_CHILD run, and the parsed
+    report (None when not read). The child must have EXITED 0 before its report is read at all: a
+    report followed by any other exit is a failure, returned with the exit code and stderr; a
+    timeout is returned as is (cannot evaluate). The observation is the two baselines, per mode
+    whether it made runs and its failing runs, and the window functions it never reached."""
+    if _is_timeout(rc):
+        return rc, None
+    if rc != 0:
+        return "sweep child exited {}: err={!r}".format(rc, err[-400:]), None
+    try:
+        sweep = json.loads(out.rpartition("SWEEP-REPORT ")[2].partition("\n")[0])
+        return ([sweep["baseline"], sweep["branch baseline"]],
+                [[mode, sweep[mode][0] > 0, sweep[mode][1]] for mode in _SWEEP_MODES],
+                sorted(set(_SWEEP_REACHED) - set(sweep["names"]))), sweep
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
+        return "no report ({}): rc={} err={!r}".format(exc, rc, err[-400:]), None
+
+
+def _member_timeout_timely(elapsed, budget, recorded=None):
+    """True when elapsed stayed under the budget, else the budget-timeout message, recorded
+    (default CANNOT_EVALUATE: fail closed, never a pass, never definite) and used as the
+    stood-down value on BOTH sides of the comparison, because timing alone is never a
+    definite finding. config/member-timeout-cannot-evaluate pins this producer on a synthetic
+    over-budget value against a private record, so a mutant that stops recording or stops
+    reporting the reached budget fails that check definitively whatever the real control's
+    own timing."""
+    if elapsed < budget:
+        return True
+    message = ("TIMEOUT: member-timeout control: finished after {:.1f} s, past its {} s "
+               "budget (cannot evaluate)".format(elapsed, budget))
+    (CANNOT_EVALUATE if recorded is None else recorded).append(message)
+    return message
+
+
+def _verdict(failures, cannot_evaluate, caused):
+    """The suite exit code. A finding is attributed to a timeout when caused maps it to timeout
+    messages that were all recorded in cannot_evaluate (check() derives that from a result that is
+    a timeout message naming the member, _registered_offenders from a lane whose only offenders
+    timed out clean); every other finding is definite. 1 when any definite finding exists (a
+    definite finding outranks cannot-evaluate; the timeouts are listed beside it); 2 when a time
+    bound was reached and every finding is attributed to one; 0 when clean (main prints the PASS
+    line)."""
+    recorded = set(cannot_evaluate)
+    attributed = [finding for finding in failures
+                  if caused.get(finding) and set(caused[finding]) <= recorded]
+    definite = [finding for finding in failures if finding not in attributed]
+    note = "a member reached its time bound, so this run is no verdict on that member"
+    if definite:
+        print("SELF-TEST FAIL:")
+        for failure in definite:
+            print("  - " + failure)
+    if cannot_evaluate:
+        print(("  also cannot evaluate ({}):" if definite else
+               "SELF-TEST CANNOT EVALUATE: {}:").format(note))
+        for entry in cannot_evaluate:
+            print("  - " + entry)
+        if attributed:
+            print("  findings attributed to those timeouts:")
+            for finding in attributed:
+                print("  - " + finding)
+    if definite:
+        return 1
+    return 2 if cannot_evaluate else 0
 
 
 # These registered self-tests exercise data/text/filesystem fixtures, not a git
 # lifecycle. They still require a successful observed system-config-lane run.
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
+    "opf/tools/_child_status.py": ("Child-status probe vectors over forked and trampolined interpreter and bash "
+                                   "children; no git."),
     "opf/tools/_journal.py": "Descriptor-helper vectors over in-process pipes with patched os primitives.",
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
+    "opf/tools/_opf_adopt_discover.py": "Read-only source-discovery vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_adopt_state.py": ("Containment vectors over temporary product trees in a replaced "
+                                       "environment (private empty HOME, no system git config, C locale, "
+                                       "umask 022); its fixtures commit through plumbing only "
+                                       "(_opf_adopt_apply._selftest_git_commit and the S16 add, "
+                                       "write-tree, commit-tree, update-ref helper), never a hook."),
+    "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
+    "opf/tools/_opf_import_batch.py": "Pure batch parsing, canonical emission and digest vectors over in-memory bytes.",
+    "opf/tools/_opf_import_complete.py": "Import-completion vectors over temporary post-import filesystem fixtures.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
@@ -1568,136 +4237,23 @@ def _self_test_main_isolated(args):
 """
 
 
-def _opf_lifecycle_graph_checks():
-    """Mutation D uses a synthetic route mirroring the retired two-level wrapper shape (the fixture
-    above); rename cases guard discovery."""
-    import copy
-    names = denial = None
-    expected_names = "derivable lifecycle graph"
-    expected_denial = "named wrapper bypass"
-    try:
-        tree = _optlevel.parse(_LIFECYCLE_GRAPH_FIXTURE)
-        module = "lifecycle_fixture"
-        entry = "self_test"
-        delegates = _opf_lifecycle_delegates({module: tree})
-        delegate = delegates[module, entry][1]
-        route_name = delegates[module, "_self_test_main"][1]
-        renamed = copy.deepcopy(tree)
-        for node in ast.walk(renamed):
-            if isinstance(node, ast.FunctionDef) and node.name == delegate:
-                node.name = "body_without_a_suffix"
-            elif isinstance(node, ast.Name) and node.id == delegate:
-                node.id = "body_without_a_suffix"
-        renamed.body.append(_optlevel.parse("def unrelated_isolated(): pass").body[0])
-        expected_names = dict(delegates)
-        expected_names[module, entry] = (module, "body_without_a_suffix")
-        names = _opf_lifecycle_delegates({module: renamed})
-
-        mutant = copy.deepcopy(tree)
-        route = next(node for node in mutant.body
-                     if isinstance(node, ast.FunctionDef) and node.name == route_name)
-        calls = [node for node in ast.walk(route) if isinstance(node, ast.Call)
-                 and isinstance(node.func, ast.Name) and node.func.id == entry]
-        if len(calls) != 1:
-            raise ValueError("cannot uniquely mutate the fixture wrapper route")
-        calls[0].func.id = delegate
-        expected_denial = "lifecycle bypass: {}.{} -> {}.{}".format(
-            module, route.name, module, delegate)
-        try:
-            _opf_lifecycle_delegates({module: mutant})
-        except ValueError as exc:
-            denial = str(exc)
-    except (OSError, SyntaxError, ValueError, KeyError, StopIteration) as exc:
-        names = denial = str(exc)
-    check("env/opf-lifecycle-names-independent", names, expected_names)
-    check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
-
-
-def _opf_home_lifecycles(config_results):
-    """Account for every registered OPF module and its observed command variants.
-    Wrapped entries must isolate before delegation and restore after an exception.
-    Explicit non-git exemptions still run under the config observer; its absolute
-    executable/replaced-PATH residual applies. The derived graph rejects direct
-    wrapper bypasses; dynamic routes retain the graph helper's disclosed residual.
-    """
-    code = "\n".join((
-        "import importlib, inspect, json, os, sys",
-        "sys.path.insert(0, sys.argv[1])",
-        "module = importlib.import_module(sys.argv[2])",
-        "entry, delegate = sys.argv[3:5]",
-        "saved = dict(os.environ)",
-        "seen = []",
-        "class StopProbe(Exception): pass",
-        "def stop(*args):",
-        "    home = os.environ.get('HOME')",
-        "    seen.append([home != saved.get('HOME'),",
-        "                 home == os.environ.get('XDG_CONFIG_HOME'), os.path.isdir(home),",
-        "                 os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'])",
-        "    raise StopProbe()",
-        "setattr(module, delegate, stop)",
-        "try:",
-        "    fn = getattr(module, entry)",
-        "    args = [None for p in inspect.signature(fn).parameters.values()",
-        "            if p.default is inspect.Parameter.empty]",
-        "    fn(*args)",
-        "except StopProbe:",
-        "    pass",
-        "print(json.dumps([seen, dict(os.environ) == saved]))",
-    ))
-    results = {}
-    roster = [argv for argv in _registered_selftests()
-              if _command_identity(argv)[0].startswith("opf/tools/")]
-    paths = {_command_identity(argv)[0] for argv in roster}
-    missing = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
-    for argv in roster:
-        if config_results.get(argv) != (0, b"", b"", b""):
-            missing.add(_command_identity(argv)[0])
-    problems = []
-    try:
-        trees = {Path(relative).stem: ast.parse(
-            (ROOT / relative).read_text(encoding="utf-8")) for relative in sorted(paths)}
-        registrations = _opf_lifecycle_delegates(trees)
-    except (OSError, SyntaxError, ValueError) as exc:
-        registrations = {}
-        problems.append(str(exc))
-    for relative in sorted(paths):
-        module = Path(relative).stem
-        delegates = {entry: callee[1] for (owner, entry), callee in registrations.items()
-                     if owner == module}
-        reason = OPF_LIFECYCLE_EXEMPTIONS.get(relative)
-        if not delegates:
-            if not reason or not reason.strip():
-                missing.add(relative)
-        elif reason is not None:
-            missing.add(relative)  # A stale exemption must be reviewed and removed.
-        for entry, delegate in sorted(delegates.items()):
-            env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
-                       GIT_CONFIG_NOSYSTEM="0")
-            try:
-                child = subprocess.run(
-                    [sys.executable, "-I", "-B", "-c", code,
-                     str(ROOT / "opf" / "tools"), module, entry, delegate],
-                    env=env, capture_output=True, text=True, timeout=60)
-                try:
-                    got = (child.returncode, json.loads(child.stdout))
-                except ValueError:
-                    got = (child.returncode, child.stdout, child.stderr)
-            except (OSError, subprocess.SubprocessError) as exc:
-                got = str(exc)
-            results[module, entry] = got
-    if not paths or not results:
-        problems.append("no registered lifecycle observations")
-    problems.extend("{}.{}: {!r}".format(module, entry, value)
-                    for (module, entry), value in sorted(results.items())
-                    if value != (0, [[[True, True, True, True]], True]))
-    for check_id, module, entry in (
-            ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
-            ("env/opf-tooling-home-lifecycle", "opf", "run_self_tests"),
-    ):
-        if (module, entry) not in results:
-            problems.append("{}.{}: missing lifecycle observation".format(module, entry))
-        check(check_id, results.get((module, entry)), (0, [[[True, True, True, True]], True]))
-    check("env/registered-opf-lifecycles", (sorted(missing), problems), ([], []))
+def _lifecycle_finding(roster, config_results, definite, problems, recorded=None, probes=()):
+    """(got, cause) for env/registered-opf-lifecycles. definite holds the paths missing for a
+    reason other than their config run; each roster argv whose config run was not clean adds its
+    path to it unless that run only timed out (_split_offenders). probes holds the recorded
+    timeout messages of the lifecycle probes that reached their bound, kept out of problems
+    (_lifecycle_problems in tools/selftest_git_fixture_env_config_system.py). With any definite
+    path or problem, got lists ONLY the definite paths and cause is (): a member whose run only
+    timed out, or a probe that reached its bound, is reported by its own timeout message on the
+    cannot-evaluate list, never in this FAIL. Otherwise got lists the timed-out paths and the
+    probes' timeout messages, and cause every one of those timeout messages."""
+    offenders, timed_out, causes = _split_offenders(
+        {argv: config_results.get(argv) for argv in roster}, recorded)
+    definite = set(definite) | {_command_identity(argv)[0] for argv in offenders}
+    if definite or problems:
+        return (sorted(definite), problems), ()
+    return ((sorted({_command_identity(argv)[0] for argv in timed_out}), problems + list(probes)),
+            causes + tuple(probes))
 
 
 def _build_decoy(base):
@@ -1738,22 +4294,21 @@ def _snapshot_git_dir(repo):
 def _run_corpus(poison_key, poison_value, cwd):
     """Run the corpus self-test isolated with exactly ONE repository-selecting poison on top of an
     otherwise scrubbed environment, so the lane measures that poison alone. Returns the child's
-    return code, or a loud string on a launch failure or timeout."""
+    return code, a loud string on a launch failure, or the timeout message _run_bounded recorded
+    as cannot-evaluate."""
     env = _git_fixture_env.git_fixture_env()
     env[poison_key] = poison_value
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)],
-                              cwd=str(cwd), env=env, capture_output=True, text=True, timeout=300)
-        return proc.returncode
-    except (OSError, subprocess.SubprocessError) as exc:
-        return "corpus launch failed: {}".format(exc)
+    rc, _, _ = _run_bounded([sys.executable, "-I", "-B", str(CORPUS_SELFTEST)], str(cwd), env,
+                            CORPUS_BOUND, "corpus self-test under " + poison_key, "CORPUS ")
+    return rc if _is_timeout(rc) or not isinstance(rc, str) else "corpus launch failed: " + rc
 
 
 def _run_corpus_imported(poison_key, poison_value, cwd):
     """Run the corpus suite through its IMPORTED surface (run_self_test(), which bypasses
     __main__ and its entry-point scrub) isolated with exactly ONE repository-selecting poison,
     so the fixture-lifecycle scrub in GitTests.setUp must hold on its own. Returns the child's
-    return code, or a loud string on a launch failure or timeout."""
+    return code, a loud string on a launch failure, or the timeout message _run_bounded recorded
+    as cannot-evaluate."""
     env = _git_fixture_env.git_fixture_env()
     env[poison_key] = poison_value
     code = "\n".join((
@@ -1764,12 +4319,11 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
         "rc = selftest_aiqt_corpus.run_self_test()",
         "sys.exit(rc if dict(os.environ) == saved else 1)",
     ))
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
-                              cwd=str(cwd), env=env, capture_output=True, text=True, timeout=300)
-        return proc.returncode
-    except (OSError, subprocess.SubprocessError) as exc:
-        return "imported corpus launch failed: {}".format(exc)
+    rc, _, _ = _run_bounded([sys.executable, "-I", "-B", "-c", code, str(ROOT / "tools")],
+                            str(cwd), env, CORPUS_BOUND,
+                            "imported corpus self-test under " + poison_key, "CORPUS ")
+    return (rc if _is_timeout(rc) or not isinstance(rc, str)
+            else "imported corpus launch failed: " + rc)
 
 
 def _auto_maintenance_children(workdir, env):
@@ -1779,8 +4333,8 @@ def _auto_maintenance_children(workdir, env):
     red leg demonstrates that child LAUNCHING, this single-file seed staying under the
     automatic-work thresholds, and once those thresholds are met the child can repack or prune
     the fixture's .git/objects after the commit returned, racing a later copytree/rmtree/read
-    of that repository). A launch failure or an unreadable trace is a loud string, never a
-    silent pass."""
+    of that repository). A launch failure or an unreadable, empty or malformed trace is a loud
+    string, never a silent pass."""
     workdir.mkdir()
     trace = workdir / "trace2-events.jsonl"
     repo = workdir / "repo"
@@ -1796,17 +4350,66 @@ def _auto_maintenance_children(workdir, env):
              "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
              "commit", "-q", "-m", "seed"],
             check=True, capture_output=True, timeout=60, env=env)
-        lines = trace.read_text(encoding="utf-8").splitlines()
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         return "maintenance probe failed: %s" % (exc,)
-    children = []
-    for line in lines:
+    return _trace2_maintenance_children(trace)
+
+
+def _trace2_maintenance_children(trace, bound=TRACE2_TAIL_SECONDS, clock=time.monotonic,
+                                 sleep=time.sleep):
+    """The argv of every maintenance/gc child_start event in the trace2 event file trace. The
+    DETACHED child an unpinned commit launches inherits GIT_TRACE2_EVENT and keeps appending
+    events after the commit returned, so a read can land while it is mid-write and see an
+    unterminated final event. The file is then read again until it ends at a newline. The bound
+    is a polling deadline, bound seconds by clock after the first clock reading: clock is read
+    after EVERY read, and a read whose reading is at or past the deadline fails the probe loudly
+    whether or not that read ended at a newline (a tail completed only after the bound is a
+    failure, never accepted; an event still unterminated there is reported as such), so the
+    probe can overrun the bound by one sleep and one read but never accepts a read it cannot
+    place before the deadline. Only newline-terminated events are parsed, split at LF alone
+    (JSON escapes every LF inside a string, while str.splitlines would also cut an event at a
+    raw U+2028, U+2029 or U+0085, which JSON allows unescaped inside a string); a malformed
+    event (bad JSON or UTF-8, nesting too deep to parse, not an object, an object without a
+    string event (a child_start whose tag was lost would otherwise hide its child), a child_start
+    argv that is missing or not a list of strings) and an empty file (no event recorded, so no
+    evidence either way) are loud strings.
+    The red leg's evidence, the commit's own child_start event, is complete before the commit
+    exits; the wait only covers events the detached child is still writing. Residuals: a writer
+    that leaves the tail unterminated past the bound (a stalled or killed child) fails the probe
+    loudly rather than passing it, and events appended after the final read are not seen."""
+    deadline = clock() + bound
+    while True:
         try:
-            event = json.loads(line)
-        except ValueError as exc:
+            data = trace.read_bytes()
+        except OSError as exc:
+            return "maintenance probe failed: %s" % (exc,)
+        late = clock() >= deadline
+        if not data:
+            return "empty trace2 event file: no event recorded"
+        if data.endswith(b"\n"):
+            if late:
+                return "trace2 tail completed only after the %s s bound" % (bound,)
+            break
+        if late:
+            return "unterminated trace2 event after %s s: %r" % (
+                bound, data[data.rfind(b"\n") + 1:][:80])
+        sleep(0.05)
+    children = []
+    for line in data.split(b"\n")[:-1]:
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (ValueError, RecursionError) as exc:
             return "unparseable trace2 event: %s" % (exc,)
-        if event.get("event") == "child_start":
-            argv = event.get("argv") or []
+        if not isinstance(event, dict):
+            return "unparseable trace2 event: not a JSON object: %r" % (line[:80],)
+        kind = event.get("event")
+        if not isinstance(kind, str):
+            return "unparseable trace2 event: event is not a string: %r" % (line[:80],)
+        if kind == "child_start":
+            argv = event.get("argv")
+            if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+                return ("unparseable trace2 event: child_start argv is not a list of strings: %r"
+                        % (line[:80],))
             if set(("maintenance", "gc")) & set(argv):
                 children.append(argv)
     return children
@@ -2053,6 +4656,18 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_release_delta.py", "_git", ("git",),
      "production gate read funnel (rev-parse/cat-file/ls-tree/show and `worktree list`"
      " reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_git_raw", ("git",),
+     "production gate read funnel with replace refs and grafts disabled"
+     " (--no-replace-objects plus GIT_GRAFT_FILE pinned to os.devnull; diff-tree and"
+     " merge-base reads for the post-release revision binding, QA round-2); read-only by"
+     " design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_stage1_git", ("git",),
+     "stage-1 re-execution read funnel (a design decision): rev-parse and"
+     " cat-file --batch reads only, with --no-replace-objects and -c core.commitGraph=false -c"
+     " core.fsmonitor=false in option position plus an INLINE GIT_* scrub (GIT_NO_REPLACE_OBJECTS=1,"
+     " GIT_GRAFT_FILE pinned to os.devnull); the env is built inline rather than through"
+     " _substitution_free_env because stage 1 runs before that function is defined and may import"
+     " nothing from the checkout; read-only by design, never a maintenance-triggering subcommand"),
     ("tools/check_release_delta.py", "_index_materialized_tree", ("git",),
      "throwaway-index staging funnel: the loop variable carries exactly `init -q` and"
      " `add --force -A` over a raw-materialized temp tree under a scrubbed env; neither"
@@ -2089,6 +4704,17 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
      " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
+    ("tools/measure_hook_latency.py", "_sample", ("unresolved",),
+     "cannot-evaluate head: the timing funnel launches the command each hooks.json PreToolUse"
+     " entry declares (python3 running the dispatcher, or the self-test's stub dispatcher)"
+     " and that interpreter's -I -c version probe, never git; the dispatcher's own git"
+     " calls run inside the launched script, and this tool's fixture git calls go through"
+     " _git, whose argv carries gc.auto=0, gc.autoDetach=false and maintenance.auto=false"
+     " as literal `-c` pairs in option position"),
+    ("tools/selftest_git_fixture_env.py", "_start_member_group", ("unresolved",),
+     "cannot-evaluate head: the bounded-run funnel (_run_bounded) receives its argv from its"
+     " callers, and every caller passes a sys.executable head (_run_config_member's registered members,"
+     " the corpus leak lanes and the member-timeout controls' fixtures); no git launch"),
     ("opf/tools/_opf_adopt_hook.py", "self_test", ("unresolved",),
      "cannot-evaluate argv: the sandbox-mock seam canary calls subprocess.Popen(None)"
      " to prove the mock net denies the subprocess seam; with the mocks in place the"
@@ -2105,11 +4731,6 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/check_opf_init_p0.py", "runner_check.run_shell", ("unresolved",),
      "cannot-evaluate head: a PATH-resolved bash running this self-test's planted"
      " runner-script bodies; the bodies drive the runner under test, not git"),
-    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", ("unresolved",),
-     "cannot-evaluate argv: replays the doctor's own printed `git -C <fixture>"
-     " --literal-pathspecs add ...` advice command (and its -f-stripped control) inside the"
-     " fixture repo; add is not maintenance-triggering and the argv shape is validated by the"
-     " preceding checks"),
     ("opf/tools/selftest_commonmark_conformance.py", "_run_matrix", ("unresolved",),
      "cannot-evaluate head: re-spawns this conformance harness under each named PATH-resolved"
      " python interpreter (an optional maintainer matrix); not a git launch"),
@@ -2152,9 +4773,7 @@ _SCAN_ALLOWED_UNPINNED = (
      " run_status_owned, whose own argv head is sys.executable running the _fixture_main"
      " supervisor (the opf.py watchdog checks patch it only with wrappers that replay"
      " sys.executable argvs through the saved launcher), and the raw in-child replay runs"
-     " the fixture argvs its callers spell: sys.executable CLI/crash subjects throughout,"
-     " plus the worklog upgrade fixture's git init/add/commit whose argv carries the three"
-     " F-367 pins as literal `-c` pairs in option position under a private HOME/XDG env"),
+     " the fixture argvs its callers spell: sys.executable CLI/crash subjects throughout"),
     # In-process exec loaders and mutant builders (the dynamic tripwire), each audited: each
     # exec compiles THIS repo's own tracked source, an AST/text mutant of it, or a red-leg
     # candidate body spelled as a string literal in the self-test itself, into a module
@@ -2164,11 +4783,11 @@ _SCAN_ALLOWED_UNPINNED = (
     # scan's reach and is covered by its entry's audited justification instead (the
     # check_opf_init_observe.py red-leg candidate spells a subprocess.run whose argv
     # heads are sys.executable commands, never git).
-    ("tools/selftest_git_fixture_env.py", "_system_pin_checks", ("dynamic",),
+    ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", ("dynamic",),
      "exec of an AST-built PATH-removal mutant of the lifecycle helper's own source, for the"
      " wrapper red leg",
      1),
-    ("tools/selftest_git_fixture_env.py", "_manifest_extra_setup_failures", ("dynamic",),
+    ("tools/selftest_git_fixture_env_core.py", "_manifest_extra_setup_failures", ("dynamic",),
      "exec of one registry-derived fixture-setup expression against a stubbed _git, proving"
      " the setup guard refuses a failed git",
      1),
@@ -4481,23 +7100,88 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
+def main(report_path=None, lanes=None):
+    """The suite's entry: _suite_main (the lanes and the verdict) inside ONE top-level try whose
+    finally ends every member group still registered (_finish_members, _close_members), on every
+    exit: a return, a timeout, KeyboardInterrupt, SystemExit or any other exception. While it runs,
+    the first SIGINT or SIGTERM raises and every later one is deferred, never raised
+    (_close_on_signal, first raise then defer). THE FALLBACK CLOSE PROTECTS THE CLOSING STORE: the
+    store closing = True is the first statement of a finally that is itself inside the try whose
+    finally runs the second close, so a signal raising at that store (closing still clear, none
+    raised yet) skips at most the first close, and the handler has then set closing itself; once
+    closing is set or one signal has raised, no signal raises, so neither close can be cut short
+    and the main thread never takes the registry lock while a handler could raise. (A try statement
+    as the finally's first statement would not do under the sweep's line-event model: CPython 3.14
+    leaves that line's NOP outside every protected range, so a raise delivered there escapes main()
+    with both closes skipped.) The close handlers stay installed through BOTH closes and the
+    caller's dispositions are restored ONCE, after the second (_restore_signal_handlers), even when
+    the installation itself was interrupted. THE DEFERRED-SIGNAL PRECEDENCE (_raise_held): every
+    signal received while closing is set or after one has raised is kept, in the order received,
+    and none is dropped; after the restore, when any was deferred, _raise_held raises once the
+    strongest of the run's signals, SIGTERM over SIGINT whatever the order (SystemExit 143 whenever
+    a SIGTERM was received, else KeyboardInterrupt), and records it, so a SIGTERM a control's
+    _reopen_members already raised still outranks a SIGINT held during the closes; when none was
+    deferred, the exception already propagating stands. Only then is the exit code final
+    (_final_verdict): problems the second close still meets, and any registry lock refusal of the
+    run, make a clean run cannot-evaluate (exit 2), and the PASS line is printed only after the
+    close. config/member-close-signal-sweep pins this by a sweep over two suite bodies (one
+    returning 0, one driving the config pool's failed-member branch): a real SIGINT, and separately
+    a SIGTERM, at every line event from the suite body through the restore (sys.settrace), at every
+    bytecode instruction of that range (sys.monitoring), and a second signal at every line after
+    each first (sys.monitoring, since CPython drops a trace function that raised), each run
+    requiring a completed close, an empty registry, a free lock, the handlers restored in reverse
+    order, nothing left deferred and exactly the outcome this precedence gives for the signals
+    sent. config/member-close-handlers pins a SIGINT during the installation, a
+    SIGTERM, the restored handlers and a real member closed under SIGINTs at the entry of each
+    close; config/member-close-lock the lock; config/member-close-unresolved-verdict the verdict.
+    DISCLOSED RESIDUALS: the guarantee holds at the interpreter's signal-delivery points
+    (eval-breaker granularity) on the main thread, where CPython runs Python signal handlers; a
+    signal delivered to the process before the handlers are installed takes the default
+    disposition, and one delivered after the restore takes the restored disposition (a SIGINT
+    after SIGINT's restore raises KeyboardInterrupt there, replacing an exception already
+    propagating when nothing was deferred; one handled at or after the final drain's entry
+    preempts that drain, so the signals still deferred, a SIGTERM among them, are dropped). A
+    signal whose own Python handler is cut off at its entry by a
+    newly arrived one that raises is lost (CPython has already cleared its pending flag;
+    _close_on_signal). SIGKILL, and a SIGINT or SIGTERM whose disposition the caller had already
+    changed (left as it is), are outside this, and so is SIGHUP (like every other signal but SIGINT
+    and SIGTERM, it keeps the caller's disposition, and its default action ends the process with no
+    close); an exception set into the main thread from outside (PyThreadState_SetAsyncExc) is not a
+    signal and is not limited to one."""
+    _MEMBERS.update(closing=False, raised=None, held=[])
+    del _MEMBERS["refused"][:]
+    previous, code, unresolved = {}, None, []
     try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
+        try:
+            try:
+                _install_signal_handlers(previous)
+                code = _suite_main(report_path, lanes)
+            finally:
+                _MEMBERS["closing"] = True
+                _finish_members()
+        finally:
+            unresolved = _finish_members()
+    finally:
+        try:
+            _restore_signal_handlers(previous)
+        finally:
+            _raise_held()
+    return _final_verdict(code, unresolved, list(_MEMBERS["refused"]))
 
 
-def main(report_path=None):
+def _suite_main(report_path, lanes):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     if shutil.which("git") is None:
         print("SELF-TEST HARNESS ERROR: git is not available on PATH", file=sys.stderr)
+        return 2
+    if lanes is None:
+        print("SELF-TEST HARNESS ERROR: tools/selftest_git_fixture_env.py is the shared"
+              " suite engine and runs no checks of its own; run one of the registered"
+              " runners (" + ", ".join(_SUITE_RUNNERS) + ")."
+              " Nothing was run (cannot evaluate).", file=sys.stderr)
         return 2
     try:
         raw = tempfile.mkdtemp(prefix="git-fixture-env-selftest-")
@@ -4506,323 +7190,22 @@ def main(report_path=None):
               file=sys.stderr)
         return 2
     try:
-        base = Path(raw)
-
-        # ---------- layer 1: the scrub itself ----------
-        ambient_home = os.environ.get("HOME")
-        restore = _poison_environ()
-        try:
-            env = _git_fixture_env.git_fixture_env(GIT_AUTHOR_NAME="Fixture Author")
-        finally:
-            restore()
-        check("env/repo-selectors-dropped",
-              sorted(k for k, v in POISON_VARS.items() if env.get(k) == v), [])
-        check("env/allowlist-drops-novel-var", "GIT_FIXTURE_NOVEL_VARIABLE" in env, False)
-        check("env/config-pins",
-              (env.get("GIT_CONFIG_NOSYSTEM"), env.get("GIT_CONFIG_GLOBAL"),
-               env.get("GIT_CONFIG_SYSTEM")),
-              ("1", os.devnull, os.devnull))
-        check("env/scratch-home",
-              (env.get("HOME") == env.get("XDG_CONFIG_HOME"),
-               bool(env.get("HOME")) and os.path.isdir(env.get("HOME", "")),
-               env.get("HOME") != ambient_home),
-              (True, True, True))
-        check("env/override-kept", env.get("GIT_AUTHOR_NAME"), "Fixture Author")
-        check("env/non-git-preserved", env.get(SENTINEL), "kept")
-
-        # F-367: a fixture commit must not spawn automatic maintenance (an unpinned commit
-        # LAUNCHES the DETACHED `git maintenance run --auto` / `git gc --auto` child; once the
-        # automatic-work thresholds are met, that child can repack or prune the fixture's
-        # .git/objects after the commit returned, racing a later copytree/rmtree/read of that
-        # repository). The green leg proves the pinned env spawns none; the red leg strips
-        # exactly the maintenance pins and must OBSERVE the child launching, so the probe is
-        # proven discriminating, never vacuous.
-        check("env/no-auto-maintenance",
-              _auto_maintenance_children(base / "maintenance-green",
-                                         _git_fixture_env.git_fixture_env()), [])
-        unpinned = _git_fixture_env.git_fixture_env()
-        for name in _git_fixture_env._MAINTENANCE_PIN_VARS:
-            del unpinned[name]
-        red = _auto_maintenance_children(base / "maintenance-red", unpinned)
-        check("env/no-auto-maintenance-red",
-              red if isinstance(red, str) else bool(red), True)
-
-        # Layer 4, the tripwire leg: the repo-wide scan must report NO unpinned
-        # maintenance-capable launch (green), and a planted unpinned fixture commit must be
-        # reported while its pinned twin is not (the red leg proves the scan discriminating,
-        # never vacuous).
-        check("env/maintenance-pin-scan", _maintenance_pin_scan(ROOT), [])
-        planted_root = base / "pin-scan-planted"
-        (planted_root / "tools").mkdir(parents=True)
-        (planted_root / "opf" / "tools").mkdir(parents=True)
-        (planted_root / "tools" / "planted_unpinned.py").write_text(
-            "import subprocess\n\n\n"
-            "def _seed(repo):\n"
-            "    subprocess.run(['git', '-C', str(repo), 'commit', '-q', '-m', 'x'],\n"
-            "                   check=True, capture_output=True, timeout=30)\n",
-            encoding="utf-8")
-        (planted_root / "tools" / "planted_pinned.py").write_text(
-            "import subprocess\n\n\n"
-            "def _seed(repo):\n"
-            "    subprocess.run(['git', '-C', str(repo), '-c', 'gc.auto=0',\n"
-            "                    '-c', 'gc.autoDetach=false',\n"
-            "                    '-c', 'maintenance.auto=false',\n"
-            "                    'commit', '-q', '-m', 'x'],\n"
-            "                   check=True, capture_output=True, timeout=30)\n",
-            encoding="utf-8")
-        planted = _maintenance_pin_scan(planted_root, allow_missing_files=True)
-        got = "planted scan: %r" % (planted,)
-        if len(planted) == 1 and "tools/planted_unpinned.py" in planted[0] \
-                and "planted_pinned" not in planted[0]:
-            got = True
-        check("env/maintenance-pin-scan-red", got, True)
-
-        # Layer 4, the contract leg: the planted red/green table over every launch form and
-        # false-flag form round-2 review demonstrated (see _SCAN_CONTRACT_CASES).
-        check("env/maintenance-pin-scan-contract",
-              _scan_contract_failures(base / "pin-scan-contract"), [])
-
-        # The in-place form, in a CHILD interpreter under a fully poisoned environment: after
-        # scrub_git_environment() the only GIT_-prefixed variables left are the three pins, and
-        # HOME has left the poisoned value for the scratch home.
-        child_code = "\n".join((
-            "import json, os, sys",
-            "sys.path.insert(0, sys.argv[1])",
-            "import _git_fixture_env",
-            "_git_fixture_env.scrub_git_environment()",
-            "left = sorted([k, v] for k, v in os.environ.items() if k.startswith('GIT_'))",
-            "print(json.dumps([left, os.environ.get('HOME')]))",
-        ))
-        child_env = dict(os.environ)
-        child_env.update(POISON_VARS)
-        child_env["HOME"] = "/decoy/home"
-        try:
-            child = subprocess.run(
-                [sys.executable, "-I", "-c", child_code, str(ROOT / "tools")],
-                env=child_env, capture_output=True, text=True, timeout=60)
-            payload = json.loads(child.stdout)
-            got = (child.returncode, payload[0], payload[1] != "/decoy/home")
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            got = "scrub child failed: {}".format(exc)
-        check("env/scrub-in-place-child", got,
-              (0, [["GIT_CONFIG_COUNT", "3"], ["GIT_CONFIG_GLOBAL", os.devnull],
-                   ["GIT_CONFIG_KEY_0", "gc.auto"], ["GIT_CONFIG_KEY_1", "gc.autoDetach"],
-                   ["GIT_CONFIG_KEY_2", "maintenance.auto"], ["GIT_CONFIG_NOSYSTEM", "1"],
-                   ["GIT_CONFIG_SYSTEM", os.devnull], ["GIT_CONFIG_VALUE_0", "0"],
-                   ["GIT_CONFIG_VALUE_1", "false"], ["GIT_CONFIG_VALUE_2", "false"]], True))
-
-        # caller_env_without_git(), in a CHILD interpreter under full poison, with HOME at a
-        # scratch caller home whose .gitconfig carries the trust surface: after the in-place
-        # scrub, the caller env drops every GIT_* variable, retains the PRE-scrub HOME (while the
-        # process environment stays scrubbed), and a `git config --global` read under it sees the
-        # caller's global config again (the mechanism behind safe.directory trust on a checkout
-        # owned by another uid), while the fixture env still cannot.
-        caller_home = base / "caller-home"
-        caller_home.mkdir()
-        (caller_home / ".gitconfig").write_text(
-            "[safe]\n\tdirectory = *\n[aiqt]\n\tfixtureprobe = caller\n", encoding="utf-8")
-        trust_code = "\n".join((
-            "import json, os, subprocess, sys",
-            "sys.path.insert(0, sys.argv[1])",
-            "import _git_fixture_env",
-            "pre_home = os.environ.get('HOME')",
-            "_git_fixture_env.scrub_git_environment()",
-            "_git_fixture_env.scrub_git_environment()",
-            "caller = _git_fixture_env.caller_env_without_git()",
-            "fixture = _git_fixture_env.git_fixture_env()",
-            "probe = ['git', 'config', '--global', 'aiqt.fixtureprobe']",
-            "c = subprocess.run(probe, env=caller, capture_output=True, text=True, timeout=60)",
-            "f = subprocess.run(probe, env=fixture, capture_output=True, text=True, timeout=60)",
-            "print(json.dumps([sorted(k for k in caller if k.startswith('GIT_')),",
-            "                  caller.get('HOME') == pre_home,",
-            "                  os.environ.get('HOME') == pre_home,",
-            "                  [c.returncode, c.stdout.strip()], f.returncode == 0]))",
-        ))
-        trust_env = dict(os.environ)
-        trust_env.update(POISON_VARS)
-        trust_env["HOME"] = str(caller_home)
-        try:
-            child = subprocess.run(
-                [sys.executable, "-I", "-c", trust_code, str(ROOT / "tools")],
-                env=trust_env, capture_output=True, text=True, timeout=120)
-            payload = json.loads(child.stdout)
-            got = (child.returncode, payload[0], payload[1], payload[2],
-                   payload[3], payload[4])
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            got = "caller-env child failed: {}".format(exc)
-        check("env/caller-env-restores-trust-config", got,
-              (0, [], True, False, [0, "caller"], False))
-
-        # Stop the OPF suite at its first in-process invocation, after its fixture
-        # isolation. Observe the actual inherited environment and its finally restoration.
-        opf_code = "\n".join((
-            "import json, os, sys",
-            "sys.path.insert(0, sys.argv[1])",
-            "import check_opf_init",
-            "saved = dict(os.environ)",
-            "seen = []",
-            "class StopProbe(Exception): pass",
-            "def invoke(args):",
-            "    seen.append(dict(os.environ))",
-            "    raise StopProbe()",
-            "check_opf_init._suite(invoke)",
-            "expected = {'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,",
-            "            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0',",
-            "            'GIT_OPTIONAL_LOCKS': '0'}",
-            "print(json.dumps([len(seen) == 1 and",
-            "    {k: v for k, v in seen[0].items() if k.startswith('GIT_')} == expected,",
-            "    bool(seen) and seen[0].get('PATH') == saved.get('PATH'),",
-            "    dict(os.environ) == saved]))",
-        ))
-        opf_env = dict(os.environ)
-        opf_env.update(POISON_VARS)
-        try:
-            child = subprocess.run(
-                [sys.executable, "-I", "-B", "-c", opf_code, str(ROOT / "opf" / "tools")],
-                env=opf_env, capture_output=True, text=True, timeout=60)
-            got = (child.returncode, json.loads(child.stdout))
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            got = "OPF isolation child failed: {}".format(exc)
-        check("env/opf-init-inherited-allowlist", got, (0, [True, True, True]))
-
-        _system_pin_checks(base)
-
-        # ---------- layer 2: per-member routing ----------
-        for check_id, member_rel, scrub_names in (
-                ("route/selftest-aiqt-corpus", "tools/selftest_aiqt_corpus.py",
-                 ("git_fixture_env", "scrub_git_environment")),
-                ("route/selftest-orch-hooks", "tools/selftest_orch_hooks.py",
-                 ("scrub_git_environment",)),
-                ("route/qa-adapter", "tools/_qa_adapter.py", ("git_fixture_env",)),
-                ("route/check-record-drift", "tools/check_record_drift.py",
-                 ("scrub_git_environment",)),
-                ("route/check-mistakes-register", "tools/check_mistakes_register.py",
-                 ("scrub_git_environment",)),
-                ("route/check-version-monotonicity", "tools/check_version_monotonicity.py",
-                 ("scrub_git_environment",)),
-                ("route/check-release-build", "tools/check_release_build.py",
-                 ("scrub_git_environment",)),
-                ("route/check-release-delta", "tools/check_release_delta.py",
-                 ("scrub_git_environment",)),
-                ("route/check-opf-upgrade", "opf/tools/check_opf_upgrade.py",
-                 ("_scrubbed_env",)),
-                ("route/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py",
-                 ("scrub_git_environment",)),
-        ):
-            check(check_id, _calls_any(ROOT / member_rel, scrub_names), True)
-
-        for check_id, member, owner, binding, factory, launches in (
-                ("route/check-record-sections", "tools/check_record_sections.py",
-                 "_selftest_git", "env", "git_fixture_env", True),
-                ("route/check-portability", "tools/check_portability.py",
-                 "_self_test_main_isolated", "git_env", "git_fixture_env", True),
-                ("route/gen-manifest", "tools/gen_manifest.py",
-                 "_git", "env", "git_fixture_env", "computed"),
-                ("route/check-release-delta-env", "tools/check_release_delta.py",
-                 "_selftest_env", "env", "git_fixture_env", False),
-                ("route/check-release-delta-init", "tools/check_release_delta.py",
-                 "_git_init_commit", "env", "git_fixture_env", True),
-                ("route/check-release-delta-spy", "tools/check_release_delta.py",
-                 "_spy_index", "senv", "git_fixture_env", True),
-                ("route/check-release-build-attestation", "tools/check_release_build.py",
-                 "_self_test_main_isolated", "ge", "git_fixture_env", "attestation"),
-                ("route/check-branch-root", "tools/check_branch_root.py",
-                 "_fixture_git", "env", "git_fixture_env", "computed"),
-                ("route/check-gensrc-failclose", "tools/check_gensrc_failclose.py",
-                 "_git_fixture", "env", "git_fixture_env", True),
-                ("route/qa-adapter-fixture-env", "tools/_qa_adapter.py",
-                 "_self_test_isolated", "genv", "git_fixture_env", True),
-                ("route/check-opf-init", "opf/tools/check_opf_init.py",
-                 "_suite_isolated", "fixture_env", "_scrubbed_env", False),
-        ):
-            check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
-        for check_id, member, owner in (
-                ("scope/check-manifest", "tools/check_manifest.py", "self_test_main"),
-                ("scope/check-record-sections", "tools/check_record_sections.py", "self_test"),
-                ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test"),
-                ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main"),
-        ):
-            check(check_id, _scrub_scoped_first(ROOT / member, owner,
-                                               "fixture_git_lifecycle"), True)
-        check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
-
-        check("route/selftest-aiqt-hooks-fixture-env",
-              _archive_reads_use_caller_env(ROOT / "tools" / "selftest_aiqt_hooks.py",
-                                           fixture_calls=True), True)
-        check("route/selftest-aiqt-corpus-fixture-env",
-              _scrub_scoped_first(CORPUS_SELFTEST, "GitTests._init_repo", "git_fixture_env"),
-              True)
-
-        # Function-SCOPED routing: _calls_any proves the call SITE exists somewhere in the file,
-        # so the corpus row (either name accepted) stayed green with only one of its two
-        # protections removed. Each named self-test entry must itself lead with the in-place
-        # scrub, a top-level call with no process-launching call before it.
-        for check_id, member_rel, func_name in (
-                ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
-                ("scope/selftest-aiqt-corpus-setup", "tools/selftest_aiqt_corpus.py", "GitTests.setUp"),
-                ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
-                ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
-                ("scope/check-record-drift", "tools/check_record_drift.py", "self_test"),
-                ("scope/check-mistakes-register", "tools/check_mistakes_register.py",
-                 "self_test"),
-                ("scope/check-version-monotonicity", "tools/check_version_monotonicity.py",
-                 "self_test_main"),
-                ("scope/check-release-build", "tools/check_release_build.py", "self_test_main"),
-                ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main"),
-        ):
-            check(check_id, _scrub_scoped_first(ROOT / member_rel, func_name,
-                                                "scrub_git_environment"), True)
-
-        # The REAL-repository reads (the safe.directory regression): every literal
-        # `git ... archive ...` launch in the two members that read the checkout under test must
-        # pass env=caller_env_without_git(), or a checkout trusted only through the caller's
-        # global config regresses to a rc=128 refusal under the in-place scrub.
-        for check_id, member_rel in (
-                ("trust/check-release-build-archive-env", "tools/check_release_build.py"),
-                ("trust/check-release-delta-archive-env", "tools/check_release_delta.py"),
-        ):
-            check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
-
-        _roster_checks()
-        _opf_lifecycle_graph_checks()
-        config_results = _config_injection_lane(base)
-        _manifest_setup_failures(base)
-        _manifest_extra_setup_failures()
-        _opf_home_lifecycles(config_results)
-
-        # ---------- layer 3: the end-to-end leak probe ----------
-        decoy = _build_decoy(base)
-        if decoy is None:
+        code = lanes(Path(raw))
+        if code is not None:
+            # A lane return value can only FAIL the suite, never pass it: None falls
+            # through to the expected-id reconciliation and the verdict below; the
+            # exact int 2 is a harness error the lane reported for itself; any other
+            # value (0, 1, a bool, a non-int) is itself a harness error. Whatever a
+            # lane returns, the only exit taken here is 2.
+            if type(code) is not int or code != 2:
+                print("SELF-TEST HARNESS ERROR: the lane returned {!r}; a lane may"
+                      " return only None (reconcile the executed set and judge the"
+                      " verdict) or 2 (a harness error the lane reported itself)."
+                      " Fail closed (cannot evaluate).".format(code), file=sys.stderr)
             return 2
-        neutral_cwd = base / "neutral"
-        neutral_cwd.mkdir()
-        index_path = decoy / ".git" / "index"
-        index_before = index_path.read_bytes()
-        snap_before = _snapshot_git_dir(decoy)
-
-        rc = _run_corpus("GIT_INDEX_FILE", str(index_path), neutral_cwd)
-        check("leak/index-poison-fixture-green", rc, 0)
-        check("leak/index-poison-caller-unchanged",
-              (index_path.read_bytes() == index_before,
-               _snapshot_git_dir(decoy) == snap_before),
-              (True, True))
-
-        rc = _run_corpus("GIT_DIR", str(decoy / ".git"), neutral_cwd)
-        check("leak/gitdir-poison-fixture-green", rc, 0)
-        check("leak/gitdir-poison-caller-unchanged", _snapshot_git_dir(decoy) == snap_before, True)
-
-        # The IMPORTED corpus surface: run_self_test() bypasses __main__ and its entry-point
-        # scrub, so this lane stays green only if the fixture lifecycle (GitTests.setUp) scrubs
-        # itself.
-        rc = _run_corpus_imported("GIT_DIR", str(decoy / ".git"), neutral_cwd)
-        check("leak/imported-gitdir-poison-fixture-green", rc, 0)
-        check("leak/imported-gitdir-poison-caller-unchanged",
-              _snapshot_git_dir(decoy) == snap_before, True)
     finally:
         shutil.rmtree(raw, ignore_errors=True)
 
-    if not _write_report(report_path):
-        return 2
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -4830,14 +7213,8 @@ def main(report_path=None):
         FAILURES.append("execution-set/missing: {}".format(check_id))
     for check_id in sorted(_EXECUTED_SET - expected):
         FAILURES.append("execution-set/extra: {}".format(check_id))
-    if FAILURES:
-        print("SELF-TEST FAIL:")
-        for failure in FAILURES:
-            print("  - " + failure)
-        return 1
-    print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
-          "tools/selftest_checks.toml".format(len(EXECUTED)))
-    return 0
+    # 0 here is not yet a pass: main() prints the PASS line only after its close (_final_verdict).
+    return _verdict(FAILURES, CANNOT_EVALUATE, TIMEOUT_CAUSED)
 
 
 def _parse_argv(argv):
@@ -4845,10 +7222,10 @@ def _parse_argv(argv):
         return None
     if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
         return argv[1]
-    print("usage: selftest_git_fixture_env.py [--execution-report ABS_PATH] "
+    print("usage: a git-fixture-env suite runner accepts [--execution-report ABS_PATH] "
           "(the report path must be absolute)", file=sys.stderr)
     sys.exit(2)
 
 
 if __name__ == "__main__":
-    sys.exit(main(_parse_argv(sys.argv[1:])))
+    _selftest_exit_report.exit_with(main(_parse_argv(sys.argv[1:])))

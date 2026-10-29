@@ -87,17 +87,38 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
   gen_site.py --check   fail (exit 1) if any target is out of date; exit 2 on a bad source/shell
   gen_site.py --self-test  adversarial corpus over the bounded subset and the fail-closed paths
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_site.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import html
 import os
 import re
-import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_site.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_site.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
@@ -254,7 +275,7 @@ def parse_frontmatter(fm_text, source_rel):
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise SchemaError("{}: frontmatter is not valid TOML: {}".format(source_rel, exc))
     known = set(REQUIRED_FIELDS) | set(OPTIONAL_FIELDS)
     unknown = sorted(k for k in data if k not in known)
@@ -828,7 +849,7 @@ def main(argv):
         except SchemaError as exc:
             print("error: {}".format(exc), file=sys.stderr)
             return 2
-        if reconcile(target, page, check):
+        if reconcile(target, page, check, root):
             print("drift: {}".format(target_rel))
             drift = True
     if check and drift:
@@ -1417,6 +1438,51 @@ def _self_test():
             finally:
                 os.chmod(secret, 0o755)
                 secret.rmdir()
+        # site/ symlinked outside the root, or to a directory inside it, fails closed (exit 2) in --check and
+        # write mode with the page there untouched and nothing under it read: main() refuses a site/ that is a
+        # symlink at all, a stricter rule than reconcile's directory probe, which follows a link inside the root.
+        if symlink_ok:
+            import shutil
+
+            def _run_main_out(tmp_repo, argv):
+                """_run_main that also returns the output, reading reconcile's SystemExit as its exit code."""
+                orig = mod.repo_root
+                mod.repo_root = lambda: tmp_repo
+                buf = _io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        try:
+                            code = main(argv)
+                        except SystemExit as exc:
+                            code = exc.code
+                finally:
+                    mod.repo_root = orig
+                return code, buf.getvalue()
+
+            target_rel = _declared_md_sources()[0][1]
+            refusal = "{}/ is a symbolic link; refusing".format(SITE_DIR)
+            with tempfile.TemporaryDirectory() as outside_td:
+                for where in ("outside", "in-root"):
+                    held = Path(outside_td) / SITE_DIR if where == "outside" else td2 / "shared" / SITE_DIR
+                    held.parent.mkdir(exist_ok=True)
+                    shutil.move(str(td2 / SITE_DIR), str(held))
+                    os.symlink(held if where == "outside" else os.path.relpath(held, td2), td2 / SITE_DIR)
+                    page = held / Path(target_rel).relative_to(SITE_DIR)
+                    os.utime(page, ns=(10 ** 9, 10 ** 9))
+                    try:
+                        for argv in (["--check"], []):
+                            case_count += 1
+                            code, out = _run_main_out(td2, argv)
+                            written = os.stat(page).st_mtime_ns != 10 ** 9
+                            if code != 2 or refusal not in out or written:
+                                failures.append("site/ symlinked {} the root ({}): expected exit 2 with {!r} and {} "
+                                                "untouched, got exit {}, written {}, output {!r}".format(
+                                                    "outside" if where == "outside" else "inside",
+                                                    " ".join(argv) or "write", refusal, target_rel, code, written,
+                                                    out))
+                    finally:
+                        (td2 / SITE_DIR).unlink()
+                        shutil.move(str(held), str(td2 / SITE_DIR))
 
     _ = stat  # `stat` imported for potential platform check; retained if the fixture path grows.
 

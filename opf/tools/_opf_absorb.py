@@ -59,11 +59,16 @@ over synthetic stores, reached through `opf/tools/opf.py --self-test` as the `op
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_absorb.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_absorb.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import html
 import os
@@ -767,7 +772,8 @@ def self_test():
     malformed-heading findings propagated fail-closed in BOTH the range rollup and the freeze digest; the CLI
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
-    fail-closed on a broken ledger and on an unledgered covers token, exit-map)."""
+    fail-closed on a broken ledger and on an unledgered covers token, exit-map). The imported
+    release-row flag (spec 6.1, 14.3): the drafter drafts over an imported historical row."""
     import tempfile
     import shutil
 
@@ -965,6 +971,17 @@ def self_test():
     check("published-edit-freeze-finding",
           _opf_changelog.run_gates(vbase, worklog, cl_edit).status == "FINDING")
 
+    # 8b: the imported release-row flag (spec 6.1, 14.3). The drafter validates the ledger by
+    # validate_version's own rule, so a ledger with an imported historical row drafts the unreleased entry.
+    v_imp = {"schema": 1,
+             "release": [{"version": "0.9.0", "date": "2026-05-01T00:00:00Z", "worklog_span": [],
+                          "coverage_digest": _opf_release.compute_span_digest(by_id, None),
+                          "imported": True}] + vbase["release"],
+             "summary": vbase["summary"]}
+    st_impa, text_impa, _n, _f = draft_entry(v_imp, worklog, None, cl, "unreleased")
+    check("imported-row-draft-ok",
+          st_impa == OK and text_impa == "## unreleased\n\n### Added\n- a feature (WL-4)\n")
+
     # 9: the freeze-digest assist equals U5's freeze_digest of the parsed entry.
     check("freeze-digest-assist",
           _freeze_digest_of(cl, "1.0.0").draft == freeze_of(cl, "1.0.0")
@@ -987,12 +1004,10 @@ def self_test():
     check("exit-map", EXIT[OK] == 0 and EXIT[NOT_APPLICABLE] == 0 and EXIT[CANNOT_EVALUATE] == 2)
 
     # --- end-to-end store resolution over synthetic on-disk stores -----------------------------------
-    manifest_wl = ("[opf]\n"
-                   'standard = "opf"\n'
-                   'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-                   'layout = "inline"\n'
-                   'posture = "required"\n'
-                   'import_status = "none"\n\n'
+    # The [opf] base table comes from the production builder, so the fixtures follow the tooling's
+    # constants rather than restating them.
+    import _opf_init
+    manifest_wl = (_opf_init.base_table_text(_opf_init._manifest_model()) + "\n"
                    "[types.worklog]\n"
                    'namespace = "WL"\n')
     manifest_done = manifest_wl + '\n[types.done]\nnamespace = "DN"\n'

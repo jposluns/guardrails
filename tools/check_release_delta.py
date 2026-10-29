@@ -28,24 +28,708 @@ alters-obligations or byte-only (6.2/GD-89). A row that is malformed for its kin
 control must not run the gate mis-configured.
 
 Modes: default (genesis mode while releases.toml is zero-row and the manifest declares genesis;
-whole-surface delta otherwise); --repin --target V (10.4 adopter mode, rollback branch keyed on the
+post-release mode while the changelog head version EQUALS the newest attested release row, accepted only
+when the head COMMIT descends from that row's commit_sha and differs from it in nothing but the
+post-release record paths (judged entirely over COMMITTED objects through the substitution-free funnel;
+checkout drift is a stderr advisory, never the verdict), AND the attested release itself re-passes the
+exact gate it faced before its row was appended (the whole-surface delta from release_rows[-2], or the genesis validation for a first release;
+RELEASING steps 6a/6b; see _post_release_head); whole-surface delta otherwise, where the head version must
+strictly increase over the newest row); --repin --target V (10.4 adopter mode, rollback branch keyed on the
 pin-history match plus wholesale target validation plus recorded authorization); --self-test.
+
+Launch (a design decision): a plain run re-executes the COMMITTED copy of this
+gate. Stage 1 (the launched file: standard library only, no checkout import, no sys.path change)
+materializes HEAD's committed tree through a verified re-hashing walk and re-executes
+tools/check_release_delta.py from that materialization under -I -B with a fresh pycache prefix; stage 2
+routes every branch from COMMITTED records and judges the post-release branch over committed objects
+exclusively, while the genesis and delta branches judge the checkout by design. The launched file
+itself is checkout code: an attacker who controls it controls the launch (the disclosed residual).
+The stage-2 child and each nested validator child also write a completion record that stage 1 (or
+this gate) requires beside exit 0. The record detects an omitted, truncated or foreign-pid result;
+it cannot authenticate that the child ran its checks, because the child writes it (the second
+disclosed residual; see _stage2_arm_result). For the same reason no in-process exit guarantee
+holds against child code that installs a tracing, profiling, monitoring or audit hook: such a hook,
+firing once or repeatedly, can defeat the result writer's exit 2, so exit 0 can stand beside a
+success record (the same child-controlled-code class; see _stage2_arm_result).
 
 Exit: 0 clean / genesis / NOT APPLICABLE legs; 1 a real finding (an under-claimed bump, a rowless
 change, an unconsumed or wrong row, a register incompleteness); 2 malformed or unreadable input
 (a predecessor artifact, the dispositions record, a stale renderer declaration, a git failure).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_release_delta.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import io
 import os
 import subprocess
-import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_release_delta.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_release_delta.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+# ===== STAGE 1: re-execute the COMMITTED gate (a design decision) ===================================
+# Round 5 demonstrated that vetting checkout code from INSIDE a process
+# that already imported it cannot close the class: an untracked shadow module imported later (an
+# untracked tools/tempfile.py), a crafted __pycache__ .pyc behind a byte-identical .py, and a
+# repo-config core.fsmonitor hook that plants a file mid-run each flipped a refusal to exit 0 under
+# the exact CI launch. So the gate stops vetting the checkout from inside it: when launched as a plain
+# run (no options), this block, which imports NOTHING from the checkout and makes NO sys.path change
+# (standard library only), resolves HEAD through the pinned git funnel below, materializes HEAD's
+# COMMITTED tree into a fresh private directory through a verified re-hashing walk, and re-executes
+# the COMMITTED copy of this gate from that directory under -I -B -X pycache_prefix=<fresh empty dir>,
+# passing the repository and the materialized tree as explicit arguments. Stage 2 (the committed copy)
+# then routes every branch from committed records (see run()).
+#
+# DISCLOSED RESIDUAL (inherent): this launched file is ITSELF checkout code; an attacker who controls
+# the checkout copy of this file, the interpreter binary, or the launching process controls the launch
+# and can fabricate any verdict, and no file can vet its own launch. What the re-execution closes is
+# everything AFTER the launch: no other checkout file (no shadow module, no planted .pyc, no sibling
+# tool, no routing record) participates in the verdict. A launch without -P/-I additionally leaves the
+# few stdlib imports above this block shadowable by files planted beside this one; CI launches with
+# -I, which keeps the script directory off sys.path.
+#
+# DISCLOSED RESIDUAL (the completion record, PR #397 QA round p1): stage 1 accepts a zero child exit
+# only beside the child's complete record bound to its pid. That detects a child that fails to
+# complete (an omitted, truncated or foreign-pid record); it does not authenticate the committed
+# child's code, which can write a well-formed record without running the dispatch.
+
+def _stage1_git(repo, args, input_bytes=None, c_locale=False):
+    """The stage-1 pinned git funnel: the inherited GIT_* environment scrubbed; replace objects,
+    grafts, the commit-graph cache and core.fsmonitor all disabled on EVERY call (QA round-5
+    reproduction (c): a repo-config fsmonitor hook is attacker-chosen code and must never run
+    mid-gate; plumbing object reads apply no clean/smudge filter). QA round-6 (codex blocker 2):
+    GIT_NO_LAZY_FETCH=1 is set AFTER the scrub (the scrub would otherwise drop an inherited copy)
+    and protocol.allow=never is pinned on the argv, so a promisor/partial-clone repository can
+    never start a lazy fetch (and with it core.sshCommand, a remote helper, or a credential
+    helper) while stage 1 reads objects: a missing object is a refusal, never a transport.
+    `c_locale` pins LC_ALL=C (which gettext honors over LANGUAGE) for the one caller that matches
+    a git MESSAGE, the no-repository probe, so a localized message cannot defeat the match.
+    Raises OSError when git cannot be launched (callers map it to exit 2; QA round-6 claude 3:
+    never a traceback)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    if c_locale:
+        env["LC_ALL"] = "C"
+    return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                           "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                           "-C", repo, *args], capture_output=True, env=env, input=input_bytes)
+
+
+def _stage1_is_oid(sv):
+    return isinstance(sv, str) and len(sv) in (40, 64) and all(c in "0123456789abcdef" for c in sv)
+
+
+def _stage1_objects(repo, oids):
+    """{oid: (type, body)} via one pinned `git cat-file --batch`, EVERY returned body re-hashed
+    against the id that requested it (the stage-1 twin of _release_schema's typed batch reader,
+    duplicated here because stage 1 may import nothing from the checkout). ValueError on any protocol
+    or re-hash failure (mapped to exit 2 by the caller)."""
+    import hashlib
+    uniq = list(dict.fromkeys(oids))
+    if not uniq:
+        return {}
+    proc = _stage1_git(repo, ["cat-file", "--batch"],
+                       input_bytes=("\n".join(uniq) + "\n").encode("ascii"))
+    if proc.returncode != 0:
+        raise ValueError("git cat-file --batch failed: "
+                         + proc.stderr.decode("utf-8", "replace").strip()[:200])
+    out, i, result = proc.stdout, 0, {}
+    for want in uniq:
+        nl = out.find(b"\n", i)
+        if nl == -1:
+            raise ValueError("truncated cat-file header for " + want)
+        parts = out[i:nl].decode("ascii", "replace").split(" ")
+        i = nl + 1
+        if (len(parts) != 3 or parts[0] != want
+                or parts[1] not in ("blob", "commit", "tree", "tag") or not parts[2].isdigit()):
+            raise ValueError("malformed cat-file header for {}: {!r}".format(want, parts))
+        otype, size = parts[1], int(parts[2])
+        body = out[i:i + size]
+        if len(body) != size or out[i + size:i + size + 1] != b"\n":
+            raise ValueError("short cat-file body for " + want)
+        algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
+        if algo(otype.encode("ascii") + b" " + str(size).encode("ascii") + b"\x00"
+                + body).hexdigest() != want:
+            raise ValueError("git object {} re-hash mismatch in the stage-1 walk; a tampered "
+                             "loose object or object-store overlay substituted the "
+                             "bytes".format(want))
+        result[want] = (otype, body)
+        i += size + 1
+    if i != len(out):
+        raise ValueError("{} trailing byte(s) after the last requested object".format(
+            len(out) - i))
+    return result
+
+
+def _stage1_materialize(repo, commit_oid, dest):
+    """Write the committed tree at commit_oid into dest from verified objects only: the commit, every
+    tree, and every blob re-hashed against the id that named it; symlinks, gitlinks and unknown modes
+    refused; blob modes preserved."""
+    otype, body = _stage1_objects(repo, [commit_oid])[commit_oid]
+    if otype != "commit":
+        raise ValueError("object {} is a {}, not a commit".format(commit_oid, otype))
+    first = body.split(b"\n", 1)[0]
+    tree = first[5:].decode("ascii", "replace") if first.startswith(b"tree ") else ""
+    if not _stage1_is_oid(tree):
+        raise ValueError("commit {} carries no well-formed tree header".format(commit_oid))
+    entries, stack = [], [(tree, "")]
+    while stack:
+        tree_oid, prefix = stack.pop()
+        otype, body = _stage1_objects(repo, [tree_oid])[tree_oid]
+        if otype != "tree":
+            raise ValueError("object {} is a {}, not a tree".format(tree_oid, otype))
+        oid_len, i = len(tree_oid) // 2, 0
+        while i < len(body):
+            sp = body.find(b" ", i)
+            nul = body.find(b"\x00", sp + 1) if sp != -1 else -1
+            if sp == -1 or nul == -1 or len(body) < nul + 1 + oid_len:
+                raise ValueError("malformed tree object " + tree_oid)
+            mode = body[i:sp].decode("ascii", "replace")
+            name = body[sp + 1:nul].decode("utf-8")
+            child = body[nul + 1:nul + 1 + oid_len].hex()
+            i = nul + 1 + oid_len
+            if not name or "/" in name or name in (".", ".."):
+                raise ValueError("bad tree entry name in " + tree_oid)
+            if mode == "40000":
+                stack.append((child, prefix + name + "/"))
+            elif mode in ("100644", "100755"):
+                entries.append((mode, child, prefix + name))
+            else:
+                raise ValueError("unsupported mode {} at {} (symlinks and gitlinks are "
+                                 "refused)".format(mode, prefix + name))
+    blobs = _stage1_objects(repo, [c for _m, c, _p in entries])
+    dest_root = os.path.realpath(dest)
+    for mode, child, path in entries:
+        target = os.path.realpath(os.path.join(dest, path))
+        if target != dest_root and not target.startswith(dest_root + os.sep):
+            raise ValueError("path {!r} escapes the materialization root".format(path))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(blobs[child][1])
+        os.chmod(target, 0o755 if mode == "100755" else 0o644)
+
+
+# The entries whose presence marks a directory as a git directory in its own right (a bare
+# repository, a linked-worktree admin directory, a separate gitdir): git's discovery accepts such a
+# directory directly, with no `.git` entry beneath it (QA round-8 codex blocker 2 / claude F2).
+_GIT_DIR_MARKERS = ("HEAD", "objects", "refs", "commondir", "gitdir")
+
+
+def _stage1_repository_in_ancestry(*dirs):
+    """False ONLY when an inspection that is a SUPERSET of git's own repository discovery finds
+    nothing (the superset-of-discovery decision); the ONE helper both absence predicates use. For
+    every directory given, BOTH its lexical ancestry (os.path.abspath) and its physical ancestry
+    (os.path.realpath) are walked up to `/`: `git -C` changes into the directory, so discovery
+    walks the PHYSICAL ancestors, and a symlinked launch path past a damaged ancestor otherwise
+    read as absence (QA round-8 codex blocker 1 / claude F1). A directory counts as PRESENT when a
+    `.git` entry exists there in any form (directory, file or symlink; lstat, so a dangling symlink,
+    a symlink loop or a gitfile naming a missing gitdir counts; QA round-7 codex blocker), OR the
+    directory itself carries any git-directory marker (HEAD, objects, refs, commondir, gitdir: a
+    damaged BARE repository is still a repository; QA round-8 codex blocker 2 / claude F2), OR an
+    lstat there fails with anything other than not-found (fail-closed). The walk does not stop at a
+    filesystem boundary or a ceiling directory, because git may be told to cross them.
+    Returns None for absence, else a non-empty description naming the directory and the entry
+    found (or the path whose lstat failed), so the exit-2 refusal can say why (QA round-9 claude m2).
+    DISCLOSED RESIDUAL (the accepted fail-closed cost): this over-refuses by design. A genuine
+    non-git tree whose lexical or physical ancestry carries one of those names (an unrelated `refs`
+    directory or `HEAD` file, say) is cannot-evaluate, exit 2, never the single-stage path."""
+    seen = set()
+    for start in dirs:
+        for d in (os.path.abspath(start), os.path.realpath(start)):
+            while d not in seen:
+                seen.add(d)
+                for name in (".git",) + _GIT_DIR_MARKERS:
+                    try:
+                        os.lstat(os.path.join(d, name))
+                        return "directory {} carries a {!r} entry".format(d, name)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        return "{} is unreadable ({})".format(os.path.join(d, name), exc)
+                parent = os.path.dirname(d)
+                if parent == d:
+                    break
+                d = parent
+    return None
+
+
+def _stage1_gate_paths():
+    """(gate root, inspection directories) for the RUNNING gate file (QA round-9 codex blocker /
+    claude B1, extending the superset-of-discovery rule). The gate root is derived ONLY from the PHYSICAL
+    path of the file actually executing: os.path.realpath of the raw launch path joined to the cwd
+    resolves each symlink before the `..` that follows it, as the kernel does, and follows a
+    symlinked gate FILE. abspath erases `link/..` as text, so a root derived from it can name a
+    directory the gate does not live in. The lexical forms (abspath of __file__, the raw __file__
+    and sys.argv[0] joined to the cwd, un-normalized) are ADDITIONAL inputs to the superset walk
+    only, never the root. Raises OSError when the cwd or the path cannot be resolved: realpath runs
+    STRICT (QA round-10 claude F1), so a launch path naming no file on disk (a pipe read through
+    /dev/fd/N resolves to `pipe:[n]`, stdin's `<stdin>`) is cannot-evaluate, never a lexical
+    remainder whose ancestry reads as absence. The caller checks __file__ exists first."""
+    cwd = os.getcwd()
+    raw = os.path.join(cwd, __file__)
+    physical = os.path.realpath(raw, strict=True)
+    dirs = [os.path.dirname(physical), os.path.dirname(raw),
+            os.path.dirname(os.path.abspath(__file__))]
+    if sys.argv and sys.argv[0]:
+        dirs.append(os.path.dirname(os.path.join(cwd, sys.argv[0])))
+    return os.path.dirname(os.path.dirname(physical)), tuple(dirs)
+
+
+def _stage1_no_committed_state(repo, launch=()):
+    """True ONLY when a positive probe establishes that NO COMMITTED STATE exists, the sole
+    condition under which the single-stage checkout gate may run (QA round-6 codex blocker 1 /
+    claude 3). Either (a) NOT A GIT REPOSITORY: git's own discovery refusal under a pinned C
+    locale names no repository AND _stage1_repository_in_ancestry, a SUPERSET of git discovery
+    over the lexical and physical ancestry of the gate root and of each `launch` directory, finds
+    nothing (QA rounds 7 and 8: a `.git` entry or git-directory marker git cannot use ANYWHERE on
+    those walks, e.g. a corrupt ancestor .git/HEAD, an ancestor .git file naming a missing gitdir,
+    a bare ancestor with a corrupt HEAD, or any of these behind a symlinked launch path, is a
+    DAMAGED repository and never a fallback); or
+    (b) an UNBORN HEAD: the repository resolves, HEAD is a symbolic ref to a
+    refs/ branch, and `git show-ref --verify` answers exactly "missing" (rc 1) for that branch.
+    Every other git failure (dubious ownership, bad config, a corrupt object store, a detached or
+    corrupt HEAD) returns False and the caller exits 2 without importing any checkout module.
+    Raises OSError when git cannot be launched (the caller maps it to exit 2)."""
+    probe = _stage1_git(repo, ["rev-parse", "--git-dir"], c_locale=True)
+    if probe.returncode != 0:
+        err = probe.stderr.decode("utf-8", "replace")
+        return ("not a git repository" in err
+                and not _stage1_repository_in_ancestry(repo, *launch))
+    sym = _stage1_git(repo, ["symbolic-ref", "--quiet", "HEAD"])
+    if sym.returncode != 0:
+        return False
+    try:
+        ref = sym.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return False
+    if not ref.startswith("refs/"):
+        return False
+    return _stage1_git(repo, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
+
+
+def _stage1_read_capture(path):
+    """Read back a stage-2 capture (the structured result, the error-stream file) from stage 1's
+    fresh private directory as raw bytes, or None when it cannot be read back as a regular file:
+    ONE descriptor opened O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat-required S_ISREG before any
+    read, so a special file the committed child code swapped in at the capture path is refused at
+    once, never a blocking open (the fail-closed rule, security-seci-fail-closed: the committed
+    copy ran with access to that directory). A platform that offers no O_NOFOLLOW or no O_NONBLOCK
+    is cannot-evaluate (None), never an unguarded or blocking name-based open (PR #397 QA round 2,
+    gemini: a getattr fallback of 0 silently dropped the containment flag; O_CLOEXEC stays
+    optional, descriptor hygiene rather than containment). Stdlib only: stage 1 may import nothing
+    from the checkout, so this is a local twin of the shared non-blocking readers."""
+    import stat
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _stage2_arm_result():
+    """The stage-2 child half of the fail-closed contract (security-seci-fail-closed; the child
+    contract, defined here and applied to the nested validators by _CHILD_RECORD_STUB): when stage 1
+    named a result path (AIQT_RELEASE_DELTA_STAGE2_RESULT), register the result writer with atexit
+    FIRST, before any checkout import below runs or registers cleanup, so atexit's LIFO order runs
+    it LAST, after every later-registered cleanup of this child (another exit handler registered
+    before it is itself a fault). The result is ONE line, `release-delta-stage2 <code> <pid>`,
+    which the writer produces only when a verdict code was set in the state this returns (the
+    stage-2 dispatch sets it); a committed copy that exits without setting one (a bare
+    SystemExit(0) in loaded code, a replaced dispatch) or whose shutdown ends the process first
+    writes NO complete result, and stage 1 refuses the pass. The pid is this writer's own, so a
+    stale record, or one carrying another process's pid, never matches.
+
+    What the record does NOT prove (PR #397 QA round p1, codex MEDIUM): it detects an omitted,
+    truncated or malformed result and one bound to a foreign pid, so it catches a committed copy
+    that FAILS to complete. It cannot authenticate that the dispatch ran: the child writes it, and
+    the child runs committed code that stage 1 does not control. A committed copy that writes
+    `release-delta-stage2 0 <its own pid>` and the boundary line itself, then exits 0, passes
+    without judging anything (the disclosed residual of this record; rejecting such a fabricated
+    record needs verification outside the child).
+
+    The writer makes the result TRULY LAST (merge train 3 QA round 2, codex and claude MAJORs: a
+    builtin cleanup hook that raises prints a frameless 'Exception ignored' report with no
+    traceback header, and a finalizer ran in interpreter finalization AFTER the record): it
+    collects the cyclic garbage until a pass frees nothing (bounded, past which it fails closed),
+    so pending finalizers run before the result; flushes the streams; writes the boundary line
+    `release-delta-stage2-boundary <pid>` to the error stream (its LAST byte on a pass); writes the
+    result; and ends the process ITSELF with os._exit, so no interpreter finalization runs after
+    it. An audit hook armed here sees every `sys.unraisablehook` and `sys.excepthook` event
+    (CPython raises them before it calls whatever hook is installed, so a silenced hook or a
+    replaced stream cannot hide the fault), and threading.excepthook is wrapped (a thread fault
+    raises no audit event); any such fault, a reporting hook replaced, or a stream that cannot be
+    flushed makes the result and the exit 2, with a named line on the error stream. The fault and
+    hook checks run again AFTER the record is written (PR #397 QA round p1, codex MAJOR): opening
+    the result file raises an audit event, and a hook run there can fault or replace a reporting
+    hook after the first checks. A fault found then turns the exit to 2, WHATEVER the verdict was
+    (round 2, claude MINOR-1), and overwrites the record in place with code 2; stage 1 refuses a
+    success record beside a nonzero exit. The whole writer, its final os._exit(code) call
+    included, runs inside an outer guard: an exception raised in its guarded body (the second
+    check itself raising, a profiling hook raising at a call's event, at the final exit call
+    included) ends in os._exit(2) after a best-effort rewrite of the record to code 2 (round 2,
+    codex MAJOR / claude MEDIUM-1: an exception leaving the atexit callback kept the dispatch's
+    exit beside an already written success record; round 3, codex MAJOR / claude MAJOR-1: the
+    final exit call sat outside the guard, so a profiling hook raising at it left exit 0 beside
+    a success record). The body holds nested try statements, and an exception a trace function
+    raises at the line event of a nested `try:` line escapes the outer handler (observed on
+    Python 3.14.4; PR #397 QA round 4, claude MINOR-1). No complete record exists at any of
+    those points, so that outcome is still fail-closed. What this does NOT guarantee:
+    - An OSError from the result open, from a write (the record's or a diagnostic line's) or from
+      the close, or a rewrite that itself fails, can leave a code-0 record beside exit 2, which
+      stage 1 refuses (a success record beside a nonzero exit is never a verdict).
+    - Only the record's close and the exit call follow the final checks, so a fault another
+      thread of the child raises in that window is not seen (a disclosed race).
+    - No in-process exit guarantee holds against code the child runs that installs a tracing,
+      profiling, monitoring or audit hook (PR #397 QA round 4, claude MEDIUM-1). Such a hook,
+      raising once or repeatedly, alone or beside another hook, can defeat the guard: one that
+      has not raised yet can raise inside the guard's handler, outside its inner try, and the
+      exception then leaves the atexit callback with the dispatch's exit beside whatever record
+      was written, so exit 0 can stand beside a success record. Observed: an audit hook that
+      makes the second check raise, then a trace function raising once in the handler before
+      the rewrite, left exit 0 beside a code-0 record; a sys.monitoring callback, a trace
+      function that re-arms a raising profile function, and a profile function raising once at
+      the guard's own os._exit(2) each left exit 0. That is code the child runs controlling the
+      child, the same class as the forged-record residual above, and no in-process change
+      closes it. (os._exit raises no audit event, so an audit hook cannot raise at an exit call
+      itself; one that raises during the guard's rewrite loses the rewrite.)
+    Stage 1 requires the error stream to hold EXACTLY the boundary line on a pass: the gate's own
+    diagnostics go to a separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other
+    byte is a fault.
+    Returns the mutable state the dispatch settles, or None when no result path is named (a
+    hand-run stage 2, every other mode)."""
+    path = os.environ.get("AIQT_RELEASE_DELTA_STAGE2_RESULT")
+    if not path:
+        return None
+    import atexit
+    import gc
+    import threading
+    state = {"code": None}
+    faults = []
+    reporting = (sys.excepthook, sys.unraisablehook)
+    thread_hook = threading.excepthook
+
+    def _audit(event, _args):
+        if event in ("sys.unraisablehook", "sys.excepthook"):
+            faults.append(event)
+
+    def _thread_fault(args):
+        faults.append("threading.excepthook")
+        thread_hook(args)
+
+    def _check_hooks():
+        if (threading.excepthook is not _thread_fault or sys.excepthook is not reporting[0]
+                or sys.unraisablehook is not reporting[1]):
+            faults.append("a fault-reporting hook was replaced")
+
+    def _write_result():
+        if state["code"] is None:
+            return
+        try:
+            code = state["code"]
+            for _pass in range(100):
+                if gc.collect() == 0:
+                    break
+            else:
+                faults.append("garbage collection still freed objects after 100 passes")
+            _check_hooks()
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception as exc:  # any flush failure is a fault, named below
+                faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
+            if faults:
+                code = 2
+            seen = len(faults)
+            try:
+                if faults:
+                    os.write(2, "error: stage-2 cleanup fault ({}); fail-closed "
+                             "(security-seci-fail-closed)\n".format(
+                                 ", ".join(sorted(set(faults)))).encode("utf-8", "replace"))
+                os.write(2, "release-delta-stage2-boundary {}\n".format(os.getpid()).encode(
+                    "ascii"))
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+                try:
+                    os.write(fd, "release-delta-stage2 {} {}\n".format(code, os.getpid()).encode(
+                        "ascii"))
+                    # The second check (PR #397 QA round p1, codex MAJOR): the open above raised
+                    # an audit event, and a hook run there may have faulted or replaced a
+                    # reporting hook. A late fault overwrites the record in place (code 2 has
+                    # the same length, so no stale byte stays) and makes the exit 2 WHATEVER
+                    # the verdict was (round 2, claude MINOR-1: beside verdict 1 it was a
+                    # silent exit 1 with the fault unnamed).
+                    _check_hooks()
+                    if len(faults) != seen:
+                        code = 2
+                        os.write(2, "error: stage-2 fault during the result write ({}); "
+                                 "fail-closed (security-seci-fail-closed)\n".format(
+                                     ", ".join(sorted(set(faults[seen:])))).encode(
+                                         "utf-8", "replace"))
+                        os.pwrite(fd, "release-delta-stage2 2 {}\n".format(os.getpid()).encode(
+                            "ascii"), 0)
+                finally:
+                    os.close(fd)
+            except OSError:
+                # The open, a write or the close raising OSError can leave the record written
+                # before it (code 0 included) beside exit 2; stage 1 refuses a success record
+                # beside a nonzero exit (PR #397 QA round 2, codex).
+                code = 2
+            # PR #397 QA round 3 (codex MAJOR, claude MAJOR-1): the final exit call runs INSIDE
+            # the guard, so an exception raised AT it (a profiling hook raising at the call
+            # event, before os._exit runs) also ends in the guard's os._exit(2).
+            os._exit(code)
+        except BaseException:
+            # PR #397 QA round 2 (codex MAJOR, claude MEDIUM-1): ANY exception escaping the
+            # writer (the second check itself raising, an exception a hook or profiler injects
+            # into the result write or close, or, round 3, at the final exit call) must still
+            # end in os._exit(2), never in atexit's 'Exception ignored' path, which keeps the
+            # dispatch's exit beside an already written success record. Best effort first:
+            # name the fault and rewrite the record to code 2; if that itself raises,
+            # os._exit(2) still runs and any stale success record sits beside exit 2, which
+            # stage 1 refuses. A tracing, profiling, monitoring or audit hook the child installs
+            # can stop this os._exit(2) too, firing once or repeatedly (the residual
+            # _stage2_arm_result's docstring states; PR #397 QA round 4).
+            try:
+                os.write(2, b"error: stage-2 result writer fault; fail-closed "
+                         b"(security-seci-fail-closed)\n")
+                fd2 = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+                try:
+                    os.write(fd2, "release-delta-stage2 2 {}\n".format(os.getpid()).encode(
+                        "ascii"))
+                finally:
+                    os.close(fd2)
+            except BaseException:
+                pass
+            os._exit(2)
+    atexit.register(_write_result)
+    ncallbacks = getattr(atexit, "_ncallbacks", None)
+    if ncallbacks is None:
+        # PR #397 QA round 2 (gemini): with no atexit._ncallbacks a handler registered before
+        # the result writer cannot be ruled out; a recorded fault, never a clean default.
+        faults.append("atexit._ncallbacks is unavailable, so a pre-registered exit handler "
+                      "cannot be ruled out")
+    elif ncallbacks() != 1:
+        faults.append("an exit handler was registered before the result writer")
+    sys.addaudithook(_audit)
+    threading.excepthook = _thread_fault
+    return state
+
+
+# The physical gate root stage 1 established when it hands off to the single-stage checkout gate
+# (QA round-10 claude F2): main() judges THIS root, never _gen_common.repo_root(), whose fallback is
+# the cwd, a directory stage 1 never inspected. None until stage 1 positively hands off.
+_STAGE1_ROOT = None
+
+
+def _stage1_main():
+    """Returns the final exit code, or None to fall through to the single-stage checkout gate ONLY
+    when _stage1_no_committed_state POSITIVELY establishes that no committed state exists (not a
+    git repository, or an unborn branch; there is then no committed revision to certify and no
+    attested release to defend, and the genesis and delta branches judge the checkout by design).
+    Any OTHER git failure (QA round-6 codex blocker 1 / claude 3: dubious ownership, a corrupt
+    HEAD, bad config, git not launchable) is exit 2 HERE, before any checkout module is imported:
+    a git failure is never permission to execute checkout code. The gate root is the PHYSICAL
+    root of the running file (_stage1_gate_paths, QA round 9), never a lexical normalization; on
+    the hand-off it records that root in _STAGE1_ROOT for main() (QA round 10)."""
+    global _STAGE1_ROOT
+    import shutil
+    import tempfile
+    if not isinstance(globals().get("__file__"), str) or not globals()["__file__"]:
+        # QA round-10 claude F1: code run with no __file__ (an exec of the source, a loader with
+        # no location) names no running file, so no physical root exists: exit 2, no traceback.
+        print("error: stage-1 re-execution: the running gate has no __file__ (run without a "
+              "source file), so its physical root cannot be established; no checkout code runs; "
+              "fail-closed", file=sys.stderr)
+        return 2
+    try:
+        repo, launch = _stage1_gate_paths()
+    except OSError as exc:
+        print("error: stage-1 re-execution: cannot resolve the physical path of the running gate "
+              "({}); no checkout code runs; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    try:
+        proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        if proc.returncode != 0:
+            if _stage1_no_committed_state(repo, launch):
+                _STAGE1_ROOT = repo
+                return None
+            found = _stage1_repository_in_ancestry(repo, *launch)
+            print("error: stage-1 re-execution: git cannot resolve HEAD ({}) at the gate root {} "
+                  "and no probe positively established an absent committed state ({}); a refused "
+                  "or damaged repository is cannot-evaluate and runs no checkout code; "
+                  "fail-closed".format(
+                      proc.stderr.decode("utf-8", "replace").strip()[:200]
+                      or "rc={}".format(proc.returncode), repo,
+                      ("refused because " + found) if found else
+                      "no .git entry or git-directory marker on the inspected ancestry; git "
+                      "itself refused"), file=sys.stderr)
+            return 2
+    except OSError as exc:
+        print("error: stage-1 re-execution: cannot launch git ({}); the committed state cannot be "
+              "evaluated and no checkout code runs; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    head = proc.stdout.decode("ascii", "replace").strip()
+    if not _stage1_is_oid(head):
+        print("error: stage-1 re-execution: git rev-parse HEAD returned no full object id; "
+              "fail-closed", file=sys.stderr)
+        return 2
+    tmp = tempfile.mkdtemp(prefix="aiqt-release-delta-stage2-")
+    try:
+        tree_dir = os.path.join(tmp, "tree")
+        pyc_dir = os.path.join(tmp, "pyc")
+        os.mkdir(tree_dir)
+        os.mkdir(pyc_dir)
+        try:
+            _stage1_materialize(repo, head, tree_dir)
+        except (ValueError, OSError, KeyError, UnicodeDecodeError) as exc:
+            print("error: stage-1 re-execution: cannot materialize HEAD's committed tree ({}); "
+                  "fail-closed".format(exc), file=sys.stderr)
+            return 2
+        gate = os.path.join(tree_dir, "tools", "check_release_delta.py")
+        if not os.path.isfile(gate):
+            print("error: stage-1 re-execution: HEAD's committed tree carries no "
+                  "tools/check_release_delta.py; the committed revision must carry the gate that "
+                  "judges it; fail-closed", file=sys.stderr)
+            return 2
+        # The fail-closed child contract (security-seci-fail-closed; the completion record
+        # built here for the stage-2 launch): a zero exit alone is never a
+        # pass. The child must ALSO write the complete structured result its exit handler
+        # (registered first, run last, after its cleanup) binds to its own exit code and pid,
+        # and its captured error stream must be EMPTY apart from the closing boundary line its
+        # result writer prints (_stage2_arm_result; merge train 3 QA, codex MAJOR: a
+        # committed gate whose shutdown faults -- an atexit handler that raises -- exits 0 with
+        # only a stderr traceback, and one that is a bare SystemExit(0) exits 0 having judged
+        # nothing). The captures live in stage 1's fresh private directory and are read back
+        # through the non-blocking fstat-checked reader, so the committed child code cannot
+        # park stage 1 on a swapped special file. A success record beside a NONZERO exit is
+        # refused by name (PR #397 QA round p1, codex MAJOR: a fault during the result write).
+        # The record detects an omitted, truncated or foreign-pid result; it does not
+        # authenticate the committed child, which can write a well-formed record without
+        # running the dispatch (the disclosed residual, _stage2_arm_result). An exception
+        # raised in the guarded body of the child's result writer, at its final exit call
+        # included, ends in exit 2 (PR #397 QA round 3; a trace function raising at a nested
+        # `try:` line escapes the guard before any complete record exists, which is still
+        # fail-closed), EXCEPT where the committed code installs a tracing, profiling,
+        # monitoring or audit hook: firing once or repeatedly, it can stop any in-process exit,
+        # the writer's own exit 2 included, so exit 0 can stand beside a success record, the
+        # same code-controls-the-child class as the forged record (PR #397 QA round 4).
+        result_path = os.path.join(tmp, "stage2-result")
+        err_path = os.path.join(tmp, "stage2-stderr")
+        diag_path = os.path.join(tmp, "stage2-diagnostics")
+        child_env = dict(os.environ)
+        child_env["AIQT_RELEASE_DELTA_STAGE2_RESULT"] = result_path
+        child_env["AIQT_RELEASE_DELTA_STAGE2_DIAG"] = diag_path
+        try:
+            with open(diag_path, "wb"):
+                pass
+            with open(err_path, "wb") as err_file:
+                child = subprocess.Popen([sys.executable, "-I", "-B", "-X",
+                                          "pycache_prefix=" + pyc_dir, gate, "--stage2-repo",
+                                          repo, "--stage2-tree", tree_dir],
+                                         stderr=err_file, env=child_env)
+                child_rc = child.wait()
+        except OSError as exc:
+            print("error: stage-1 re-execution: cannot launch the committed gate ({}); "
+                  "fail-closed".format(exc), file=sys.stderr)
+            return 2
+        boundary = "release-delta-stage2-boundary {}\n".format(child.pid).encode("ascii")
+        diag_bytes = _stage1_read_capture(diag_path)
+        err_bytes = _stage1_read_capture(err_path)
+        # Relay the gate's diagnostics, then its error stream without its own boundary line.
+        for piece in (diag_bytes, err_bytes[:-len(boundary)]
+                      if err_bytes and err_bytes.endswith(boundary) else err_bytes):
+            if piece:
+                sys.stderr.buffer.write(piece)
+        sys.stderr.buffer.flush()
+        record = _stage1_read_capture(result_path)
+        if child_rc != 0:
+            if record is not None and record.startswith(b"release-delta-stage2 0 "):
+                # PR #397 QA round p1 (codex MAJOR): a success record beside a nonzero exit is
+                # a fault during or after the result write, never a pass and never the code.
+                print("error: stage-1 re-execution: the committed gate exited {} but its stage-2 "
+                      "result records a pass ({}); a success record beside a nonzero exit is "
+                      "never a verdict (security-seci-fail-closed); fail-closed".format(
+                          child_rc, repr(record[:120])), file=sys.stderr)
+                return 2
+            return child_rc
+        if record != "release-delta-stage2 0 {}\n".format(child.pid).encode("ascii"):
+            print("error: stage-1 re-execution: the committed gate exited 0 but wrote no "
+                  "complete stage-2 result bound to its own exit code and pid ({}); a zero "
+                  "exit alone is never a pass (security-seci-fail-closed: a silent exit, a "
+                  "replaced dispatch or an unreadable result judges nothing); "
+                  "fail-closed".format("the capture is unreadable or not a regular file"
+                                       if record is None else repr(record[:120])),
+                  file=sys.stderr)
+            return 2
+        if err_bytes is None or diag_bytes is None:
+            print("error: stage-1 re-execution: the committed gate exited 0 but its stage-2 "
+                  "error-stream or diagnostics capture cannot be read back as a regular file; a "
+                  "passing verdict requires readable, complete captures; fail-closed",
+                  file=sys.stderr)
+            return 2
+        if err_bytes != boundary:
+            print("error: stage-1 re-execution: the committed gate exited 0 but its stage-2 "
+                  "error stream holds more than its closing boundary line ({} byte(s)); the "
+                  "gate's own diagnostics have their own capture, so any byte there (a "
+                  "traceback, a frameless 'Exception ignored' report, a thread fault) or a "
+                  "missing boundary is a fault, never a pass (security-seci-fail-closed; merge "
+                  "train 3 QA round 2); fail-closed".format(len(err_bytes)), file=sys.stderr)
+            return 2
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__" and sys.argv[1:] == []:
+    _stage1_rc = _stage1_main()
+    if _stage1_rc is not None:
+        sys.exit(_stage1_rc)
+
+# The stage-2 child half of the fail-closed contract is armed HERE, before any checkout import
+# below runs or registers cleanup, so the atexit result writer is registered FIRST and runs LAST
+# (_stage2_arm_result; security-seci-fail-closed).
+_STAGE2_RESULT = _stage2_arm_result() if __name__ == "__main__" else None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
@@ -70,6 +754,11 @@ MANIFEST_REL = ".aiqt/manifest.toml"
 CHANGELOG_REL = "changelog.toml"
 IDHISTORY_REL = ".aiqt/core/id-history.toml"
 DERIVED_PATHS = (".aiqt/release/root.txt", ".aiqt/release/announce-snippet.txt")
+# The ONLY paths a post-release head may change from the newest attested release's commit_sha (RELEASING
+# steps 6a/6b): the appended release row, the three regenerated branch-integrity artifacts (the same set as
+# check_release_build.ALLOWED_ATTESTATION_DELTA), and changelog.toml, where only the newest release's `tag`
+# key equal to "v" + version may be added (checked byte-for-byte by _post_release_changelog_ok).
+POST_RELEASE_PATHS = frozenset((RELEASES_REL, MANIFEST_REL, CHANGELOG_REL) + DERIVED_PATHS)
 # Adopter-experience hook: dormant until the artifact exists (2.6 structural absence).
 PROFILES_REL = ".aiqt/core/profiles.toml"
 
@@ -109,18 +798,69 @@ class DeltaEvent:
 
 # --- git plumbing (as check_version_monotonicity: every return code checked) ------------------------
 
-def _git(root, args, binary=False):
+def _substitution_free_env():
+    """The env half of the ONE substitution-free read funnel (QA round-3 codex R3-1 / claude F1):
+    GIT_NO_REPLACE_OBJECTS=1 disables refs/replace/* object substitution and GIT_GRAFT_FILE pinned to
+    os.devnull disables <GIT_DIR>/info/grafts parent rewriting, belt-and-braces with the
+    --no-replace-objects argv option _git and _git_raw also pass. QA round-4 (codex R4-2 / claude m2):
+    the environment is FIRST stripped of every GIT_-prefixed variable (the same allowlist scrub
+    _index_materialized_tree and gen_manifest.git_tracked use), so an inherited GIT_DIR cannot point the
+    reads at a decoy repository and GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES cannot
+    overlay a forged object store; dropping a GIT_ variable can at most make a read FAIL (a refusal,
+    e.g. trust supplied only through GIT_CONFIG_*), never substitute a byte. QA round-6 (codex
+    blocker 2): GIT_NO_LAZY_FETCH=1 is set AFTER the scrub, so a promisor/partial-clone repository
+    can never start a lazy fetch (and with it core.sshCommand, a remote helper, or a credential
+    helper) while the gate reads objects: a missing object is a refusal (SchemaError/GateError,
+    exit 2), never a transport; the _git/_git_raw launches additionally pin
+    -c protocol.allow=never, belt-and-braces."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    return env
+
+
+def _git(root, args, binary=False, c_locale=False):
+    """THE substitution-free read funnel for every git read this gate makes (rev-parse, cat-file, show,
+    ls-tree, the ls-tree/diff-index --cached/ls-files drift advisory, worktree list; _git_raw is its
+    diff-tree/merge-base twin): replace
+    objects are disabled (--no-replace-objects AND GIT_NO_REPLACE_OBJECTS=1), commit grafts are disabled
+    (GIT_GRAFT_FILE pinned to os.devnull), and the commit-graph cache is never read (core.commitGraph
+    pinned false, so ancestry and parent answers come from the recorded commit objects, never from a
+    substitutable cache file; the commit-graph pin is UNTESTED defence in depth, QA round-4 claude m5:
+    probing current git produced no case where a forged commit-graph changes a funneled verdict, only
+    unpinned `git log` parent output, so no self-test coverage is claimed for this one pin). A replace ref or graft that substitutes another blob, tree, or parent
+    chain for HEAD or the release commit therefore cannot alter any byte this gate judges (QA round-3
+    codex R3-1 / claude F1). _release_schema's raw materialization (ls-tree + cat-file --batch) carries
+    the SAME pins, so every committed byte the verdict consumes is substitution-free. core.fsmonitor is
+    pinned false on every call (QA round 5, reproduction (c)): a repo-config fsmonitor program is
+    attacker-chosen code. No funneled call reads working-tree content through git (`git status` and
+    `git diff-index HEAD` would also run clean filters, and status the post-index-change hook; see
+    _warn_checkout_drift)."""
+    env = _substitution_free_env()
+    if c_locale:
+        # LC_ALL=C (honored by gettext over LANGUAGE) for the ONE caller that matches a git
+        # MESSAGE, _no_committed_state's no-repository probe: a localized message cannot defeat it.
+        env["LC_ALL"] = "C"
     try:
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=not binary)
+        return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-C", str(root), *args],
+                              capture_output=True, text=not binary, env=env)
     except OSError as exc:
         raise GateError("git is not available: {}".format(exc))
 
 
 def _show(root, commit, path):
-    proc = _git(root, ["show", "{}:{}".format(commit, path)], binary=True)
-    if proc.returncode != 0:
-        raise GateError("git show {}:{} failed: predecessor artifact unreachable".format(commit, path))
-    return proc.stdout
+    """The raw committed bytes of `path` at `commit`, read ONLY from RE-HASHED objects through the
+    pinned, environment-scrubbed funnel (QA round-4 codex R4-2 / claude m2): the commit object, every
+    tree object on the path, and the blob itself are each re-hashed against the id that named them, so
+    a tampered loose object or an object-store overlay cannot substitute a byte this gate judges; it
+    can only make the read fail (GateError, exit 2)."""
+    try:
+        return _release_schema.verified_path_blob(root, commit, path)
+    except SchemaError as exc:
+        raise GateError("git show {}:{} failed: {}".format(commit, path, exc))
 
 
 def _show_toml(root, commit, path):
@@ -130,7 +870,7 @@ def _show_toml(root, commit, path):
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS). run()'s ValueError
     # backstop covered only the first; both now fail closed here, at the parse locus.
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("predecessor {} at {} does not parse: {}".format(path, commit, exc))
 
 
@@ -187,6 +927,25 @@ def _anchor_predecessor(root, prev_row):
     if _rev_parse(root, tag_obj + "^{commit}") != commit:
         raise GateError("predecessor tag {} peels to a commit other than the recorded commit_sha".format(
             tag))
+    # QA round-4 (codex R4-2 / claude m2): the two reads above resolve through the object store
+    # UNVERIFIED (rev-parse / cat-file -t do not re-hash), so additionally re-hash the recorded tag
+    # OBJECT itself and parse its peel from the verified body: a tampered loose tag object cannot point
+    # the anchor at a different commit than the recorded one. Refusal-only: this can never accept a
+    # state the checks above rejected.
+    try:
+        otype, body = _release_schema.verified_object(root, tag_obj)
+    except SchemaError as exc:
+        raise GateError(str(exc))
+    if otype != "tag":
+        raise GateError("predecessor tag {} object {} is not an annotated tag object under the "
+                        "re-hashed read; fail-closed".format(tag, tag_obj))
+    headers = dict(
+        (ln.partition(b" ")[0], ln.partition(b" ")[2])
+        for ln in reversed(body.split(b"\n\n", 1)[0].split(b"\n")))
+    if headers.get(b"type") != b"commit" or headers.get(b"object") != commit.encode("ascii"):
+        raise GateError("predecessor tag {} verified body peels to {!r} (type {!r}), not the recorded "
+                        "commit_sha; fail-closed".format(tag, headers.get(b"object"),
+                                                          headers.get(b"type")))
 
 
 # --- record loading ---------------------------------------------------------------------------------
@@ -567,18 +1326,24 @@ def _renderer_freshness(root, label):
     """Run gen_renderers.py --check against the tree at `root` (its own repo, resolved by the copied
     gen_renderers via repo_root). Drift or an incomplete closure is exit 2."""
     try:
-        # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must never crash the gate; only
-        # the returncode is interpreted, and stderr is decoded with replacement for a diagnostic message.
+        # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must never crash the gate; the
+        # verdict reads the returncode, the result record and whether stderr is empty, never its text.
         # -B: never write bytecode into the target tree (round-6 finding 1). gen_renderers imports the
         # tree's own renderer modules; a .pyc left in `root`/tools/__pycache__ could be captured by a
         # later index build and perturb a manifest SOURCES comparison.
-        proc = subprocess.run([sys.executable, "-B", str(root / "tools" / "gen_renderers.py"), "--check",
-                               "--root", str(root)], capture_output=True)
+        # The child runs under the record stub (_run_recorded_child; merge train 3 QA round 2): a
+        # zero exit passes only with its complete result and an empty error stream.
+        rc, _out, _err, fault = _run_recorded_child(root / "tools" / "gen_renderers.py",
+                                                    ["--check", "--root", str(root)])
     except OSError as exc:
         raise GateError("{} renderer freshness could not launch ({}); fail-closed".format(label, exc))
-    if proc.returncode != 0:
+    if rc != 0:
         raise GateError("{} renderer declaration is stale or a closure is incomplete "
-                        "(gen_renderers.py --check rc={})".format(label, proc.returncode))
+                        "(gen_renderers.py --check rc={}{})".format(
+                            label, rc, "; " + fault if fault else ""))
+    if fault is not None:
+        raise GateError("{} renderer freshness (gen_renderers.py --check) {} "
+                        "(security-seci-fail-closed); fail-closed".format(label, fault))
 
 
 def _index_materialized_tree(dest, label):
@@ -589,13 +1354,19 @@ def _index_materialized_tree(dest, label):
     GIT_* variable and pins the global/system config to os.devnull so host git config cannot steer it (test
     hermeticity). No clean/smudge filter is configured in this pack, and both validators read source bytes
     from the filesystem while git_tracked reads only the path set, so an index-side eol/text attribute
-    cannot perturb their result. A launch or nonzero exit is cannot-evaluate (GateError, exit 2)."""
+    cannot perturb their result. A launch or nonzero exit is cannot-evaluate (GateError, exit 2).
+    Both calls pin core.fsmonitor=false and protocol.allow=never on the argv, with GIT_NO_LAZY_FETCH
+    in the env (QA round-7 claude F3), matching the funnels: a repo-config fsmonitor hook must never
+    run under a gate-driven git call, here included."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_NO_LAZY_FETCH"] = "1"
     for argv in (["init", "-q"], ["add", "--force", "-A"]):
         try:
-            proc = subprocess.run(["git", "-C", str(dest), *argv], capture_output=True, env=env)
+            proc = subprocess.run(["git", "-C", str(dest), "-c", "core.fsmonitor=false",
+                                   "-c", "protocol.allow=never", *argv],
+                                  capture_output=True, env=env)
         except OSError as exc:
             raise GateError("{} manifest index: cannot launch git {} ({}); fail-closed".format(
                 label, argv[0], exc))
@@ -636,16 +1407,18 @@ def _predecessor_tree_checks(root, commit, prev_genesis):
         _renderer_freshness(dest, "predecessor")
         clause_args = ["--root", str(dest)] + (["--genesis"] if prev_genesis else [])
         _validate_via_tool(dest, "check_clauses.py", clause_args,
-                           "predecessor clause inventory / id-history structure (7.2/7.3)")
+                           "predecessor clause inventory / id-history structure (7.2/7.3)",
+                           tools_root=dest)
         # round-8 finding 1: the path leg trusts the predecessor manifest keyset, so validate the
         # predecessor manifest against its OWN raw-materialized tree BEFORE it is trusted, running the
         # AUTHORITATIVE gen_manifest --check (fresh-regeneration drift) and check_manifest (exact SOURCES
         # set-equality plus raw re-hash) over the index built above. A manifest that omits a covered pack
         # path (an under-claimed removal that the pre-fix gate passed as PATCH) is now exit 2.
         _validate_via_tool(dest, "gen_manifest.py", ["--check", "--root", str(dest)],
-                           "predecessor manifest freshness (gen_manifest --check)")
+                           "predecessor manifest freshness (gen_manifest --check)", tools_root=dest)
         _validate_via_tool(dest, "check_manifest.py", ["--root", str(dest)],
-                           "predecessor manifest integrity (check_manifest SOURCES set-equality)")
+                           "predecessor manifest integrity (check_manifest SOURCES set-equality)",
+                           tools_root=dest)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -684,21 +1457,16 @@ def _tracked_at(root, commit):
     empty tree, a duplicate, a case-fold or NFC/NFD collision, or a decode error is a cannot-evaluate, never
     a silent empty set."""
     import unicodedata
-    proc = _git(root, ["ls-tree", "-r", "-z", commit], binary=True)
-    if proc.returncode != 0:
-        raise GateError("cannot list predecessor tree {} ({})".format(
-            commit, proc.stderr.decode("utf-8", "replace").strip()))
-    if not proc.stdout:
+    # QA round-4 (codex R4-2 / claude m2): enumerated from RE-HASHED commit and tree objects
+    # (walk_tree_verified), never from `git ls-tree` output a tampered object store could steer.
+    try:
+        listed = _release_schema.walk_tree_verified(root, commit)
+    except SchemaError as exc:
+        raise GateError("cannot list predecessor tree {} ({})".format(commit, exc))
+    if not listed:
         raise GateError("predecessor tree {} lists no entries; an empty tree is never assumed".format(commit))
     paths, seen_fold, seen_nfc = set(), {}, {}
-    for record in proc.stdout.split(b"\x00"):
-        if not record:
-            continue
-        try:
-            meta, path = record.decode("utf-8").split("\t", 1)
-            mode = meta.split(" ", 1)[0]
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise GateError("malformed git ls-tree record ({}); fail-closed".format(exc))
+    for mode, _osha, path in listed:
         if mode == "120000":
             raise GateError("predecessor tracked symlink {!r}: symlinks are rejected in pack scope "
                             "(4.3)".format(path))
@@ -749,24 +1517,853 @@ def _claimed_rank(prev_v, head_v):
     return PATCH
 
 
+# --- post-release head (RELEASING steps 6a/6b) -------------------------------------------------------
+
+def _git_raw(root, args):
+    """The binary-capture diff-tree/merge-base twin of the _git funnel, with the IDENTICAL substitution
+    pins (--no-replace-objects plus GIT_NO_REPLACE_OBJECTS=1, GIT_GRAFT_FILE pinned to os.devnull, and
+    the commit-graph cache disabled): a replace ref or graft that substitutes another tree or parent
+    chain for HEAD or the release commit cannot alter what is compared (QA round-2; round-3 widened the
+    same pins to EVERY git read via _git, so the two launches share one funnel policy; round-4 scrubbed
+    the inherited GIT_* environment out of both). DISCLOSED RESIDUAL (QA round-4): diff-tree and
+    merge-base read tree and intermediate commit objects internally without a per-object re-hash; the
+    tree objects of BOTH endpoint commits are independently re-hashed by the verified reads and full
+    materializations in the same run, so a forged tree still fails the run; and QA round-5 claude m1 added a parent-chain
+    walk from HEAD to the release commit through RE-HASHED commit objects (_assert_head_ancestry), so
+    a forged INTERMEDIATE ancestry commit object is refused too. merge-base and diff-tree stay
+    refusal-capable conveniences, never the accepting authority for ancestry."""
+    try:
+        return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-C", str(root), *args],
+                              capture_output=True, env=_substitution_free_env())
+    except OSError as exc:
+        raise GateError("git is not available: {}".format(exc))
+
+
+def _assert_head_ancestry(root, commit):
+    """HEAD must DESCEND from the newest release row's commit_sha (QA round-2 codex 4 / claude m4),
+    established by walking the parent chain from HEAD to the release commit EXCLUSIVELY through
+    RE-HASHED commit objects (QA round-5 claude m1: git merge-base reads intermediate commit objects
+    without verifying them, so a forged loose object for an intermediate commit could graft an
+    unrelated head onto the release; the verified walk refuses it with a re-hash mismatch). The
+    funneled merge-base runs first as a cheap refusal (and keeps the graft/replace pins exercised); it
+    is never the accepting authority."""
+    proc = _git_raw(root, ["merge-base", "--is-ancestor", commit, "HEAD"])
+    if proc.returncode != 0:
+        raise GateError("post-release head: the newest release row's commit_sha {} is not an ancestor of "
+                        "HEAD; the head does not descend from the release it claims; fail-closed".format(
+                            commit))
+    head_oid = _rev_parse(root, "HEAD^{commit}")
+    seen, frontier = set(), [head_oid]
+    while frontier:
+        oid = frontier.pop()
+        if oid == commit:
+            return
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if len(seen) > 1048576:
+            raise GateError("post-release head: the verified ancestry walk from HEAD exceeded 1048576 "
+                            "commits without reaching {}; fail-closed".format(commit))
+        try:
+            otype, body = _release_schema.verified_object(root, oid)
+        except SchemaError as exc:
+            raise GateError("post-release head ancestry: {}".format(exc))
+        if otype != "commit":
+            raise GateError("post-release head ancestry: object {} is a {}, not a commit; "
+                            "fail-closed".format(oid, otype))
+        for line in body.split(b"\n\n", 1)[0].split(b"\n"):
+            if line.startswith(b"parent "):
+                try:
+                    parent = line[7:].decode("ascii")
+                except UnicodeDecodeError:
+                    raise GateError("post-release head ancestry: commit {} carries a non-ASCII "
+                                    "parent header; fail-closed".format(oid))
+                if not _release_schema.OBJECTID_RE.fullmatch(parent):
+                    raise GateError("post-release head ancestry: commit {} parent {!r} is not a "
+                                    "full object id; fail-closed".format(oid, parent))
+                frontier.append(parent)
+    raise GateError("post-release head: the newest release row's commit_sha {} is not reachable from "
+                    "HEAD through re-hashed commit objects; the head does not descend from the release "
+                    "it claims; fail-closed".format(commit))
+
+
+def _assert_only_post_release_paths(changed):
+    """Every path differing between the release commit's tree and HEAD's tree must be a post-release record
+    path; anything else is an undeclared release, exit 2."""
+    extra = sorted(set(changed) - POST_RELEASE_PATHS)
+    if extra:
+        raise GateError("post-release head (the head version equals the newest release row) changes {} "
+                        "beyond the post-release paths {}; declare a new version".format(
+                            extra[:5], sorted(POST_RELEASE_PATHS)))
+
+
+def _assert_tree_entry_regular(path, src_mode, dst_mode, status):
+    """A differing tree entry must be an IN-PLACE content edit of a regular non-executable blob
+    (100644 -> 100644, status M): an addition, a deletion, a type change (symlink/gitlink), or any
+    executable-bit or other mode change is exit 2 on EVERY path, allowed or not (QA round-2 codex 3 /
+    claude m2)."""
+    if status != "M" or src_mode != "100644" or dst_mode != "100644":
+        raise GateError("post-release head: {!r} must stay an in-place edit of a regular non-executable "
+                        "blob (100644 -> 100644, status M) relative to the release commit; got status "
+                        "{} mode {} -> {}; fail-closed".format(path, status, src_mode, dst_mode))
+
+
+def _head_tree_diff(root, commit):
+    """Every path whose RAW HEAD TREE entry differs from `commit`'s tree, read entirely from the recorded
+    tree objects (git diff-tree -r -z --no-renames with replacement objects and grafts disabled), never
+    from the working tree, the index, or any path piped line-wise: no smudge/clean filter, checkout
+    conversion, or C-style path quoting (a name starting with a double quote) can hide a committed edit
+    (QA round-2 codex 1 / claude B1, m1). Every differing path must be a post-release record path AND an
+    in-place 100644 -> 100644 modification (_assert_only_post_release_paths, _assert_tree_entry_regular).
+    Returns the changed path set."""
+    proc = _git_raw(root, ["diff-tree", "-r", "-z", "--no-renames", commit, "HEAD"])
+    if proc.returncode != 0:
+        raise GateError("git diff-tree {}..HEAD failed: cannot compare the post-release head".format(commit))
+    fields = proc.stdout.split(b"\0")
+    changed = {}
+    i = 0
+    while i < len(fields) and fields[i]:
+        try:
+            meta = fields[i].decode("ascii")
+            path = fields[i + 1].decode("utf-8")
+            src_mode, dst_mode, _src_oid, _dst_oid, status = meta.lstrip(":").split(" ")
+        except (IndexError, UnicodeDecodeError, ValueError) as exc:
+            raise GateError("malformed git diff-tree record ({}); fail-closed".format(exc))
+        changed[path] = (src_mode, dst_mode, status)
+        i += 2
+    _assert_only_post_release_paths(set(changed))
+    for path in sorted(changed):
+        src_mode, dst_mode, status = changed[path]
+        _assert_tree_entry_regular(path, src_mode, dst_mode, status)
+    return set(changed)
+
+
+# The drift advisory's per-file size cap (QA round-6 codex major 4): a tracked checkout file whose
+# fstat size exceeds this many bytes is NEVER read; it is reported as UNCHECKED instead, and the
+# verdict is unaffected either way (the advisory never gates).
+_DRIFT_ADVISORY_SIZE_CAP = 100 * 1024 * 1024
+
+
+def _drift_entry_state(root, path_b, committed_symlink, want):
+    """Compare ONE tracked path's checkout bytes against HEAD's blob id `want` for the advisory,
+    following NO symlink anywhere on the path (QA round-6 codex majors 3/4 / claude 2) and refusing
+    empty, `.` and `..` path components before any open (QA round-7 claude F1, classified as drift:
+    O_NOFOLLOW stops symlinks, never a real dot-dot walk out of the root): every
+    directory component is opened from a root descriptor with O_NOFOLLOW | O_DIRECTORY (a
+    symlinked parent is ELOOP, classified as drift, so no byte outside the root is ever read); the
+    final file is opened with O_NOFOLLOW | O_NONBLOCK (a FIFO or device swapped in cannot block
+    the open); the opened DESCRIPTOR is fstat'ed and must be a regular file (the check binds to
+    what was actually opened, closing the lstat-then-read race); the hash streams in bounded 1 MiB
+    chunks (never a whole-file read); and a regular file over _DRIFT_ADVISORY_SIZE_CAP bytes
+    (100 MiB) is never read at all. A committed-symlink entry is compared via readlink on the
+    directory descriptor, with no open. Returns "match", "drift", or "unchecked"; OSError,
+    ValueError, and MemoryError all classify as drift (the advisory never raises). In the
+    self-test only the `..` input and ./big.txt DISCRIMINATE the component refusal (QA round-8
+    claude F4); the empty-component inputs are regression pins, already drift without it."""
+    import hashlib
+    import stat
+    algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
+    parts = path_b.split(b"/")
+    if any(comp in (b"", b".", b"..") for comp in parts):
+        # QA round-7 claude F1: O_NOFOLLOW stops only symlinks, so a `..` component would walk the
+        # descriptor chain OUT of the root through real directories; refuse empty, `.` and `..`
+        # components before any open (classified as drift, the advisory's refusal state).
+        return "drift"
+    fds = []
+    try:
+        fds.append(os.open(str(root), os.O_RDONLY | os.O_DIRECTORY))
+        for comp in parts[:-1]:
+            fds.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+        name = parts[-1]
+        if committed_symlink:
+            data = os.readlink(name, dir_fd=fds[-1])
+            digest = algo(b"blob " + str(len(data)).encode("ascii") + b"\x00" + data).hexdigest()
+            return "match" if digest == want else "drift"
+        fds.append(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1]))
+        fd = fds[-1]
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "drift"
+        if st.st_size > _DRIFT_ADVISORY_SIZE_CAP:
+            return "unchecked"
+        h = algo(b"blob " + str(st.st_size).encode("ascii") + b"\x00")
+        remaining = st.st_size
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                return "drift"  # the file shrank mid-read: not HEAD's bytes
+            h.update(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            return "drift"  # the file grew mid-read
+        return "match" if h.hexdigest() == want else "drift"
+    except (OSError, ValueError, MemoryError):
+        return "drift"
+    finally:
+        # Every descriptor this function opens enters `fds` at the open itself and is closed
+        # EXACTLY here, once, on every path: no close-then-rebind along the walk and no descriptor
+        # ever closed twice (the #378 close sweep's REBIND/TRY shapes both stay empty).
+        for fd_ in fds:
+            try:
+                os.close(fd_)
+            except OSError:
+                pass
+
+
+def _warn_checkout_drift(root):
+    """ADVISORY ONLY, never part of the verdict (QA round-3 codex R3-3). The post-release branch judges
+    HEAD's COMMITTED objects exclusively: every byte it reads comes through the substitution-free funnel
+    over committed objects, and the manifest freshness/integrity legs run over a raw materialization of
+    HEAD's committed tree, so the index, the working tree, checkout filters, and untracked files cannot
+    change the verdict. This helper only prints a stderr note when a tracked file's checkout bytes do
+    not re-hash to HEAD's blob id (computed HERE in Python from `git ls-tree -r -z HEAD`), when `git
+    diff-index --cached --name-only -z HEAD` reports a staged change, or when `git ls-files -z --others
+    --exclude-standard` reports untracked files, as a courtesy to a maintainer whose checkout drifted
+    from the revision the verdict certifies. It is explicitly NOT a cleanliness guarantee, which
+    is exactly why it does not gate: it cannot see an index entry carrying assume-unchanged or
+    skip-worktree, an executable-bit change under core.filemode=false, or an untracked file hidden by
+    .git/info/exclude or a .gitignore (codex R3-3's reproductions), and it compares raw bytes, so a
+    checkout whose smudge filter or line-ending conversion rewrote a file is reported as drift. A git
+    failure is likewise only a note. Content comparison is delegated to _drift_entry_state (QA
+    round-6 codex majors 3/4 / claude 2): a no-follow descriptor walk from the root, an fstat-bound
+    regular-file requirement on the opened descriptor, bounded chunked hashing, and tracked files
+    over _DRIFT_ADVISORY_SIZE_CAP bytes (100 MiB) reported as UNCHECKED rather than read.
+    WHY NO WORKTREE-COMPARING GIT CALL (QA round 5, reproduction (c) and its siblings): `git status`
+    refreshes the index, so it RUNS repo-configured code mid-gate: the core.fsmonitor program, the clean
+    filter of any stat-dirty tracked file (a filter.<driver>.clean named by .gitattributes or
+    .git/info/attributes), and the post-index-change hook when it writes the refreshed index; -c
+    core.fsmonitor=false stops only the first. `git diff-index HEAD` (no --cached) also runs the clean
+    filter on a racily clean file. So git here only lists objects and paths (ls-tree, diff-index
+    --cached, ls-files --others), none of which reads working-tree content, and the content comparison
+    is done in Python (the self-test case "(R5 filter/hook)" plants all three and fails if any runs)."""
+    proc_t = _git(root, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"], binary=True)
+    proc_s = _git(root, ["diff-index", "--cached", "--name-only", "-z", "HEAD"], binary=True)
+    proc_u = _git(root, ["ls-files", "-z", "--others", "--exclude-standard"], binary=True)
+    if proc_t.returncode != 0 or proc_s.returncode != 0 or proc_u.returncode != 0:
+        print("post-release advisory: a git listing failed; checkout drift from the certified revision is "
+              "unknown (the verdict reads committed objects only)", file=sys.stderr)
+        return
+    entries = set(rec.decode("utf-8", "replace")
+                  for rec in (proc_s.stdout + b"\0" + proc_u.stdout).split(b"\0") if rec)
+    unchecked = []
+    for rec in proc_t.stdout.split(b"\0"):
+        meta, tab, path_b = rec.partition(b"\t")
+        fields = meta.split(b" ")
+        if not tab or len(fields) != 3 or fields[1] != b"blob":
+            continue
+        path_s = path_b.decode("utf-8", "replace")
+        want = fields[2].decode("ascii", "replace")
+        state = _drift_entry_state(root, path_b, fields[0] == b"120000", want)
+        if state == "drift":
+            entries.add(path_s)
+        elif state == "unchecked":
+            unchecked.append(path_s)
+    entries = sorted(entries)
+    if entries:
+        print("post-release advisory: the index, working tree, or untracked files differ from HEAD "
+              "({} entr{}, e.g. {}); the verdict certifies the COMMITTED revision only, never this "
+              "checkout".format(len(entries), "y" if len(entries) == 1 else "ies", entries[:5]),
+              file=sys.stderr)
+    if unchecked:
+        print("post-release advisory: {} tracked file(s) over the {}-byte advisory size cap were "
+              "left UNCHECKED for drift (e.g. {}); the verdict reads committed objects only, never "
+              "this checkout".format(len(unchecked), _DRIFT_ADVISORY_SIZE_CAP, sorted(unchecked)[:5]),
+              file=sys.stderr)
+
+
+def _post_release_changelog_ok(prev_bytes, head_bytes, version):
+    """True when the head changelog equals the predecessor's byte for byte, or differs ONLY by one added
+    line `tag = "v<version>"` that lands in the newest [[release]] table as that release's own key
+    (RELEASING step 6b: the line goes immediately after that release's `version` line, BEFORE any sub-table
+    header such as [release.artifacts]). The LINE check (one added line whose removal restores the
+    predecessor bytes) runs first; _changelog_tag_toml_ok then proves the line landed as the NEWEST
+    release's own `tag` key. Any other edit, including a reformat, a comment, another key, or a different
+    tag value, is False."""
+    if head_bytes == prev_bytes:
+        return True
+    want = 'tag = "v{}"'.format(version)
+    lines = head_bytes.decode("utf-8").splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.rstrip("\r\n") != want or "".join(lines[:i] + lines[i + 1:]).encode("utf-8") != prev_bytes:
+            continue
+        return _changelog_tag_toml_ok(prev_bytes, head_bytes, version)
+    return False
+
+
+def _changelog_tag_toml_ok(prev_bytes, head_bytes, version):
+    """The PARSED proof behind the step 6b line check: the newest [[release]] table itself carries tag ==
+    "v" + version and, with that one key removed, the head record EQUALS the predecessor's. A textually
+    perfect tag line placed in an OLDER release's table, or inside a sub-table such as [release.artifacts],
+    passes the line check and is rejected ONLY here (QA round-2: the TOML-only catch), so this is factored
+    out for the self-test to discriminate."""
+    head, prev = tomllib.loads(head_bytes.decode("utf-8")), tomllib.loads(prev_bytes.decode("utf-8"))
+    newest = dict(head["release"][-1])
+    if newest.pop("tag", None) != "v" + version:
+        return False
+    head["release"][-1] = newest
+    return head == prev
+
+
+def _assert_release_rows_prefix(prev_releases, release_rows, head_version):
+    """HEAD's releases record must be the release commit's rows plus EXACTLY the newest row: an extra,
+    altered, or reordered prior row is a rewrite of attested history, exit 2 (QA round-2 claude M1)."""
+    if list(prev_releases) != list(release_rows[:-1]):
+        raise GateError("post-release head: {} is not the predecessor's rows plus exactly the newest row "
+                        "{}".format(RELEASES_REL, head_version))
+
+
+def _assert_newest_manifest_binding(newest_manifest, head_version):
+    """The release commit's own manifest must record the newest row's version (QA round-2 claude M1/M4):
+    an anchored release whose manifest disagrees with its release-order row is inconsistent, exit 2."""
+    if newest_manifest.get("release-version") != head_version:
+        raise GateError("predecessor manifest release-version {!r} != release-order row version {!r}; the "
+                        "anchored predecessor is inconsistent".format(
+                            newest_manifest.get("release-version"), head_version))
+
+
+def _gate_module_files():
+    """Every pack-tree file this gate PROCESS executes or imports, enumerated from sys.modules (plus
+    this file itself), never a hand list (QA round-4 codex R4-1 / claude m3): any module whose resolved
+    __file__ lies under the pack root that owns this gate is included, so a new import is covered the
+    moment it lands. Returns (pack root, sorted file paths)."""
+    # The pack root is the parent of this file's tools directory in BOTH the checkout and the
+    # stage-2 materialized tree (which carries no .git for repo_root() to find; QA round 5).
+    pack = Path(__file__).resolve().parent.parent
+    files = {Path(__file__).resolve()}
+    for mod in list(sys.modules.values()):
+        f = getattr(mod, "__file__", None)
+        if not isinstance(f, str):
+            continue
+        try:
+            q = Path(f).resolve()
+        except OSError:
+            continue
+        if q == pack or pack in q.parents:
+            files.add(q)
+    return pack, sorted(files)
+
+
+def _assert_gate_code_matches_head(root, head_oid):
+    """POST-RELEASE ONLY (QA round-4 codex R4-1 / claude m3): the gate executes from the CHECKOUT, so
+    an edited checkout module (this file, _release_schema, _gen_common, gen_manifest, check_manifest, or
+    any other import) could otherwise turn a refusal into exit 0 while the advisory merely mentions the
+    drift. Compare every file this process executes or imports from the pack tree (enumerated from
+    sys.modules, never a hand list) byte-for-byte against the SAME path\x27s blob in HEAD\x27s committed
+    tree through the re-hashed funnel, and exit 2 on any difference or any such file missing from HEAD.
+    Refusal-only: a checkout difference here can never accept a state; it can only refuse.
+
+    DISCLOSED RESIDUAL: this check is itself checkout code. An attacker who controls the gate\x27s own
+    LAUNCH (the interpreter binary, PYTHONPATH / sitecustomize, a wrapping process, or a pre-import
+    patch of this very function) can run arbitrary code and fabricate any verdict; no in-process
+    self-comparison can defend a process against its own launcher. What this check closes is the
+    demonstrated R4-1 class: an in-place checkout edit changing the verdict of an otherwise honest
+    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide. By design,
+    under the two-stage launch this check runs INSIDE the committed
+    copy (stage 2), where it pins the stage-2 materialized modules to the judged HEAD; the
+    launch-control residual concentrates entirely in the stage-1 launched file."""
+    pack, files = _gate_module_files()
+    for q in files:
+        rel = q.relative_to(pack).as_posix()
+        try:
+            committed = _release_schema.verified_path_blob(root, head_oid, rel)
+        except SchemaError as exc:
+            raise GateError("post-release head: the gate\x27s own code file {} is not readable from "
+                            "HEAD\x27s committed tree ({}); every module the gate executes must be "
+                            "committed at HEAD; fail-closed".format(rel, exc))
+        try:
+            disk = q.read_bytes()
+        except OSError as exc:
+            raise GateError("post-release head: cannot read the gate\x27s own code file {} ({}); "
+                            "fail-closed".format(rel, exc))
+        if disk != committed:
+            raise GateError("post-release head: the gate\x27s own code file {} differs from HEAD\x27s "
+                            "committed tree; on this branch the checkout may not change the verdict; "
+                            "commit or revert the edit; fail-closed".format(rel))
+
+
+def _assert_profiles_absent_committed(root, head_oid, release_commit):
+    """The 2.6 profiles/groups arm-or-fail-closed decision on the post-release branch is taken from the
+    COMMITTED trees, never the checkout (QA round-4 claude M1): deleting the checkout copy of a shipped
+    artifact must never turn the fail-closed refusal into POST-RELEASE exit 0. ANY committed tree entry
+    at PROFILES_REL (a file, an executable, a symlink, a gitlink, or a tree), in HEAD or in the newest
+    release commit, resolved through re-hashed objects only, means the artifact has shipped -> exit 2.
+    The run() lstat on the checkout stays as an ADDITIONAL refusal only (an artifact present in the
+    checkout but not yet committed also fail-closes); it is never the deciding input on this branch."""
+    for commit in (head_oid, release_commit):
+        try:
+            shipped = _release_schema.verified_tree_entry_exists(root, commit, PROFILES_REL)
+        except SchemaError as exc:
+            raise GateError(str(exc))
+        if shipped:
+            raise GateError("profiles/groups artifact {} has shipped (present in the COMMITTED tree at "
+                            "{}) but its delta leg is not implemented; fail-closed until the diff lands "
+                            "(2.6; QA round-4 claude M1: the committed trees decide, the checkout lstat "
+                            "is only an additional refusal)".format(PROFILES_REL, commit))
+
+
+def _post_release_head(root, prev_row, release_rows, head_version):
+    """The head version EQUALS the newest attested row (the RELEASING step 6a attestation commit, main
+    after it merges, and the step 6b tag-key commit). THE ONE AND ONLY RELAXATION over the gate the release
+    faced BEFORE its row was appended is the version-increase requirement (QA round-2 claude B1): every
+    other rejection is preserved, and the whole branch binds to the HEAD REVISION, never to working-tree
+    bytes. Coverage of what the pre-row gate rejected and where each case is still rejected:
+
+      pre-row rejection                            | post-release enforcement
+      -------------------------------------------- | ----------------------------------------------------
+      any change beyond the release commit         | raw tree diff HEAD vs commit_sha (_head_tree_diff,
+                                                   | replace objects/grafts disabled): POST_RELEASE_PATHS
+                                                   | only, with no path-quoting or filter hazard
+      an addition, deletion, type or mode change   | every differing entry must stay 100644 -> 100644
+                                                   | status M (_assert_tree_entry_regular), on every path
+      a staged, dirty, or untracked state          | NOT JUDGED: the verdict binds to HEAD's COMMITTED
+      presented as the head                        | objects only; checkout drift is a stderr ADVISORY
+                                                   | (_warn_checkout_drift, never the verdict), and CI
+                                                   | runs this gate on a fresh checkout
+      a head not descending from the release       | git merge-base --is-ancestor commit_sha HEAD, raw
+                                                   | (_assert_head_ancestry)
+      the release's OWN whole-surface delta: the   | _release_checks_at_commit replays the full delta from
+      version increase over ITS predecessor, the   | release_rows[-2] against the newest row's tagged tree
+      strict record schemas, both anchored tree    | with the row's version as head; a finding exits 1 and
+      checks, every classification leg, the        | malformed input exits 2, exactly as before the row
+      disposition sweep, the claimed-bump floor    | existed
+      a malformed FIRST release (the zero-row      | with exactly one row, _release_checks_at_commit runs
+      genesis strict validation)                   | the same genesis checks over the tagged tree
+      a stale or inconsistent HEAD manifest        | gen_manifest --check + check_manifest over a RAW
+                                                   | materialization of HEAD's COMMITTED tree
+                                                   | (_head_committed_manifest_integrity), plus the
+                                                   | HEAD-byte version bindings below
+      a changelog edit beyond the newest tag key   | _post_release_changelog_ok over HEAD's COMMITTED bytes
+      a rewritten releases record                  | HEAD's committed rows == the release commit's rows
+                                                   | plus exactly the newest row (_assert_release_rows_prefix)
+
+    Every byte this branch judges comes from HEAD's or the release commit's COMMITTED objects through
+    the substitution-free funnel (_git/_git_raw and the raw materialization: replace objects, grafts,
+    and the commit-graph cache all disabled), and the manifest freshness/integrity legs run over a raw
+    materialization of HEAD's committed tree, NEVER the working tree (QA round-3 codex R3-1/R3-2/R3-3,
+    claude F1/F2/F3). The working tree, the index and its flags (assume-unchanged, skip-worktree,
+    core.filemode=false), checkout clean/smudge filters, and exclude rules therefore cannot make a bad
+    committed state print POST-RELEASE. QA round-5 (claude M1): run() ROUTES into this branch
+    from HEAD's COMMITTED records alone, and this branch reads NO checkout record at all (the drift
+    advisory prints, never gates), so a divergent checkout can neither prevent this branch from
+    running, steer it, nor be certified by it; the committed copies are still re-read below and
+    cross-checked against the routing reads as defence in depth.
+
+    EXACTNESS of the coverage table (QA round-3 claude F5): "rejected" above means rejected at the
+    RECORD level, not the byte level. Exactly three byte-level variants that the pre-row gate rejected
+    (it rejected EVERY same-version head outright) are ACCEPTED here because the records they encode
+    are identical and gen_manifest/check_manifest bind the exact committed bytes: (1) a committed
+    releases.toml whose bytes differ from the release commit's rows plus the newest row only in TOML
+    comments or formatting (rows are compared PARSED, _assert_release_rows_prefix); (2) a tag line
+    terminated CRLF inside an LF changelog (the one-added-line check strips the terminator; the parsed
+    proof is unaffected; reachable only through plumbing, because the generated .gitattributes pins the
+    changelog to eol=lf and porcelain checkin normalizes the CRLF away); (3) the tag key placed elsewhere WITHIN the newest [[release]] table than
+    immediately after its version line (the enforced property is the parsed one: the newest table
+    itself carries tag == "v" + version and nothing else changed; RELEASING step 6b's placement advice
+    exists so a hand-added line does not land inside a sub-table). Each variant is locked by a
+    self-test case.
+
+    QA round-4 (codex R4-1/R4-2/R4-3, claude M1/m2/m3): nothing in the checkout or the inherited
+    environment may turn a refusal into exit 0 on this branch; a checkout or environment difference may
+    only REFUSE (exit 2) or leave the verdict unchanged. Concretely: every module this process executes
+    or imports from the pack tree must byte-equal HEAD\x27s committed copy
+    (_assert_gate_code_matches_head, with its disclosed launch-control residual); the validators judging
+    a raw materialization are the materialized tree\x27s OWN committed copies (tools_root in
+    _validate_via_tool); the profiles arm-or-fail-closed decision is taken from the COMMITTED trees
+    (_assert_profiles_absent_committed), the run() checkout lstat remaining an additional refusal only;
+    and every funneled read scrubs the inherited GIT_* environment and re-hashes each commit, tree, and
+    blob it consumes against the requesting id (_release_schema), so a decoy GIT_DIR, an
+    object-directory overlay, or an overwritten loose object cannot substitute a judged byte.
+
+    By design, a plain launch re-executes the COMMITTED copy of this
+    gate from a verified materialization of HEAD (stage 1), so no checkout Python file beyond the
+    launched file itself (an untracked shadow module, a crafted __pycache__ .pyc, a planted sibling)
+    participates in this branch; every child validator launches under -I -B with a fresh pycache
+    prefix (_child_pycache_x); and the launched file remains the disclosed residual, because
+    nothing can vet its own launch.
+    Returns (sorted changed paths, replayed-release findings)."""
+    commit = prev_row["commit_sha"]
+    head_oid = _rev_parse(root, "HEAD^{commit}")
+    # QA round-4 FIRST (codex R4-1 / claude m3): before any other judgment, the code this process runs
+    # must byte-equal HEAD\x27s committed copy of it, else nothing below is trustworthy.
+    _assert_gate_code_matches_head(root, head_oid)
+    _assert_head_ancestry(root, commit)
+    changed = _head_tree_diff(root, commit)
+    # QA round-4 (claude M1): the profiles arm-or-fail-closed decision from the COMMITTED trees.
+    _assert_profiles_absent_committed(root, head_oid, commit)
+    _warn_checkout_drift(root)
+    head_rows = _strict(_release_schema.strict_releases, _show_toml(root, head_oid, RELEASES_REL),
+                        "HEAD " + RELEASES_REL)
+    if head_rows != release_rows:
+        raise GateError("post-release head: the committed {} at HEAD disagrees with the loaded record; "
+                        "fail-closed".format(RELEASES_REL))
+    head_cl_bytes = _show(root, head_oid, CHANGELOG_REL)
+    try:
+        head_cl = tomllib.loads(head_cl_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise GateError("HEAD {} does not parse: {}".format(CHANGELOG_REL, exc))
+    cl_rel = head_cl.get("release", [])
+    if (not isinstance(cl_rel, list) or not cl_rel or not isinstance(cl_rel[-1], dict)
+            or cl_rel[-1].get("version") != head_version):
+        raise GateError("post-release head: the committed {} head version disagrees with the loaded "
+                        "record; fail-closed".format(CHANGELOG_REL))
+    head_man = _show_toml(root, head_oid, MANIFEST_REL)
+    _strict(_release_schema.strict_manifest, head_man, "HEAD " + MANIFEST_REL)
+    if head_man.get("release-version") != head_version:
+        raise GateError("HEAD manifest release-version {!r} != the newest release row version {!r}; "
+                        "fail-closed".format(head_man.get("release-version"), head_version))
+    prev_releases = _strict(_release_schema.strict_releases, _show_toml(root, commit, RELEASES_REL),
+                            "predecessor " + RELEASES_REL)
+    _assert_release_rows_prefix(prev_releases, release_rows, head_version)
+    newest_manifest = _show_toml(root, commit, MANIFEST_REL)
+    _strict(_release_schema.strict_manifest, newest_manifest, "predecessor " + MANIFEST_REL)
+    _assert_newest_manifest_binding(newest_manifest, head_version)
+    if CHANGELOG_REL in changed and not _post_release_changelog_ok(
+            _show(root, commit, CHANGELOG_REL), head_cl_bytes, head_version):
+        raise GateError("post-release head: {} differs from the release commit by more than the newest "
+                        "release's tag = \"v{}\" key; declare a new version".format(CHANGELOG_REL,
+                                                                                    head_version))
+    _head_committed_manifest_integrity(root, head_oid)
+    findings = _release_checks_at_commit(root, release_rows, newest_manifest)
+    return sorted(changed), findings
+
+
+def _release_checks_at_commit(root, release_rows, newest_manifest):
+    """THE PRESERVED RELEASE CHECK (QA round-2 claude B1): the post-release head must never certify a
+    release the gate would have rejected before its row was appended, so the release the newest row attests
+    is re-checked here against ITS OWN predecessor, over committed objects only.
+
+    - With two or more rows, the whole-surface delta is replayed from release_rows[-2] against the newest
+      row's tagged commit tree (equal to HEAD outside POST_RELEASE_PATHS, enforced by the caller) with the
+      newest row's version as the head version: predecessor anchoring, the version-increase/claimed rank,
+      every strict record validation on BOTH objects, both authoritative raw-tree checks, every
+      classification leg, the disposition sweep, and the claimed-bump floor. Findings are returned for
+      exit 1; malformed input raises GateError (exit 2), exactly the pre-row verdicts.
+    - With exactly one row, the newest row attests the FIRST release, whose pre-row state was the zero-row
+      genesis path, so the SAME genesis validation runs over the tagged tree: manifest genesis = true, the
+      strict record schemas, renderer-target existence, and the authoritative validators
+      (check_clauses --genesis, gen_renderers --check, gen_manifest --check + check_manifest) over the
+      RAW-materialized tree (_predecessor_tree_checks).
+
+    Head-side records are read from the newest row's COMMIT (git show / raw materialization), never the
+    working tree, and every read goes through the substitution-free funnel (replace objects, grafts, and
+    the commit-graph cache disabled; QA round-3 claude F1). Returns the findings list (empty when
+    clean)."""
+    newest = release_rows[-1]
+    n_commit, version = newest["commit_sha"], newest["version"]
+    n_rows = _validate_dispositions_data(_show_toml(root, n_commit, DISPOSITIONS_REL),
+                                         "release commit " + DISPOSITIONS_REL)
+    n_genesis = newest_manifest.get("genesis") is True
+    if len(release_rows) == 1:
+        if not n_genesis:
+            raise GateError("the first attested release's commit " + n_commit + " does not declare "
+                            "genesis = true in its manifest while its own releases record is zero-row "
+                            "(2.5); fail-closed")
+        _strict(_release_schema.strict_order, _show_toml(root, n_commit, ORDER_REL),
+                "release commit " + ORDER_REL)
+        n_renderers = _show_toml(root, n_commit, RENDERERS_REL)
+        _strict(_release_schema.strict_renderers, n_renderers, "release commit " + RENDERERS_REL)
+        _strict(_release_schema.strict_clause_inventory, _show_toml(root, n_commit, CLAUSES_REL),
+                "release commit " + CLAUSES_REL)
+        _strict(_release_schema.strict_id_history, _show_toml(root, n_commit, IDHISTORY_REL),
+                "release commit " + IDHISTORY_REL)
+        _assert_renderer_targets_declared(n_rows, _renderer_ids(n_renderers))
+        _predecessor_tree_checks(root, n_commit, True)
+        return []
+    prev_row = release_rows[-2]
+    _anchor_predecessor(root, prev_row)
+    p_commit = prev_row["commit_sha"]
+    claimed = _claimed_rank(prev_row["version"], version)
+    prev_inv = _strict(_release_schema.strict_clause_inventory, _show_toml(root, p_commit, CLAUSES_REL),
+                       "predecessor " + CLAUSES_REL)
+    head_inv = _strict(_release_schema.strict_clause_inventory, _show_toml(root, n_commit, CLAUSES_REL),
+                       "release commit " + CLAUSES_REL)
+    register = _strict(_release_schema.strict_id_history, _show_toml(root, n_commit, IDHISTORY_REL),
+                       "release commit " + IDHISTORY_REL)
+    _strict(_release_schema.strict_releases, _show_toml(root, p_commit, RELEASES_REL),
+            "predecessor " + RELEASES_REL)
+    _strict(_release_schema.strict_id_history, _show_toml(root, p_commit, IDHISTORY_REL),
+            "predecessor " + IDHISTORY_REL)
+    _strict(_release_schema.strict_order, _show_toml(root, p_commit, ORDER_REL),
+            "predecessor " + ORDER_REL)
+    _strict(_release_schema.strict_order, _show_toml(root, n_commit, ORDER_REL),
+            "release commit " + ORDER_REL)
+    prev_disp = _validate_dispositions_data(_show_toml(root, p_commit, DISPOSITIONS_REL),
+                                            "predecessor " + DISPOSITIONS_REL)
+    prev_manifest = _show_toml(root, p_commit, MANIFEST_REL)
+    _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
+    if prev_manifest.get("release-version") != prev_row["version"]:
+        raise GateError("predecessor manifest release-version {!r} != release-order row version {!r}; the "
+                        "anchored predecessor is inconsistent".format(
+                            prev_manifest.get("release-version"), prev_row["version"]))
+    prev_renderers = _show_toml(root, p_commit, RENDERERS_REL)
+    head_renderers = _show_toml(root, n_commit, RENDERERS_REL)
+    _strict(_release_schema.strict_renderers, prev_renderers, "predecessor " + RENDERERS_REL)
+    _strict(_release_schema.strict_renderers, head_renderers, "release commit " + RENDERERS_REL)
+    _assert_renderer_targets_declared(n_rows, _nongenesis_renderer_target_scope(prev_renderers,
+                                                                                head_renderers))
+    _assert_renderer_targets_declared(prev_disp, _renderer_ids(prev_renderers))
+    _predecessor_tree_checks(root, p_commit, prev_manifest.get("genesis") is True)
+    # The release commit's OWN tree is held to the SAME authoritative validators the live head gets
+    # (check_clauses, gen_renderers --check, gen_manifest --check + check_manifest), raw-materialized.
+    _predecessor_tree_checks(root, n_commit, n_genesis)
+    events, findings = [], []
+    for ev, fs in (clause_text_leg(prev_inv, head_inv, register, n_rows, version),
+                   path_keyset_leg(prev_manifest, newest_manifest),
+                   ownership_leg(_ownership_classes_at(root, p_commit),
+                                 _ownership_classes_at(root, n_commit), n_rows, version),
+                   order_leg(_show(root, p_commit, ORDER_REL), _show(root, n_commit, ORDER_REL)),
+                   renderer_diff(prev_renderers, head_renderers, n_rows, version)):
+        events += ev
+        findings += fs
+    floor = max((e.floor for e in events), default=PATCH)
+    findings += _disposition_findings(events, n_rows, version)
+    if claimed < floor:
+        findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
+            BUMP_NAME[claimed], prev_row["version"], version, BUMP_NAME[floor]))
+    return findings
+
+
+def _disposition_findings(events, rows, head_version):
+    """The mis-dated and unconsumed disposition sweep over classified events (round-3 finding 3), shared by
+    the live delta in run() and the post-release replay (_release_checks_at_commit) so they cannot drift.
+    The subjects of the changes DETECTED this release are grouped by the disposition kind that would target
+    them, so a mis-dated row for a current change is caught."""
+    findings = []
+    dispositioned_clause_changes = ("behaviour-neutral", "strengthened", "default-correction",
+                                    "undispositioned-text-change")
+    clause_subjects = set(e.subject for e in events
+                          if e.surface == "clause" and e.change in dispositioned_clause_changes)
+    ownership_subjects = set(e.subject for e in events
+                             if e.surface == "ownership" and e.change in ("weakened", "strengthened"))
+    renderer_subjects = set(e.subject for e in events if e.surface == "renderer")
+    subjects_by_kind = dict((("behaviour-neutral", clause_subjects), ("strengthened", clause_subjects),
+                             ("default-correction", clause_subjects), ("class-change", ownership_subjects),
+                             ("renderer-semantics", renderer_subjects)))
+    for r in rows:
+        if r["_consumed"]:
+            continue
+        if r["id"] in subjects_by_kind.get(r["kind"], set()) and r["release"] != head_version:
+            # A row that names a change detected THIS release but is dated for another release: it was
+            # never consumed (take_row is exact-release) and the head_version sweep cannot see it, so a
+            # mis-dated disposition could otherwise hide behind a coincidentally-adequate bump.
+            findings.append("disposition row (kind {} id {}) is dated {}, not the release under build "
+                            "{}, but names a change detected in this release (mis-dated "
+                            "disposition)".format(r["kind"], r["id"], r["release"], head_version))
+        elif r["release"] == head_version:
+            findings.append("disposition row (kind {} id {}) at {} matches no detected change "
+                            "(unconsumed)".format(r["kind"], r["id"], head_version))
+    return findings
+
+
 # --- genesis structural validation (single-home validators, never re-implemented) -------------------
 
-def _validate_via_tool(root, script, args, what):
-    """Run a sibling single-home validator as a subprocess and raise GateError (exit 2) on any nonzero exit
+_CHILD_PYCACHE = [None]
+
+
+def _child_pycache_x():
+    """The `-X pycache_prefix=<dir>` value for EVERY Python child this gate launches (QA round-5 claude
+    M2): a process-lifetime FRESH, empty pycache directory so a crafted pre-existing __pycache__ .pyc
+    cannot be READ behind a byte-identical .py (-B alone only stops WRITES; QA round-5 reproduction (b)).
+    The children launch with a LITERAL sys.executable head and inline -I -B flags (so the
+    launcher-isolation and maintenance-pin scans resolve the interpreter and its isolation statically):
+    -I makes the child ignore PYTHONPATH, the user site and sitecustomize (round 5 reproduced a
+    sitecustomize reached through an inherited PYTHONPATH flipping a child validator refusal to exit 0
+    even though the gate ran under -I), and -B writes no bytecode into any judged tree."""
+    if _CHILD_PYCACHE[0] is None:
+        import atexit
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp(prefix="aiqt-release-delta-pyc-")
+        atexit.register(lambda: shutil.rmtree(d, ignore_errors=True))
+        _CHILD_PYCACHE[0] = d
+    return "pycache_prefix=" + _CHILD_PYCACHE[0]
+
+
+# The record stub every nested validator child runs under (security-seci-fail-closed; the stage-2
+# contract of _stage2_arm_result applied to the validators this gate launches; merge train 3 QA round
+# 2, codex and claude MAJORs: _renderer_freshness and _validate_via_tool judged only the exit code, so
+# a validator whose cleanup faulted after a zero exit passed). argv: the script, the result path,
+# then the script's own arguments. It registers its result writer FIRST (so it runs LAST), arms the
+# fault audit hook and the thread-fault wrapper, runs the script as __main__, and the writer collects
+# the cyclic garbage, flushes, writes `release-delta-child <code> <pid>` and ends the child with
+# os._exit, so nothing of interpreter finalization runs after the result. The fault and hook checks
+# run again after the record is written (PR #397 QA round p1, codex MAJOR: the open raises an audit
+# event a hook can fault in); a late fault overwrites the record in place with code 2 and exits 2,
+# whatever the verdict was (round 2, claude MINOR-1). The whole writer, its final os._exit(code)
+# call included (round 3, codex MAJOR / claude MAJOR-1), runs inside an outer guard: an exception
+# raised in its guarded body, at the final exit call included, ends in os._exit(2) after a
+# best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1); an
+# exception a trace function raises at a nested `try:` line escapes the outer handler before any
+# complete record exists, which is still fail-closed (round 4, claude MINOR-1). Not guaranteed: an
+# OSError from the result open, a write or the close, or a rewrite that itself fails, can leave a
+# code-0 record beside exit 2, which _run_recorded_child refuses; only the close and the exit call
+# follow the final checks, so a fault another thread raises in that window is not seen (a
+# disclosed race); and a tracing, profiling, monitoring or audit hook the validator installs,
+# firing once or repeatedly, can stop the guard's os._exit(2) and leave exit 0 beside a success
+# record (round 4, claude MEDIUM-1), the class of the code-controls-the-child residual
+# _stage2_arm_result states. With atexit._ncallbacks
+# unavailable, a pre-registered exit handler cannot be ruled out: a recorded fault, never a clean
+# default (round 2, gemini). The record cannot authenticate the validator's code, which can write a
+# well-formed record itself (the residual _stage2_arm_result discloses).
+_CHILD_RECORD_STUB = (
+    "import atexit, gc, os, runpy, sys, threading\n"
+    "script, result = sys.argv[1], sys.argv[2]\n"
+    "sys.argv = [script] + sys.argv[3:]\n"
+    "state, faults = [], []\n"
+    "reporting = (sys.excepthook, sys.unraisablehook)\n"
+    "thread_hook = threading.excepthook\n"
+    "def thread_fault(args):\n"
+    "    faults.append('threading.excepthook')\n"
+    "    thread_hook(args)\n"
+    "def check_hooks():\n"
+    "    if (threading.excepthook is not thread_fault or sys.excepthook is not reporting[0]\n"
+    "            or sys.unraisablehook is not reporting[1]):\n"
+    "        faults.append('a fault-reporting hook was replaced')\n"
+    "def record():\n"
+    "    if not state:\n"
+    "        return\n"
+    "    try:\n"
+    "        code = state[0]\n"
+    "        for _ in range(100):\n"
+    "            if gc.collect() == 0:\n"
+    "                break\n"
+    "        else:\n"
+    "            faults.append('garbage collection never settled')\n"
+    "        check_hooks()\n"
+    "        try:\n"
+    "            sys.stdout.flush()\n"
+    "            sys.stderr.flush()\n"
+    "        except Exception:\n"
+    "            faults.append('the streams could not be flushed')\n"
+    "        if faults:\n"
+    "            code = 2\n"
+    "            os.write(2, ('release-delta child fault: ' + ', '.join(sorted(set(faults)))\n"
+    "                         + chr(10)).encode())\n"
+    "        seen = len(faults)\n"
+    "        try:\n"
+    "            fd = os.open(result, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC,\n"
+    "                         0o600)\n"
+    "            try:\n"
+    "                os.write(fd, ('release-delta-child ' + str(code) + ' ' + str(os.getpid())\n"
+    "                              + chr(10)).encode())\n"
+    "                check_hooks()\n"
+    "                if len(faults) != seen:\n"
+    "                    code = 2\n"
+    "                    os.write(2, ('release-delta child fault during the result write: '\n"
+    "                                 + ', '.join(sorted(set(faults[seen:]))) + chr(10)).encode())\n"
+    "                    os.pwrite(fd, ('release-delta-child 2 ' + str(os.getpid())\n"
+    "                                   + chr(10)).encode(), 0)\n"
+    "            finally:\n"
+    "                os.close(fd)\n"
+    "        except OSError:\n"
+    "            code = 2\n"
+    "        os._exit(code)\n"
+    "    except BaseException:\n"
+    "        try:\n"
+    "            os.write(2, ('release-delta child fault during the result write: the writer '\n"
+    "                         'raised' + chr(10)).encode())\n"
+    "            fd2 = os.open(result, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC,\n"
+    "                          0o600)\n"
+    "            try:\n"
+    "                os.write(fd2, ('release-delta-child 2 ' + str(os.getpid())\n"
+    "                               + chr(10)).encode())\n"
+    "            finally:\n"
+    "                os.close(fd2)\n"
+    "        except BaseException:\n"
+    "            pass\n"
+    "        os._exit(2)\n"
+    "atexit.register(record)\n"
+    "ncallbacks = getattr(atexit, '_ncallbacks', None)\n"
+    "if ncallbacks is None:\n"
+    "    faults.append('atexit._ncallbacks is unavailable, so a pre-registered exit handler '\n"
+    "                  'cannot be ruled out')\n"
+    "elif ncallbacks() != 1:\n"
+    "    faults.append('an exit handler was registered before the result writer')\n"
+    "sys.addaudithook(lambda event, _args: event in ('sys.unraisablehook', 'sys.excepthook')\n"
+    "                 and faults.append(event))\n"
+    "threading.excepthook = thread_fault\n"
+    "try:\n"
+    "    runpy.run_path(script, run_name='__main__')\n"
+    "    code = 0\n"
+    "except SystemExit as exc:\n"
+    "    code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)\n"
+    "    if not isinstance(exc.code, (int, type(None))):\n"
+    "        print(exc.code, file=sys.stderr)\n"
+    "state.append(code)\n"
+    "sys.exit(code)\n")
+
+
+def _run_recorded_child(script_path, args):
+    """Run one validator child under _CHILD_RECORD_STUB and return (returncode, stdout, stderr,
+    fault): `fault` is None, or names why a ZERO exit is still no pass (security-seci-fail-closed):
+    no complete result bound to the child's own exit code and pid (an early os._exit, a cleanup that
+    ended the process first), or any byte on its error stream (a traceback, a frameless 'Exception
+    ignored' report, a thread fault; the validators print nothing there on a pass), or, beside a
+    NONZERO exit, a result that records a pass (a fault during or after the result write; PR #397
+    QA round p1). The result lives in a fresh private directory and is read back through the
+    non-blocking fstat-checked reader. A launch failure raises OSError for the caller to name."""
+    import shutil
+    import tempfile
+    private = tempfile.mkdtemp(prefix="aiqt-release-delta-child-")
+    try:
+        result = os.path.join(private, "result")
+        with subprocess.Popen([sys.executable, "-I", "-B", "-X", _child_pycache_x(), "-c",
+                               _CHILD_RECORD_STUB, str(script_path), result, *args],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+            out, err = child.communicate()
+        record = _stage1_read_capture(result)
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+    fault = None
+    if child.returncode == 0:
+        if record != "release-delta-child 0 {}\n".format(child.pid).encode("ascii"):
+            fault = ("exited 0 but wrote no complete result bound to its own exit code and pid "
+                     "({}); a zero exit alone is never a pass".format(
+                         "unreadable" if record is None else repr(record[:80])))
+        elif err:
+            fault = ("exited 0 but its error stream is not empty ({!r}); a fault there, cleanup "
+                     "included, is never a pass".format(err[:200].decode("utf-8", "replace")))
+    elif record is not None and record.startswith(b"release-delta-child 0 "):
+        fault = ("exited {} but its result records a pass ({!r}); a success record beside a "
+                 "nonzero exit is never a verdict".format(child.returncode, record[:80]))
+    return child.returncode, out, err, fault
+
+
+def _validate_via_tool(root, script, args, what, tools_root=None):
+    """Run a single-home validator as a subprocess and raise GateError (exit 2) on any nonzero exit
     OR a launch failure, so a structural violation OR a cannot-evaluate fails this gate closed rather than
-    passing (VC-4 QA #1; round-4 finding 4 launch propagation). The tool is located beside this gate and
-    pointed at the target via its args."""
+    passing (VC-4 QA #1; round-4 finding 4 launch propagation). With `tools_root` set (ALWAYS set when the
+    subject is a RAW MATERIALIZATION of a committed tree; QA round-4 codex R4-1 / claude m3), the tree
+    under judgment is validated by its OWN committed tools/<script> copy, so an edit beside this gate in
+    the CHECKOUT cannot neuter the validator that certifies committed bytes; a copy missing from the
+    materialized tree is a refusal. With tools_root=None the checkout sibling runs, ONLY for the
+    genesis/delta branches, whose subject IS the checkout."""
+    if tools_root is not None:
+        script_path = Path(tools_root) / "tools" / script
+        if not script_path.is_file():
+            raise GateError("{}: tools/{} is missing from the materialized committed tree; the committed "
+                            "revision must carry the validator that judges it; fail-closed".format(
+                                what, script))
+    else:
+        script_path = Path(__file__).resolve().parent / script
     try:
         # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must not crash the gate; the
-        # returncode is interpreted, and the diagnostic tail is decoded with replacement. -B keeps the child
+        # verdict reads the returncode, the result record and whether stderr is empty, and the
+        # diagnostic tail is decoded with replacement. -B keeps the child
         # from writing bytecode (round-6 finding 1 hermeticity), so no generated .pyc can enter a tree index.
-        proc = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve().parent / script), *args],
-                              capture_output=True)
+        # The child runs under the record stub (_run_recorded_child; merge train 3 QA round 2): a
+        # zero exit passes only with its complete result and an empty error stream.
+        rc, out, err, fault = _run_recorded_child(script_path, args)
     except OSError as exc:
         raise GateError("{}: cannot launch {} ({}); fail-closed".format(what, script, exc))
-    if proc.returncode != 0:
-        diag = (proc.stderr or proc.stdout).decode("utf-8", "replace").strip()[:400]
-        raise GateError("{}: {} rc={} ({})".format(what, script, proc.returncode, diag))
+    if rc != 0:
+        diag = fault or (err or out).decode("utf-8", "replace").strip()[:400]
+        raise GateError("{}: {} rc={} ({})".format(what, script, rc, diag))
+    if fault is not None:
+        raise GateError("{}: {} {} (security-seci-fail-closed); fail-closed".format(
+            what, script, fault))
 
 
 def _head_manifest_integrity(root):
@@ -774,11 +2371,44 @@ def _head_manifest_integrity(root):
     is strict-validated by the caller; here run the AUTHORITATIVE freshness (gen_manifest --check) and
     integrity (check_manifest SOURCES set-equality + raw re-hash) against the HEAD working tree, so a stale
     HEAD manifest that omits a staged pack path is exit 2. Mirrors _predecessor_tree_checks' manifest legs.
-    HEAD is the real git working tree, so no materialization or throwaway index is needed."""
+    GENESIS and DELTA branches only, whose subject IS the checkout; the POST-RELEASE branch judges the
+    committed revision and uses _head_committed_manifest_integrity instead (QA round-3 codex R3-2)."""
     _validate_via_tool(root, "gen_manifest.py", ["--check", "--root", str(root)],
                        "head manifest freshness (gen_manifest --check)")
     _validate_via_tool(root, "check_manifest.py", ["--root", str(root)],
                        "head manifest integrity (check_manifest SOURCES set-equality)")
+
+
+def _head_committed_manifest_integrity(root, head_oid):
+    """The post-release manifest freshness + integrity legs over a RAW materialization of HEAD's
+    COMMITTED tree, exactly as _predecessor_tree_checks runs them for older commits (QA round-3 codex
+    R3-2 / claude F2): gen_manifest --check and check_manifest consume the materialized committed bytes,
+    never the working tree, so a checkout clean/smudge filter, a skip-worktree or assume-unchanged index
+    flag, or any other checkout drift can neither mask a stale/corrupt COMMITTED manifest nor substitute
+    fresh working-tree bytes for stale committed ones. Hermetic like _predecessor_tree_checks: a temp
+    dir removed in finally, the throwaway index built on the CLEAN materialized tree first."""
+    import shutil
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-head-"))
+    dest = tmp / "tree"
+    dest.mkdir()
+    try:
+        try:
+            _release_schema.materialize_tree_raw(root, head_oid, dest)
+        except SchemaError as exc:
+            raise GateError(str(exc))
+        _index_materialized_tree(dest, "head")
+        # QA round-4 codex R4-1 / claude m3: the validators judging the COMMITTED tree are the tree\x27s
+        # OWN committed copies (tools_root=dest), never the checkout siblings beside this gate, so a
+        # checkout edit that neuters gen_manifest/check_manifest cannot certify a corrupt committed
+        # manifest (_assert_gate_code_matches_head separately refuses a drifted gate import).
+        _validate_via_tool(dest, "gen_manifest.py", ["--check", "--root", str(dest)],
+                           "head manifest freshness (gen_manifest --check)", tools_root=dest)
+        _validate_via_tool(dest, "check_manifest.py", ["--root", str(dest)],
+                           "head manifest integrity (check_manifest SOURCES set-equality)",
+                           tools_root=dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _genesis_structural(root):
@@ -797,8 +2427,115 @@ def _genesis_structural(root):
 
 # --- run --------------------------------------------------------------------------------------------
 
+def _no_committed_state(root):
+    """The stage-2 twin of _stage1_no_committed_state (QA round-6 codex blocker 1 / claude 3): True
+    ONLY when a positive probe establishes that no committed state exists. Either (a) NOT A GIT
+    REPOSITORY: git's own discovery refusal under a pinned C locale names no repository AND
+    _stage1_repository_in_ancestry, the same SUPERSET of git discovery over the root's lexical and
+    physical ancestry, finds nothing (QA rounds 7 and 8: a damaged ancestor repository, bare or
+    not, git cannot use is never a fallback); or (b) an UNBORN HEAD: the
+    repository resolves, HEAD is a symbolic ref to a refs/ branch, and `git show-ref --verify`
+    answers exactly "missing" (rc 1) for it. Every other git failure (dubious ownership, bad
+    config, a corrupt object store, a detached or corrupt HEAD) returns False: cannot-evaluate."""
+    probe = _git(root, ["rev-parse", "--git-dir"], binary=True, c_locale=True)
+    if probe.returncode != 0:
+        err = probe.stderr.decode("utf-8", "replace")
+        return ("not a git repository" in err
+                and not _stage1_repository_in_ancestry(str(root)))
+    sym = _git(root, ["symbolic-ref", "--quiet", "HEAD"], binary=True)
+    if sym.returncode != 0:
+        return False
+    try:
+        ref = sym.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return False
+    if not ref.startswith("refs/"):
+        return False
+    return _git(root, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
+
+
+def _head_commit_or_none(root):
+    """HEAD's commit id through the pinned funnel, or None ONLY when _no_committed_state POSITIVELY
+    establishes that none exists (not a git repository, or an unborn branch). Routing uses this to
+    decide whether there IS a committed state to certify: a repository carrying an attested release
+    row necessarily has a resolvable HEAD, so an unresolvable HEAD never diverts a committed
+    post-release state to a checkout-judged branch. Any OTHER git failure (QA round-6 codex blocker
+    1: dubious ownership, a corrupt HEAD, bad config) re-raises as GateError, exit 2: a git failure
+    is never a license to judge the checkout."""
+    try:
+        return _rev_parse(root, "HEAD^{commit}")
+    except GateError:
+        if _no_committed_state(root):
+            return None
+        found = _stage1_repository_in_ancestry(str(root))
+        raise GateError("git cannot resolve HEAD at {} and no probe positively established an "
+                        "absent committed state ({}); a refused or damaged repository is "
+                        "cannot-evaluate, never routed to a checkout-judged branch".format(
+                            root, ("refused because " + found) if found else
+                            "git itself refused"))
+
+
+def _committed_post_release_state(root, head_oid):
+    """The post-release ROUTING predicate over HEAD's COMMITTED objects ONLY (QA round-5 claude M1):
+    (release rows, head version) when the committed releases record carries rows and the committed
+    changelog's newest version EQUALS the newest row's version; None when the committed state is
+    genesis- or delta-shaped. No checkout byte participates, so reverting the checkout copies of the
+    routing records to the release state can no longer route a post-release head into the genesis or
+    delta branch. With committed rows present, an unreadable or malformed committed routing record is
+    cannot-evaluate (GateError, exit 2), never a silent fall-through to a checkout-judged branch."""
+    rows = _strict(_release_schema.strict_releases, _show_toml(root, head_oid, RELEASES_REL),
+                   "HEAD " + RELEASES_REL)
+    if not rows:
+        return None
+    try:
+        cl = tomllib.loads(_show(root, head_oid, CHANGELOG_REL).decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise GateError("HEAD {} does not parse: {}".format(CHANGELOG_REL, exc))
+    rel = cl.get("release", [])
+    if not isinstance(rel, list) or not rel or not isinstance(rel[-1], dict):
+        raise GateError("HEAD {}: no [[release]] tables to read the committed head version "
+                        "from".format(CHANGELOG_REL))
+    head_version = rel[-1].get("version")
+    if not isinstance(head_version, str) or _parse(head_version) is None:
+        raise GateError("HEAD {}: latest release version {!r} is malformed".format(
+            CHANGELOG_REL, head_version))
+    if head_version != rows[-1]["version"]:
+        return None
+    return rows, head_version
+
+
 def run(root):
     try:
+        # BRANCH ROUTING FROM COMMITTED OBJECTS ONLY (QA round-5 claude M1; part of the committed-copy
+        # re-execution decision): whether the post-release branch runs is decided from HEAD's
+        # COMMITTED copies of the routing records (the release rows and the changelog head version),
+        # read through the verified funnel, never from the checkout.
+        head_oid_route = _head_commit_or_none(root)
+        pr_state = (_committed_post_release_state(root, head_oid_route)
+                    if head_oid_route is not None else None)
+        if pr_state is not None:
+            release_rows, head_version = pr_state
+            prev_row = release_rows[-1]
+            # Anchor the attested predecessor exactly as the checkout branches do (round-7 finding 2).
+            _anchor_predecessor(root, prev_row)
+            changed, pr_findings = _post_release_head(root, prev_row, release_rows, head_version)
+            if pr_findings:
+                print("FAIL: {} release-delta finding(s) (post-release replay of the newest attested "
+                      "release against its own predecessor)".format(len(pr_findings)))
+                for f in pr_findings:
+                    print("  " + f)
+                return 1
+            print("release-delta: POST-RELEASE (head version {} equals the newest attested release row {}; "
+                  "the head differs from its commit_sha only in the post-release paths {}, and the attested "
+                  "release itself re-passes the pre-row gate against its own predecessor); no delta "
+                  "computed".format(head_version, prev_row["tag"], changed or "(none)"))
+            return 0
+        # GENESIS / DELTA CONTRACT (stated plainly; QA round 5): the two branches below JUDGE THE
+        # CHECKOUT BY DESIGN. Their subject is the candidate surface in the working tree, and their
+        # verdict certifies that checkout; CI runs them on a fresh clone where the checkout equals
+        # HEAD. Only the post-release branch above certifies a COMMITTED revision, which is why its
+        # routing and every byte it judges come from committed objects alone, and why a plain launch
+        # re-executes the COMMITTED gate copy (stage 1) before any of this runs.
         release_rows = load_release_rows(root)
         head_manifest = _load(root, MANIFEST_REL)
         # Strict-validate the manifest BEFORE branching genesis/delta (round-3 finding 1): a bad
@@ -809,7 +2546,9 @@ def run(root):
         # Profiles/groups (2.6 arm-or-fail-closed): the real diff leg is not built. While the artifact is
         # ABSENT the leg is legitimately NOT APPLICABLE; the moment it SHIPS a gate that cannot diff it must
         # FAIL CLOSED, never silently pass a change on the profile surface (VC-4 QA #4). Checked in BOTH
-        # genesis and delta modes. lstat (round-5 finding 5): the path existing as ANY tree entry, including
+        # genesis and delta modes. The POST-RELEASE branch returns above and never reaches this lstat: its
+        # decision is taken from the COMMITTED trees alone (_assert_profiles_absent_committed, QA round-4
+        # claude M1; round 5 removed every checkout read from that branch). lstat (round-5 finding 5): the path existing as ANY tree entry, including
         # a symlink or a broken/loop symlink, means the artifact has shipped -> fail-closed. ONLY a genuine
         # FileNotFoundError establishes absence; any other OSError is cannot-evaluate.
         try:
@@ -864,6 +2603,16 @@ def run(root):
             raise GateError("head manifest release-version {!r} != changelog head version {!r}; the "
                             "surface is inconsistent".format(head_manifest.get("release-version"),
                                                              head_version))
+        # The post-release branch is entered ONLY through the committed routing above (QA round-5
+        # claude M1). A checkout whose records claim the post-release state (a head version equal to
+        # the newest attested row) while HEAD's COMMITTED records do not is never certified from
+        # checkout inputs: refuse. Refusal-only: this can never accept a state the committed routing
+        # rejected, and a head version BELOW the row still fails at _claimed_rank.
+        if head_version == prev_row["version"]:
+            raise GateError("the checkout claims the post-release state (head version {} equals the "
+                            "newest attested release row) but HEAD's COMMITTED records do not; the "
+                            "post-release branch routes from committed objects only; commit the "
+                            "post-release records".format(head_version))
         claimed = _claimed_rank(prev_row["version"], head_version)
         # Strict-validate the consumed records on BOTH the predecessor object and the head object BEFORE any
         # delta computation (round-2 findings 1/4): a duplicate or incomplete clause row, a malformed
@@ -946,29 +2695,7 @@ def run(root):
         print("release-delta: profiles/groups leg NOT APPLICABLE (adopter-experience artifact not "
               "yet defined; arms or fail-closes when it ships)")
         floor = max((e.floor for e in events), default=PATCH)
-        # The subjects of the changes DETECTED this release, grouped by the disposition kind that would
-        # target them, so a mis-dated row for a current change can be caught (round-3 finding 3).
-        clause_subjects = {e.subject for e in events if e.surface == "clause" and e.change in (
-            "behaviour-neutral", "strengthened", "default-correction", "undispositioned-text-change")}
-        ownership_subjects = {e.subject for e in events if e.surface == "ownership"
-                              and e.change in ("weakened", "strengthened")}
-        renderer_subjects = {e.subject for e in events if e.surface == "renderer"}
-        subjects_by_kind = {"behaviour-neutral": clause_subjects, "strengthened": clause_subjects,
-                            "default-correction": clause_subjects, "class-change": ownership_subjects,
-                            "renderer-semantics": renderer_subjects}
-        for r in rows:
-            if r["_consumed"]:
-                continue
-            if r["id"] in subjects_by_kind.get(r["kind"], set()) and r["release"] != head_version:
-                # A row that names a change detected THIS release but is dated for another release: it was
-                # never consumed (take_row is exact-release) and the head_version sweep cannot see it, so a
-                # mis-dated disposition could otherwise hide behind a coincidentally-adequate bump.
-                findings.append("disposition row (kind {} id {}) is dated {}, not the release under build "
-                                "{}, but names a change detected in this release (mis-dated "
-                                "disposition)".format(r["kind"], r["id"], r["release"], head_version))
-            elif r["release"] == head_version:
-                findings.append("disposition row (kind {} id {}) at {} matches no detected change "
-                                "(unconsumed)".format(r["kind"], r["id"], head_version))
+        findings += _disposition_findings(events, rows, head_version)
         if claimed < floor:
             findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
                 BUMP_NAME[claimed], prev_row["version"], head_version, BUMP_NAME[floor]))
@@ -992,11 +2719,22 @@ def run(root):
 # --- self-test --------------------------------------------------------------------------------------
 # Pure classification cases (every 6.5 table row over in-memory inputs) always run and are deterministic.
 # The git-independent genesis and unreachable-predecessor cases build minimal record trees in a private
-# tempdir and are skipped with a printed note (never a false pass) where no writable tempdir exists.
+# tempdir; where no writable tempdir exists they cannot run, which is a NOT RUN failure (never a pass).
 
 def _run_quiet_root(root):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run(root)
+
+
+def _run_quiet_root_err(root):
+    """run(root) quiet, returning (rc, stderr text). The first-block record-tree assertions check
+    the INTENDED diagnostic, never exit 2 alone (round-5 codex 5): a git lost after the suite
+    starts also yields exit 2 there, for an unrelated reason, so the exit code alone cannot tell
+    a structural refusal from a missing git."""
+    err = io.StringIO()
+    with redirect_stdout(io.StringIO()), redirect_stderr(err):
+        rc = run(root)
+    return rc, err.getvalue()
 
 
 def _floors(events):
@@ -1074,7 +2812,12 @@ def _pin_fixture_version(repo, failures, version="1.0.0"):
             failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
                             "version pinning; the archive-backed case cannot be normalized".format(repo.name))
             return False
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
+    # The sibling gen_manifest runs by ABSOLUTE path under the isolated interpreter: a bare
+    # "python3 tools/gen_manifest.py" resolved both the interpreter and the script through the
+    # caller's working directory, so the self-test failed at setup from any directory other than
+    # the repo root, and a planted tools/gen_manifest.py in that directory would have run instead.
+    if subprocess.run([sys.executable, "-I", "-B",
+                       str(Path(__file__).resolve().parent / "gen_manifest.py"), "--root", str(repo)],
                       capture_output=True, env=env).returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
                         "gen failure FAILS the self-test rather than silently passing as the intended "
@@ -1091,7 +2834,10 @@ def _regen_fixture_manifest(root, case, failures, env):
     verdict assertion, where a coincidental exit (a stale/broken manifest ALSO drives exit 2) could
     otherwise be misread as the intended gate verdict and pass by luck. Returns True only when the manifest
     was actually regenerated."""
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
+    # The sibling gen_manifest by ABSOLUTE path under the isolated interpreter, exactly as
+    # _pin_fixture_version launches it: never resolved through the caller's working directory.
+    if subprocess.run([sys.executable, "-I", "-B",
+                       str(Path(__file__).resolve().parent / "gen_manifest.py"), "--root", str(root)],
                       capture_output=True, env=env).returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
                         "the self-test rather than silently passing as the intended assertion".format(case))
@@ -1101,10 +2847,16 @@ def _regen_fixture_manifest(root, case, failures, env):
 
 def _edit_clause_consistently(repo):
     """Edit ONE clause's canonical-text CONSISTENTLY: pick a clause that is the sole coverer of every line
-    in its span (so no sibling window breaks), rewrite those source lines, and recompute the whole-file
-    source-digest for every clause in that source. The head tree then passes the authoritative check_clauses
-    (the delta gate now runs it in non-genesis, round-4 finding 2), while the predecessor keeps the original
-    text so clause_text_leg still sees a real text change. Returns the edited clause-id, or None."""
+    in its span (so no sibling window breaks) and whose text occurs once in its window, rewrite ONLY that
+    clause's own characters, and recompute the whole-file source-digest for every clause in that source.
+    The rest of its start-line and end-line (the tail of the sentence before it, the head of the one after
+    it) is kept byte for byte, and the new text keeps the old one's line count, first word and final
+    character, so the edited row still covers its whole source span with whole-sentence or whole-clause
+    edges (check_clauses WHOLE-CLAUSE EDGES). Overwriting the whole start-line instead would cut the
+    sentence before the clause short and leave a row that begins inside a clause. The head tree then passes
+    the authoritative check_clauses (the delta gate now runs it in non-genesis, round-4 finding 2), while the
+    predecessor keeps the original text so clause_text_leg still sees a real text change. Returns the
+    edited clause-id, or None."""
     import hashlib
     import re
     import tomllib
@@ -1124,15 +2876,21 @@ def _edit_clause_consistently(repo):
             continue
         if all(sum(1 for (a, b) in spans[sp] if isinstance(a, int) and a <= L <= b) == 1
                for L in range(s, e + 1)):
-            target = c
-            break
+            window = "\n".join((repo / sp).read_text(encoding="utf-8").split("\n")[s - 1:e])
+            if c["canonical-text"].strip() and window.count(c["canonical-text"]) == 1:
+                target = c
+                break
     if target is None:
         return None
     sp, s, e = target["source-path"], target["start-line"], target["end-line"]
-    new_lines = ["EDITEDBYE2ETESTXYZ{}".format(k) for k in range(e - s + 1)]
+    old_text = target["canonical-text"]
+    new_lines = ["EDITEDBYE2ETESTXYZ{}".format(k) for k in range(len(old_text.split("\n")))]
+    new_lines[0] = old_text.split()[0] + " " + new_lines[0]
+    new_lines[-1] += old_text[-1]
     srcp = repo / sp
     src_lines = srcp.read_text(encoding="utf-8").split("\n")
-    src_lines[s - 1:e] = new_lines
+    window = "\n".join(src_lines[s - 1:e])
+    src_lines[s - 1:e] = window.replace(old_text, "\n".join(new_lines)).split("\n")
     new_src = "\n".join(src_lines)
     srcp.write_text(new_src, encoding="utf-8")
     new_dig = hashlib.sha256(new_src.encode("utf-8")).hexdigest()
@@ -1142,7 +2900,7 @@ def _edit_clause_consistently(repo):
         if 'source-path = "{}"'.format(sp) in b:
             b = re.sub(r'source-digest = "[0-9a-f]{64}"', 'source-digest = "{}"'.format(new_dig), b)
         if 'clause-id = "{}"'.format(target["clause-id"]) in b:
-            esc = "\\n".join(new_lines)
+            esc = "\\n".join(line.replace("\\", "\\\\") for line in new_lines)
             b = re.sub(r'canonical-text = "[^"]*"',
                        lambda _m: 'canonical-text = "{}"'.format(esc), b, count=1)
         out.append("[[clause]]" + b)
@@ -1150,26 +2908,1017 @@ def _edit_clause_consistently(repo):
     return target["clause-id"]
 
 
+_REAL_PACK_CASES = "the real full-pack two-release run() cases (findings 1/2, rounds 3-8)"
+_E2E_TMP_PREFIX = "aiqt-release-delta-selftest-"
+
+
+def _not_run(failures, case, cause):
+    """Record a self-test case that could not run as a NAMED failure (a counted cannot-evaluate that
+    fails the run), never a printed note beside a PASS: coverage that did not run is not coverage."""
+    failures.append("NOT RUN: {}: {}; coverage that did not run FAILS the self-test, never a silent "
+                    "PASS".format(case, cause))
+
+
+# One label per git-availability gate in _self_test_main_isolated, in SOURCE order: the i-th _git_gate
+# call passes the literal _GIT_GATE_LABELS[i], and the LAST entry is the final gate, which dispatches
+# the real full-pack / POST-RELEASE case sets. The transient-availability vectors in
+# _not_run_net_vectors replay a failed probe over this order; the alignment (every probe through
+# _git_gate, one _git_gate call per label, the label indices in source order as exact ints, no
+# indirect reference to the probe or to _git_gate) is enforced by _git_gate_alignment_failures
+# over the module source in the self-test, never left to a comment (PR #530 QA round-3 claude
+# MINOR-4; round-4 codex 1 / claude MINOR-2; round-5 codex 1/2/4). Round-6 (codex 1 / claude
+# MEDIUM-1): that static scan is a BACKSTOP; the runtime guarantee is _GATE_IMPORT_BINDINGS (gate
+# and probe captured at import), _gate_identity_failures (identity at each gated block and at the
+# end; its exact guarantee and disclosed limits are stated there) and the per-label accounting
+# (_gate_accounting_failures, one red-on-revert vector per label since round-7).
+# Reviewed sites in _self_test_main_isolated that reach git CODE without a gate (round-4 claude
+# MINOR-3): the duplicate-CLI main() calls are rejected at option parsing before any git runs; the
+# single-named-ref-read anchor cases run with _rev_parse/_object_type stubbed; the R6
+# dubious-ownership cases run with _stage1_git and _git patched to a canned refusal; and the
+# FIRST-BLOCK _run_quiet_root record trees (genesis, genesis-mismatch, unreachable predecessor)
+# assert exit 2 AND the intended diagnostic text (round-5 codex 5: an absent git also yields exit
+# 2, for an unrelated reason, so exit alone cannot discriminate there). The later _genesis_base
+# and predecessor malformed-record assertions still check exit 2 only, so any ONE of those single
+# assertions can be satisfied by a git lost after the suite starts: reduced discrimination,
+# disclosed (git absent at the START stops the whole suite in fixture_git_lifecycle, which raises
+# RuntimeError: self-test requires git). The F-TOML-BARE-VALUEERROR-CLASS fixture commit
+# is REAL git work, so it runs behind the gate at label 0.
+_GIT_GATE_LABELS = (
+    "the F-TOML-BARE-VALUEERROR-CLASS fixture commit (the bare-ValueError / RecursionError class)",
+    "the materialized executable/plain-file mode cases (round-7 finding 4)",
+    "the duplicate-predecessor-clause inventory case (finding 1, predecessor object)",
+    "the predecessor-ownership-via-git-plumbing case (VC-4 QA #11)",
+    "the drift-advisory, fsmonitor-pin and promisor cases (QA rounds 6-10)",
+    "the real full-pack and POST-RELEASE run() cases",
+)
+
+
+def _git_gate(label, failures):
+    """One NAMED availability gate per git-dependent block of _self_test_main_isolated (PR #530 QA
+    round-2 codex MAJOR): when the probe fails, the gated block is a recorded NOT RUN failure naming the
+    block, never a silent skip beside a PASS, so a TRANSIENTLY failed probe at one gate can no longer
+    leave its block unrun while a later probe succeeds and the suite still prints SELF-TEST PASS.
+    Round-6/7: the self-test also verifies the gate and probe BINDINGS by identity at each gated
+    block (_gate_identity_failures over _GATE_IMPORT_BINDINGS) and accounts for exactly one record
+    per label (_gate_accounting_failures). The identity guarantee, exactly (round-8: the checker
+    validates the public capture against its own definition-time reference, so this holds under
+    a co-rebinding of the capture; round-9: the checker reads the namespace the gated calls
+    resolve through and takes no reference from a caller; the checker itself is a trusted input
+    carried by review alone, stated at _gate_identity_failures): a module rebinding that is
+    still in place at a checkpoint is
+    detected whatever its spelling; a temporary rebinding
+    restored between checkpoints, and a local shadow that never rebinds the module, are not
+    detected by the identity check (the static backstop covers the spellings it lists), while the
+    accounting still fails a run whose gated blocks leave no record.
+    Red-on-revert: the transient-availability scenarios and the rebound-gate run in
+    _not_run_net_vectors (round-7: one assertion per identity checkpoint and per gate label)."""
+    if _git_available():
+        return True
+    _not_run(failures, label, "git is unavailable at this block's probe (QA round-4 codex R4-3 / "
+             "claude m4; a transient probe failure never skips a block silently)")
+    return False
+
+
+# Round-6 (codex 1 / claude MEDIUM-1): the gate function and the availability probe objects,
+# captured ONCE at import as a module-private constant. The self-test verifies at each gated
+# block and again at the end that the module's _git_gate and _git_available are THESE exact
+# objects (identity, read through the module's own namespace). The guarantee, exactly (round-7
+# codex 3 / claude MEDIUM-2): a module rebinding that is still in place at a checkpoint is
+# detected whatever its spelling, where rounds 4 to 6 each produced a new one; a temporary
+# rebinding restored between checkpoints, and a local shadow that never rebinds the module, are
+# not detected by the identity check; the static _git_gate_alignment_failures scan below covers
+# the spellings it lists, and the per-label accounting catches a gate that leaves blocks without
+# a record whatever the binding. Round-8 (codex 1): _gate_identity_failures holds its OWN
+# definition-time reference to these objects and validates this public capture against it at
+# every checkpoint, so rebinding THIS name together with the gate no longer blinds the
+# checkpoints. Round-9 (claude 1/2): that reference and the namespace it reads are closure-held,
+# so no caller can supply either; the checker itself is a trusted input that review alone
+# carries, stated there.
+_GATE_IMPORT_BINDINGS = (_git_gate, _git_available)
+
+
+def _gate_identity_checker(space, ref):
+    """Build _gate_identity_failures ONCE at import (below), over the module namespace and the
+    import capture held in its closure; the docstring of the returned checker states its
+    guarantee, its trusted inputs and its red-on-revert vectors."""
+    def _gate_identity_failures(failures, where):
+        """Append a named failure for each module gate/probe binding that is no longer the object
+        captured at import: identity through the module namespace the gated calls resolve
+        through, never a spelling scan. Round-8 (codex 1): the reference is bound ONCE at
+        definition time (import) to the import capture, never reread from the module namespace;
+        the round-7 checker read _GATE_IMPORT_BINDINGS at each call, so rebinding the capture
+        TOGETHER with the gate blinded every checkpoint. The public capture is validated against
+        that reference at every checkpoint, so that co-rebinding is a named identity failure.
+        Round-9 (claude 1): BOTH the namespace and the reference are closure-held. The namespace
+        is the globals() dict captured at import, the very dict through which the gated calls of
+        _self_test_main_isolated resolve _git_gate (its __globals__), never sys.modules[__name__],
+        so a module object swapped into sys.modules cannot hide an in-place rebinding. The
+        reference is no parameter, so no checkpoint can supply its own (a third argument or a
+        keyword is a TypeError, fail-closed); the round-8 _ref default could be passed the
+        rebound capture explicitly, which restored the round-7 blindness. This checker is a
+        TRUSTED INPUT: a rebinding of the module name _gate_identity_failures, or a store into
+        its closure cells (cell_contents), is outside what the check can observe, and the static
+        backstop has NO rule for either, so review alone carries that boundary; the check
+        detects drift of the gate, the probe and the public capture, never of itself. The
+        guarantee, exactly (round-7 codex 3 / claude MEDIUM-2; round-8 scopes it to an intact
+        checker): a module rebinding that is still in place at a checkpoint is detected whatever
+        its spelling; a temporary rebinding restored between checkpoints, and a local shadow (a
+        parameter, a local def, class or match capture) that never rebinds the module, are not
+        detected by the identity check; the static backstop covers the spellings it lists, and
+        the per-label accounting (_gate_accounting_failures) fails a run whose gated blocks
+        leave no record whatever the binding. The restore-between-checkpoints escape is
+        reproduced by a disclosed-residual witness in the self-test. The round-5 static checker
+        admitted globals(), sys.modules and import-binding respellings of _git_gate, each of
+        which skipped all six gated blocks beside SELF-TEST PASS (round-6 codex 1 / claude
+        MEDIUM-1). The reviewed probe swap in _not_run_net_vectors is active only inside nested
+        runs whose nonzero exit their caller asserts, so an identity failure recorded there
+        never reaches a PASS. Red-on-revert: the planted rebindings, the planted co-rebinding of
+        the capture and the gate (round-8, red at the round-7 pin), the sys.modules swap beside
+        an in-place rebinding and the explicitly supplied reference (round-9, each red at the
+        round-8 pin), and the rebound-gate nested run, whose output must carry this diagnostic
+        for every checkpoint by name (round-7: one assertion per checkpoint)."""
+        if space.get("_GATE_IMPORT_BINDINGS") is not ref:
+            failures.append("(git-gate identity) {}: _GATE_IMPORT_BINDINGS is not the capture "
+                            "made at import (round-8: the checkpoints validate the module "
+                            "capture against a definition-time reference held outside the "
+                            "module namespace, so a co-rebinding cannot blind them)".format(where))
+        for name, bound in zip(("_git_gate", "_git_available"), ref):
+            if space.get(name) is not bound:
+                failures.append("(git-gate identity) {}: {} is not the object captured at "
+                                "import (rebound by some spelling; identity decides, so the "
+                                "spelling does not matter)".format(where, name))
+    return _gate_identity_failures
+
+
+_gate_identity_failures = _gate_identity_checker(globals(), _GATE_IMPORT_BINDINGS)
+
+
+def _gate_accounting_failures(failures, gate_ran):
+    """The per-label accounting (round-6 codex 1 / claude MEDIUM-1; extracted round-7 so each
+    label's obligation has its own red-on-revert vector): every gate label must account for
+    exactly one record, its gated body's last statement (an entry in gate_ran) or its NOT RUN
+    line (already in failures), so a bypassed or vanished block is a named failure at run time
+    whatever the gate binding looked like. Red-on-revert: the per-label unit vectors in the
+    self-test (each feeds this check a record list missing exactly one label and requires the
+    diagnostic naming that label and no other) and the rebound-gate nested run, whose output
+    must name every label."""
+    for label_acct in _GIT_GATE_LABELS:
+        ran_acct = gate_ran.count(label_acct)
+        notrun_acct = sum(1 for f_acct in failures
+                          if f_acct.startswith("NOT RUN: " + label_acct))
+        if ran_acct + notrun_acct != 1:
+            failures.append("(git-gate accounting) {!r}: exactly one record per gate label is "
+                            "required (body ran, or its NOT RUN line); got ran={}, "
+                            "not-run={}".format(label_acct, ran_acct, notrun_acct))
+
+
+def _git_gate_alignment_failures(source):
+    """The _GIT_GATE_LABELS/_git_gate alignment as an AST CHECK over module source, not a comment (PR
+    #530 QA round-3 claude MINOR-4; round-4 codex 1 / claude MINOR-2 widened it beyond bare-name
+    calls; round-5 codex 1/2/4 and claude MINOR-2 scoped the allowances exactly; round-6 codex 1 /
+    claude MEDIUM-1 narrowed it to a BACKSTOP behind the runtime identity and accounting checks).
+    Findings (empty when aligned):
+      - any Name reference to _git_available outside the EXECUTABLE BODY of the single top-level
+        _git_gate def (a bare call, an alias, a callback element, and equally a call in a
+        decorator, a default or an annotation of the gate, which runs at definition time, or in
+        a class body inside it); the ONE reviewed exception is _not_run_net_vectors, which swaps
+        the probe for its nested runs: there, in its DIRECT scope only (never a nested scope),
+        the Name load on the right of the exact assignment `real_probe = _git_available` (that
+        target name, one target, EXACTLY once) and the string key of a
+        `globals()["_git_available"]` store target are allow-listed BY SHAPE AND LOCATION,
+        nothing else; a second or nested def of _not_run_net_vectors is itself a finding;
+      - any _git_available reference inside a function nested in _git_gate (a closure exported
+        through globals() would probe outside the gate, unnamed on failure);
+      - any import of the probe name, plain or aliased (round-5: an ImportFrom alias is an
+        indirect probe);
+      - any attribute reference ending in _git_available, any string constant equal to
+        "_git_available" (a getattr, globals() or sys.modules lookup) and any bytes constant that
+        decodes to it (round-5: a decoded-bytes key), the strings of this checker itself excepted;
+      - more or less than one top-level def of _git_gate;
+      - any reference to _git_gate other than a direct call (round-5: an alias, a functools.partial
+        argument or a rebinding would route gated blocks around the counted, ordered calls);
+      - a _git_gate call count different from len(_GIT_GATE_LABELS), and the i-th _git_gate call in
+        source order not passing the literal _GIT_GATE_LABELS[i] with an index of EXACT type int
+        (a swapped or computed index would name the WRONG block on failure; round-5: bool is an int
+        subclass and 0.0 == 0, so either would satisfy an equality-only test);
+      - round-6: a binding of EITHER name as a parameter, a global/nonlocal declaration, an except
+        alias or a keyword argument (a parameter default such as a lambda bound to the probe name
+        resolves the gate's own body call to the parameter); string, bytes, attribute and import
+        references to _git_gate exactly as for the probe (a globals()/sys.modules store or lookup,
+        a getattr key, an import binding); real_probe used anywhere but inside _planned_probe or as
+        the restore statement's value (an ungated early return through the reviewed alias); ZERO
+        `real_probe = _git_available` swaps (a stand-in bound under the reviewed name) refused like
+        two; the globals() stores of both names COUNTED against the reviewed code (two each); a
+        GeneratorExp or TypeAlias inside the gate treated as a DEFERRED scope (either carries the
+        probe out of the gate uncalled); and the `_GATE_IMPORT_BINDINGS` capture required exactly
+        once at module top level.
+      - round-7: a binding of EITHER name by a match capture (MatchAs.name, MatchStar.name or
+        MatchMapping.rest) or by a class definition (binding nodes the round-6 scan missed); any
+        call through a _GATE_IMPORT_BINDINGS subscript (an indirect probe or an uncounted gate
+        call through the import capture); any store or delete of _GATE_IMPORT_BINDINGS other
+        than the one reviewed capture (round-7: a co-rebinding blinded the then checkpoints;
+        round-8: the checkpoints validate the capture at run time, leaving this rule defence
+        in depth over the Name store/delete spellings it sees);
+        and, in _not_run_net_vectors, more or less than one def of _planned_probe and any use of
+        _planned_probe other than as the reviewed probe-store value (a second def or a direct
+        call would wrap real_probe into an ungated early return).
+    This check is a BACKSTOP (round-6 codex 1 / claude MEDIUM-1): rounds 4 to 6 each produced a new
+    spelling, and a spelling scan over Python source cannot be closed. Its residual is every DYNAMIC
+    spelling (a name assembled at run time from string fragments, an attribute chain through another
+    module), and a git-dependent block with NO probe at all stays invisible to it (git absence there
+    surfaces as an unnamed exception, fail-closed but not a named NOT RUN); the round-5 scope note
+    stands: exec/eval are refused across tools/ and opf/tools/ by the maintenance-pin scan, outside
+    its counted per-function dynamic-site exceptions. The guarantee is carried at run time
+    instead, and it is exactly this (round-7 codex 3 / claude MEDIUM-2): _GATE_IMPORT_BINDINGS
+    captures the gate and probe objects once at import, and _gate_identity_failures verifies BOTH
+    module bindings by identity at each gated block and at the end, against its own
+    definition-time reference, validating the public capture against that reference too
+    (round-8: a co-rebinding of the capture together with the gate is a named identity
+    failure; round-9: the namespace and the reference are closure-held, and the checker itself
+    is a trusted input that review alone carries, since this backstop has no rule for it), so a
+    module rebinding that is
+    still in place at a checkpoint is detected whatever its spelling; a temporary rebinding
+    restored between checkpoints (reproduced by the disclosed-residual witness in the self-test)
+    and a local shadow that never rebinds the module are NOT detected by the identity check, and
+    this backstop covers only the spellings it lists; the per-label accounting
+    (_gate_accounting_failures) requires exactly one record per gate label (its body ran, or its
+    NOT RUN line), so skipped blocks never sit silently beside SELF-TEST PASS whatever the
+    binding. The self-test plants every refused shape above and requires each to be a finding."""
+    import ast
+    tree = ast.parse(source)
+    findings = []
+    probe = "_git_available"
+
+    gate_defs = [node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name == "_git_gate"]
+    top_defs = [node for node in gate_defs if node in tree.body]
+    if len(gate_defs) != 1 or len(top_defs) != 1:
+        findings.append("line(s) {}: _git_gate must have exactly one top-level def (a second or "
+                        "nested def could carry an unchecked probe)".format(
+                            ", ".join(str(node.lineno) for node in gate_defs) or "none"))
+    nested_ids = set()
+    allowed_ids = set()
+    for gate_def in top_defs:
+        for inner in ast.walk(gate_def):
+            if inner is not gate_def and isinstance(
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                            ast.GeneratorExp, ast.TypeAlias)):
+                nested_ids.update(id(sub) for sub in ast.walk(inner))
+        # Round-5 (codex 1): only the EXECUTABLE BODY of the gate may call the probe. Scanning
+        # gate_def.body keeps the signature (decorators, defaults, annotations) out of the
+        # allowance; class bodies and annotations INSIDE the body are excluded explicitly, and
+        # nested scopes stay excluded via nested_ids.
+        off_body = set()
+        for inner in ast.walk(gate_def):
+            if inner is not gate_def and isinstance(inner, ast.ClassDef):
+                off_body.update(id(sub) for sub in ast.walk(inner))
+            elif isinstance(inner, ast.AnnAssign):
+                off_body.update(id(sub) for sub in ast.walk(inner.annotation))
+        for stmt in gate_def.body:
+            for node in ast.walk(stmt):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == probe and id(node.func) not in nested_ids
+                        and id(node.func) not in off_body):
+                    allowed_ids.add(id(node.func))
+    net_defs = [node for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_not_run_net_vectors"]
+    top_nets = [node for node in net_defs if node in tree.body]
+    if len(net_defs) != 1 or len(top_nets) != 1:
+        findings.append("line(s) {}: _not_run_net_vectors must have exactly one top-level def "
+                        "(round-5: the swap allowance extends to no second or nested "
+                        "definition)".format(
+                            ", ".join(str(node.lineno) for node in net_defs) or "none"))
+    for fn in (top_nets if len(net_defs) == 1 and len(top_nets) == 1 else ()):
+        # Round-5 (codex 2): the swap allowance holds in the DIRECT scope of fn only, and the
+        # alias allowance is the single exact reviewed assignment, by target name.
+        inner_scope = set()
+        for inner in ast.walk(fn):
+            if inner is not fn and isinstance(
+                    inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                            ast.GeneratorExp, ast.TypeAlias)):
+                inner_scope.update(id(sub) for sub in ast.walk(inner))
+        swaps = []
+        probe_stores, gate_stores = [], []
+        restore_ids = set()
+        for stmt in ast.walk(fn):
+            if not isinstance(stmt, ast.Assign) or id(stmt) in inner_scope:
+                continue
+            if (isinstance(stmt.value, ast.Name) and stmt.value.id == probe
+                    and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and stmt.targets[0].id == "real_probe"):
+                swaps.append(stmt)
+            for target in stmt.targets:
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Call)
+                        and isinstance(target.value.func, ast.Name)
+                        and target.value.func.id == "globals" and not target.value.args
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value in (probe, "_git_gate")):
+                    allowed_ids.add(id(target.slice))
+                    (probe_stores if target.slice.value == probe else gate_stores).append(stmt)
+                    if (target.slice.value == probe and isinstance(stmt.value, ast.Name)
+                            and stmt.value.id == "real_probe"):
+                        restore_ids.add(id(stmt.value))
+        # Round-6: ZERO swaps are refused like two (a stand-in probe bound under the reviewed
+        # target name would otherwise read as the allowance), and the globals() stores of BOTH
+        # names are counted against the reviewed code, never just allow-listed by shape.
+        if len(swaps) != 1:
+            findings.append("line(s) {}: the reviewed `real_probe = {}` swap must appear exactly "
+                            "once in the direct scope of _not_run_net_vectors (round-6: zero and "
+                            "two are both refused)".format(
+                                ", ".join(str(stmt.lineno) for stmt in swaps) or "none", probe))
+        else:
+            allowed_ids.add(id(swaps[0].value))
+        for stores, count in ((probe_stores, 2), (gate_stores, 2)):
+            if len(stores) != count:
+                findings.append("line(s) {}: {} globals() store(s) of the {} name in the direct "
+                                "scope of _not_run_net_vectors; the reviewed code has exactly {} "
+                                "(round-6: the stores are counted)".format(
+                                    ", ".join(str(stmt.lineno) for stmt in stores) or "none",
+                                    len(stores), "probe" if stores is probe_stores else "gate",
+                                    count))
+        # Round-6 (claude MEDIUM-2): real_probe is itself an indirect probe handle; it may be
+        # USED only inside _planned_probe and as the restore statement's value, so an ungated
+        # early return through the reviewed alias is a finding.
+        planned_ids = set()
+        for inner in ast.walk(fn):
+            if (isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and inner.name == "_planned_probe"):
+                planned_ids.update(id(sub) for sub in ast.walk(inner))
+        swap_target_ids = {id(stmt.targets[0]) for stmt in swaps}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "real_probe"
+                    and id(node) not in planned_ids and id(node) not in restore_ids
+                    and id(node) not in swap_target_ids):
+                findings.append("line {}: real_probe is used outside _planned_probe and the "
+                                "restore statement (round-6: an ungated early return through "
+                                "the reviewed alias)".format(node.lineno))
+        # Round-7: _planned_probe is the only reviewed wrapper around real_probe, so its def
+        # count and its uses are pinned: a second def, or a use other than as the reviewed
+        # probe-store value, wraps real_probe into an ungated early return.
+        planned_defs = [inner for inner in ast.walk(fn)
+                        if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and inner.name == "_planned_probe"]
+        if len(planned_defs) != 1:
+            findings.append("line(s) {}: exactly one def of _planned_probe in "
+                            "_not_run_net_vectors (round-7: a second def could wrap real_probe "
+                            "for an ungated early return)".format(
+                                ", ".join(str(d.lineno) for d in planned_defs) or "none"))
+        planned_use_ids = {id(stmt.value) for stmt in probe_stores
+                           if isinstance(stmt.value, ast.Name)
+                           and stmt.value.id == "_planned_probe"}
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "_planned_probe"
+                    and id(node) not in planned_use_ids):
+                findings.append("line {}: _planned_probe is used other than as the reviewed "
+                                "probe-store value (round-7: a direct call wraps real_probe "
+                                "into an ungated early return)".format(node.lineno))
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name in ("_git_gate_alignment_failures",
+                                                           "_gate_identity_checker"):
+            allowed_ids.update(id(node) for node in ast.walk(fn)
+                               if isinstance(node, ast.Constant)
+                               and node.value in (probe, "_git_gate"))
+    # Round-6: the import-time capture the runtime identity check reads; the exact reviewed
+    # tuple, exactly once at module top level, is the one allowed indirect reference to the
+    # gate and probe objects.
+    captures = [stmt for stmt in tree.body
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == "_GATE_IMPORT_BINDINGS"
+                and isinstance(stmt.value, ast.Tuple) and len(stmt.value.elts) == 2
+                and all(isinstance(elt, ast.Name) for elt in stmt.value.elts)
+                and [elt.id for elt in stmt.value.elts] == ["_git_gate", probe]]
+    capture_ids = set()
+    capture_target_ids = set()
+    if len(captures) == 1:
+        allowed_ids.add(id(captures[0].value.elts[1]))
+        capture_ids.add(id(captures[0].value.elts[0]))
+        capture_target_ids.add(id(captures[0].targets[0]))
+    else:
+        findings.append("line(s) {}: the import-time gate/probe capture must appear exactly "
+                        "once at module top level (round-6: the runtime identity check reads "
+                        "it; zero loses that check and a second could alias the probe)".format(
+                            ", ".join(str(stmt.lineno) for stmt in captures) or "none"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                for bound in (probe, "_git_gate"):
+                    if bound in (alias.name, alias.asname):
+                        findings.append("line {}: import of {} (round-5/6: an import alias or "
+                                        "binding is an indirect probe or a rebound gate outside "
+                                        "the named gate)".format(node.lineno, bound))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == probe and id(node) not in allowed_ids:
+            if id(node) in nested_ids:
+                findings.append("line {}: a {} reference inside a nested or deferred scope "
+                                "escapes _git_gate (an exported closure, generator or type "
+                                "alias would probe unnamed on failure)".format(
+                                    node.lineno, probe))
+            else:
+                findings.append("line {}: {} is referenced outside _git_gate (a bare, aliased or "
+                                "callback probe, unnamed on failure)".format(node.lineno, probe))
+        elif isinstance(node, ast.Attribute) and node.attr in (probe, "_git_gate"):
+            findings.append("line {}: attribute reference to {} (round-6: an indirect probe or a "
+                            "sys.modules gate rebinding bypasses the named gate)".format(
+                                node.lineno, node.attr))
+        elif (isinstance(node, ast.Constant) and node.value in (probe, "_git_gate")
+                and id(node) not in allowed_ids):
+            findings.append("line {}: string reference to {} (round-6: a getattr, globals() or "
+                            "sys.modules lookup or store bypasses or rebinds the named "
+                            "gate)".format(node.lineno, node.value))
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, bytes)
+                and node.value in (probe.encode("ascii"), "_git_gate".encode("ascii"))):
+            findings.append("line {}: bytes reference to {} (round-5/6: a decoded-bytes globals() "
+                            "or getattr key routes around the named gate)".format(
+                                node.lineno, node.value.decode("ascii")))
+        elif isinstance(node, ast.arg) and node.arg in (probe, "_git_gate"):
+            findings.append("line {}: {} bound as a parameter (round-6: a signature binding "
+                            "shadows the module binding inside the very function that calls "
+                            "the probe)".format(node.lineno, node.arg))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and (
+                probe in node.names or "_git_gate" in node.names):
+            findings.append("line {}: a global or nonlocal declaration of the gate or probe name "
+                            "(round-6: a rebinding route)".format(node.lineno))
+        elif isinstance(node, ast.ExceptHandler) and node.name in (probe, "_git_gate"):
+            findings.append("line {}: the gate or probe name bound as an except alias (round-6: "
+                            "a binding route the Name scan missed)".format(node.lineno))
+        elif isinstance(node, ast.keyword) and node.arg in (probe, "_git_gate"):
+            findings.append("line {}: the gate or probe name bound as a keyword argument "
+                            "(round-6)".format(node.lineno))
+        elif (isinstance(node, (ast.MatchAs, ast.MatchStar))
+                and node.name in (probe, "_git_gate")):
+            findings.append("line {}: {} bound by a match capture pattern (round-7: MatchAs and "
+                            "MatchStar are binding nodes the round-6 scan missed)".format(
+                                node.lineno, node.name))
+        elif isinstance(node, ast.MatchMapping) and node.rest in (probe, "_git_gate"):
+            findings.append("line {}: {} bound by a match mapping rest pattern (round-7: a "
+                            "binding node the round-6 scan missed)".format(
+                                node.lineno, node.rest))
+        elif isinstance(node, ast.ClassDef) and node.name in (probe, "_git_gate"):
+            findings.append("line {}: {} bound by a class definition (round-7: a class statement "
+                            "rebinds or shadows the name)".format(node.lineno, node.name))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "_GATE_IMPORT_BINDINGS"):
+            findings.append("line {}: a call through a _GATE_IMPORT_BINDINGS subscript (round-7: "
+                            "an indirect probe or an uncounted gate call through the import "
+                            "capture)".format(node.lineno))
+        elif (isinstance(node, ast.Name) and node.id == "_GATE_IMPORT_BINDINGS"
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+                and id(node) not in capture_target_ids):
+            findings.append("line {}: _GATE_IMPORT_BINDINGS is rebound or deleted outside the "
+                            "reviewed import-time capture (round-7; round-8: the runtime "
+                            "checkpoints validate the capture against a definition-time "
+                            "reference, so this rule is defence in depth over the Name "
+                            "spellings it sees)".format(node.lineno))
+    gate_calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name) and node.func.id == "_git_gate"),
+                        key=lambda call: (call.lineno, call.col_offset))
+    direct_call_ids = {id(call.func) for call in gate_calls}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id == "_git_gate"
+                and id(node) not in direct_call_ids and id(node) not in capture_ids):
+            findings.append("line {}: _git_gate is referenced other than by a direct call "
+                            "(round-5: an alias, functools.partial or rebinding would route a "
+                            "gated block around the counted, ordered calls)".format(node.lineno))
+    if len(gate_calls) != len(_GIT_GATE_LABELS):
+        findings.append("{} _git_gate call(s) (lines {}) for {} label(s) in _GIT_GATE_LABELS".format(
+            len(gate_calls), ", ".join(str(call.lineno) for call in gate_calls) or "none",
+            len(_GIT_GATE_LABELS)))
+    for position, call in enumerate(gate_calls):
+        arg = call.args[0] if call.args else None
+        if not (isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name)
+                and arg.value.id == "_GIT_GATE_LABELS" and isinstance(arg.slice, ast.Constant)
+                and type(arg.slice.value) is int and arg.slice.value == position):
+            findings.append("line {}: _git_gate call {} must pass the literal _GIT_GATE_LABELS[{}]: "
+                            "the label indices follow source order, so a swapped, computed or "
+                            "non-int-typed index (round-5: bool is an int subclass and 0.0 == 0) "
+                            "would name the wrong block".format(call.lineno, position, position))
+    return findings
+
+
+def _plant_notice_omission(mpath, failures):
+    """Drop the NOTICE [[sources]] row from the regenerated manifest at mpath (the round-8 finding 1
+    fixture). Corpus content decides whether that row exists, so this can fail in CI: a manifest without
+    exactly one NOTICE row ahead of its [[artifacts]] rows records a NOT RUN failure and returns False."""
+    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
+    kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
+    if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
+        mpath.write_text("".join(kept), encoding="utf-8")
+        return True
+    _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+             "the regenerated manifest does not carry exactly one NOTICE [[sources]] row ahead of "
+             "its [[artifacts]] rows, so the omission cannot be planted")
+    return False
+
+
+def _plant_noncanon_source_path(cp, failures):
+    """Rewrite the first source-path in the clauses.toml at cp to a NON-CANONICAL form that resolves to the
+    same file (dir/sub/../sub/file; the round-5 finding 1 fixture). Corpus content decides whether such a
+    path exists, so this can fail in CI: a clauses.toml with no source-path that has a parent directory
+    records a NOT RUN failure and returns False."""
+    import re
+    text = cp.read_text(encoding="utf-8")
+    m = re.search(r'source-path = "([^"]+)"', text)
+    parts = m.group(1).split("/") if m else []
+    if len(parts) < 2:
+        _not_run(failures, "the non-canonical HEAD clause source-path case (round-5 finding 1)",
+                 "the archived clauses.toml has no source-path with a parent directory to rewrite")
+        return False
+    noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
+    cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
+                               'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
+    return True
+
+
+def _e2e_git_cases(tmp, failures):
+    """Run the two real git end-to-end case sets. Each returns False when it could not run; a False return
+    that recorded no cause is itself a NOT RUN failure (the two caller nets), so neither set can end early
+    without failing the self-test."""
+    n_real = len(failures)
+    if not _real_pack_e2e(tmp, failures) and len(failures) == n_real:
+        _not_run(failures, _REAL_PACK_CASES, "the case ended early without recording a cause")
+    n_post = len(failures)
+    if not _post_release_e2e(tmp, failures) and len(failures) == n_post:
+        _not_run(failures, "the POST-RELEASE head cases", "the case ended early without recording a "
+                 "cause")
+
+
+def _real_pack_not_run_vectors(tmp, failures):
+    """Red-on-revert vectors for the two early ends of _real_pack_e2e that printed a SKIPPED note and
+    returned False with NO failure, so the self-test still passed: a fixture git repo that cannot be
+    built, and a clause inventory with no sole-coverer clause to edit (corpus content, so reachable in
+    CI). Each drives the real _real_pack_e2e over a tiny stub archive (only the archive read and the
+    version pin are stubbed; the real extract, git add/commit/tag and clause search run) and requires a
+    False return AND a NOT RUN failure naming the cause. The per-site failure-injection vectors for the
+    later fixtures (_real_pack_fault_vectors) dispatch from here, so a nested self-test run that stubs
+    this set skips them with it."""
+    import tarfile
+    env = _selftest_env()
+    # Two clauses that both cover lines 1-2 of one source: no line has a sole coverer, so the real
+    # _edit_clause_consistently finds nothing to edit and returns None.
+    files = {
+        "rules/stub.md": "First stub sentence.\nSecond stub sentence.\n",
+        CLAUSES_REL: ("[[clause]]\nclause-id = \"stub.1\"\nsource-path = \"rules/stub.md\"\n"
+                      "start-line = 1\nend-line = 2\ncanonical-text = \"First stub sentence.\"\n\n"
+                      "[[clause]]\nclause-id = \"stub.2\"\nsource-path = \"rules/stub.md\"\n"
+                      "start-line = 1\nend-line = 2\ncanonical-text = \"Second stub sentence.\"\n"),
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for rel, text in sorted(files.items()):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    stub_arch = buf.getvalue()
+
+    def _stub_pin(lock_index):
+        def _pin(repo, _failures, version="1.0.0"):
+            for args in (["init", "-q"], ["add", "-A"]):
+                subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            if lock_index:
+                # a stale index lock: the fixture build then fails at its own git add
+                (repo / ".git" / "index.lock").write_text("", encoding="utf-8")
+            return True
+        return _pin
+
+    # Saved by name, so _archive_head is referenced only as _archive_head(repo_root()) (the git-fixture-env
+    # trust check pins that one call shape); each globals() key is a constant string, since gen_renderers.py
+    # refuses a computed key (one could name RENDERER_DECL at run time).
+    saved = {"_archive_head": globals()["_archive_head"],
+             "_pin_fixture_version": globals()["_pin_fixture_version"]}
+    for name, lock_index, want in (("not-run-commit", True, "could not build the fixture git repo"),
+                                   ("not-run-clause", False, "no sole-coverer clause to edit")):
+        got = []
+        globals()["_archive_head"] = lambda _root: stub_arch
+        globals()["_pin_fixture_version"] = _stub_pin(lock_index)
+        try:
+            with redirect_stderr(io.StringIO()):
+                ran = _real_pack_e2e(tmp / name, got)
+        finally:
+            globals().update(saved)
+        if ran is not False or not any(f.startswith("NOT RUN: ") and want in f for f in got):
+            failures.append("(NOT RUN {}) _real_pack_e2e must return False AND record a NOT RUN failure "
+                            "naming {!r}, never print a SKIPPED note beside a PASS (got ran={!r}, "
+                            "failures={})".format(name, want, ran, got))
+    _real_pack_fault_vectors(tmp, failures)
+
+
+def _real_pack_fault_vectors(tmp, failures):
+    """Failure-injection vectors, one per _not_run site PAST _real_pack_e2e's primary cases (sites an
+    ordinary run never reaches because the host, git and the archive all behave, so removing one
+    recording call would otherwise leave the self-test green): the per-fixture archive extractions,
+    the two fixture version pins that return True early, the per-fixture predecessor commits, the
+    smudge worktree set-up proof, the genesis staging, and the profiles symlink. Each vector drives
+    the REAL _real_pack_e2e over a small stub archive with exactly ONE failure injected (an
+    extraction that raises for one named fixture, a version pin that reports failure, a stale index
+    lock that fails the fixture's next git index write, a pre-created worktree path, a pre-planted
+    regular file at the symlink target) and requires the documented True return AND a NOT RUN
+    failure naming that site's case and cause. Everything else the stubbed run records is ignored,
+    so each assertion is red exactly when its own site stops recording. The run() legs and the
+    manifest regeneration are stubbed: these vectors pin the failure RECORDING contract, never the
+    delta semantics, which the unstubbed end-to-end cases pin."""
+    import tarfile
+    env = _selftest_env()
+    # A stub tree rich enough to carry _real_pack_e2e past its primary cases: a sole-coverer clause
+    # (so the consistent edit succeeds), the files the later fixtures read or mutate, and the
+    # record-file parents the later fixtures write into.
+    files = {
+        "rules/stub.md": "First stub sentence.\nSecond stub line follows.\n",
+        "tools/_gen_common.py": "# stub closure module\n",
+        ".gitattributes": "",
+        "NOTICE": "stub notice\n",
+        CLAUSES_REL: ('[[clause]]\nclause-id = "stub.1"\nsource-path = "rules/stub.md"\n'
+                      'start-line = 1\nend-line = 1\ncanonical-text = "First stub sentence."\n'),
+        MANIFEST_REL: ('format-version = 1\n\n[[sources]]\npath = "NOTICE"\n\n[[sources]]\n'
+                       'path = "README.md"\n\n[[artifacts]]\npath = "a.md"\n'),
+        RELEASES_REL: "format-version = 1\n",
+        DISPOSITIONS_REL: "format-version = 1\n",
+        IDHISTORY_REL: "format-version = 1\n",
+        ORDER_REL: 'families = ["apex", "aiqt", "security"]\nmembers = ["PROGR"]\n',
+        RENDERERS_REL: 'targets = ["AGENTS.md"]\n',
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for rel, text in sorted(files.items()):
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    stub_arch = buf.getvalue()
+
+    def _fault_extract(raise_name, lock_name):
+        # One injected extraction fault: raise for the one named fixture, or extract and plant a
+        # stale index lock in it (git init accepts the pre-made .git directory; the fixture's next
+        # git index write then fails on the lock, at the exact site under test).
+        def _ext(arch_bytes, dest):
+            if dest.name == raise_name:
+                raise OSError("injected: archive extraction failed")
+            saved["_extract"](arch_bytes, dest)
+            if lock_name is not None and dest.name == lock_name:
+                (dest / ".git").mkdir(exist_ok=True)
+                (dest / ".git" / "index.lock").write_text("", encoding="utf-8")
+            return dest
+        return _ext
+
+    def _fault_pin(fail_name):
+        # The pin helper, stubbed: init + stage the stub tree (its gen_manifest leg has its own
+        # fixture-setup failure contract and is not under test here), or report a pin failure for
+        # the ONE named fixture exactly as the real helper does: append and return False.
+        def _pin(repo, pin_failures, version="1.0.0"):
+            if repo.name == fail_name:
+                pin_failures.append("fixture setup ({}): injected pin failure".format(repo.name))
+                return False
+            (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+            (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "{}"\n'.format(version),
+                                              encoding="utf-8")
+            for args in (["init", "-q"], ["add", "-A"]):
+                subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            return True
+        return _pin
+
+    def _occupy_worktree(vtmp):
+        # git worktree add refuses an existing non-empty directory at its path.
+        (vtmp / "smudge-wt").mkdir(parents=True)
+        (vtmp / "smudge-wt" / "occupied.txt").write_text("occupied\n", encoding="utf-8")
+
+    def _occupy_profiles(vtmp):
+        # os.symlink refuses an existing entry at the target path (the archive extraction leaves
+        # the pre-planted regular file in place: it is not an archive member).
+        core = vtmp / "genesis-profiles-loop" / ".aiqt" / "core"
+        core.mkdir(parents=True)
+        (core / "profiles.toml").write_text("occupied\n", encoding="utf-8")
+
+    # (vector name, extraction that raises, stale-lock fixture, failing pin fixture, pre-plant,
+    #  the case the site must name, the cause the site must name)
+    vectors = (
+        ("smudge-extract", "real-pack-smudge", None, None, None,
+         "the smudge-filter predecessor case and every later real full-pack case",
+         "could not extract the archive"),
+        ("smudge-pin", None, None, "real-pack-smudge", None,
+         "the smudge-filter predecessor case and every later real full-pack case",
+         "the fixture version pin failed"),
+        ("smudge-commit", None, "real-pack-smudge", None, None,
+         "the smudge-filter predecessor case (round-4 findings 1/4)",
+         "could not build the predecessor commit"),
+        ("smudge-worktree", None, None, None, _occupy_worktree,
+         "the smudge-filter attack set-up proof (round-4 findings 1/4)",
+         "could not add a checkout worktree"),
+        ("omit-extract", "real-pack-omit", None, None, None,
+         "the under-claimed predecessor manifest case and every later real full-pack case",
+         "could not extract the archive"),
+        ("omit-pin", None, None, "real-pack-omit", None,
+         "the under-claimed predecessor manifest case and every later real full-pack case",
+         "the fixture version pin failed"),
+        ("omit-commit", None, "real-pack-omit", None, None,
+         "the under-claimed predecessor manifest case (round-8 finding 1)",
+         "could not build the predecessor commit"),
+        ("pred-extract", "real-pack-pred-idhist", None, None, None,
+         "predecessor-record case (real-pack-pred-idhist)",
+         "could not extract the archive"),
+        ("pred-commit", None, "real-pack-pred-idhist", None, None,
+         "predecessor-record case (real-pack-pred-idhist)",
+         "could not build the predecessor commit"),
+        ("genesis-extract", "genesis-clean", None, None, None,
+         "real genesis full-pack case (genesis-clean)",
+         "could not extract the archive"),
+        ("genesis-stage", None, "genesis-clean", None, None,
+         "real genesis full-pack case (genesis-clean)",
+         "could not stage the extracted tree"),
+        ("profiles-symlink", None, None, None, _occupy_profiles,
+         "the self-referential profiles.toml symlink case (round-5 finding 5)",
+         "could not create the symlink"),
+    )
+    # Saved and rebound by name: each globals() key is a constant string (gen_renderers.py refuses
+    # a computed key), and _archive_head is referenced only through its string key (the
+    # git-fixture-env trust check pins its one direct call shape).
+    saved = {"_archive_head": globals()["_archive_head"],
+             "_pin_fixture_version": globals()["_pin_fixture_version"],
+             "_extract": globals()["_extract"],
+             "_regen_fixture_manifest": globals()["_regen_fixture_manifest"],
+             "_run_quiet_root": globals()["_run_quiet_root"]}
+    for name, raise_name, lock_name, pin_fail, preplant, want_case, want_cause in vectors:
+        vtmp = tmp / ("fault-" + name)
+        vtmp.mkdir(parents=True)
+        if preplant is not None:
+            preplant(vtmp)
+        got = []
+        globals()["_archive_head"] = lambda _root: stub_arch
+        globals()["_pin_fixture_version"] = _fault_pin(pin_fail)
+        globals()["_extract"] = _fault_extract(raise_name, lock_name)
+        globals()["_regen_fixture_manifest"] = lambda _root, _case, _failures, _env: True
+        globals()["_run_quiet_root"] = lambda _root: 0
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                ran = _real_pack_e2e(vtmp, got)
+        finally:
+            globals().update(saved)
+        wanted = "NOT RUN: " + want_case + ": "
+        if ran is not True or not any(f.startswith(wanted) and want_cause in f for f in got):
+            failures.append("(real-pack fault {}) _real_pack_e2e must return True AND record a NOT "
+                            "RUN failure naming {!r} with cause {!r} (got ran={!r}, "
+                            "failures={})".format(name, want_case, want_cause, ran, got))
+
+
+def _not_run_net_vectors(tmp, failures):
+    """Red-on-revert vectors for the NOT RUN sites that an ordinary run never reaches (the real corpus,
+    git and host all behave), so reverting one of them would otherwise leave the self-test green: a failed
+    end-to-end temp-directory allocation (the nested self-test must exit nonzero, never a partial PASS),
+    the corpus-dependent NOTICE-row and source-path fixtures, the two caller nets in _e2e_git_cases (an
+    end-to-end function that returns False without recording a cause), and the POST-RELEASE cases that
+    lose their discriminating power on a git that ignores a planted replace ref, graft or filter mask, or
+    for a root user (os.geteuid patched to 0); and the git-availability gates (_git_gate over
+    _GIT_GATE_LABELS, PR #530 QA round-2 codex MAJOR), replayed with a TRANSIENT probe (every earlier
+    gate fails while the final gate succeeds: the nested self-test must exit nonzero, name each skipped
+    block, and still dispatch the final gate's case sets) and with git unavailable at every gate (every
+    block named, the final one included), so a revert of any single gate's recorded failure is red. A git
+    that STOPS honouring info/grafts makes the grafts case a STANDING NOT RUN failure of this self-test
+    on that host (fail-closed and disclosed, resolved by porting the case, never by skipping it).
+    Round-6 (codex 1 / claude MEDIUM-1) and round-7 (fix item 1): a third gate scenario REBINDS
+    _git_gate itself to an always-False stand-in; the nested run must exit nonzero and its output
+    must carry the identity diagnostic for EACH of the seven checkpoints by name and the
+    accounting diagnostic for EACH of the six gate labels, so removing any one checkpoint call or
+    dropping any one label from the accounting is red under its own assertion. The FIRST nested
+    run (the failed temp-allocation scenario) doubles as the gate-0 lost-git vector (round-7
+    codex 4 / claude MINOR-5): with the toml-class fixture commit made to fail after a successful
+    probe, that run must record the block's NOT RUN naming the observed cause."""
+    import tempfile
+    # The nested self-test (the self_test_main entry, which sets up its own git lifecycle) with ONLY the
+    # end-to-end temp allocation failing. It cannot recurse: without that temp directory it never reaches
+    # this function.
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _no_e2e_tmp(*args, **kwargs):
+        if kwargs.get("prefix") == _E2E_TMP_PREFIX:
+            raise PermissionError("injected: no writable temp directory")
+        return real_mkdtemp(*args, **kwargs)
+
+    # Round-7 (codex 4 / claude MINOR-5): the same nested run carries the gate-0 lost-git vector.
+    # The toml-class fixture commit (the only caller passing this message) fails AFTER its gate's
+    # successful probe; the nested run must record that block's NOT RUN naming the OBSERVED cause
+    # (the exception type and text), never a silent skip or an unnamed traceback.
+    real_init_commit = _git_init_commit
+
+    def _lost_git_commit(repo, msg, init=True):
+        if msg == "toml class fixtures":
+            raise FileNotFoundError("injected: git vanished after the probe")
+        return real_init_commit(repo, msg, init)
+
+    out = io.StringIO()
+    tempfile.mkdtemp = _no_e2e_tmp
+    globals()["_git_init_commit"] = _lost_git_commit
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        tempfile.mkdtemp = real_mkdtemp
+        globals()["_git_init_commit"] = real_init_commit
+    if rc == 0 or "NOT RUN: every end-to-end case" not in out.getvalue():
+        failures.append("(NOT RUN temp) a failed end-to-end temp-directory allocation must record a NOT RUN "
+                        "failure and exit nonzero, never a partial PASS (got rc={}: {})".format(
+                            rc, out.getvalue().strip()[-300:]))
+    if ("NOT RUN: " + _GIT_GATE_LABELS[0] not in out.getvalue()
+            or "FileNotFoundError: injected: git vanished after the probe" not in out.getvalue()):
+        failures.append("(NOT RUN git-gate) gate 0 lost git: a fixture commit that fails after "
+                        "this block's successful probe must be the block's NOT RUN failure "
+                        "naming the observed cause (got rc={}: {})".format(
+                            rc, out.getvalue().strip()[-300:]))
+
+    # The corpus-dependent fixtures, each with a control that plants and a corpus that cannot.
+    vdir = tmp / "not-run-vectors"
+    vdir.mkdir()
+    for plant, text, want in (
+            (_plant_notice_omission, 'format-version = 1\n\n[[sources]]\npath = "NOTICE"\n\n[[sources]]\n'
+             'path = "README.md"\n\n[[artifacts]]\npath = "a.md"\n', None),
+            (_plant_notice_omission, 'format-version = 1\n\n[[sources]]\npath = "README.md"\n\n'
+             '[[artifacts]]\npath = "a.md"\n', "the omission cannot be planted"),
+            (_plant_noncanon_source_path, '[[clause]]\nsource-path = "rules/stub.md"\n', None),
+            (_plant_noncanon_source_path, '[[clause]]\nsource-path = "stub.md"\n',
+             "no source-path with a parent directory")):
+        path = vdir / "fixture.toml"
+        path.write_text(text, encoding="utf-8")
+        got = []
+        planted = plant(path, got)
+        if want is None:
+            ok = planted is True and not got and path.read_text(encoding="utf-8") != text
+        else:
+            ok = planted is False and any(f.startswith("NOT RUN: ") and want in f for f in got)
+        if not ok:
+            failures.append("(NOT RUN corpus) {} over {!r}: expected {} (got {!r}, failures={})".format(
+                plant.__name__, text, "a planted fixture" if want is None else
+                "False and a NOT RUN failure naming {!r}".format(want), planted, got))
+
+    # The caller nets: an end-to-end function that returns False and records nothing.
+    saved = {"_real_pack_e2e": _real_pack_e2e, "_post_release_e2e": _post_release_e2e}
+    got = []
+    globals().update(_real_pack_e2e=lambda _tmp, _failures: False,
+                     _post_release_e2e=lambda _tmp, _failures: False)
+    try:
+        _e2e_git_cases(tmp, got)
+    finally:
+        globals().update(saved)
+    for case in (_REAL_PACK_CASES, "the POST-RELEASE head cases"):
+        if not any(f.startswith("NOT RUN: {}: the case ended early".format(case)) for f in got):
+            failures.append("(NOT RUN net) a False return from {} that recorded no cause must be a NOT RUN "
+                            "failure (got {})".format(case, got))
+
+    # The POST-RELEASE cases on a git that ignores the planted replace ref (GIT_NO_REPLACE_OBJECTS), the
+    # graft (an empty GIT_GRAFT_FILE) and the filter mask (a required smudge that fails, so the checkout
+    # leaves the status dirty), run as a simulated root user.
+    real_env, real_geteuid = _selftest_env, os.geteuid
+
+    def _misbehaving_git_env():
+        env = real_env()
+        env["GIT_NO_REPLACE_OBJECTS"] = "1"
+        env["GIT_GRAFT_FILE"] = os.devnull
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+        for index, (key, value) in enumerate((("filter.mask.smudge", "false"),
+                                              ("filter.mask.required", "true"))):
+            env["GIT_CONFIG_KEY_{}".format(count + index)] = key
+            env["GIT_CONFIG_VALUE_{}".format(count + index)] = value
+        env["GIT_CONFIG_COUNT"] = str(count + 2)
+        return env
+
+    pdir = tmp / "not-run-post-release"
+    pdir.mkdir()
+    got = []
+    globals()["_selftest_env"] = _misbehaving_git_env
+    os.geteuid = lambda: 0
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            _post_release_e2e(pdir, got, only=("(refs/replace, R3-1)", "(info/grafts)", "(codex R3-2)",
+                                               "(R9 unsearchable ancestor)"))
+    finally:
+        globals()["_selftest_env"] = real_env
+        os.geteuid = real_geteuid
+    for want in ("did not substitute the planted replace ref", "ignores info/grafts",
+                 "did not leave a clean status", "running as root"):
+        if not any(f.startswith("NOT RUN: ") and want in f for f in got):
+            failures.append("(NOT RUN post-release) a case that loses its discriminating power must record a "
+                            "NOT RUN failure naming {!r} (got {})".format(want, got))
+
+    # The git-availability gates (PR #530 QA round-2 codex MAJOR), two red-on-revert scenarios over a
+    # nested self-test run. Scenario 1, TRANSIENT: every earlier gate reports no git while the FINAL
+    # gate reports git present; the nested run must exit nonzero and NAME each earlier gate's block.
+    # The three case sets behind the final gate are replaced for the nested run by recording sentinels
+    # (so this vector is not re-entered from the nested run, and the final gate's dispatch is itself
+    # observed). Scenario 2: no gate reports git, so every block must be named, the final one included.
+    real_probe = _git_available
+    saved_sets = {"_real_pack_not_run_vectors": _real_pack_not_run_vectors,
+                  "_not_run_net_vectors": _not_run_net_vectors, "_e2e_git_cases": _e2e_git_cases}
+    for scenario, answers, named, unnamed in (
+            ("transient probe (final gate succeeds)",
+             [False] * (len(_GIT_GATE_LABELS) - 1) + [True],
+             _GIT_GATE_LABELS[:-1], _GIT_GATE_LABELS[-1:]),
+            ("git unavailable at every gate",
+             [False] * len(_GIT_GATE_LABELS), _GIT_GATE_LABELS, ())):
+        plan = list(answers)
+        final_ran = []
+
+        def _planned_probe(plan=plan):
+            return plan.pop(0) if plan else real_probe()
+
+        def _sentinel(which, ran=final_ran):
+            def _record(_tmp, _failures):
+                ran.append(which)
+            return _record
+
+        globals()["_git_available"] = _planned_probe
+        globals()["_real_pack_not_run_vectors"] = _sentinel("real-pack")
+        globals()["_not_run_net_vectors"] = _sentinel("net")
+        globals()["_e2e_git_cases"] = _sentinel("e2e")
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self_test_main()
+        finally:
+            globals().update(saved_sets)
+            globals()["_git_available"] = real_probe
+        text = out.getvalue()
+        if rc == 0:
+            failures.append("(NOT RUN git-gate) {}: the nested self-test must exit nonzero, never "
+                            "SELF-TEST PASS beside an unrun git-gated block".format(scenario))
+        for label in named:
+            if "NOT RUN: " + label not in text:
+                failures.append("(NOT RUN git-gate) {}: the nested self-test must NAME the skipped "
+                                "block {!r} (output ended {!r})".format(
+                                    scenario, label, text.strip()[-300:]))
+        for label in unnamed:
+            if "NOT RUN: " + label in text:
+                failures.append("(NOT RUN git-gate) {}: the final gate's block must RUN when its "
+                                "probe succeeds, not record {!r}".format(scenario, label))
+        if scenario.startswith("transient") and sorted(final_ran) != ["e2e", "net", "real-pack"]:
+            failures.append("(NOT RUN git-gate) transient probe: the final gate must dispatch all "
+                            "three case sets when its probe succeeds (ran {})".format(final_ran))
+
+    # Round-6 (codex 1 / claude MEDIUM-1): a REBOUND GATE must be a NAMED failure at run time,
+    # never six silently skipped blocks beside SELF-TEST PASS (the round-5 static checker admitted
+    # a globals()/sys.modules rebinding of _git_gate; an IN-PLACE module rebinding is caught by
+    # identity whatever its spelling, so this one rebinding stands for that class, while the
+    # restored-between-checkpoints and local-shadow escapes are disclosed at
+    # _gate_identity_failures). Round-7 (fix item 1): the nested run must exit nonzero and its
+    # output must carry the identity diagnostic for EVERY checkpoint by name (the six gate labels
+    # and the end-of-suite checkpoint) and the accounting diagnostic for EVERY gate label, one
+    # assertion each, so removing one checkpoint call or dropping one label from the accounting
+    # is red under its own assertion, never satisfied by a diagnostic another checkpoint or the
+    # identity unit test produced.
+    real_gate = _GATE_IMPORT_BINDINGS[0]
+    globals()["_git_gate"] = lambda label, failures: False
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = self_test_main()
+    finally:
+        globals()["_git_gate"] = real_gate
+    text = out.getvalue()
+    if rc == 0:
+        failures.append("(NOT RUN git-gate) rebound gate: the nested self-test must exit nonzero, "
+                        "never SELF-TEST PASS beside six silently skipped blocks")
+    for where_chk in _GIT_GATE_LABELS + ("at the end of the self-test",):
+        if ("(git-gate identity) " + where_chk
+                + ": _git_gate is not the object captured at import") not in text:
+            failures.append("(NOT RUN git-gate) rebound gate: the identity checkpoint {!r} must "
+                            "name the drifted gate binding (output ended {!r})".format(
+                                where_chk, text.strip()[-300:]))
+    for label_chk in _GIT_GATE_LABELS:
+        if "(git-gate accounting) {!r}".format(label_chk) not in text:
+            failures.append("(NOT RUN git-gate) rebound gate: the per-label accounting must name "
+                            "the unaccounted block {!r} (output ended {!r})".format(
+                                label_chk, text.strip()[-300:]))
+
+
 def _real_pack_e2e(tmp, failures):
     """Build REAL full-pack two-release git repos from `git archive HEAD` of THIS repo and drive the real
     run() through the delta path: a clean CONSISTENTLY-edited id-keyed PATCH (finding 2), malformed-loader
     variants (findings 1/3), a wrong-version disposition (round-3 finding 3), and a smudge-filter predecessor
     renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4), and genesis
-    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True if it ran,
-    False if skipped (archive unavailable). Hermetic: private temp git repos, neutralized identity."""
+    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True when the
+    primary cases ran and False when they could not. A path that ends a case early records a failure
+    first, never a printed note beside a PASS: 16 named NOT RUN sites (_not_run: 14 in this body, and one
+    each in _plant_notice_omission and _plant_noncanon_source_path for the two corpus-dependent
+    fixtures), the existing NOT RUN failures for an unavailable or unextractable archive, and the existing
+    fixture-setup failures that _pin_fixture_version and _regen_fixture_manifest record; a failed
+    `git tag` raises (check=True). The caller (_e2e_git_cases) adds a NOT RUN failure for a False return
+    that recorded none. Every _not_run site past the primary cases has its own failure-injection vector
+    in _real_pack_fault_vectors, the true-return paths included. Hermetic: private temp git repos,
+    neutralized identity."""
     import re
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
-        print("SELF-TEST NOTE: `git archive HEAD` unavailable; the real full-pack run() case was SKIPPED",
-              file=sys.stderr)
+        failures.append("NOT RUN: the real full-pack run() cases (findings 1/2, rounds 3-5): "
+                        "`git archive HEAD` is unavailable; coverage that did not run FAILS the "
+                        "self-test, never a silent PASS (QA round-4 codex R4-3 / claude m4)")
         return False
     repo = tmp / "real-pack"
     try:
         _extract(arch, repo)
-    except Exception as exc:  # noqa: BLE001  a bad archive is a skip, not a false pass
-        print("SELF-TEST NOTE: could not extract the archive ({}); real full-pack case SKIPPED".format(exc),
-              file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001  a bad archive FAILS, never a false pass (round-4 R4-3)
+        failures.append("NOT RUN: the real full-pack run() cases: could not extract the archive ({}); "
+                        "coverage that did not run FAILS the self-test (QA round-4 codex R4-3)".format(exc))
         return False
     # test-hermeticity: the archived tree carries the LIVE repo's release-version, so pin the extracted
     # predecessor tree to the fixture's chosen predecessor version (1.0.0) via the shared helper before
@@ -1182,8 +3931,8 @@ def _real_pack_e2e(tmp, failures):
         return False
     for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
         if subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env).returncode != 0:
-            print("SELF-TEST NOTE: could not build the fixture git repo; real full-pack case SKIPPED",
-                  file=sys.stderr)
+            _not_run(failures, _REAL_PACK_CASES, "could not build the fixture git repo (git {} "
+                     "failed)".format(args[0]))
             return False
     commit1 = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
                              text=True).stdout.strip()
@@ -1195,7 +3944,10 @@ def _real_pack_e2e(tmp, failures):
                           capture_output=True, text=True).stdout.strip()
     cid = _edit_clause_consistently(repo)   # predecessor (commit1) keeps the original text
     if cid is None:
-        print("SELF-TEST NOTE: no sole-coverer clause to edit; real full-pack case SKIPPED", file=sys.stderr)
+        # Corpus content decides this, so it can happen in CI: a NOT RUN failure, never a skip.
+        _not_run(failures, _REAL_PACK_CASES, "no sole-coverer clause to edit (no clause is the only "
+                 "coverer of every line in its span with a once-only canonical-text), so the "
+                 "consistently-edited PATCH fixture cannot be built")
         return False
 
     def _set_head_version(version):
@@ -1396,8 +4148,10 @@ def _real_pack_e2e(tmp, failures):
     repo2 = tmp / "real-pack-smudge"
     try:
         _extract(arch, repo2)
-    except Exception:  # noqa: BLE001
-        return True  # the primary cases already ran
+    except Exception as exc:  # noqa: BLE001
+        _not_run(failures, "the smudge-filter predecessor case and every later real full-pack case",
+                 "could not extract the archive ({})".format(exc))
+        return True  # the primary cases already ran; the cause is recorded in failures
     # Pin to 1.0.0 FIRST, on the CLEAN extracted tree (shared helper: writes VERSION + changelog, inits,
     # stages, and regenerates the manifest), THEN introduce the undeclared closure edit and the smudge
     # filter and re-commit. Pinning before the edit keeps the committed manifest's _gen_common.py digest at
@@ -1405,7 +4159,11 @@ def _real_pack_e2e(tmp, failures):
     # attack under test); it only binds release-version to 1.0.0 so the gate reaches that check instead of
     # failing at the version-binding rejection. A gen failure is recorded in `failures` by the helper.
     if not _pin_fixture_version(repo2, failures):
-        return True  # the primary cases already ran; the setup failure is recorded in failures
+        # The helper recorded its own fixture-setup failure; ALSO name the cases this early return
+        # skips, exactly as the extract-failure path above names them.
+        _not_run(failures, "the smudge-filter predecessor case and every later real full-pack case",
+                 "the fixture version pin failed (the setup failure is recorded beside this one)")
+        return True  # the primary cases already ran; both causes are recorded in failures
     orig_gcommon = (repo2 / gcommon).read_text(encoding="utf-8")
     (repo2 / gcommon).write_text(orig_gcommon + "\n# predecessor-only undeclared edit\n", encoding="utf-8")
     attrs = repo2 / ".gitattributes"
@@ -1415,6 +4173,8 @@ def _real_pack_e2e(tmp, failures):
     for args in (["config", "filter.hide.smudge", "sed '/predecessor-only undeclared edit/d'"],
                  ["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
         if subprocess.run(["git", "-C", str(repo2), *args], capture_output=True, env=env).returncode != 0:
+            _not_run(failures, "the smudge-filter predecessor case (round-4 findings 1/4)",
+                     "could not build the predecessor commit (git {} failed)".format(args[0]))
             ok = False
             break
     if ok:
@@ -1433,6 +4193,9 @@ def _real_pack_e2e(tmp, failures):
                                 "attack is not set up, so the raw-materialization regression is not proven")
             subprocess.run(["git", "-C", str(repo2), "worktree", "remove", "--force", str(wt)],
                            capture_output=True, env=env)
+        else:
+            _not_run(failures, "the smudge-filter attack set-up proof (round-4 findings 1/4)",
+                     "could not add a checkout worktree to confirm the filter hides the edit")
         (repo2 / gcommon).write_text(orig_gcommon, encoding="utf-8")   # HEAD restores the original closure
         (repo2 / RELEASES_REL).write_text(
             'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
@@ -1457,22 +4220,27 @@ def _real_pack_e2e(tmp, failures):
     repo3 = tmp / "real-pack-omit"
     try:
         _extract(arch, repo3)
-    except Exception:  # noqa: BLE001  the primary cases already ran
+    except Exception as exc:  # noqa: BLE001  the primary cases already ran
+        _not_run(failures, "the under-claimed predecessor manifest case and every later real full-pack "
+                 "case", "could not extract the archive ({})".format(exc))
         return True
     # Pin to 1.0.0 FIRST (the shared helper regenerates a CLEAN, complete manifest at 1.0.0), THEN drop the
     # NOTICE [[sources]] row from that regenerated manifest so the ONLY inconsistency under test is the
     # under-claimed predecessor manifest, now reachable past the version-binding check. A gen failure is
     # recorded in `failures` by the helper.
     if not _pin_fixture_version(repo3, failures):
-        return True  # the primary cases already ran; the setup failure is recorded in failures
-    mpath = repo3 / MANIFEST_REL
-    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
-    kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
-    if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
-        mpath.write_text("".join(kept), encoding="utf-8")
+        # The helper recorded its own fixture-setup failure; ALSO name the cases this early return
+        # skips, exactly as the extract-failure path above names them.
+        _not_run(failures, "the under-claimed predecessor manifest case and every later real "
+                 "full-pack case",
+                 "the fixture version pin failed (the setup failure is recorded beside this one)")
+        return True  # the primary cases already ran; both causes are recorded in failures
+    if _plant_notice_omission(repo3 / MANIFEST_REL, failures):
         ok3 = True
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(repo3), *args], capture_output=True, env=env).returncode != 0:
+                _not_run(failures, "the under-claimed predecessor manifest case (round-8 finding 1)",
+                         "could not build the predecessor commit (git {} failed)".format(args[0]))
                 ok3 = False
                 break
         if ok3:
@@ -1513,7 +4281,9 @@ def _real_pack_e2e(tmp, failures):
         rp = tmp / dirname
         try:
             _extract(arch, rp)
-        except Exception:  # noqa: BLE001  the primary cases already ran
+        except Exception as exc:  # noqa: BLE001  the primary cases already ran
+            _not_run(failures, "predecessor-record case ({})".format(dirname),
+                     "could not extract the archive ({})".format(exc))
             return
         mutate(rp)
         # Pin to 1.0.0 AND regenerate the predecessor manifest via the shared helper, AFTER the mutation, so
@@ -1526,6 +4296,8 @@ def _real_pack_e2e(tmp, failures):
             return  # the setup failure is recorded in failures
         for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
             if subprocess.run(["git", "-C", str(rp), *args], capture_output=True, env=env).returncode != 0:
+                _not_run(failures, "predecessor-record case ({})".format(dirname),
+                         "could not build the predecessor commit (git {} failed)".format(args[0]))
                 return
         pcommit = subprocess.run(["git", "-C", str(rp), "rev-parse", "HEAD"], capture_output=True,
                                  text=True).stdout.strip()
@@ -1660,7 +4432,9 @@ def _real_pack_e2e(tmp, failures):
         dest = tmp / name
         try:
             _extract(arch, dest)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _not_run(failures, "real genesis full-pack case ({})".format(name),
+                     "could not extract the archive ({})".format(exc))
             return None
         # git-init + add so the HEAD manifest freshness/integrity checks (this round's #1, now run in the
         # genesis path too) have a tracked path set to read; no commit or identity is needed. A malformation
@@ -1668,6 +4442,8 @@ def _real_pack_e2e(tmp, failures):
         for argv in (["init", "-q"], ["add", "-A"]):
             if subprocess.run(["git", "-C", str(dest), *argv], capture_output=True,
                               env=_selftest_env()).returncode != 0:
+                _not_run(failures, "real genesis full-pack case ({})".format(name),
+                         "could not stage the extracted tree (git {} failed)".format(argv[0]))
                 return None
         return dest
 
@@ -1856,8 +4632,10 @@ def _real_pack_e2e(tmp, failures):
         try:
             os.symlink("profiles.toml", gprof / ".aiqt" / "core" / "profiles.toml")
             made = True
-        except OSError:
+        except OSError as exc:
             made = False
+            _not_run(failures, "the self-referential profiles.toml symlink case (round-5 finding 5)",
+                     "could not create the symlink ({})".format(exc))
         if made and _run_quiet_root(gprof) != 2:
             failures.append("real genesis full-pack run(): a self-referential profiles.toml symlink must "
                             "fail closed exit 2 (round-5 finding 5)")
@@ -1877,18 +4655,10 @@ def _real_pack_e2e(tmp, failures):
     # strict_clause_inventory now rejects the non-canonical form, exit 2. The manifest is regenerated so the
     # sole thing under test is the path form (neutering the source-path check makes this fixture pass).
     g1 = _extract_genesis("genesis-clause-noncanon-path")
-    if g1 is not None:
-        cp = g1 / CLAUSES_REL
-        text = cp.read_text(encoding="utf-8")
-        m = re.search(r'source-path = "([^"]+)"', text)
-        parts = m.group(1).split("/") if m else []
-        if len(parts) >= 2:
-            noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
-            cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
-                                       'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
-            if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
-                failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
-                                "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
+    if g1 is not None and _plant_noncanon_source_path(g1 / CLAUSES_REL, failures):
+        if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
+            failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
+                            "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
 
     # (round-5 finding 3) a genesis default-correction row that is fully valid EXCEPT a captured-source whose
     # host carries a raw SPACE ('https://exa mple.com/...'): the pre-fix urlparse-only check accepted it (a
@@ -1940,11 +4710,2141 @@ def _real_pack_e2e(tmp, failures):
     return True
 
 
+def _run_capture_root(root):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = run(root)
+    return rc, out.getvalue() + err.getvalue()
+
+
+def _post_release_e2e(tmp, failures, only=None):
+    """RELEASING steps 6a/6b (PR #397 QA F1; round-2 full coverage): REAL full-pack fixtures drive run()'s
+    POST-RELEASE branch over COMMITTED heads. The one-row fixture (the first attested release) covers the
+    accepted states (the attestation row alone; the correctly placed tag key over a changelog whose newest
+    release carries a [release.artifacts] sub-table), every revision-binding guard (a committed edit beyond
+    the post-release paths, a smudge-masked committed edit, a committed edit to a path starting with a
+    double quote, a mode-only +x change on EACH post-release path, a deleted post-release path, a
+    staged-only edit, untracked files at the root and under .aiqt/core, a non-descendant head), the stale
+    manifest, the extra prior row, the mis-placed tag key (EOF inside the artifacts table; the exact line in
+    an OLDER release's table, which only the TOML check catches), and the replayed GENESIS validation over a
+    malformed clauses.toml (round-2 B1 reproduction 2). Separate fixtures cover the predecessor-manifest
+    version binding and the two-release replay (B1 reproduction 1: an undispositioned clause edit still
+    exits 1 after its attestation row lands; an altered prior row exits 2).
+
+    QA round-3 coverage (codex R3-1/R3-2/R3-3, claude F1/F2/F3/F5), each case failing alone when its
+    guard is bypassed: a refs/replace blob substitution masking a forbidden committed changelog edit
+    (plus a direct assertion that the funneled _show returns the RECORDED bytes, so bypassing the _git
+    pins fails even where a redundant guard would still exit 2); a refs/replace substitution of a
+    corrupt committed manifest blob by a fresh one (discriminates the raw-materialization pins); an
+    info/grafts parent rewrite masking a non-descendant head (plus the direct _git_raw refusal); a
+    clean/smudge-filter-masked corrupt committed manifest and a skip-worktree-masked stale committed
+    manifest (both must exit 2 from the materialized COMMITTED tree); the checkout-drift ADVISORY
+    (staged-only edit and untracked files now exit 0 with the stderr advisory, and an assume-unchanged
+    working-tree overwrite of a tracked path never reaches the verdict); and the three ADMITTED
+    byte-level variants locked by the _post_release_head exactness note (a releases.toml comment, a
+    CRLF tag line, the tag key before the version line).
+
+    `only` (an iterable of label substrings) runs a subset, for out-of-tree mutant-discrimination
+    drivers and focused debugging; the unselected cases then do not run, by request. Returns False when a
+    fixture a case needs could not be built (each such return records a failure first, and the caller
+    nets a False return that recorded none), True otherwise. A case that would lose its discriminating
+    power on this host records a NOT RUN failure instead of passing: a git that does not substitute the
+    planted replace ref, ignores info/grafts, or leaves the filter-masked status dirty, and a root user,
+    for whom directory search permission is not enforced. DISCLOSED: a git that stops honouring
+    info/grafts (a removed or disabled grafts mechanism) therefore makes the grafts case a STANDING NOT
+    RUN failure of this self-test on that host; that fails closed, and is resolved by porting the case,
+    never by skipping it."""
+    env = _selftest_env()
+    arch = _archive_head(repo_root())
+    if arch is None:
+        failures.append("NOT RUN: the POST-RELEASE head cases (RELEASING 6a/6b, rounds 2-4): "
+                        "`git archive HEAD` is unavailable; coverage that did not run FAILS the "
+                        "self-test, never a silent PASS (QA round-4 codex R4-3 / claude m4)")
+        return False
+
+    def _sel(label):
+        # Either direction: a full case label also opens the block gated on its prefix (`(R7 `),
+        # so a selection by full label never silently skips its case (merge train 3 QA round 2).
+        return only is None or any(s in label or label in s for s in only)
+
+    def _extract_to(name):
+        repo_ = tmp / name
+        try:
+            _extract(arch, repo_)
+        except Exception as exc:  # noqa: BLE001  a bad archive FAILS, never a false pass (round-4 R4-3)
+            failures.append("NOT RUN: the POST-RELEASE head cases: could not extract the archive ({}); "
+                            "coverage that did not run FAILS the self-test (QA round-4 codex "
+                            "R4-3)".format(exc))
+            return None
+        return repo_
+
+    def _g(repo_, *args):
+        return subprocess.run(["git", "-C", str(repo_), *args], capture_output=True, env=env)
+
+    def _gout(repo_, *args):
+        return _g(repo_, *args).stdout.decode("utf-8").strip()
+
+    def _commit_all(repo_, label):
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "post-release case")):
+            if _g(repo_, *args).returncode != 0:
+                failures.append("fixture setup (post-release {}): could not commit".format(label))
+                return False
+        return True
+
+    def _row_text(version, tag, tobj, csha, qa="a" * 64):
+        return ('[[release]]\nversion = "{v}"\ntag = "{t}"\ntag_object_sha = "{to}"\n'
+                'commit_sha = "{c}"\nqa-sha256 = "{q}"\nqa-store-path = "qa/{v}.toml"\n'
+                'attestation-timestamps = [100]\n').format(v=version, t=tag, to=tobj, c=csha, q=qa)
+
+    def _check(repo_, label, want, want_msg):
+        rc, out = _run_capture_root(repo_)
+        if rc != want or want_msg not in out:
+            failures.append("post-release head {}: expected exit {} with {!r} (got rc={}: {})".format(
+                label, want, want_msg, rc, out.strip()[-300:]))
+
+    # ---- fixture 1: the first attested release (one row; replayed genesis) --------------------------
+    base_cl = ('[[release]]\nversion = "0.9.0"\n\n[[release]]\nversion = "1.0.0"\n\n'
+               '[release.artifacts]\nsbom = "sha256:0000"\n')
+    quoted_rel = '''"TODO.md"'''
+    v_line = 'version = "1.0.0"\n'
+    tag_line = 'tag = "v1.0.0"\n'
+
+    repo = _extract_to("post-release")
+    if repo is None or not _pin_fixture_version(repo, failures):
+        return False
+    (repo / CHANGELOG_REL).write_text(base_cl, encoding="utf-8")
+    (repo / quoted_rel).write_text("quoted-path fixture\n", encoding="utf-8")
+    own_path = repo / OWNERSHIP_REL
+    own_path.write_text(own_path.read_text(encoding="utf-8") +
+                        "\n[[exclusion]]\npath = '" + quoted_rel + "'\nreason = \"QA round-2 "
+                        "quoted-path fixture; tracked but excluded from pack scope.\"\n", encoding="utf-8")
+    _g(repo, "add", "-A")
+    if not _regen_fixture_manifest(repo, "post-release fixture", failures, env):
+        return False
+    for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                 ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+        if _g(repo, *args).returncode != 0:
+            failures.append("NOT RUN: the POST-RELEASE head cases: could not build the fixture repo "
+                            "(git {} failed); coverage that did not run FAILS the self-test (QA round-4 "
+                            "codex R4-3)".format(args[0]))
+            return False
+    commit1 = _gout(repo, "rev-parse", "HEAD")
+    tobj1 = _gout(repo, "rev-parse", "refs/tags/v1.0.0")
+    row = "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tobj1, commit1)
+
+    def _write(rel, text):
+        (repo / rel).write_text(text, encoding="utf-8")
+
+    def _append(rel, text):
+        (repo / rel).write_text((repo / rel).read_text(encoding="utf-8") + text, encoding="utf-8")
+
+    def _set_version(v):
+        _write("VERSION", v + "\n")
+        _write(CHANGELOG_REL, '[[release]]\nversion = "{}"\n'.format(v))
+
+    def _chmod_x(rel):
+        path_ = repo / rel
+        path_.chmod(path_.stat().st_mode | 0o111)
+
+    def _post_smudge():
+        orig, edited = tmp / "agents-orig.bin", tmp / "agents-edited.bin"
+        orig.write_bytes(_g(repo, "show", commit1 + ":AGENTS.md").stdout)
+        edited.write_bytes((repo / "AGENTS.md").read_bytes())
+        (repo / ".git" / "info" / "attributes").write_text("AGENTS.md filter=mask\n", encoding="utf-8")
+        _g(repo, "config", "filter.mask.smudge", "cat " + str(orig))
+        _g(repo, "config", "filter.mask.clean", "cat " + str(edited))
+        (repo / "AGENTS.md").unlink()
+        _g(repo, "checkout", "--", "AGENTS.md")
+
+    def _post_staged():
+        ab = (repo / "AGENTS.md").read_bytes()
+        (repo / "AGENTS.md").write_bytes(ab + b"\nstaged-only edit\n")
+        _g(repo, "add", "AGENTS.md")
+        (repo / "AGENTS.md").write_bytes(ab)
+
+    def _post_untracked_root():
+        (repo / "qa-undeclared.txt").write_text("x\n", encoding="utf-8")
+
+    def _post_untracked_core():
+        (repo / ".aiqt" / "core" / "qa-extra.toml").write_text("format-version = 1\n", encoding="utf-8")
+
+    def _post_orphan():
+        orphan = _gout(repo, "commit-tree", _gout(repo, "rev-parse", "HEAD^{tree}"), "-m", "orphan")
+        _g(repo, "checkout", "-q", orphan)
+
+    def _post_assume_unchanged():
+        (repo / "AGENTS.md").write_text("NOT THE COMMITTED BYTES\n", encoding="utf-8")
+        _g(repo, "update-index", "--assume-unchanged", "--", "AGENTS.md")
+
+    def _reset_case():
+        # Undo every per-case mask so no case can leak into the next: filter config and attributes,
+        # replace refs and grafts (round-3), assume-unchanged / skip-worktree index flags (cleared
+        # BEFORE reset --hard, which would otherwise leave the flagged worktree bytes in place).
+        for key in ("filter.mask.smudge", "filter.mask.clean"):
+            _g(repo, "config", "--unset-all", key)
+        for extra in ("attributes", "grafts"):
+            p_ = repo / ".git" / "info" / extra
+            if p_.exists():
+                p_.unlink()
+        for ref in _gout(repo, "for-each-ref", "--format=%(refname)", "refs/replace").splitlines():
+            _g(repo, "update-ref", "-d", ref)
+        for rel in sorted(POST_RELEASE_PATHS) + ["AGENTS.md"]:
+            _g(repo, "update-index", "--no-assume-unchanged", "--", rel)
+            _g(repo, "update-index", "--no-skip-worktree", "--", rel)
+        for args in (("reset", "-q", "--hard", commit1), ("clean", "-q", "-fdx")):
+            _g(repo, *args)
+
+    # (label, mutate [pre-regen], regen, after_regen [post-regen pre-commit], commit, post [post-commit],
+    #  want_rc, want_msg). Every case that asserts a committed-state guard COMMITS its mutation.
+    cases = [
+        ("(a) the attestation row alone, committed (step 6a, and main after it merges)",
+         None, True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("(b) the tag key placed after the newest version line, before [release.artifacts] (step 6b)",
+         lambda: _write(CHANGELOG_REL, base_cl.replace(v_line, v_line + tag_line)),
+         True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("(d) the tag key appended at EOF lands inside [release.artifacts]",
+         lambda: _write(CHANGELOG_REL, base_cl + tag_line), True, None, True, None,
+         2, "by more than the newest"),
+        ("(d) the exact tag line placed in an OLDER release's table (only the TOML check catches it)",
+         lambda: _write(CHANGELOG_REL, base_cl.replace('version = "0.9.0"\n',
+                                                       'version = "0.9.0"\n' + tag_line)),
+         True, None, True, None, 2, "by more than the newest"),
+        ("(c) the tag key plus another changed path, committed",
+         lambda: (_write(CHANGELOG_REL, base_cl.replace(v_line, v_line + tag_line)),
+                  _append("AGENTS.md", "\nedit\n")),
+         True, None, True, None, 2, "beyond the post-release paths"),
+        ("(d) a changelog edit other than the tag key (another key)",
+         lambda: _write(CHANGELOG_REL, base_cl + 'date = "2000-01-01"\n'), True, None, True, None,
+         2, "by more than the newest"),
+        ("(d) the tag key plus a changelog comment",
+         lambda: _write(CHANGELOG_REL, "# edited\n" + base_cl.replace(v_line, v_line + tag_line)),
+         True, None, True, None, 2, "by more than the newest"),
+        ("(d) a tag key that is not 'v' + version",
+         lambda: _write(CHANGELOG_REL, base_cl.replace(v_line, v_line + 'tag = "v1.0.1"\n')),
+         True, None, True, None, 2, "by more than the newest"),
+        ("(e) a head version below the newest row",
+         lambda: _set_version("0.9.0"), True, None, True, None, 2, "does not increase"),
+        ("stale manifest: the row lands without regenerating the manifest",
+         None, False, None, True, None, 2, "head manifest freshness"),
+        ("an EXTRA prior release row the release commit never carried",
+         lambda: _write(RELEASES_REL, "format-version = 1\n\n"
+                        + _row_text("0.9.0", "v0.9.0", tobj1, commit1) + "\n"
+                        + _row_text("1.0.0", "v1.0.0", tobj1, commit1)),
+         True, None, True, None, 2, "plus exactly the newest row"),
+        ("a DELETED post-release path (the announce snippet)",
+         None, True, lambda: (repo / ".aiqt/release/announce-snippet.txt").unlink(), True, None,
+         2, "stay an in-place edit"),
+        ("a smudge-masked COMMITTED edit outside the post-release paths",
+         lambda: _append("AGENTS.md", "\nCOMMITTED-HIDDEN-EDIT\n"), True, None, True, _post_smudge,
+         2, "beyond the post-release paths"),
+        ("a committed edit to a quoted path (a name starting with a double quote)",
+         lambda: _write(quoted_rel, "EVIL CONTENT\n"), True, None, True, None,
+         2, "beyond the post-release paths"),
+        ("a staged-only edit is ADVISORY only; the committed verdict stands (QA round-3 codex R3-3)",
+         None, True, None, True, _post_staged, 0, "post-release advisory"),
+        ("an untracked file at the repository root is ADVISORY only (QA round-3)",
+         None, True, None, True, _post_untracked_root, 0, "post-release advisory"),
+        ("an untracked file under .aiqt/core is ADVISORY only (QA round-3)",
+         None, True, None, True, _post_untracked_core, 0, "post-release advisory"),
+        ("an assume-unchanged working-tree overwrite of a tracked path never reaches the verdict "
+         "(QA round-3 codex R3-3)",
+         None, True, None, True, _post_assume_unchanged, 0, "release-delta: POST-RELEASE"),
+        ("(F5-1) a committed releases.toml comment: byte-level formatting is admitted when the parsed "
+         "rows equal the release commit's plus exactly the newest row",
+         lambda: _write(RELEASES_REL, "# byte-level comment (QA round-3 claude F5)\n" + row),
+         True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("(F5-3) the tag key before the version line, inside the newest release table, is admitted",
+         lambda: _write(CHANGELOG_REL, base_cl.replace(v_line, tag_line + v_line)),
+         True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("a non-descendant head (an orphan commit with an identical tree)",
+         None, True, None, True, _post_orphan, 2, "not an ancestor"),
+    ] + [("a mode-only (+x) change on the post-release path " + rel, None, True,
+          (lambda r=rel: _chmod_x(r)), True, None, 2, "stay an in-place edit")
+         for rel in sorted(POST_RELEASE_PATHS)]
+
+    for label, mutate, regen, after_regen, commit_it, post, want, want_msg in cases:
+        if not _sel(label):
+            continue
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if mutate:
+            mutate()
+        if regen and not _regen_fixture_manifest(repo, "post-release " + label, failures, env):
+            continue
+        if after_regen:
+            after_regen()
+        if commit_it and not _commit_all(repo, label):
+            continue
+        if post:
+            post()
+        _check(repo, label, want, want_msg)
+
+    # ---- substitution attacks on fixture 1 (QA round-3 codex R3-1/R3-2, claude F1/F2/F3) -----------
+    labelR = "a committed forbidden changelog edit masked by a blob replacement (refs/replace, R3-1)"
+    if _sel(labelR):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        _write(CHANGELOG_REL, base_cl + 'date = "2000-01-01"\n')
+        if (_regen_fixture_manifest(repo, "post-release " + labelR, failures, env)
+                and _commit_all(repo, labelR)):
+            bad_blob = _gout(repo, "rev-parse", "HEAD:" + CHANGELOG_REL)
+            good_blob = _gout(repo, "rev-parse", commit1 + ":" + CHANGELOG_REL)
+            if _g(repo, "replace", bad_blob, good_blob).returncode != 0:
+                failures.append("fixture setup ({}): git replace failed".format(labelR))
+            else:
+                if b"2000-01-01" in _g(repo, "show", "HEAD:" + CHANGELOG_REL).stdout:
+                    _not_run(failures, labelR, "this git did not substitute the planted replace ref, so "
+                             "the case cannot show that the --no-replace-objects pins defeat one")
+                # The funnel itself must return the RECORDED committed bytes while the replacement is
+                # active: this assertion fails ALONE when the _git pins are bypassed (claude F3), even
+                # where a redundant downstream guard would still exit 2.
+                try:
+                    funneled = _show(repo, _gout(repo, "rev-parse", "HEAD"), CHANGELOG_REL)
+                except GateError as exc:
+                    funneled = b""
+                    failures.append("blob replacement: funneled _show failed ({})".format(exc))
+                if funneled and b"2000-01-01" not in funneled:
+                    failures.append("blob replacement: the funneled _show returned the SUBSTITUTED "
+                                    "bytes; the --no-replace-objects pins are not effective")
+                _check(repo, labelR, 2, "by more than the newest")
+
+    labelR2 = "a corrupt COMMITTED manifest masked by a blob replacement (raw materialization pins)"
+    if _sel(labelR2):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if _regen_fixture_manifest(repo, "post-release " + labelR2, failures, env):
+            man_path = repo / MANIFEST_REL
+            valid = man_path.read_text(encoding="utf-8")
+            marker = 'sha256 = "'
+            base = valid.find("[[sources]]")
+            pos = valid.find(marker, base) if base != -1 else -1
+            corrupt = (valid[:pos + len(marker)] + "0" * 64 + valid[pos + len(marker) + 64:]
+                       if pos != -1 else valid)
+            if corrupt == valid:
+                failures.append("fixture setup ({}): could not corrupt a manifest sha256".format(
+                    labelR2))
+            else:
+                man_path.write_text(corrupt, encoding="utf-8")
+            if corrupt != valid and _commit_all(repo, labelR2):
+                (tmp / "man-valid-r2.bin").write_text(valid, encoding="utf-8")
+                corrupt_blob = _gout(repo, "rev-parse", "HEAD:" + MANIFEST_REL)
+                valid_blob = _gout(repo, "hash-object", "-w", str(tmp / "man-valid-r2.bin"))
+                if not valid_blob or _g(repo, "replace", corrupt_blob, valid_blob).returncode != 0:
+                    failures.append("fixture setup ({}): git replace failed".format(labelR2))
+                else:
+                    # With the materialization pins, the COMMITTED corrupt manifest is what
+                    # gen_manifest --check sees (exit 2); with them bypassed, the replacement feeds the
+                    # fresh blob to cat-file --batch and the gate would pass, so this case fails alone.
+                    _check(repo, labelR2, 2, "head manifest")
+
+    labelGf = "a non-descendant head masked by a commit graft (info/grafts)"
+    if _sel(labelGf):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if (_regen_fixture_manifest(repo, "post-release " + labelGf, failures, env)
+                and _commit_all(repo, labelGf)):
+            _post_orphan()
+            orphan_oid = _gout(repo, "rev-parse", "HEAD")
+            (repo / ".git" / "info" / "grafts").write_text(orphan_oid + " " + commit1 + "\n",
+                                                           encoding="utf-8")
+            if _g(repo, "merge-base", "--is-ancestor", commit1, "HEAD").returncode != 0:
+                _not_run(failures, labelGf, "this git ignores info/grafts, so the case cannot show "
+                         "that the GIT_GRAFT_FILE pin defeats a planted graft")
+            # The funnel must refuse the grafted parent: fails ALONE when the GIT_GRAFT_FILE pin is
+            # bypassed (claude F3).
+            if _git_raw(repo, ["merge-base", "--is-ancestor", commit1, "HEAD"]).returncode == 0:
+                failures.append("graft: the funneled merge-base honoured the planted graft; the "
+                                "GIT_GRAFT_FILE pin is not effective")
+            _check(repo, labelGf, 2, "not an ancestor")
+
+    labelC = "(F5-2) a plumbing-committed CRLF tag line inside the LF changelog is admitted"
+    if _sel(labelC):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        _write(CHANGELOG_REL, base_cl.replace(v_line, v_line + 'tag = "v1.0.0"\r\n'))
+        # The generated .gitattributes pins changelog.toml to eol=lf, so a porcelain `git add` would
+        # normalize the CRLF away at checkin; the committed blob must REALLY carry it for the exactness
+        # note's variant (2), so the CRLF blob is committed through plumbing (hash-object --no-filters +
+        # update-index --cacheinfo). The manifest is regenerated first against the CRLF working tree,
+        # so the committed manifest binds the exact committed bytes.
+        if _regen_fixture_manifest(repo, "post-release " + labelC, failures, env):
+            blob = _gout(repo, "hash-object", "-w", "--no-filters", str(repo / CHANGELOG_REL))
+            steps = ((("add", "-A"),) if blob else ())
+            ok = bool(blob)
+            for args in steps + (("update-index", "--cacheinfo",
+                                  "100644," + blob + "," + CHANGELOG_REL),
+                                 ("commit", "-q", "--no-verify", "-m", "post-release case")):
+                if ok and _g(repo, *args).returncode != 0:
+                    ok = False
+            if not ok:
+                failures.append("fixture setup ({}): could not plumbing-commit the CRLF blob".format(
+                    labelC))
+            else:
+                _check(repo, labelC, 0, "release-delta: POST-RELEASE")
+
+    labelF = "a corrupt COMMITTED manifest masked by a clean/smudge filter (codex R3-2)"
+    if _sel(labelF):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if _regen_fixture_manifest(repo, "post-release " + labelF, failures, env):
+            man_path = repo / MANIFEST_REL
+            valid = man_path.read_text(encoding="utf-8")
+            marker = 'sha256 = "'
+            base = valid.find("[[sources]]")
+            pos = valid.find(marker, base) if base != -1 else -1
+            corrupt = (valid[:pos + len(marker)] + "0" * 64 + valid[pos + len(marker) + 64:]
+                       if pos != -1 else valid)
+            if corrupt == valid:
+                failures.append("fixture setup ({}): could not corrupt a manifest sha256".format(labelF))
+            else:
+                man_path.write_text(corrupt, encoding="utf-8")
+                if _commit_all(repo, labelF):
+                    (tmp / "man-valid.bin").write_text(valid, encoding="utf-8")
+                    (tmp / "man-corrupt.bin").write_text(corrupt, encoding="utf-8")
+                    (repo / ".git" / "info" / "attributes").write_text(
+                        MANIFEST_REL + " filter=mask\n", encoding="utf-8")
+                    _g(repo, "config", "filter.mask.smudge", "cat " + str(tmp / "man-valid.bin"))
+                    _g(repo, "config", "filter.mask.clean", "cat " + str(tmp / "man-corrupt.bin"))
+                    man_path.unlink()
+                    _g(repo, "checkout", "--", MANIFEST_REL)
+                    if _g(repo, "status", "--porcelain=v1").stdout.strip():
+                        _not_run(failures, labelF, "the filter mask did not leave a clean status, so "
+                                 "the working tree does not hide the corrupt committed manifest")
+                    # The working tree now shows the VALID manifest and status is clean, yet the
+                    # COMMITTED manifest is corrupt: only the materialized-committed-tree legs catch it.
+                    _check(repo, labelF, 2, "head manifest")
+
+    labelS = "a STALE committed manifest with fresh working-tree bytes hidden by skip-worktree (F2)"
+    if _sel(labelS):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        # Commit WITHOUT regenerating: the committed manifest/root/snippet are stale for the new row;
+        # then regenerate the WORKING TREE and hide the drift behind skip-worktree. The old working-tree
+        # freshness check passed this (claude F2's H2); the committed verdict must exit 2.
+        if _commit_all(repo, labelS):
+            if _regen_fixture_manifest(repo, "post-release " + labelS + " (working tree)", failures,
+                                       env):
+                for rel in sorted(POST_RELEASE_PATHS):
+                    _g(repo, "update-index", "--skip-worktree", "--", rel)
+                _check(repo, labelS, 2, "head manifest freshness")
+
+    # ---- fixture: the release commit's manifest disagreeing with its own row (claude M4) ------------
+    labelM = "predecessor-manifest version binding (release-version 9.9.9 at the release commit)"
+    if _sel(labelM):
+        repoM = _extract_to("post-release-binding")
+        if repoM is None or not _pin_fixture_version(repoM, failures):
+            return False
+        man = (repoM / MANIFEST_REL).read_text(encoding="utf-8")
+        bad = man.replace('release-version = "1.0.0"', 'release-version = "9.9.9"', 1)
+        if bad == man:
+            failures.append("fixture setup ({}): could not rewrite release-version".format(labelM))
+        else:
+            (repoM / MANIFEST_REL).write_text(bad, encoding="utf-8")
+            for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                         ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+                _g(repoM, *args)
+            cM = _gout(repoM, "rev-parse", "HEAD")
+            tM = _gout(repoM, "rev-parse", "refs/tags/v1.0.0")
+            (repoM / RELEASES_REL).write_text(
+                "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tM, cM), encoding="utf-8")
+            if _regen_fixture_manifest(repoM, labelM, failures, env) and _commit_all(repoM, labelM):
+                _check(repoM, labelM, 2, "anchored predecessor is inconsistent")
+
+    # ---- fixture: B1 reproduction 2, a malformed genesis tree behind its attestation row ------------
+    labelG = "(B1) a first release whose genesis tree carries a malformed clauses.toml"
+    if _sel(labelG):
+        repoG = _extract_to("post-release-genesis-bad")
+        if repoG is None or not _pin_fixture_version(repoG, failures):
+            return False
+        with open(repoG / CLAUSES_REL, "a", encoding="utf-8") as fh:
+            fh.write('\n[[clause]]\nbogus = "not the 7.2 schema"\n')
+        _g(repoG, "add", "-A")
+        if not _regen_fixture_manifest(repoG, labelG, failures, env):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(repoG, *args)
+        # pre-row control: the zero-row genesis gate rejects this tree outright.
+        _check(repoG, labelG + " (pre-row control)", 2, "clause")
+        cG = _gout(repoG, "rev-parse", "HEAD")
+        tG = _gout(repoG, "rev-parse", "refs/tags/v1.0.0")
+        (repoG / RELEASES_REL).write_text(
+            "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tG, cG), encoding="utf-8")
+        if _regen_fixture_manifest(repoG, labelG, failures, env) and _commit_all(repoG, labelG):
+            _check(repoG, labelG, 2, "clause")
+
+    # ---- fixture: B1 reproduction 1 (two releases) and an altered prior row -------------------------
+    label2 = "(B1) a later release with an undispositioned clause change, after its attestation row"
+    label2b = "an ALTERED prior release row"
+    if _sel(label2) or _sel(label2b):
+        r2 = _extract_to("post-release-two")
+        if r2 is None or not _pin_fixture_version(r2, failures):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(r2, *args)
+        cA = _gout(r2, "rev-parse", "HEAD")
+        tA = _gout(r2, "rev-parse", "refs/tags/v1.0.0")
+        row1 = _row_text("1.0.0", "v1.0.0", tA, cA)
+        (r2 / RELEASES_REL).write_text("format-version = 1\n\n" + row1, encoding="utf-8")
+        if not (_regen_fixture_manifest(r2, "two-release attestation 1.0.0", failures, env)
+                and _commit_all(r2, "two-release attestation 1.0.0")):
+            return False
+        if _edit_clause_consistently(r2) is None:
+            failures.append("fixture setup (two-release): no clause admits a consistent edit")
+            return False
+        (r2 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+        (r2 / CHANGELOG_REL).write_text(
+            '[[release]]\nversion = "1.0.0"\n\n[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
+        if not (_regen_fixture_manifest(r2, "two-release release 1.0.1", failures, env)
+                and _commit_all(r2, "two-release release 1.0.1")):
+            return False
+        _g(r2, "tag", "-a", "v1.0.1", "-m", "1.0.1")
+        cX = _gout(r2, "rev-parse", "HEAD")
+        tX = _gout(r2, "rev-parse", "refs/tags/v1.0.1")
+        if _sel(label2):
+            # pre-row control: before its row lands, the undispositioned release is exit 1.
+            _check(r2, label2 + " (pre-row control)", 1, "below the required")
+        rows2 = "format-version = 1\n\n" + row1 + "\n" + _row_text("1.0.1", "v1.0.1", tX, cX)
+        (r2 / RELEASES_REL).write_text(rows2, encoding="utf-8")
+        if not (_regen_fixture_manifest(r2, "two-release attestation 1.0.1", failures, env)
+                and _commit_all(r2, "two-release attestation 1.0.1")):
+            return False
+        if _sel(label2):
+            _check(r2, label2, 1, "below the required")
+        if _sel(label2b):
+            (r2 / RELEASES_REL).write_text(rows2.replace("a" * 64, "b" * 64, 1), encoding="utf-8")
+            if (_regen_fixture_manifest(r2, label2b, failures, env)
+                    and _commit_all(r2, label2b)):
+                _check(r2, label2b, 2, "plus exactly the newest row")
+
+    # ---- QA round-4: environment and object-store substitution (codex R4-2, claude m2) --------------
+    # One shared geometry: acceptA is the ACCEPTED attestation commit (the exit-0 state), cloned as the
+    # GIT_DIR decoy; badB is the forbidden-changelog commit (plain verdict exit 2, by more than the
+    # newest); `forged` maps each post-release-path blob id AT badB to the acceptA bytes, so a forged
+    # store serving them would reconstruct the accepted content under the bad ids.
+    import zlib
+
+    def _loose_zlib(body_):
+        return zlib.compress(b"blob " + str(len(body_)).encode("ascii") + b"\x00" + body_, 9)
+
+    labelD = "(R4 GIT_DIR) a decoy repository in GIT_DIR must not redirect the committed reads"
+    labelO = "(R4 overlay) a forged GIT_OBJECT_DIRECTORY overlay must not substitute committed bytes"
+    labelL = "(R4 loose) an overwritten loose object must fail the per-object re-hash"
+    if any(_sel(x) for x in (labelD, labelO, labelL)):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        accept_a = None
+        decoy = tmp / "r4-decoy"
+        if (_regen_fixture_manifest(repo, "round-4 accepted base", failures, env)
+                and _commit_all(repo, "round-4 accepted base")):
+            accept_a = _gout(repo, "rev-parse", "HEAD")
+            if _g(repo, "clone", "-q", "--no-hardlinks", str(repo), str(decoy)).returncode != 0:
+                failures.append("fixture setup (round-4): could not clone the GIT_DIR decoy")
+                accept_a = None
+        if accept_a is None:
+            failures.append("NOT RUN: the round-4 substitution cases (accepted-base setup failed)")
+        else:
+            good_bytes = {rel: _g(repo, "show", accept_a + ":" + rel).stdout
+                          for rel in sorted(POST_RELEASE_PATHS)}
+            good_oids = {rel: _gout(repo, "rev-parse", accept_a + ":" + rel)
+                         for rel in sorted(POST_RELEASE_PATHS)}
+            _reset_case()
+            _write(RELEASES_REL, row)
+            _write(CHANGELOG_REL, base_cl + "date = \"2000-01-01\"\n")
+            if (_regen_fixture_manifest(repo, "round-4 forbidden-changelog base", failures, env)
+                    and _commit_all(repo, "round-4 forbidden-changelog base")):
+                bad_head = _gout(repo, "rev-parse", "HEAD")
+                forged = {}
+                for rel in sorted(POST_RELEASE_PATHS):
+                    bad_oid = _gout(repo, "rev-parse", "HEAD:" + rel)
+                    if bad_oid and good_oids[rel] and bad_oid != good_oids[rel]:
+                        forged[bad_oid] = good_bytes[rel]
+                if not forged:
+                    failures.append("fixture setup (round-4): no differing blob to forge")
+                if _sel(labelD):
+                    # codex R4-2: with GIT_DIR exported, the UNSCRUBBED funnel reads the decoy (whose
+                    # HEAD is the accepted state) and the gate printed POST-RELEASE; the scrubbed
+                    # funnel reads the real repository and must refuse on the committed changelog edit.
+                    os.environ["GIT_DIR"] = str(decoy / ".git")
+                    try:
+                        _check(repo, labelD, 2, "by more than the newest")
+                    finally:
+                        os.environ.pop("GIT_DIR", None)
+                if _sel(labelO) and forged:
+                    # claude m2 / codex R4-2 object overlay: forged loose objects serving the ACCEPTED
+                    # bytes under the bad ids, fronted by GIT_OBJECT_DIRECTORY with the real store as
+                    # the alternate. The scrubbed funnel must read the RECORDED bytes (asserted on the
+                    # funneled _show directly, so a scrub bypass fails this case alone even where the
+                    # re-hash still refuses) and the verdict must stay the refusal.
+                    side = tmp / "r4-overlay-objects"
+                    for oid_, body_ in forged.items():
+                        d_ = side / oid_[:2]
+                        d_.mkdir(parents=True, exist_ok=True)
+                        (d_ / oid_[2:]).write_bytes(_loose_zlib(body_))
+                    os.environ["GIT_OBJECT_DIRECTORY"] = str(side)
+                    os.environ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(
+                        repo / ".git" / "objects")
+                    try:
+                        try:
+                            funneled = _show(repo, bad_head, CHANGELOG_REL)
+                        except GateError as exc:
+                            funneled = b""
+                            failures.append("object overlay: the funneled _show failed ({}); with the "
+                                            "GIT_* scrub it must return the RECORDED bytes".format(exc))
+                        if funneled and b"2000-01-01" not in funneled:
+                            failures.append("object overlay: the funneled _show returned the "
+                                            "SUBSTITUTED bytes; the GIT_* environment scrub is not "
+                                            "effective (codex R4-2 / claude m2)")
+                        _check(repo, labelO, 2, "by more than the newest")
+                    finally:
+                        os.environ.pop("GIT_OBJECT_DIRECTORY", None)
+                        os.environ.pop("GIT_ALTERNATE_OBJECT_DIRECTORIES", None)
+                if _sel(labelL) and forged:
+                    # claude m2 overwritten-loose-object probe: the accepted bytes written INTO
+                    # .git/objects under the bad ids, no environment at all; only the per-object
+                    # re-hash can refuse (with it removed, the forged store reconstructs the accepted
+                    # tree and the gate prints POST-RELEASE).
+                    saved_, ok_l = {}, True
+                    for oid_, body_ in forged.items():
+                        q_ = repo / ".git" / "objects" / oid_[:2] / oid_[2:]
+                        if not q_.is_file():
+                            failures.append("fixture setup ({}): blob {} is not a loose object; the "
+                                            "overwrite cannot be planted".format(labelL, oid_))
+                            ok_l = False
+                            break
+                        saved_[q_] = q_.read_bytes()
+                        q_.chmod(0o644)
+                        q_.write_bytes(_loose_zlib(body_))
+                        q_.chmod(0o444)
+                    try:
+                        if ok_l:
+                            _check(repo, labelL, 2, "re-hash mismatch")
+                    finally:
+                        for q_, b_ in saved_.items():
+                            q_.chmod(0o644)
+                            q_.write_bytes(b_)
+                            q_.chmod(0o444)
+
+    # ---- QA round-4 claude M1: the profiles decision comes from the COMMITTED trees -----------------
+    labelP = "(R4 profiles) a committed profiles artifact with the checkout copy deleted still refuses"
+    if _sel(labelP):
+        repo_p = _extract_to("post-release-profiles")
+        if repo_p is None or not _pin_fixture_version(repo_p, failures):
+            return False
+        (repo_p / PROFILES_REL).write_text("format-version = 1\n", encoding="utf-8")
+        _g(repo_p, "add", "-A")
+        if not _regen_fixture_manifest(repo_p, labelP, failures, env):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(repo_p, *args)
+        c_p = _gout(repo_p, "rev-parse", "HEAD")
+        t_p = _gout(repo_p, "rev-parse", "refs/tags/v1.0.0")
+        (repo_p / RELEASES_REL).write_text(
+            "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", t_p, c_p), encoding="utf-8")
+        if _regen_fixture_manifest(repo_p, labelP, failures, env) and _commit_all(repo_p, labelP):
+            # Delete the CHECKOUT copy: the old gate (an os.lstat decision) then printed POST-RELEASE
+            # exit 0 for a tree whose COMMITTED profiles artifact must fail closed (claude M1).
+            (repo_p / PROFILES_REL).unlink()
+            _check(repo_p, labelP, 2, "has shipped")
+
+    # ---- QA round-4 codex R4-1 / claude m3: gate code and validator provenance ----------------------
+    labelGC = "(R4 gate-code) a gate import diverging from the committed HEAD copy refuses"
+    if _sel(labelGC):
+        repo_g4 = _extract_to("post-release-gatecode")
+        if repo_g4 is None:
+            return False
+        schema_p = repo_g4 / "tools" / "_release_schema.py"
+        schema_p.write_text(schema_p.read_text(encoding="utf-8")
+                            + "\n# QA round-4 gate-code divergence fixture marker\n", encoding="utf-8")
+        if not _pin_fixture_version(repo_g4, failures):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(repo_g4, *args)
+        c_g4 = _gout(repo_g4, "rev-parse", "HEAD")
+        t_g4 = _gout(repo_g4, "rev-parse", "refs/tags/v1.0.0")
+        (repo_g4 / RELEASES_REL).write_text(
+            "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", t_g4, c_g4), encoding="utf-8")
+        if _regen_fixture_manifest(repo_g4, labelGC, failures, env) and _commit_all(repo_g4, labelGC):
+            # The RUNNING gate imports the live pack modules; this fixture HEAD commits a divergent
+            # tools/_release_schema.py, so the byte comparison against the judged HEAD must refuse.
+            _check(repo_g4, labelGC, 2, "differs from HEAD")
+
+    labelV = "(R4 validators) the materialized committed tree runs its OWN validator copies"
+    if _sel(labelV):
+        repo_v = _extract_to("post-release-validators")
+        if repo_v is None:
+            return False
+        # A path-conditional tripwire PREPENDED to the committed check_manifest.py: it exits 7 ONLY
+        # when executed from a raw materialization (the aiqt-release-delta-head-/-prev- temp dirs), so
+        # the fixture checkout and the gate CLI below behave normally while the gate must surface rc=7
+        # from the COMMITTED copy it materializes. With the provenance fix reverted (the checkout
+        # sibling running instead), the tripwire never fires and the gate prints POST-RELEASE exit 0.
+        trip = ("import pathlib as _qa4_pl\n"
+                "_qa4_p = str(_qa4_pl.Path(__file__).resolve())\n"
+                "if \"aiqt-release-delta-head-\" in _qa4_p or \"aiqt-release-delta-prev-\" in _qa4_p:\n"
+                "    raise SystemExit(7)\n")
+        cm_p = repo_v / "tools" / "check_manifest.py"
+        cm_p.write_text(trip + cm_p.read_text(encoding="utf-8"), encoding="utf-8")
+        if not _pin_fixture_version(repo_v, failures):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(repo_v, *args)
+        c_v = _gout(repo_v, "rev-parse", "HEAD")
+        t_v = _gout(repo_v, "rev-parse", "refs/tags/v1.0.0")
+        (repo_v / RELEASES_REL).write_text(
+            "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", t_v, c_v), encoding="utf-8")
+        if _regen_fixture_manifest(repo_v, labelV, failures, env) and _commit_all(repo_v, labelV):
+            # The gate runs as a CLI FROM the fixture checkout (its code equals the fixture HEAD, so
+            # the gate-code comparison passes and the validator provenance alone is under test).
+            try:
+                proc_v = subprocess.run(
+                    [sys.executable, "-B", str(repo_v / "tools" / "check_release_delta.py")],
+                    cwd=str(repo_v), capture_output=True, env=env, timeout=900)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                failures.append("fixture setup ({}): could not run the fixture gate CLI ({})".format(
+                    labelV, exc))
+            else:
+                out_v = (proc_v.stdout + proc_v.stderr).decode("utf-8", "replace")
+                if proc_v.returncode != 2 or "rc=7" not in out_v:
+                    failures.append("{}: expected exit 2 with rc=7 from the materialized committed "
+                                    "copy (got rc={}: {})".format(labelV, proc_v.returncode,
+                                                                   out_v.strip()[-300:]))
+
+    # ---- Committed-copy decision: launch re-execution and committed routing -------------------------
+    # The launch-attack cases drive the EXACT CI launch (python3 -I -B tools/check_release_delta.py) so
+    # the stage-1 re-execution of the COMMITTED gate copy is itself under test, not the in-process
+    # run(). They use a DEDICATED fresh fixture (immune to any prior case's state) carrying a STALE
+    # committed post-release state (a release row with no manifest regeneration), whose HONEST verdict
+    # is exit 2 at the head-manifest-freshness leg. A baseline run with NO attack is asserted first, so
+    # the discriminator target is proven valid; then each attack must leave that verdict unchanged.
+    # With the round-5 fix reverted each attack flips to exit 0 (verified out-of-tree; see report).
+    labelR5 = "(R5 launch) the stage-1 committed re-execution and committed routing"
+    if _sel("(R5 ") or _sel("(R6 ") or _sel("(R7 ") or _sel("(R8 ") or _sel("(R9 "):
+        r5 = _extract_to("post-release-r5")
+        if r5 is None or not _pin_fixture_version(r5, failures):
+            return False
+        r5_base_cl = ('[[release]]\nversion = "0.9.0"\n\n[[release]]\nversion = "1.0.0"\n\n'
+                      '[release.artifacts]\nsbom = "sha256:0000"\n')
+        (r5 / CHANGELOG_REL).write_text(r5_base_cl, encoding="utf-8")
+        _g(r5, "add", "-A")
+        if not _regen_fixture_manifest(r5, "post-release-r5 base", failures, env):
+            return False
+        for a_ in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                   ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            if _g(r5, *a_).returncode != 0:
+                failures.append("fixture setup (R5): could not build the dedicated repo")
+                return False
+        r5_commit1 = _gout(r5, "rev-parse", "HEAD")
+        r5_tobj = _gout(r5, "rev-parse", "refs/tags/v1.0.0")
+        r5_row = "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", r5_tobj, r5_commit1)
+
+        def _r5_stale():
+            # Reset to the release commit and append the row WITHOUT regenerating the manifest, so the
+            # committed state is stale (honest exit 2 at head manifest freshness). Returns True on a
+            # clean committed stale state whose baseline verdict is the expected exit 2.
+            for a_ in (("reset", "-q", "--hard", r5_commit1), ("clean", "-q", "-fdx")):
+                _g(r5, *a_)
+            (r5 / RELEASES_REL).write_text(r5_row, encoding="utf-8")
+            return _commit_all(r5, "R5 stale state")
+
+        def _cli5(label_, extra_env=None):
+            env_ = dict(env)
+            env_.update(extra_env or {})
+            try:
+                proc_ = subprocess.run(
+                    [sys.executable, "-I", "-B", str(r5 / "tools" / "check_release_delta.py")],
+                    cwd=str(r5), capture_output=True, env=env_, timeout=1500)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                failures.append("fixture setup ({}): could not run the R5 gate CLI "
+                                "({})".format(label_, exc))
+                return None, ""
+            return proc_.returncode, (proc_.stdout + proc_.stderr).decode("utf-8", "replace")
+
+        def _cli5_expect(label_, want_rc, want_msg, extra_env=None):
+            rc_, out_ = _cli5(label_, extra_env)
+            if rc_ is None:
+                return
+            if rc_ != want_rc or want_msg not in out_:
+                failures.append("{}: expected exit {} with {!r} under the CI launch "
+                                "(got rc={}: {})".format(label_, want_rc, want_msg, rc_,
+                                                                      out_.strip()[-300:]))
+
+        # BASELINE: the stale committed state, no attack, must be exit 2 at head manifest freshness.
+        # This proves the discriminator target for every attack below (and that stage 1/stage 2 and the
+        # committed routing reach that leg over the committed revision).
+        if _r5_stale():
+            _cli5_expect(labelR5 + " baseline (stale, no attack)", 2, "head manifest freshness")
+
+        _FAKE_PASS = "release-delta: POST-RELEASE"
+        _SHADOW = ("import os\n"
+                   "print(" + repr(_FAKE_PASS + " (R5 planted module, must never run)") + ")\n"
+                   "os._exit(0)\n")
+
+        label5a = "(R5 shadow) an untracked tools/tempfile.py shadow module never runs"
+        if _sel(label5a) and _r5_stale():
+            # Reproduction (a): the pre-fix gate imported the CHECKOUT tools/ first, so this untracked
+            # shadow of a lazily imported stdlib module faked a pass and exited 0. Stage 2 runs from the
+            # materialized COMMITTED tree (no untracked file), so the shadow never loads.
+            (r5 / "tools" / "tempfile.py").write_text(_SHADOW, encoding="utf-8")
+            try:
+                _cli5_expect(label5a, 2, "head manifest freshness")
+            finally:
+                tp = r5 / "tools" / "tempfile.py"
+                if tp.exists():
+                    tp.unlink()
+
+        label5b = "(R5 pyc) a crafted __pycache__ .pyc behind a byte-identical .py never loads"
+        if _sel(label5b) and _r5_stale():
+            # Reproduction (b): a crafted UNCHECKED_HASH .pyc for a gate module, planted in the CHECKOUT
+            # tools/__pycache__ while the .py stays byte-identical to HEAD. A checkout-running gate under
+            # -B still READS an existing .pyc; stage 2 runs from the materialized committed tree under -X
+            # pycache_prefix=<fresh dir>, so the checkout .pyc is never consulted.
+            import importlib.util as _ilu
+            import py_compile as _pyc
+            src_dir = tmp / "r5-pyc-src"
+            src_dir.mkdir(exist_ok=True)
+            src = src_dir / "_release_schema.py"
+            src.write_text("import os\n"
+                           "print(" + repr(_FAKE_PASS + " (R5 crafted pyc, must never load)") + ")\n"
+                           "os._exit(0)\n", encoding="utf-8")
+            cfile = _ilu.cache_from_source(str(src))
+            ok_pyc = True
+            try:
+                _pyc.compile(str(src), cfile=cfile,
+                             invalidation_mode=_pyc.PycInvalidationMode.UNCHECKED_HASH)
+            except (OSError, _pyc.PyCompileError, ValueError) as exc:
+                failures.append("fixture setup ({}): could not build the crafted .pyc "
+                                "({})".format(label5b, exc))
+                ok_pyc = False
+            if ok_pyc:
+                co_pyc = r5 / "tools" / "__pycache__"
+                co_pyc.mkdir(parents=True, exist_ok=True)
+                planted = co_pyc / Path(cfile).name
+                planted.write_bytes(Path(cfile).read_bytes())
+                try:
+                    _cli5_expect(label5b, 2, "head manifest freshness")
+                finally:
+                    if planted.exists():
+                        planted.unlink()
+
+        label5c = "(R5 fsmonitor) a repo-config core.fsmonitor hook neither runs nor flips the verdict"
+        if _sel(label5c) and _r5_stale():
+            # Reproduction (c): a repo-config fsmonitor program that, when a worktree-scanning git call
+            # runs it, plants tools/tempfile.py AND touches a marker. Every funneled git call now pins
+            # core.fsmonitor=false, so the hook never runs (marker absent); the verdict stays exit 2.
+            marker = r5 / "tools" / "r5-fsmon-ran.marker"
+            hook = tmp / "fsmon-plant.sh"
+            hook.write_text("#!/bin/sh\n"
+                            ": > " + str(marker) + "\n"
+                            ": > " + str(r5 / "tools" / "tempfile.py") + "\n"
+                            "exit 1\n", encoding="utf-8")
+            hook.chmod(0o755)
+            _g(r5, "config", "core.fsmonitor", str(hook))
+            try:
+                _cli5_expect(label5c, 2, "head manifest freshness")
+                if marker.exists():
+                    failures.append("{}: the core.fsmonitor hook RAN under the gate launch; the "
+                                    "core.fsmonitor=false pin is not effective".format(label5c))
+            finally:
+                _g(r5, "config", "--unset-all", "core.fsmonitor")
+                for p_ in (marker, r5 / "tools" / "tempfile.py"):
+                    if p_.exists():
+                        p_.unlink()
+
+        label5f = ("(R5 filter/hook) a repo-config clean filter and post-index-change hook never run "
+                   "under the drift advisory")
+        if _sel(label5f) and _r5_stale():
+            # Sibling of reproduction (c): `git status` refreshes the index, so it runs the clean filter
+            # of a stat-dirty tracked file and, when it writes the refreshed index, the post-index-change
+            # hook; core.fsmonitor=false stops neither. The drift advisory therefore reads diff-index and
+            # ls-files only. Untracked repo-local config: .git/info/attributes names the filter for every
+            # path, core.hooksPath names a hook directory, and a tracked file is made stat-dirty with
+            # identical content. Neither marker may appear and the verdict stays exit 2.
+            m_filter = tmp / "r5-filter-ran.marker"
+            m_hook = tmp / "r5-hook-ran.marker"
+            hooks_dir = tmp / "r5-hooks"
+            hooks_dir.mkdir(exist_ok=True)
+            (hooks_dir / "post-index-change").write_text(
+                "#!/bin/sh\n: > " + str(m_hook) + "\n", encoding="utf-8")
+            (hooks_dir / "post-index-change").chmod(0o755)
+            info_attr = r5 / ".git" / "info" / "attributes"
+            info_attr.parent.mkdir(parents=True, exist_ok=True)
+            info_attr.write_text("* filter=r5plant\n", encoding="utf-8")
+            _g(r5, "config", "filter.r5plant.clean", "sh -c ': > " + str(m_filter) + "; cat'")
+            _g(r5, "config", "core.hooksPath", str(hooks_dir))
+            dirty = r5 / CHANGELOG_REL
+            st_ = dirty.stat()
+            os.utime(dirty, ns=(st_.st_atime_ns, st_.st_mtime_ns + 5 * 10 ** 9))
+            for m_ in (m_filter, m_hook):
+                if m_.exists():
+                    m_.unlink()
+            try:
+                _cli5_expect(label5f, 2, "head manifest freshness")
+                for m_, what_ in ((m_filter, "clean filter"), (m_hook, "post-index-change hook")):
+                    if m_.exists():
+                        failures.append("{}: the repo-config {} RAN under the gate launch; the drift "
+                                        "advisory must not refresh the index".format(label5f, what_))
+            finally:
+                _g(r5, "config", "--unset-all", "filter.r5plant.clean")
+                _g(r5, "config", "--unset-all", "core.hooksPath")
+                for p_ in (info_attr, m_filter, m_hook):
+                    if p_.exists():
+                        p_.unlink()
+
+        label5p = "(R5 PYTHONPATH) an inherited PYTHONPATH sitecustomize never reaches a child"
+        if _sel(label5p) and _r5_stale():
+            # Reproduction M2: a sitecustomize on PYTHONPATH that exits 0 when a validator child runs.
+            # The gate runs under -I, but the pre-fix child launches dropped that isolation; every child
+            # now launches under -I, so PYTHONPATH and sitecustomize are ignored and the verdict stays
+            # exit 2.
+            site_dir = tmp / "r5-sitecustomize"
+            site_dir.mkdir(exist_ok=True)
+            (site_dir / "sitecustomize.py").write_text(
+                "import os, sys\n"
+                "_a0 = sys.argv[0] if sys.argv else ''\n"
+                "if _a0.endswith(('gen_manifest.py', 'check_manifest.py', 'gen_renderers.py',\n"
+                "                 'check_clauses.py')):\n"
+                "    os._exit(0)\n", encoding="utf-8")
+            _cli5_expect(label5p, 2, "head manifest freshness",
+                         extra_env={"PYTHONPATH": str(site_dir)})
+
+        label5r = "(R5 routing) checkout routing records reverted to the release judged from committed"
+        if _sel(label5r) and _r5_stale():
+            # Reproduction M1: with the committed state stale (honest exit 2), the CHECKOUT copies of the
+            # routing records (releases.toml, changelog.toml) are reverted to the release commit's
+            # genesis-shaped bytes. The pre-fix router read the checkout and branched to GENESIS/DELTA
+            # (exit 0); committed routing reads HEAD's committed records and still routes POST-RELEASE,
+            # so the stale committed manifest is still caught (exit 2 head manifest freshness).
+            for rel in (RELEASES_REL, CHANGELOG_REL):
+                _g(r5, "checkout", r5_commit1, "--", rel)
+            try:
+                _cli5_expect(label5r, 2, "head manifest freshness")
+            finally:
+                _g(r5, "checkout", "HEAD", "--", RELEASES_REL, CHANGELOG_REL)
+
+        label5s = "(R5 stage) the accepted committed state re-executes the committed copy and passes"
+        if _sel(label5s):
+            # Positive control: a clean one-row attestation state (manifest regenerated), through the
+            # EXACT CI launch, must re-execute the committed gate copy (stage 1) and print POST-RELEASE
+            # exit 0. A stage-1 materialization or re-exec regression surfaces here as a non-zero exit.
+            for a_ in (("reset", "-q", "--hard", r5_commit1), ("clean", "-q", "-fdx")):
+                _g(r5, *a_)
+            (r5 / RELEASES_REL).write_text(r5_row, encoding="utf-8")
+            if _regen_fixture_manifest(r5, "post-release-r5 accepted", failures, env) \
+                    and _commit_all(r5, "R5 accepted state"):
+                _cli5_expect(label5s, 0, "release-delta: POST-RELEASE")
+
+        # ---- QA round-6 codex blocker 1 / claude 3: a git FAILURE is never the single-stage
+        # fallback. Each case damages the repository (or removes git from PATH) and plants a
+        # checkout tools/_gen_common.py tripwire that fakes a pass if ANY checkout module is
+        # imported: the gate must exit 2 from stage 1 with the tripwire inert. Only a positively
+        # identified absent committed state (no repository with no .git entry, or an unborn HEAD)
+        # may reach the checkout imports.
+        _R6_TRIP = ("import os\n"
+                    "print(" + repr(_FAKE_PASS + " (R6 checkout import, must never run)")
+                    + ", flush=True)\n"
+                    "os._exit(0)\n")
+
+        label6h = "(R6 corrupt HEAD) a damaged repository fails closed, never the checkout fallback"
+        if _sel(label6h) and _r5_stale():
+            head6 = r5 / ".git" / "HEAD"
+            orig_head6 = head6.read_bytes()
+            gc6 = r5 / "tools" / "_gen_common.py"
+            orig_gc6 = gc6.read_bytes()
+            gc6.write_text(_R6_TRIP, encoding="utf-8")
+            head6.write_bytes(b"garbage, neither a ref nor an object id\n")
+            try:
+                _cli5_expect(label6h, 2, "no probe positively established")
+            finally:
+                head6.write_bytes(orig_head6)
+                gc6.write_bytes(orig_gc6)
+
+        label6b = "(R6 bad config) a config parse failure fails closed, never the checkout fallback"
+        if _sel(label6b) and _r5_stale():
+            cfg6 = r5 / ".git" / "config"
+            orig_cfg6 = cfg6.read_bytes()
+            gc6 = r5 / "tools" / "_gen_common.py"
+            orig_gc6 = gc6.read_bytes()
+            gc6.write_text(_R6_TRIP, encoding="utf-8")
+            cfg6.write_bytes(orig_cfg6 + b"\n[broken\n")
+            try:
+                _cli5_expect(label6b, 2, "no probe positively established")
+            finally:
+                cfg6.write_bytes(orig_cfg6)
+                gc6.write_bytes(orig_gc6)
+
+        label6g = "(R6 no git) git absent from PATH is a clean exit 2, never a traceback"
+        if _sel(label6g) and _r5_stale():
+            empty6 = tmp / "r6-empty-path"
+            empty6.mkdir(exist_ok=True)
+            _cli5_expect(label6g, 2, "cannot launch git", extra_env={"PATH": str(empty6)})
+
+        label6i = "(R6 stage2 -I) a PYTHONPATH sitecustomize keyed to the stage-2 launch never fires"
+        if _sel(label6i) and _r5_stale():
+            # QA round-6 claude 1: the (R5 PYTHONPATH) sitecustomize fires only for VALIDATOR
+            # children, so removing -I from the stage-1 child launch went undetected. This payload
+            # fires exactly for check_release_delta.py launched with --stage2-tree: with -I on the
+            # stage-1 child it never runs; without it, stage 2 fakes a pass and the case goes red.
+            site6 = tmp / "r6-sitecustomize"
+            site6.mkdir(exist_ok=True)
+            (site6 / "sitecustomize.py").write_text(
+                "import os, sys\n"
+                "_a0 = sys.argv[0] if sys.argv else ''\n"
+                "if _a0.endswith('check_release_delta.py') and '--stage2-tree' in sys.argv:\n"
+                "    print(" + repr(_FAKE_PASS + " (R6 sitecustomize, must never run)") + ")\n"
+                "    os._exit(0)\n", encoding="utf-8")
+            _cli5_expect(label6i, 2, "head manifest freshness",
+                         extra_env={"PYTHONPATH": str(site6)})
+
+        # ---- QA round-7 codex blocker: git DISCOVERY searches ancestor directories, so a damaged
+        # ANCESTOR repository (a corrupt .git/HEAD, a .git file naming a missing gitdir) fails git
+        # with the same "not a git repository" wording as true absence. Absence may hold only when
+        # no .git entry exists at the gate root or ANY ancestor; each case plants the checkout
+        # tripwire and the gate must exit 2 from stage 1 with the tripwire inert. The control case
+        # (no .git anywhere in the ancestry) must still reach the checkout gate by design.
+        label7a = "(R7 corrupt ancestor) a damaged ANCESTOR repository fails closed, never the fallback"
+        label7g = ("(R7 dangling ancestor .git) an ancestor .git file naming a missing gitdir "
+                   "fails closed, never the fallback")
+        label7n = ("(R7 no repository) a root with no .git in any ancestor still reaches the "
+                   "checkout gate")
+        label8s = ("(R8 symlinked launch) a damaged ancestor reached through a symlinked absolute "
+                   "launch path fails closed, never the fallback")
+        label8b = "(R8 damaged bare ancestor) a bare ancestor with a corrupt HEAD fails closed"
+        label8v = ("(R8 ancestor variants) dangling, looping and unreadable ancestor .git entries "
+                   "fail closed; an unborn ancestor HEAD still reaches the checkout gate")
+        label9p = ("(R9 physical gate root) a symlink followed by `..`, or a symlinked gate file, "
+                   "never hides the gate's physical repository")
+        label9u = ("(R9 unsearchable ancestor) an ancestor without search permission fails "
+                   "closed through the OSError branch")
+        label10f = ("(R10 no physical file) a launch naming no file on disk (a pipe read through "
+                    "/dev/fd/N, a source run with no __file__) is exit 2, never a traceback")
+        label10r = ("(R10 hand-off root) a non-git copy of the gate run from inside another "
+                    "repository judges its own root, never the cwd")
+        if (_sel(label7a) or _sel(label7g) or _sel(label7n) or _sel(label8s) or _sel(label8b)
+                or _sel(label8v) or _sel(label9p) or _sel(label9u) or _sel(label10f)
+                or _sel(label10r)):
+            gate_bytes7 = (r5 / "tools" / "check_release_delta.py").read_bytes()
+
+            def _mini_gate7(base_):
+                proj_ = base_ / "project"
+                (proj_ / "tools").mkdir(parents=True)
+                (proj_ / "tools" / "check_release_delta.py").write_bytes(gate_bytes7)
+                (proj_ / "tools" / "_gen_common.py").write_text(_R6_TRIP, encoding="utf-8")
+                return proj_
+
+            def _gate_cli7(label_, proj_, want_rc, want_msg, cwd_=None, argv_=None):
+                try:
+                    proc_ = subprocess.run(
+                        [sys.executable, "-I", "-B",
+                         argv_ or str(proj_ / "tools" / "check_release_delta.py")],
+                        cwd=str(cwd_ or proj_), capture_output=True, env=env, timeout=600)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    failures.append("fixture setup ({}): could not run the gate CLI ({})".format(
+                        label_, exc))
+                    return
+                out_ = (proc_.stdout + proc_.stderr).decode("utf-8", "replace")
+                if proc_.returncode != want_rc or want_msg not in out_:
+                    failures.append("{}: expected exit {} with {!r} (got rc={}: {})".format(
+                        label_, want_rc, want_msg, proc_.returncode, out_.strip()[-300:]))
+                elif (want_msg != "(R6 checkout import, must never run)"
+                      and "(R6 checkout import, must never run)" in out_):
+                    failures.append("{}: the checkout tripwire ran: {}".format(
+                        label_, out_.strip()[-300:]))
+
+            def _marker_free_base7():
+                import tempfile as _tempfile7b
+                for cand_ in (tmp, Path(_tempfile7b.gettempdir()), Path("/var/tmp")):
+                    if not _stage1_repository_in_ancestry(str(cand_)):
+                        return cand_
+                return None
+
+        if _sel(label7a):
+            anc7 = tmp / "r7-corrupt-ancestor"
+            proj7 = _mini_gate7(anc7)
+            _g(anc7, "init", "-q")
+            (anc7 / ".git" / "HEAD").write_bytes(b"garbage, neither a ref nor an object id\n")
+            _gate_cli7(label7a, proj7, 2, "no probe positively established")
+            if _stage1_no_committed_state(str(proj7)) or _no_committed_state(proj7):
+                failures.append(label7a + ": both absence predicates must refuse a damaged "
+                                "ancestor repository (git discovery searches ancestors)")
+
+        if _sel(label7g):
+            dgl7 = tmp / "r7-dangling-ancestor"
+            proj7g = _mini_gate7(dgl7)
+            (dgl7 / ".git").write_text("gitdir: " + str(dgl7 / "missing-gitdir") + "\n",
+                                       encoding="utf-8")
+            _gate_cli7(label7g, proj7g, 2, "no probe positively established")
+            if _stage1_no_committed_state(str(proj7g)) or _no_committed_state(proj7g):
+                failures.append(label7g + ": both absence predicates must refuse a dangling "
+                                "ancestor .git file")
+
+        if _sel(label7n):
+            import shutil as _shutil7
+            import tempfile as _tempfile7
+            base7 = None
+            for cand7 in (tmp, Path(_tempfile7.gettempdir()), Path("/var/tmp")):
+                if not _stage1_repository_in_ancestry(str(cand7)):
+                    base7 = cand7
+                    break
+            if base7 is None:
+                failures.append(label7n + ": every candidate temp path has a .git entry or a "
+                                "git-directory marker on its lexical or physical ancestry; the "
+                                "true no-repository control needs a marker-free path (fixture-env)")
+            else:
+                nr7 = Path(_tempfile7.mkdtemp(prefix="aiqt-r7-norepo-", dir=str(base7)))
+                try:
+                    _gate_cli7(label7n, _mini_gate7(nr7), 0,
+                               "(R6 checkout import, must never run)")
+                finally:
+                    _shutil7.rmtree(nr7, ignore_errors=True)
+
+        # ---- Superset-of-discovery decision: absence holds only when an inspection that
+        # is a SUPERSET of git discovery finds nothing. Each case plants the checkout tripwire;
+        # the CLI must exit 2 from stage 1 and BOTH absence predicates must refuse. (R8 symlinked
+        # launch) carries codex blocker 1 and claude F1 reproductions A and B: `git -C` walks the
+        # PHYSICAL ancestry, so with the realpath walk removed each goes red with the tripwire
+        # firing. (R8 damaged bare ancestor) carries codex blocker 2 and claude F2 reproduction D:
+        # a bare repository keeps its markers in its own directory with no .git entry, so with the
+        # marker check removed it goes red. (R8 ancestor variants) keeps the dangling-symlink,
+        # symlink-loop and unreadable .git ancestors fail-closed and the unborn ancestor HEAD on
+        # the positively identified absent path (verified out-of-tree; see the round-8 report).
+        def _refuse8(label_, path_):
+            if _stage1_no_committed_state(str(path_)) or _no_committed_state(Path(str(path_))):
+                failures.append(label_ + ": both absence predicates must refuse (a damaged "
+                                "repository on the lexical or physical ancestry)")
+
+        if _sel(label8s):
+            s8 = tmp / "r8-symlinked-launch"
+            (s8 / "elsewhere").mkdir(parents=True)
+            ca8 = s8 / "codex-anc"
+            projc8 = _mini_gate7(ca8)
+            _g(ca8, "init", "-q")
+            (ca8 / ".git" / "HEAD").write_bytes(b"garbage\n")
+            os.symlink(str(projc8), str(s8 / "alias"))
+            aa8 = s8 / "claude-a"
+            proja8 = _mini_gate7(aa8 / "sub")
+            _g(aa8, "init", "-q")
+            (aa8 / ".git" / "HEAD").write_bytes(b"garbage, neither a ref nor an object id\n")
+            os.symlink(str(aa8 / "sub"), str(s8 / "elsewhere" / "link"))
+            bb8 = s8 / "claude-b"
+            _mini_gate7(bb8 / "sub")
+            (bb8 / ".git").write_text("gitdir: " + str(bb8 / "missing-gitdir") + "\n",
+                                      encoding="utf-8")
+            os.symlink(str(bb8 / "sub"), str(s8 / "elsewhere" / "link2"))
+            for tag8, via8, cwd8 in (
+                    ("codex alias", s8 / "alias", None),
+                    ("claude A", s8 / "elsewhere" / "link" / "project", None),
+                    ("claude A, cwd=project", s8 / "elsewhere" / "link" / "project", proja8),
+                    ("claude B gitfile", s8 / "elsewhere" / "link2" / "project", None)):
+                lab8 = "{} [{}]".format(label8s, tag8)
+                _gate_cli7(lab8, via8, 2, "no probe positively established", cwd8)
+                _refuse8(lab8, via8)
+
+        if _sel(label8b):
+            b8 = tmp / "r8-bare-ancestor"
+            src8 = b8 / "src"
+            src8.mkdir(parents=True)
+            (src8 / "f.txt").write_text("one commit\n", encoding="utf-8")
+            _git_init_commit(src8, "r8 bare source")
+            bare8 = b8 / "bare2.git"
+            if _g(b8, "clone", "-q", "--bare", str(src8), str(bare8)).returncode != 0:
+                failures.append("fixture setup ({}): could not clone the bare ancestor".format(
+                    label8b))
+            else:
+                projd8 = _mini_gate7(bare8)
+                _gate_cli7(label8b + " [claude D control: valid bare ancestor with a commit]",
+                           projd8, 2, "carries no tools/check_release_delta.py")
+                (bare8 / "HEAD").write_bytes(b"garbage\n")
+                _gate_cli7(label8b + " [claude D: same bare ancestor, HEAD corrupted]", projd8, 2,
+                           "no probe positively established")
+                _refuse8(label8b + " [claude D]", projd8)
+            ebare8 = b8 / "empty-bare"
+            _g(b8, "init", "-q", "--bare", str(ebare8))
+            proje8 = _mini_gate7(ebare8)
+            (ebare8 / "HEAD").write_bytes(b"garbage\n")
+            _gate_cli7(label8b + " [codex: initialized bare, HEAD garbage]", proje8, 2,
+                       "no probe positively established")
+            _refuse8(label8b + " [codex]", proje8)
+
+        if _sel(label8v):
+            v8 = tmp / "r8-variants"
+            dang8 = v8 / "dangling"
+            projv8 = _mini_gate7(dang8)
+            os.symlink(str(dang8 / "nowhere"), str(dang8 / ".git"))
+            loop8 = v8 / "loop"
+            projl8 = _mini_gate7(loop8)
+            os.symlink(str(loop8 / ".git"), str(loop8 / ".git"))
+            unr8 = v8 / "unreadable"
+            proju8 = _mini_gate7(unr8)
+            _g(unr8, "init", "-q")
+            # QA round-9 claude m1: the symlink-loop and chmod-0 cases are REGRESSION PINS, not
+            # discriminators: lstat of the entry itself succeeds whatever it points at or its mode,
+            # so they pass on the plain presence check. The fail-closed OSError branch is driven
+            # by (R9 unsearchable ancestor), which goes red with that branch removed.
+            for tag8, proj8 in (("dangling .git symlink", projv8),
+                                ("symlink loop, regression pin", projl8)):
+                _gate_cli7("{} [{}]".format(label8v, tag8), proj8, 2,
+                           "no probe positively established")
+                _refuse8("{} [{}]".format(label8v, tag8), proj8)
+            os.chmod(unr8 / ".git", 0)
+            try:
+                _gate_cli7(label8v + " [chmod-0 .git, regression pin]", proju8, 2,
+                           "no probe positively established")
+                _refuse8(label8v + " [chmod-0 .git, regression pin]", proju8)
+            finally:
+                os.chmod(unr8 / ".git", 0o755)
+            unb8 = v8 / "unborn"
+            projn8 = _mini_gate7(unb8)
+            _g(unb8, "init", "-q")
+            if not (_stage1_no_committed_state(str(projn8)) and _no_committed_state(projn8)):
+                failures.append(label8v + " [unborn HEAD]: both predicates must still identify an "
+                                "unborn ancestor HEAD as the absent committed state")
+            _gate_cli7(label8v + " [unborn HEAD]", projn8, 0,
+                       "(R6 checkout import, must never run)")
+
+        # ---- QA round 9 (codex blocker / claude B1): the gate root is the PHYSICAL path of the
+        # running file. Each fixture sits under a marker-free base, so the lexical (abspath) form
+        # of every attack path names a repository-free directory; only the physical path reaches
+        # the damaged or healthy ancestor repository. With the root and the walk derived from
+        # abspath(__file__) (the ce8b18e3 code) every attack row goes red with the tripwire firing.
+        if _sel(label9p):
+            import shutil as _shutil9
+            import tempfile as _tempfile9
+            base9 = _marker_free_base7()
+            if base9 is None:
+                failures.append(label9p + ": no marker-free temp path exists for the lexical "
+                                "decoy (fixture-env)")
+            else:
+                p9 = Path(_tempfile9.mkdtemp(prefix="aiqt-r9-physical-", dir=str(base9)))
+                try:
+                    stub9 = "(R9 committed stage-2 copy ran)"
+                    for kind9 in ("damaged", "healthy"):
+                        # codex: alias -> anc/sub; alias/../project/tools is lexically the
+                        # repository-free decoy project/tools beside alias, physically
+                        # anc/project/tools.
+                        c9 = p9 / ("codex-" + kind9)
+                        anc9 = c9 / "anc"
+                        _mini_gate7(anc9)
+                        (anc9 / "sub").mkdir()
+                        (c9 / "project" / "tools").mkdir(parents=True)
+                        os.symlink(str(anc9 / "sub"), str(c9 / "alias"))
+                        if kind9 == "damaged":
+                            _g(anc9, "init", "-q")
+                            (anc9 / ".git" / "HEAD").write_bytes(b"garbage\n")
+                            want9 = (2, "no probe positively established")
+                        else:
+                            (anc9 / "tools").mkdir()
+                            # The committed stub honours the stage-2 fail-closed contract (the
+                            # result record a zero exit must carry, and an error stream holding
+                            # only the closing boundary line), so this case still proves the
+                            # PHYSICAL root ran the COMMITTED copy and exits 0.
+                            (anc9 / "tools" / "check_release_delta.py").write_text(
+                                "import os\n"
+                                "print(" + repr(stub9) + ")\n"
+                                "_p9 = os.environ.get('AIQT_RELEASE_DELTA_STAGE2_RESULT')\n"
+                                "if _p9:\n"
+                                "    os.write(2, ('release-delta-stage2-boundary '\n"
+                                "                 + str(os.getpid()) + chr(10)).encode())\n"
+                                "    with open(_p9, 'w', encoding='utf-8') as _h9:\n"
+                                "        _h9.write('release-delta-stage2 0 '\n"
+                                "                  + str(os.getpid()) + chr(10))\n",
+                                encoding="utf-8")
+                            _git_init_commit(anc9, "r9 healthy ancestor")
+                            want9 = (0, stub9)
+                        rel9 = os.path.join("alias", "..", "project", "tools",
+                                            "check_release_delta.py")
+                        _gate_cli7("{} [codex {}: alias/../project, relative]".format(
+                            label9p, kind9), c9, want9[0], want9[1], cwd_=c9, argv_=rel9)
+                        _gate_cli7("{} [codex {}: alias/../project, absolute]".format(
+                            label9p, kind9), c9, want9[0], want9[1], cwd_=Path("/"),
+                            argv_=os.path.join(str(c9), rel9))
+                    # claude B1: dmg/ damaged; plain/link -> dmg/x/project/tools; plain2/tools/
+                    # check_release_delta.py is a symlink to the damaged repository's gate.
+                    d9 = p9 / "claude"
+                    dmg9 = d9 / "dmg"
+                    projd9 = _mini_gate7(dmg9 / "x")
+                    _g(dmg9, "init", "-q")
+                    (dmg9 / ".git" / "HEAD").write_bytes(b"garbage\n")
+                    plain9 = d9 / "plain"
+                    plain9.mkdir()
+                    os.symlink(str(projd9 / "tools"), str(plain9 / "link"))
+                    (d9 / "plain2" / "tools").mkdir(parents=True)
+                    os.symlink(str(projd9 / "tools" / "check_release_delta.py"),
+                               str(d9 / "plain2" / "tools" / "check_release_delta.py"))
+                    for tag9, argv9, cwd9 in (
+                            ("claude: link/../tools from cwd=plain",
+                             os.path.join("link", "..", "tools", "check_release_delta.py"),
+                             plain9),
+                            ("claude: the same absolute from cwd=/",
+                             os.path.join(str(plain9), "link", "..", "tools",
+                                          "check_release_delta.py"), Path("/")),
+                            ("claude: symlinked gate file",
+                             str(d9 / "plain2" / "tools" / "check_release_delta.py"),
+                             d9 / "plain2")):
+                        _gate_cli7("{} [{}]".format(label9p, tag9), projd9, 2,
+                                   "no probe positively established", cwd_=cwd9, argv_=argv9)
+                    # claude m2: the refusal names the directory and the entry it found.
+                    _gate_cli7(label9p + " [refusal names the marker]", projd9, 2,
+                               "directory {} carries a '.git' entry".format(dmg9))
+                    # Marker-free control: the same `..`-after-symlink shape with no repository
+                    # anywhere still reaches the checkout gate by design.
+                    n9 = p9 / "control"
+                    _mini_gate7(n9 / "real")
+                    (n9 / "real" / "sub").mkdir()
+                    os.symlink(str(n9 / "real" / "sub"), str(n9 / "alias"))
+                    _gate_cli7(label9p + " [marker-free control: alias/../project]", n9, 0,
+                               "(R6 checkout import, must never run)", cwd_=n9,
+                               argv_=os.path.join("alias", "..", "project", "tools",
+                                                  "check_release_delta.py"))
+                finally:
+                    _shutil9.rmtree(p9, ignore_errors=True)
+
+        # QA round-9 claude m1: an lstat that fails with something other than not-found (an
+        # ancestor directory without search permission answers EACCES) must read as PRESENT. With
+        # the fail-closed `except OSError` branch reduced to `pass`, the walk steps over the
+        # unsearchable directory to a marker-free ancestry and answers absence: red.
+        if _sel(label9u):
+            import shutil as _shutil9u
+            import tempfile as _tempfile9u
+            base9u = _marker_free_base7()
+            if os.geteuid() == 0:
+                _not_run(failures, label9u, "running as root, directory search permission is not "
+                         "enforced, so the fail-closed OSError branch cannot be reached this way")
+            elif base9u is None:
+                failures.append(label9u + ": no marker-free temp path exists (fixture-env)")
+            else:
+                u9 = Path(_tempfile9u.mkdtemp(prefix="aiqt-r9-unsearchable-", dir=str(base9u)))
+                try:
+                    (u9 / "locked" / "inner").mkdir(parents=True)
+                    os.chmod(u9 / "locked", 0o600)
+                    try:
+                        found9 = _stage1_repository_in_ancestry(str(u9 / "locked" / "inner"))
+                    finally:
+                        os.chmod(u9 / "locked", 0o700)
+                    if not found9 or "unreadable" not in found9:
+                        failures.append(label9u + ": an ancestor without search permission must "
+                                        "fail closed as present (got {!r})".format(found9))
+                finally:
+                    _shutil9u.rmtree(u9, ignore_errors=True)
+
+        # ---- QA round 10 (claude F1): realpath runs STRICT, and a missing __file__ is checked
+        # first. A pipe read through /dev/fd/N resolves to `/proc/<pid>/fd/pipe:[n]`, which names
+        # no file; non-strict realpath kept it as text, its ancestry read as absence and the
+        # checkout import ran (rc 1, ModuleNotFoundError). Code run with no __file__ raised a
+        # NameError traceback (rc 1). Each must be the named exit 2 with the tripwire inert.
+        if _sel(label10f):
+            import threading as _threading10
+            cwd10 = tmp / "r10-cwd-repo"
+            cwd10.mkdir()
+            (cwd10 / "README").write_text("r10 cwd repository\n", encoding="utf-8")
+            _git_init_commit(cwd10, "r10 cwd repository")
+
+            def _cli10(label_, argv_, want_msg, pass_fds_=(), feed_fd=None):
+                try:
+                    proc_ = subprocess.Popen([sys.executable, "-I", "-B"] + argv_,
+                                             cwd=str(cwd10), stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, env=env,
+                                             pass_fds=pass_fds_)
+                except OSError as exc:
+                    failures.append("fixture setup ({}): could not run the gate ({})".format(
+                        label_, exc))
+                    return
+                feeder_ = None
+                if feed_fd is not None:
+                    os.close(pass_fds_[0])
+
+                    def _feed():
+                        try:
+                            view_ = memoryview(gate_bytes7)
+                            while view_:
+                                view_ = view_[os.write(feed_fd, view_):]
+                        except OSError:
+                            pass
+                        finally:
+                            os.close(feed_fd)
+                    feeder_ = _threading10.Thread(target=_feed)
+                    feeder_.start()
+                try:
+                    out_b, err_b = proc_.communicate(timeout=600)
+                except subprocess.TimeoutExpired:
+                    proc_.kill()
+                    out_b, err_b = proc_.communicate()
+                if feeder_ is not None:
+                    feeder_.join()
+                out_ = (out_b + err_b).decode("utf-8", "replace")
+                if (proc_.returncode != 2 or want_msg not in out_ or "Traceback" in out_
+                        or "(R6 checkout import, must never run)" in out_):
+                    failures.append("{}: expected exit 2 with {!r} and no traceback (got rc={}: "
+                                    "{})".format(label_, want_msg, proc_.returncode,
+                                                 out_.strip()[-300:]))
+
+            rfd10, wfd10 = os.pipe()
+            _cli10(label10f + " [pipe read through /dev/fd/{}]".format(rfd10),
+                   ["/dev/fd/{}".format(rfd10)],
+                   "cannot resolve the physical path of the running gate",
+                   pass_fds_=(rfd10,), feed_fd=wfd10)
+            projf10 = _mini_gate7(tmp / "r10-no-file")
+            # A loader with no location: module_from_spec sets no __file__ and runs the source
+            # as __main__ (the exec-with-no-__file__ shape, with no exec in this source).
+            nofile10 = ("import importlib.abc, importlib.util, sys\n"
+                        "src = open(sys.argv[1], encoding='utf-8').read()\n"
+                        "class NoFile(importlib.abc.InspectLoader):\n"
+                        "    def get_source(self, name):\n"
+                        "        return src\n"
+                        "    def is_package(self, name):\n"
+                        "        return False\n"
+                        "spec = importlib.util.spec_from_loader('__main__', NoFile())\n"
+                        "mod = importlib.util.module_from_spec(spec)\n"
+                        "assert not hasattr(mod, '__file__')\n"
+                        "del sys.argv[1:]\n"
+                        "spec.loader.exec_module(mod)\n")
+            _cli10(label10f + " [no __file__]",
+                   ["-c", nofile10, str(projf10 / "tools" / "check_release_delta.py")],
+                   "the running gate has no __file__")
+
+        # ---- QA round 10 (claude F2): on the hand-off to the single-stage gate main() judged
+        # _gen_common.repo_root(), whose fallback is the cwd stage 1 never inspected. A non-git
+        # copy whose OWN releases.toml is corrupt, run from inside a committed repository, must
+        # report that corruption; with run(repo_root()) it judges the cwd repository instead.
+        if _sel(label10r):
+            import shutil as _shutil10
+            import tempfile as _tempfile10
+            base10 = _marker_free_base7()
+            if base10 is None:
+                failures.append(label10r + ": no marker-free temp path exists for the non-git "
+                                "copy (fixture-env)")
+            else:
+                r10 = Path(_tempfile10.mkdtemp(prefix="aiqt-r10-handoff-", dir=str(base10)))
+                try:
+                    copy10 = _extract(arch, r10 / "copy")
+                    with open(copy10 / RELEASES_REL, "a", encoding="utf-8") as fh10:
+                        fh10.write("[[release\n")
+                    cwd10r = r10 / "elsewhere"
+                    cwd10r.mkdir()
+                    (cwd10r / "README").write_text("r10 cwd repository\n", encoding="utf-8")
+                    _git_init_commit(cwd10r, "r10 cwd repository")
+                    _gate_cli7(label10r, copy10, 2,
+                               "cannot read {} (Expected ']]'".format(RELEASES_REL), cwd_=cwd10r)
+                finally:
+                    _shutil10.rmtree(r10, ignore_errors=True)
+
+        # ---- QA round-7 claude F3: a repo-config core.fsmonitor hook is attacker-chosen code and
+        # must never run on the checkout-judged branches either. gen_manifest.git_tracked (the one
+        # tracked-set enumerator those branches consume, directly and through the gen_manifest /
+        # check_manifest validator children) and _index_materialized_tree carry the funnels' pins;
+        # this asserts the GENESIS route end-to-end (both enumerators are also asserted directly
+        # in the isolated self-test; the delta branch reaches them through the same two sites).
+        label7f = ("(R7 fsmonitor genesis) a repo-config fsmonitor hook never runs on a "
+                   "checkout-judged branch")
+        if _sel(label7f):
+            gfx7 = _extract_to("r7-fsmon-genesis")
+            if gfx7 is not None and _pin_fixture_version(gfx7, failures):
+                _git_init_commit(gfx7, "r7 fsmonitor genesis fixture", init=False)
+
+                def _cli7f(label_):
+                    try:
+                        proc_ = subprocess.run(
+                            [sys.executable, "-I", "-B",
+                             str(gfx7 / "tools" / "check_release_delta.py")],
+                            cwd=str(gfx7), capture_output=True, env=env, timeout=1500)
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        failures.append("fixture setup ({}): could not run the gate CLI "
+                                        "({})".format(label_, exc))
+                        return None, ""
+                    return proc_.returncode, (proc_.stdout + proc_.stderr).decode(
+                        "utf-8", "replace")
+
+                rc7b, out7b = _cli7f(label7f + " baseline")
+                if rc7b is not None and (rc7b != 0 or "release-delta: GENESIS" not in out7b):
+                    failures.append("{}: the genesis baseline must exit 0 on the GENESIS route "
+                                    "(got rc={}: {})".format(label7f, rc7b, out7b.strip()[-300:]))
+                elif rc7b is not None:
+                    mark7 = tmp / "r7-fsmon-ran.marker"
+                    hook7 = tmp / "r7-fsmon.sh"
+                    hook7.write_text("#!/bin/sh\n: >> " + str(mark7) + "\nexit 1\n",
+                                     encoding="utf-8")
+                    hook7.chmod(0o755)
+                    _g(gfx7, "config", "core.fsmonitor", str(hook7))
+                    try:
+                        rc7m, out7m = _cli7f(label7f)
+                        if rc7m is not None and (rc7m != 0
+                                                 or "release-delta: GENESIS" not in out7m):
+                            failures.append("{}: the genesis verdict must be unchanged under the "
+                                            "hook config (got rc={}: {})".format(
+                                                label7f, rc7m, out7m.strip()[-300:]))
+                        if mark7.exists():
+                            failures.append("{}: the core.fsmonitor hook RAN on the genesis "
+                                            "branch; the git_tracked / _index_materialized_tree "
+                                            "pins are not effective".format(label7f))
+                    finally:
+                        _g(gfx7, "config", "--unset-all", "core.fsmonitor")
+
+        # ---- merge train 3 QA (codex MAJOR): the fail-closed child contract of the stage-2
+        # launch (security-seci-fail-closed). A COMMITTED gate copy that faults in shutdown (an
+        # atexit handler that raises leaves exit 0 behind with only a stderr traceback) or that
+        # exits 0 without running the dispatch (a bare SystemExit(0)) writes no complete stage-2
+        # result, so stage 1 must exit 2 by name, never pass the zero exit through. The committed
+        # copy is the malicious file; the WORKING-TREE copy is this pinned gate, which launches.
+        label7s = ("(R7 stage2 fault) a committed gate whose shutdown faults or that exits "
+                   "silently never passes the stage-2 contract")
+        if _sel(label7s):
+            import inspect as _inspect7s
+            import shutil as _shutil7s
+            # merge train 3 QA round 2 (codex and claude MAJORs): committed copies that DO arm
+            # this gate's own result writer (_stage2_arm_result, its source copied verbatim) and
+            # settle 0, so the result record is complete and only the error-stream contract and
+            # the writer's fault detection can refuse them; a clean one must still pass.
+            armed7s = ("import os\nimport sys\n" + _inspect7s.getsource(_stage2_arm_result)
+                       + "\n_state7s = _stage2_arm_result()\n")
+            settle7s = "_state7s['code'] = 0\n"
+            # PR #397 QA round p1 (codex MAJOR): an audit hook installed AFTER the writer is armed
+            # faults while the result file is opened, under a redirected stream, so nothing
+            # reaches the error stream and only the writer's second check can refuse it.
+            late7s = ("import contextlib, io\n"
+                      "_r7s = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                      "class _Late7s:\n"
+                      "    def __del__(self):\n"
+                      "        raise RuntimeError('QA late finalizer')\n"
+                      "def _late7s(event, args):\n"
+                      "    if event == 'open' and args and args[0] == _r7s:\n"
+                      "        with contextlib.redirect_stderr(io.StringIO()):\n"
+                      "            _o7s = _Late7s()\n"
+                      "            del _o7s\n"
+                      "sys.addaudithook(_late7s)\n")
+            # Hand-written records (no writer armed): the pid binding and the refusal of a
+            # success record beside a nonzero exit are each the only catcher of their case.
+            forged7s = ("import os\n"
+                        "_r7s = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                        "os.write(2, ('release-delta-stage2-boundary ' + str(os.getpid())\n"
+                        "             + chr(10)).encode())\n"
+                        "with open(_r7s, 'w', encoding='utf-8') as _h7s:\n"
+                        "    _h7s.write('release-delta-stage2 0 ' + {} + chr(10))\n"
+                        "os._exit({})\n")
+            # PR #397 QA round 2 (codex MAJOR): a profiling hook that raises at the C return
+            # of the named os call inside the writer frame, AFTER the call succeeded, under a
+            # replaced stream, so only the writer's exception guard can refuse it.
+            prof7s = ("import io\n"
+                      "sys.stderr = io.StringIO()\n"
+                      "def _prof7s(frame, event, arg):\n"
+                      "    if (event == 'c_return' and arg is {}\n"
+                      "            and frame.f_code.co_name == '_write_result'\n"
+                      "            and 'fd' in frame.f_locals):\n"
+                      "        raise RuntimeError('QA injected result-writer fault')\n"
+                      "sys.setprofile(_prof7s)\n")
+            # PR #397 QA round 3 (codex MAJOR / claude MAJOR-1): the same hook raising at the
+            # CALL event of the writer's final os._exit(code), so the exit never runs; only a
+            # guard that covers the final exit call refuses it (with the call outside the guard,
+            # the gate passed with exit 0).
+            exit7s = ("import io\n"
+                      "sys.stderr = io.StringIO()\n"
+                      "def _exit7s(frame, event, arg):\n"
+                      "    if (event == 'c_call' and arg is os._exit\n"
+                      "            and frame.f_code.co_name == '_write_result'):\n"
+                      "        raise RuntimeError('QA injected final-exit fault')\n"
+                      "sys.setprofile(_exit7s)\n")
+            # PR #397 QA round 2 (claude MEDIUM-1): an audit hook on the result open deletes a
+            # reporting hook and silences the streams, so the SECOND hook check itself raises
+            # AttributeError; it fires once, so the guard's rewrite path stays clean.
+            raise7s = ("import threading\n"
+                       "_r7q = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                       "_hit7q = []\n"
+                       "def _del7q(event, args):\n"
+                       "    if event == 'open' and args and args[0] == _r7q and not _hit7q:\n"
+                       "        _hit7q.append(1)\n"
+                       "        sys.stderr = None\n"
+                       "        del threading.excepthook\n"
+                       "sys.addaudithook(_del7q)\n")
+            # PR #397 QA round 2 (claude MEDIUM-2): the same window replaces a reporting hook
+            # WITHOUT raising; only the second hook check sees it.
+            swap7s = ("_r7w = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                      "def _swap7w(event, args):\n"
+                      "    if event == 'open' and args and args[0] == _r7w:\n"
+                      "        sys.unraisablehook = lambda _u: None\n"
+                      "sys.addaudithook(_swap7w)\n")
+            for tag7s, body7s, want7s in (
+                    ("shutdown-fault", "import atexit\n"
+                     "def _fault():\n"
+                     "    raise RuntimeError('QA stage2 cleanup fault')\n"
+                     "atexit.register(_fault)\n", 2),
+                    ("silent-exit", "raise SystemExit(0)\n", 2),
+                    ("armed clean control", armed7s + settle7s, 0),
+                    ("armed frameless builtin cleanup fault", armed7s + "import atexit\n"
+                     "atexit.register(int, 'QA frameless cleanup fault')\n" + settle7s, 2),
+                    ("armed stray error-stream byte", armed7s
+                     + "os.write(2, b'QA stray byte' + bytes([10]))\n" + settle7s, 2),
+                    ("armed cyclic finalizer fault", armed7s + "class _QA7s:\n"
+                     "    __del__ = os.remove\n"
+                     "_qa7s = _QA7s()\n_qa7s.self = _qa7s\ndel _qa7s\n" + settle7s, 2),
+                    ("armed thread fault under redirected diagnostics", armed7s
+                     + "import contextlib, io, threading\n"
+                     "with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "    _t7s = threading.Thread(target=lambda: 1 / 0)\n"
+                     "    _t7s.start()\n"
+                     "    _t7s.join()\n" + settle7s, 2),
+                    # PR #397 QA round p1 (codex MAJOR; claude MEDIUM-1 and MINOR-1): each case
+                    # below is refused by exactly one guard, so removing that guard turns the
+                    # case into exit 0.
+                    ("armed late fault during the result write", armed7s + late7s + settle7s, 2),
+                    ("armed late fault clean control", armed7s + late7s.replace(
+                        "args[0] == _r7s", "args[0] == _r7s + '.never'") + settle7s, 0),
+                    ("armed unraisable fault under redirected diagnostics", armed7s
+                     + "import contextlib, io\n"
+                     "class _QA7u:\n"
+                     "    __del__ = os.remove\n"
+                     "with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "    _qa7u = _QA7u()\n"
+                     "    del _qa7u\n" + settle7s, 2),
+                    ("armed replaced thread hook hiding a thread fault", armed7s
+                     + "import threading\n"
+                     "threading.excepthook = lambda _a: None\n"
+                     "_t7r = threading.Thread(target=lambda: 1 / 0)\n"
+                     "_t7r.start()\n"
+                     "_t7r.join()\n" + settle7s, 2),
+                    ("exit handler registered before the writer", "import atexit\n"
+                     "atexit.register(int)\n" + armed7s + settle7s, 2),
+                    ("record bound to another pid", forged7s.format("'1'", 0), 2),
+                    ("success record beside a nonzero exit",
+                     forged7s.format("str(os.getpid())", 1), 2),
+                    # PR #397 QA round 2 (codex MAJOR / claude MEDIUM-1): any exception escaping
+                    # the writer, injected at the C return of the result write or of the close,
+                    # or raised by the second check itself, must end in os._exit(2), never in
+                    # atexit's 'Exception ignored' path beside the already written success
+                    # record; the streams are silenced so only the writer's own guard refuses.
+                    ("armed exception injected after the successful result write",
+                     armed7s + prof7s.format("os.write") + settle7s, 2),
+                    ("armed exception injected from the result close",
+                     armed7s + prof7s.format("os.close") + settle7s, 2),
+                    ("armed second check raising under silenced streams",
+                     armed7s + raise7s + settle7s, 2),
+                    ("armed exception injected at the final exit call",
+                     armed7s + exit7s + settle7s, 2),
+                    # PR #397 QA round 2 (claude MEDIUM-2): a reporting hook replaced during the
+                    # result open, without raising, is refused ONLY by the second hook check.
+                    ("armed reporting hook replaced during the result open",
+                     armed7s + swap7s + settle7s, 2),
+                    # PR #397 QA round 2 (gemini): with atexit._ncallbacks unavailable a
+                    # pre-registered exit handler cannot be ruled out; a recorded fault, never a
+                    # clean default.
+                    ("armed atexit._ncallbacks unavailable",
+                     "import atexit\ndel atexit._ncallbacks\n" + armed7s + settle7s, 2)):
+                mal7 = tmp / ("r7-stage2-" + tag7s.replace(" ", "-"))
+                (mal7 / "tools").mkdir(parents=True)
+                gate7 = mal7 / "tools" / "check_release_delta.py"
+                gate7.write_text(body7s, encoding="utf-8")
+                try:
+                    _git_init_commit(mal7, "r7 stage2 " + tag7s + " fixture")
+                except subprocess.CalledProcessError as exc7s:
+                    failures.append("fixture setup ({} [{}]): could not commit ({})".format(
+                        label7s, tag7s, exc7s))
+                    continue
+                _shutil7s.copyfile(str(Path(__file__).resolve()), str(gate7))
+                try:
+                    proc7s = subprocess.run([sys.executable, "-I", "-B", str(gate7)],
+                                            cwd=str(mal7), capture_output=True, env=env,
+                                            timeout=600)
+                except (OSError, subprocess.TimeoutExpired) as exc7s:
+                    failures.append("fixture setup ({} [{}]): could not run the gate CLI "
+                                    "({})".format(label7s, tag7s, exc7s))
+                    continue
+                out7s = (proc7s.stdout + proc7s.stderr).decode("utf-8", "replace")
+                if want7s == 0:
+                    if proc7s.returncode != 0:
+                        failures.append("{} [{}]: a committed copy that arms the result writer "
+                                        "and settles 0 with an empty error stream must pass "
+                                        "(no over-rejection), got rc={}: {}".format(
+                                            label7s, tag7s, proc7s.returncode,
+                                            out7s.strip()[-300:]))
+                    continue
+                if proc7s.returncode != 2 or "stage-2" not in out7s or (
+                        tag7s == "success record beside a nonzero exit"
+                        and "records a pass" not in out7s):
+                    failures.append("{} [{}]: expected exit 2 naming the stage-2 contract (a "
+                                    "zero child exit with no complete result or a faulted "
+                                    "error stream is never a pass), got rc={}: {}".format(
+                                        label7s, tag7s, proc7s.returncode,
+                                        out7s.strip()[-300:]))
+
+            # What a late fault leaves behind (PR #397 QA round p1, codex MAJOR; round 2,
+            # claude MINOR-1: the same late fault beside verdict 1 must also turn the exit and
+            # the record to 2, with the fault named, never a silent exit 1): stage 1 deletes its
+            # captures, so the armed late-fault body runs directly here and its record must
+            # carry code 2, never the record written before the second check. PR #397 QA round 3
+            # (claude MINOR-2): the guard's best-effort rewrite of the record to code 2, with its
+            # fault named, is pinned the same way for an exception after the successful result
+            # write and for one at the final exit call (rewrite removed: the code-0 record stays;
+            # final exit outside the guard: exit 0 beside the code-0 record).
+            for tag7d, body7d, needle7d in (
+                    ("late fault, settled 0", late7s + settle7s, b"during the result write"),
+                    ("late fault, settled 1", late7s + "_state7s['code'] = 1\n",
+                     b"during the result write"),
+                    ("exception after the successful result write, guard rewrite",
+                     prof7s.format("os.write") + settle7s, b"result writer fault"),
+                    ("exception at the final exit call, guard rewrite", exit7s + settle7s,
+                     b"result writer fault")):
+                direct7s = tmp / "r7-stage2-direct-late.py"
+                record7s = tmp / "r7-stage2-direct-late.result"
+                if record7s.exists():
+                    record7s.unlink()
+                direct7s.write_text(armed7s + body7d, encoding="utf-8")
+                try:
+                    proc7d = subprocess.run([sys.executable, "-I", "-B", str(direct7s)],
+                                            capture_output=True, timeout=120,
+                                            env=dict(env, AIQT_RELEASE_DELTA_STAGE2_RESULT=str(
+                                                record7s)))
+                    rec7d = record7s.read_bytes() if record7s.is_file() else b""
+                except (OSError, subprocess.TimeoutExpired) as exc7d:
+                    proc7d, rec7d = None, "not run ({})".format(exc7d).encode("utf-8")
+                if (proc7d is None or proc7d.returncode != 2
+                        or not rec7d.startswith(b"release-delta-stage2 2 ")
+                        or needle7d not in proc7d.stderr):
+                    failures.append("{} [record, run directly, {}]: expected rc=2, a code-2 "
+                                    "record and the fault named (got rc={}, record={!r}, "
+                                    "stderr={!r})".format(
+                                        label7s, tag7d,
+                                        None if proc7d is None else proc7d.returncode,
+                                        rec7d[:80],
+                                        None if proc7d is None else proc7d.stderr[-200:]))
+            # PR #397 QA round 2 (gemini BLOCKER): a platform with no O_NOFOLLOW or no
+            # O_NONBLOCK offers no race-free containment for the capture read-back, so the
+            # reader must answer cannot-evaluate (None), never fall back to an unguarded
+            # name-based open; a control read with both primitives present stays intact.
+            cap7p = tmp / "r7-stage1-capture-probe"
+            cap7p.write_bytes(b"release-delta-stage2 0 1\n")
+            saved7p = os.O_NOFOLLOW
+            del os.O_NOFOLLOW
+            try:
+                got7p = _stage1_read_capture(str(cap7p))
+            finally:
+                os.O_NOFOLLOW = saved7p
+            if got7p is not None:
+                failures.append("{} [no os.O_NOFOLLOW]: _stage1_read_capture must refuse "
+                                "(cannot-evaluate) when the platform lacks the race-free "
+                                "open primitive, got {!r}".format(label7s, got7p))
+            saved7p = os.O_NONBLOCK
+            del os.O_NONBLOCK
+            try:
+                got7p = _stage1_read_capture(str(cap7p))
+            finally:
+                os.O_NONBLOCK = saved7p
+            if got7p is not None:
+                failures.append("{} [no os.O_NONBLOCK]: _stage1_read_capture must refuse "
+                                "(cannot-evaluate) when the platform lacks the race-free "
+                                "open primitive, got {!r}".format(label7s, got7p))
+            if _stage1_read_capture(str(cap7p)) != b"release-delta-stage2 0 1\n":
+                failures.append("{} [capture primitives control]: a regular file must read "
+                                "back intact with both primitives present".format(label7s))
+
+        # ---- merge train 3 QA round 2 (codex and claude MAJORs): the nested validator children
+        # (_renderer_freshness, _validate_via_tool) judged only the exit code, so a validator
+        # whose cleanup faulted after a zero exit passed. Each now runs under the record stub
+        # (_run_recorded_child): every fault below must be a GateError, the clean control none.
+        label7n = ("(R7 nested child) a validator child that faults in cleanup or ends early "
+                   "never passes on its zero exit")
+        if _sel(label7n):
+            nest7 = tmp / "r7-nested-child"
+            (nest7 / "tools").mkdir(parents=True, exist_ok=True)
+            for tag7n, body7n, want7n in (
+                    ("clean control", "print('validator ok')\n", False),
+                    ("python cleanup fault", "import atexit\n"
+                     "def _fault():\n"
+                     "    raise RuntimeError('QA nested cleanup fault')\n"
+                     "atexit.register(_fault)\n", True),
+                    ("frameless builtin cleanup fault", "import atexit\n"
+                     "atexit.register(int, 'QA nested frameless fault')\n", True),
+                    ("thread fault", "import threading\n"
+                     "_t = threading.Thread(target=lambda: 1 / 0)\n_t.start()\n_t.join()\n",
+                     True),
+                    ("early silent exit", "import os\nos._exit(0)\n", True),
+                    ("stray error-stream byte", "import os\n"
+                     "os.write(2, b'QA stray byte' + bytes([10]))\n", True),
+                    # PR #397 QA round p1 (codex MAJOR; claude MEDIUM-2 and MINOR-1): each case
+                    # below is refused by exactly one guard of the record stub. The validator
+                    # finds the stub's result path as the argument after its own path.
+                    ("late fault during the result write", "import contextlib, io, sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "class _Late:\n"
+                     "    def __del__(self):\n"
+                     "        raise RuntimeError('QA nested late finalizer')\n"
+                     "def _late(event, args):\n"
+                     "    if event == 'open' and args and args[0] == _r:\n"
+                     "        with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "            _o = _Late()\n"
+                     "            del _o\n"
+                     "sys.addaudithook(_late)\n", True),
+                    ("late fault clean control", "import sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "sys.addaudithook(lambda event, args: event == 'open' and args\n"
+                     "                 and args[0] == _r and None)\n", False),
+                    ("unraisable fault under a redirected stream", "import contextlib, io, os\n"
+                     "class _Q:\n"
+                     "    __del__ = os.remove\n"
+                     "with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "    _q = _Q()\n"
+                     "    del _q\n", True),
+                    ("cyclic finalizer fault with automatic collection off", "import gc, os\n"
+                     "gc.disable()\n"
+                     "class _C:\n"
+                     "    __del__ = os.remove\n"
+                     "_c = _C()\n_c.self = _c\ndel _c\n", True),
+                    ("replaced thread hook hiding a thread fault", "import threading\n"
+                     "threading.excepthook = lambda _a: None\n"
+                     "_t = threading.Thread(target=lambda: 1 / 0)\n_t.start()\n_t.join()\n",
+                     True),
+                    ("record bound to another pid", "import os, sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "with open(_r, 'w', encoding='utf-8') as _h:\n"
+                     "    _h.write('release-delta-child 0 1' + chr(10))\n"
+                     "os._exit(0)\n", True),
+                    # PR #397 QA round 2 (codex MAJOR / claude MEDIUM-1): any exception escaping
+                    # the stub's writer, injected at the C return of the result write or of the
+                    # close, or raised by the second check itself, must end in os._exit(2),
+                    # never in atexit's 'Exception ignored' path beside the already written
+                    # success record.
+                    ("exception injected after the successful result write",
+                     "import io, os, sys\n"
+                     "sys.stderr = io.StringIO()\n"
+                     "def _prof(frame, event, arg):\n"
+                     "    if (event == 'c_return' and arg is os.write\n"
+                     "            and frame.f_code.co_name == 'record'\n"
+                     "            and 'fd' in frame.f_locals):\n"
+                     "        raise RuntimeError('QA injected result-writer fault')\n"
+                     "sys.setprofile(_prof)\n", True),
+                    ("exception injected from the result close",
+                     "import io, os, sys\n"
+                     "sys.stderr = io.StringIO()\n"
+                     "def _prof(frame, event, arg):\n"
+                     "    if (event == 'c_return' and arg is os.close\n"
+                     "            and frame.f_code.co_name == 'record'\n"
+                     "            and 'fd' in frame.f_locals):\n"
+                     "        raise RuntimeError('QA injected result-writer fault')\n"
+                     "sys.setprofile(_prof)\n", True),
+                    # PR #397 QA round 3 (codex MAJOR / claude MAJOR-1): the hook raises at the
+                    # CALL event of the stub's final os._exit(code), so the exit never runs; only
+                    # a guard that covers the final exit call refuses it (with the call outside
+                    # the guard, both legs passed on exit 0 beside a success record).
+                    ("exception injected at the final exit call",
+                     "import io, os, sys\n"
+                     "sys.stderr = io.StringIO()\n"
+                     "def _prof(frame, event, arg):\n"
+                     "    if (event == 'c_call' and arg is os._exit\n"
+                     "            and frame.f_code.co_name == 'record'):\n"
+                     "        raise RuntimeError('QA injected final-exit fault')\n"
+                     "sys.setprofile(_prof)\n", True),
+                    ("second check raising under silenced streams", "import sys, threading\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "_hit = []\n"
+                     "def _del(event, args):\n"
+                     "    if event == 'open' and args and args[0] == _r and not _hit:\n"
+                     "        _hit.append(1)\n"
+                     "        sys.stderr = None\n"
+                     "        del threading.excepthook\n"
+                     "sys.addaudithook(_del)\n", True),
+                    # PR #397 QA round 2 (claude MEDIUM-2): a reporting hook replaced during the
+                    # result open, without raising, is refused ONLY by the stub's second hook
+                    # check.
+                    ("reporting hook replaced during the result open", "import sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "sys.addaudithook(lambda event, args: event == 'open' and args\n"
+                     "                 and args[0] == _r\n"
+                     "                 and setattr(sys, 'unraisablehook', lambda _u: None))\n",
+                     True)):
+                script7n = "qa-nested-{}.py".format(tag7n.replace(" ", "-"))
+                (nest7 / "tools" / script7n).write_text(body7n, encoding="utf-8")
+                (nest7 / "tools" / "gen_renderers.py").write_text(body7n, encoding="utf-8")
+                for leg7n, call7n in (
+                        ("_validate_via_tool", lambda: _validate_via_tool(
+                            nest7, script7n, [], "nested-child probe", tools_root=nest7)),
+                        ("_renderer_freshness", lambda: _renderer_freshness(
+                            nest7, "nested-child probe"))):
+                    try:
+                        call7n()
+                        raised7n = None
+                    except GateError as exc7n:
+                        raised7n = str(exc7n)
+                    if want7n and raised7n is None:
+                        failures.append("{} [{} via {}]: the zero exit passed; a fault or a "
+                                        "missing result must be a GateError".format(
+                                            label7n, tag7n, leg7n))
+                    elif not want7n and raised7n is not None:
+                        failures.append("{} [{} via {}]: a clean validator must pass (no "
+                                        "over-rejection), got: {}".format(
+                                            label7n, tag7n, leg7n, raised7n[:300]))
+            # A success record beside a nonzero exit: the nonzero exit already fails both legs,
+            # so _run_recorded_child's own fault is asserted directly (PR #397 QA round p1).
+            script7z = nest7 / "tools" / "qa-nested-success-record-nonzero.py"
+            script7z.write_text("import os, sys\n"
+                                "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                                "with open(_r, 'w', encoding='utf-8') as _h:\n"
+                                "    _h.write('release-delta-child 0 ' + str(os.getpid())\n"
+                                "             + chr(10))\n"
+                                "os._exit(1)\n", encoding="utf-8")
+            try:
+                rc7z, _o7z, _e7z, fault7z = _run_recorded_child(script7z, [])
+            except OSError as exc7z:
+                rc7z, fault7z = None, "launch failed ({})".format(exc7z)
+            if rc7z != 1 or fault7z is None or "records a pass" not in fault7z:
+                failures.append("{} [success record beside a nonzero exit]: expected rc=1 with a "
+                                "fault naming the success record (got rc={}, fault={!r})".format(
+                                    label7n, rc7z, fault7z))
+            # An exit handler registered before the stub's own writer is reachable only by code
+            # that runs before the stub, so the stub runs from a file under a launcher that
+            # registers one first (through runpy, as the stub runs a validator); control first.
+            stub7x = nest7 / "qa-record-stub.py"
+            stub7x.write_text(_CHILD_RECORD_STUB, encoding="utf-8")
+            result7x = nest7 / "qa-record-stub-result"
+            clean7x = nest7 / "tools" / "qa-nested-clean-control.py"
+            # The same launcher also pins what a late fault leaves behind: a code-2 record, never
+            # the success record written before the second check.
+            late7x = nest7 / "tools" / "qa-nested-late-fault-during-the-result-write.py"
+            # PR #397 QA round 2 (claude MINOR-1): the same late fault beside a verdict of 1
+            # must also turn the exit and the record to 2, named, never a silent exit 1.
+            late17x = nest7 / "tools" / "qa-nested-late-fault-beside-verdict-1.py"
+            late17x.write_text(late7x.read_text(encoding="utf-8") + "raise SystemExit(1)\n",
+                               encoding="utf-8")
+            for tag7x, pre7x, script7x, want7x, needle7x in (
+                    ("control", "", clean7x, 0, b""),
+                    ("pre-registered", "atexit.register(int)\n", clean7x, 2,
+                     b"an exit handler was registered"),
+                    # PR #397 QA round 2 (gemini): a platform whose atexit offers no _ncallbacks
+                    # cannot rule out a pre-registered handler; the stub records the fault,
+                    # never a clean default.
+                    ("atexit._ncallbacks unavailable", "del atexit._ncallbacks\n", clean7x, 2,
+                     b"atexit._ncallbacks is unavailable"),
+                    ("late fault record", "", late7x, 2, b"during the result write"),
+                    ("late fault record beside verdict 1", "", late17x, 2,
+                     b"during the result write"),
+                    # PR #397 QA round 3 (claude MINOR-2): the guard's best-effort rewrite of
+                    # the record to code 2, with its fault named, for an exception after the
+                    # successful result write (rewrite removed: the code-0 record stays) and at
+                    # the final exit call (call outside the guard: exit 0, code-0 record).
+                    ("guard rewrite after the successful result write", "",
+                     nest7 / "tools" / "qa-nested-exception-injected-after-the-successful-"
+                     "result-write.py", 2, b"the writer raised"),
+                    ("guard rewrite at the final exit call", "",
+                     nest7 / "tools" / "qa-nested-exception-injected-at-the-final-exit-call.py",
+                     2, b"the writer raised")):
+                if result7x.exists():
+                    result7x.unlink()
+                try:
+                    proc7x = subprocess.run(
+                        [sys.executable, "-I", "-B", "-c", "import atexit, runpy, sys\n" + pre7x
+                         + "sys.argv = sys.argv[1:]\n"
+                         "runpy.run_path(sys.argv[0], run_name='__main__')\n",
+                         str(stub7x), str(script7x), str(result7x)],
+                        capture_output=True, timeout=120)
+                except (OSError, subprocess.TimeoutExpired) as exc7x:
+                    failures.append("fixture setup ({} [exit handler before the writer]): {}"
+                                    .format(label7n, exc7x))
+                    break
+                rec7x = result7x.read_bytes() if result7x.is_file() else b""
+                if (proc7x.returncode != want7x
+                        or not rec7x.startswith("release-delta-child {} ".format(
+                            want7x).encode("ascii"))
+                        or needle7x not in proc7x.stderr):
+                    failures.append("{} [stub run from a file, {}]: expected rc={} and a code-{} "
+                                    "record (got rc={}, record={!r}, stderr={!r})".format(
+                                        label7n, tag7x, want7x, want7x, proc7x.returncode,
+                                        rec7x[:80], proc7x.stderr[:200]))
+
+
+    # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
+    # The round-4 (R4 loose) case forged only a BLOB. verified_object re-hashes EVERY object type it
+    # reads through cat-file --batch (git does not verify --batch bodies), so a tampered loose commit,
+    # tree or tag must raise SchemaError "re-hash mismatch". These assert verified_object DIRECTLY (the
+    # read path the materialization and ancestry walk use), so the re-hash is the sole catcher: a mutant
+    # that re-hashes only blobs returns the tampered body with no error and each case fails (verified
+    # out-of-tree).
+    labelFA = "(R5 forged ancestry) a forged INTERMEDIATE commit object never grafts HEAD onto the release"
+    if _sel(labelFA):
+        # QA round-5 claude m1: release commit R; an orphan commit O carrying R's tree; HEAD H whose
+        # parent is O. The loose object for O is then overwritten (filename kept) with O's body plus
+        # `parent R`, so merge-base (which reads O unverified) answers "R is an ancestor of HEAD". The
+        # verified parent-chain walk re-hashes O and must refuse; with the walk removed this passes.
+        import zlib as _zlib_a
+        anc = tmp / "r5-ancestry"
+        anc.mkdir(exist_ok=True)
+
+        def _ga(*a_):
+            return subprocess.run(["git", "-C", str(anc), *a_], capture_output=True, env=env)
+
+        _ga("init", "-q")
+        (anc / "f.txt").write_text("release\n", encoding="utf-8")
+        _ga("add", "-A")
+        _ga("commit", "-q", "--no-verify", "-m", "release")
+        a_rel = _gout(anc, "rev-parse", "HEAD")
+        a_tree = _gout(anc, "rev-parse", "HEAD^{tree}")
+        a_orphan = subprocess.run(["git", "-C", str(anc), "commit-tree", a_tree, "-m", "orphan"],
+                                  capture_output=True, text=True, env=env).stdout.strip()
+        a_head = subprocess.run(["git", "-C", str(anc), "commit-tree", a_tree, "-p", a_orphan,
+                                 "-m", "head"], capture_output=True, text=True, env=env).stdout.strip()
+        _ga("reset", "-q", "--hard", a_head)
+        q_ = anc / ".git" / "objects" / a_orphan[:2] / a_orphan[2:]
+        if not q_.is_file() or len(a_head) != len(a_rel):
+            failures.append("fixture setup ({}): the orphan commit is not loose".format(labelFA))
+        else:
+            body_ = subprocess.run(["git", "-C", str(anc), "cat-file", "commit", a_orphan],
+                                   capture_output=True, env=env).stdout
+            hdr_, sep_, msg_ = body_.partition(b"\n\n")
+            forged_ = hdr_.replace(b"\n", b"\nparent " + a_rel.encode("ascii") + b"\n", 1) + sep_ + msg_
+            q_.chmod(0o644)
+            q_.write_bytes(_zlib_a.compress(b"commit " + str(len(forged_)).encode("ascii") + b"\x00"
+                                            + forged_, 9))
+            q_.chmod(0o444)
+            _release_schema._VERIFIED_OBJECT_CACHE.pop(a_orphan, None)
+            mb_ = _git_raw(anc, ["merge-base", "--is-ancestor", a_rel, "HEAD"])
+            if mb_.returncode != 0:
+                failures.append("fixture setup ({}): the forged parent did not graft for merge-base, so "
+                                "the case would not discriminate".format(labelFA))
+            else:
+                try:
+                    _assert_head_ancestry(anc, a_rel)
+                    failures.append("{}: the forged intermediate commit was accepted as ancestry; the "
+                                    "verified parent-chain walk did not refuse".format(labelFA))
+                except GateError as exc:
+                    if "re-hash mismatch" not in str(exc):
+                        failures.append("{}: expected a re-hash mismatch, got: {}".format(labelFA, exc))
+            _release_schema._VERIFIED_OBJECT_CACHE.pop(a_orphan, None)
+
+    labelFC = "(R5 forged commit) a tampered loose COMMIT object fails the per-object re-hash"
+    labelFT = "(R5 forged tree) a tampered loose TREE object fails the per-object re-hash"
+    labelFG = "(R5 forged tag) a tampered loose annotated TAG object fails the per-object re-hash"
+    labelFB = "(R5 forged blob) a tampered loose BLOB object fails the per-object re-hash"
+    if any(_sel(x) for x in (labelFC, labelFT, labelFG, labelFB)):
+        import zlib as _zlib5
+
+        def _loose_path(repo_, oid_):
+            return repo_ / ".git" / "objects" / oid_[:2] / oid_[2:]
+
+        def _raw_object(repo_, oid_):
+            t_ = _gout(repo_, "cat-file", "-t", oid_)
+            b_ = subprocess.run(["git", "-C", str(repo_), "cat-file", t_, oid_],
+                                capture_output=True).stdout
+            return t_, b_
+
+        def _forge_one(label_, oid_, miss_):
+            # Tamper the loose object at oid_ (same declared type, one appended byte), keeping the
+            # FILENAME = the original id, then assert verified_object re-hashes and refuses. The
+            # verified-object cache is cleared around the probe so a prior clean read cannot mask it.
+            q_ = _loose_path(repo, oid_)
+            if not q_.is_file():
+                failures.append("fixture setup ({}): {}".format(label_, miss_))
+                return
+            t_, b_ = _raw_object(repo, oid_)
+            saved_ = q_.read_bytes()
+            _release_schema._VERIFIED_OBJECT_CACHE.pop(oid_, None)
+            q_.chmod(0o644)
+            q_.write_bytes(_zlib5.compress(t_.encode("ascii") + b" "
+                                           + str(len(b_) + 1).encode("ascii") + b"\x00" + b_ + b"\n", 9))
+            q_.chmod(0o444)
+            try:
+                _release_schema.verified_object(repo, oid_)
+                failures.append("{}: verified_object accepted a tampered {} object; the "
+                                "per-object re-hash did not refuse".format(label_, t_))
+            except _release_schema.SchemaError as exc:
+                if "re-hash mismatch" not in str(exc):
+                    failures.append("{}: expected a re-hash mismatch, got: {}".format(
+                        label_, exc))
+            finally:
+                q_.chmod(0o644)
+                q_.write_bytes(saved_)
+                q_.chmod(0o444)
+                _release_schema._VERIFIED_OBJECT_CACHE.pop(oid_, None)
+
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if _regen_fixture_manifest(repo, "post-release forged-object base", failures, env) \
+                and _commit_all(repo, "post-release forged-object base"):
+            if _sel(labelFC):
+                _forge_one(labelFC, _gout(repo, "rev-parse", "HEAD"), "HEAD commit is not loose")
+            if _sel(labelFT):
+                _forge_one(labelFT, _gout(repo, "rev-parse", "HEAD:.aiqt"), "subtree is not loose")
+            if _sel(labelFG):
+                _forge_one(labelFG, _gout(repo, "rev-parse", "refs/tags/v1.0.0"),
+                           "tag object is not loose")
+            if _sel(labelFB):
+                _forge_one(labelFB, _gout(repo, "rev-parse", "HEAD:" + RELEASES_REL),
+                           "release-row blob is not loose")
+
+    return True
+
+
 def self_test_main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
     with fixture_git_lifecycle():
         return _self_test_main_isolated()
+
+
+# The drift-advisory fixture's expected per-path states, keyed by EXACT tracked path.
+_DRIFT_CHILD_EXPECT = (
+    ("lnkdir/leaf.txt", "drift", "(R6 drift symlink-parent): a symlinked parent directory must be "
+     "drift WITHOUT following it (the outside copy carries the committed bytes, so a "
+     "follow-and-read reports clean)"),
+    ("lnkfile.txt", "drift", "(R7 drift symlink-final): a tracked FILE swapped for a symlink to an "
+     "outside copy of the committed bytes must be drift (the final open's O_NOFOLLOW pin)"),
+    ("fifo.txt", "drift", "(R6 drift FIFO): a FIFO swapped in for a tracked file must be drift "
+     "(descriptor-bound regular-file check)"),
+    ("emptyfifo.txt", "drift", "(R7 drift empty-blob FIFO): a FIFO swapped in for an EMPTY "
+     "committed blob must be drift (S_ISREG on the opened descriptor: size 0 hashes to the empty "
+     "blob)"),
+    ("big.txt", "unchecked", "(R6 drift cap): a tracked file over the advisory size cap must be "
+     "reported UNCHECKED, never read"),
+)
+
+
+def _drift_child_failures(returncode, out, err):
+    """The drift-advisory child's result consumer (QA round-8 codex minor / claude F3). It judges
+    the child's STRUCTURED per-path states (the DRIFT-STATES line: every _drift_entry_state result
+    the advisory computed, keyed by exact path) and never a substring of the advisory text: that
+    text prints at most 5 entries (`e.g.`), and a substring test lets 'emptyfifo.txt' satisfy a
+    'fifo.txt' expectation. Returns the list of failures (empty when every expectation holds)."""
+    import json
+    failures = []
+    if returncode != 0:
+        failures.append("(R6 drift) the advisory child failed rc={}: {}".format(
+            returncode, err.strip()[-300:]))
+    # EXACTLY ONE record (QA round-9 codex minor): a duplicate, identical or contradictory, and a
+    # malformed record anywhere are failures no other record can erase; order never decides.
+    records = [line for line in out.splitlines() if "DRIFT-STATES" in line]
+    if len(records) != 1:
+        failures.append("(R6 drift) the advisory child must report exactly one DRIFT-STATES record "
+                        "(got {}); a duplicate or a malformed extra record is never resolved by "
+                        "order".format(len(records)))
+        return failures
+    # A key repeated INSIDE the one record (QA round-10 codex minor) is a named failure: json.loads
+    # keeps the last value, so the order of contradictory values would otherwise decide.
+    repeated = []
+
+    def _pairs(pairs):
+        keys = [key for key, _value in pairs]
+        repeated.extend(sorted(set(key for key in keys if keys.count(key) > 1)))
+        return dict(pairs)
+
+    states = None
+    if records[0].startswith("DRIFT-STATES "):
+        try:
+            states = json.loads(records[0][len("DRIFT-STATES "):], object_pairs_hook=_pairs)
+        except ValueError:
+            states = None
+    if repeated:
+        failures.append("(R6 drift) the DRIFT-STATES record repeats the key(s) {}; a duplicate "
+                        "key is never resolved by order".format(", ".join(repeated)))
+        return failures
+    if not isinstance(states, dict):
+        failures.append("(R6 drift) the advisory child reported no structured per-path states "
+                        "(DRIFT-STATES); empty or truncated output never reads as clean")
+        return failures
+    for path, want, msg in _DRIFT_CHILD_EXPECT:
+        if states.get(path) != want:
+            failures.append("{} (state {!r}, expected {!r})".format(msg, states.get(path), want))
+    if "UNCHECKED" not in out:
+        failures.append("(R6 drift cap): the advisory text must report the over-cap file "
+                        "UNCHECKED")
+    return failures
 
 
 def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent classification cases
@@ -1955,6 +6855,543 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     failures = []
+    # Round-6 per-block accounting (codex 1 / claude MEDIUM-1): each gated block appends its
+    # label here as its body's LAST statement; the gate records a NOT RUN failure instead when
+    # its probe fails; the final verdict requires EXACTLY ONE record per gate label.
+    gate_ran = []
+
+    # PR #530 QA round-3 claude MINOR-4, round-4 codex 1 / claude MINOR-2, round-5 codex 1/2/4: the
+    # _GIT_GATE_LABELS/_git_gate alignment is a CHECK over the module source, not a comment, and it
+    # refuses INDIRECT probes too. Planted vectors: the bare probe and the extra gate call were
+    # findings under the round-3 checker already; the EIGHT round-4 shapes (an alias, a callback
+    # tuple, a getattr, a globals() lookup, a sys.modules attribute, a second def of _git_gate, a
+    # probe closure escaping _git_gate, and a swapped label index) each returned [] from it; and
+    # the round-5 shapes (an import alias, a bytes globals() key, a second def of
+    # _not_run_net_vectors, an alias / functools.partial / rebinding of _git_gate, decorator,
+    # default and annotation probes on the gate, a class-body probe, an unrelated early-return
+    # alias, a duplicated and a nested real_probe swap, and a bool and a float label index) each
+    # returned [] from the round-4 checker; the round-6 shapes (a globals()/sys.modules/import
+    # rebinding or lookup of _git_gate, a parameter shadowing of the probe, a generator-expression
+    # and a type-alias escape, an early return through real_probe, a zero-swap stand-in, and a
+    # third globals() store) each returned [] from the round-5 checker, while the round-6
+    # duplicated import capture drew TWO round-5 findings (an indirect probe reference and an
+    # indirect gate reference, neither capture-specific) and the missing capture cannot be
+    # evaluated at round-5 at all, that revision having no capture to remove (round-7 codex 4 /
+    # claude MINOR-3 corrected the earlier claim that every round-6 shape returned []); and the
+    # round-7 shapes (the match captures and the class-definition binding, the calls through a
+    # _GATE_IMPORT_BINDINGS subscript, the capture co-rebinding, and the second def of and the
+    # ungated call to _planned_probe) each returned [] from the round-6 checker, which also had
+    # five rules with no planted vector at all (a global declaration, an except alias, a keyword
+    # argument, a bytes gate key, the gate-store count; claude MINOR-2), vectored now. Round-8
+    # (codex 2): the capture-deletion and zero-_planned_probe-def inputs were already findings
+    # under the round-7 checker; their new fixtures pin the ast.Del arm and the LOWER side of the
+    # def-count bound, each previously unvectored (round-9 claude 3: the zero-def fixture pins
+    # the lower side; the earlier two-def vector, round-7, pins the upper side, so together
+    # they pin both sides). Round-8 (codex 1): the co-rebinding RUNTIME
+    # vector below was red at the round-7 pin (its checker reread the rebound module capture).
+    # Round-6/7: this battery keeps the checker honest as a BACKSTOP; the runtime identity
+    # checkpoints (_gate_identity_failures at every gate and at the end) and the per-label
+    # accounting (_gate_accounting_failures) before the verdict carry the guarantee, whose exact
+    # statement and disclosed limits live at _gate_identity_failures. Residual
+    # (disclosed): a git-dependent block with NO probe at all is invisible to the static check; see
+    # the checker docstring.
+    own_source = Path(__file__).resolve().read_text(encoding="utf-8")
+    align = _git_gate_alignment_failures(own_source)
+    if align:
+        failures.append("(git-gate alignment) this module must probe git only through _git_gate, one "
+                        "call per label: {}".format("; ".join(align)))
+    for tagg, plantg, wantg in (
+            ("a planted bare probe",
+             "def _planted_probe_vector():\n    return _git_available()\n",
+             "outside _git_gate"),
+            ("a planted alias probe (round-4)",
+             "def _planted_alias_vector():\n    _probe = _git_available\n    return _probe()\n",
+             "outside _git_gate"),
+            ("a planted callback-tuple probe (round-4)",
+             "def _planted_tuple_vector():\n    return any(fn() for fn in (_git_available,))\n",
+             "outside _git_gate"),
+            ("a planted getattr probe (round-4)",
+             "def _planted_getattr_vector():\n"
+             "    return getattr(sys.modules[__name__], \"_git_available\")()\n",
+             "string reference"),
+            ("a planted globals() probe (round-4)",
+             "def _planted_globals_vector():\n    return globals()[\"_git_available\"]()\n",
+             "string reference"),
+            ("a planted sys.modules attribute probe (round-4)",
+             "def _planted_modattr_vector():\n    return sys.modules[__name__]._git_available()\n",
+             "attribute reference"),
+            ("a planted second def of _git_gate (round-4)",
+             "def _git_gate(label, failures):\n    return True\n",
+             "exactly one top-level def"),
+            ("a planted extra gate call",
+             "def _planted_gate_vector(failures):\n"
+             "    return _git_gate(_GIT_GATE_LABELS[0], failures)\n",
+             "label(s) in _GIT_GATE_LABELS"),
+            ("a planted import alias of the probe (round-5)",
+             "from planted_mod import _git_available as _planted_import\n",
+             "import of"),
+            ("a planted bytes-keyed globals() lookup (round-5)",
+             "def _planted_bytes_vector():\n"
+             "    return globals()[b\"_git_available\".decode()]()\n",
+             "bytes reference"),
+            ("a planted second def of _not_run_net_vectors (round-5)",
+             "def _not_run_net_vectors(tmp, failures):\n    return None\n",
+             "_not_run_net_vectors must have exactly one top-level def"),
+            ("a planted alias of _git_gate (round-5)",
+             "def _planted_gate_alias_vector(failures):\n    _gate = _git_gate\n"
+             "    return _gate(_GIT_GATE_LABELS[0], failures)\n",
+             "other than by a direct call"),
+            ("a planted functools.partial over _git_gate (round-5)",
+             "def _planted_gate_partial_vector(failures):\n    import functools\n"
+             "    return functools.partial(_git_gate, _GIT_GATE_LABELS[0])\n",
+             "other than by a direct call"),
+            ("a planted rebinding of _git_gate (round-5)",
+             "_git_gate = lambda label, failures: False\n",
+             "other than by a direct call"),
+            ("a planted globals() rebinding of _git_gate (round-6)",
+             "globals()[\"_git_gate\"] = lambda label, failures: False\n",
+             "string reference to _git_gate"),
+            ("a planted sys.modules rebinding of _git_gate (round-6)",
+             "sys.modules[__name__]._git_gate = lambda label, failures: False\n",
+             "attribute reference to _git_gate"),
+            ("a planted import binding of _git_gate (round-6)",
+             "from planted_mod import replacement as _git_gate\n",
+             "import of _git_gate"),
+            ("a planted getattr lookup of _git_gate (round-6)",
+             "def _planted_gate_lookup_vector(failures):\n"
+             "    return getattr(sys.modules[__name__], \"_git_gate\")("
+             "_GIT_GATE_LABELS[0], failures)\n",
+             "string reference to _git_gate"),
+            ("a planted duplicate import capture (round-6)",
+             "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n",
+             "capture must appear exactly"),
+            ("a planted match capture of _git_gate (round-7)",
+             "def _planted_matchas_vector(x):\n    match x:\n        case _git_gate:\n"
+             "            pass\n",
+             "match capture pattern"),
+            ("a planted match star capture of the probe (round-7)",
+             "def _planted_matchstar_vector(x):\n    match x:\n        case [*_git_available]:\n"
+             "            pass\n",
+             "match capture pattern"),
+            ("a planted match mapping rest capture (round-7)",
+             "def _planted_matchmap_vector(x):\n    match x:\n        case {**_git_gate}:\n"
+             "            pass\n",
+             "match mapping rest"),
+            ("a planted class-definition binding of the probe (round-7)",
+             "def _planted_class_vector():\n    class _git_available:\n        pass\n",
+             "bound by a class definition"),
+            ("a planted probe call through the import capture (round-7)",
+             "def _planted_capture_probe_vector():\n    return _GATE_IMPORT_BINDINGS[1]()\n",
+             "call through a _GATE_IMPORT_BINDINGS subscript"),
+            ("a planted gate call through the import capture (round-7)",
+             "def _planted_capture_gate_vector(failures):\n"
+             "    return _GATE_IMPORT_BINDINGS[0](_GIT_GATE_LABELS[0], failures)\n",
+             "call through a _GATE_IMPORT_BINDINGS subscript"),
+            ("a planted co-rebinding of the import capture (round-7)",
+             "_GATE_IMPORT_BINDINGS = (lambda label, failures: False, lambda: True)\n",
+             "rebound or deleted outside the reviewed import-time capture"),
+            ("a planted deletion of the import capture (round-7 rule, vectored round-8)",
+             "del _GATE_IMPORT_BINDINGS\n",
+             "rebound or deleted outside the reviewed import-time capture"),
+            ("a planted global declaration of the probe (round-6 rule, vectored round-7)",
+             "def _planted_global_vector():\n    global _git_available\n",
+             "global or nonlocal declaration"),
+            ("a planted except alias of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_except_vector():\n    try:\n        pass\n"
+             "    except Exception as _git_gate:\n        pass\n",
+             "except alias"),
+            ("a planted keyword-argument binding of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_kw_vector():\n    return dict(_git_gate=None)\n",
+             "keyword argument"),
+            ("a planted bytes-keyed lookup of _git_gate (round-6 rule, vectored round-7)",
+             "def _planted_gate_bytes_vector():\n"
+             "    return globals()[b\"_git_gate\".decode()]()\n",
+             "bytes reference to _git_gate")):
+        gotg = _git_gate_alignment_failures(own_source + "\n\n" + plantg)
+        if not any(wantg in fg for fg in gotg):
+            failures.append("(git-gate alignment) {} must be a finding naming {!r} (got {})".format(
+                tagg, wantg, gotg))
+    # Round-4: the escaped-closure and swapped-label-index vectors EDIT the real source instead of
+    # appending to it (an appended def cannot reach inside _git_gate or reorder its calls); so
+    # do the round-5 class-body, definition-time, swap-allowance and index-type vectors below.
+    _gate_probe_line = "    if " + "_git_available():"
+    if own_source.count(_gate_probe_line + "\n") != 1:
+        failures.append("(git-gate alignment) expected exactly one direct gate probe line to edit "
+                        "for the escaped-closure vector")
+    else:
+        _escaped = own_source.replace(
+            _gate_probe_line + "\n",
+            "    def _esc():\n        return " + "_git_available()\n"
+            "    globals()[\"_escaped_gate_probe\"] = _esc\n    if _esc():\n")
+        gote = _git_gate_alignment_failures(_escaped)
+        if not any("escapes _git_gate" in fg for fg in gote):
+            failures.append("(git-gate alignment) a probe closure escaping _git_gate must be a "
+                            "finding (got {})".format(gote))
+        # Round-5 (codex 1): a class-body call inside the gate sits outside its executable body.
+        _classed = own_source.replace(
+            _gate_probe_line + "\n",
+            "    class _PlantedProbe:\n        available = " + "_git_available()\n"
+            "    if _PlantedProbe.available:\n")
+        gotc = _git_gate_alignment_failures(_classed)
+        if not any("outside _git_gate" in fc for fc in gotc):
+            failures.append("(git-gate alignment) a class-body probe inside _git_gate (round-5) "
+                            "must be a finding naming outside _git_gate (got {})".format(gotc))
+        # Round-6: a GENERATOR EXPRESSION and a TYPE ALIAS are deferred scopes; either carries
+        # the probe out of the gate uncalled, and whoever evaluates the exported object probes
+        # OUTSIDE the gate, unnamed on failure.
+        for tag_esc, plant_esc in (
+                ("a generator-expression escape",
+                 "    globals()[\"_planted_escape\"] = (" + "_git_available() for _ in (0,))\n"),
+                ("a type-alias escape",
+                 "    type _PlantedAlias = " + "_git_available()\n")):
+            got_esc = _git_gate_alignment_failures(own_source.replace(
+                _gate_probe_line + "\n", plant_esc + _gate_probe_line + "\n"))
+            if not any("escapes _git_gate" in f_esc for f_esc in got_esc):
+                failures.append("(git-gate alignment) {} from the gate body (round-6: a deferred "
+                                "scope) must be a finding (got {})".format(tag_esc, got_esc))
+    # Round-5 (codex 1): definition-time probes in the signature of the gate; each EDITS the def
+    # line (an appended second def trips the one-def finding, never the targeted one).
+    _gate_def_line = "\ndef _git_gate(label, failures):\n"
+    if own_source.count(_gate_def_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one _git_gate def line to edit for "
+                        "the round-5 definition-time vectors")
+    else:
+        for tagd, repld in (
+                ("a decorator probe",
+                 "\n@_planted_deco(" + "_git_available())\ndef _git_gate(label, failures):\n"),
+                ("a default-argument probe",
+                 "\ndef _git_gate(label, failures, _cached=" + "_git_available()):\n"),
+                ("a return-annotation probe",
+                 "\ndef _git_gate(label, failures) -> " + "_git_available():\n")):
+            gotd = _git_gate_alignment_failures(own_source.replace(_gate_def_line, repld))
+            if not any("outside _git_gate" in fd for fd in gotd):
+                failures.append("(git-gate alignment) {} on _git_gate (round-5: the probe is "
+                                "allowed only in the executable body of the gate) must be a "
+                                "finding (got {})".format(tagd, gotd))
+        # Round-6 (codex 3): a PARAMETER named after the probe shadows the module binding inside
+        # the gate itself, so the body's probe call resolves to the parameter; ast.arg bindings
+        # are findings now.
+        got_param = _git_gate_alignment_failures(own_source.replace(
+            _gate_def_line,
+            "\ndef _git_gate(label, failures, " + "_git_available=lambda: True):\n"))
+        if not any("bound as a parameter" in f_param for f_param in got_param):
+            failures.append("(git-gate alignment) a parameter shadowing of the probe (round-6) "
+                            "must be a finding naming the parameter binding (got {})".format(
+                                got_param))
+    # Round-5 (codex 2): the swap allowance is the exact reviewed assignment, in the direct
+    # scope of _not_run_net_vectors, exactly once; anything else there is a finding.
+    _swap_line = "    real_probe = " + "_git_available\n"
+    if own_source.count(_swap_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one reviewed real_probe swap line "
+                        "to edit for the round-5 swap-allowance vectors")
+    else:
+        for tags, repls, wants in (
+                ("an unrelated early-return alias",
+                 "    _unrelated_probe = " + "_git_available\n"
+                 "    if not _unrelated_probe():\n        return\n" + _swap_line,
+                 "outside _git_gate"),
+                ("a second real_probe assignment",
+                 _swap_line + _swap_line, "exactly once"),
+                ("a nested-scope swap",
+                 "    def _planted_nested_swap():\n"
+                 "        real_probe = " + "_git_available\n        return real_probe()\n"
+                 + _swap_line,
+                 "outside _git_gate"),
+                ("an early return through the reviewed alias (round-6)",
+                 _swap_line + "    if not real_probe():\n        return\n",
+                 "outside _planned_probe"),
+                ("a zero-swap stand-in probe (round-6)",
+                 "    real_probe = lambda: True\n",
+                 "exactly once"),
+                ("a third globals() probe store (round-6)",
+                 _swap_line + "    globals()[\"" + "_git_available\"] = real_probe\n",
+                 "the stores are counted"),
+                ("a second def of _planned_probe (round-7)",
+                 _swap_line + "    def _planned_probe():\n        return real_probe()\n",
+                 "exactly one def of _planned_probe"),
+                ("an ungated call to _planned_probe (round-7)",
+                 _swap_line + "    if not _planned_probe():\n        return\n",
+                 "other than as the reviewed probe-store value"),
+                ("a third globals() gate store (round-6 rule, vectored round-7)",
+                 _swap_line + "    globals()[\"" + "_git_gate\"] = None\n",
+                 "store(s) of the gate name")):
+            gots5 = _git_gate_alignment_failures(own_source.replace(_swap_line, repls, 1))
+            if not any(wants in f5 for f5 in gots5):
+                failures.append("(git-gate alignment) {} in _not_run_net_vectors (round-5) must "
+                                "be a finding naming {!r} (got {})".format(tags, wants, gots5))
+    _swapped = own_source.splitlines(keepends=True)
+    _call_mark = "if " + "_git_gate(_GIT_GATE_LABELS["
+    _call_rows = [index for index, line in enumerate(_swapped)
+                  if line.lstrip().startswith(_call_mark)]
+    if len(_call_rows) < 2:
+        failures.append("(git-gate alignment) expected at least two gate call lines to swap")
+    else:
+        # Round-5 (codex 4): a bool or float index satisfies an equality-only test (False == 0,
+        # 0.0 == 0), so the checker requires EXACT type int; each vector edits the first call row.
+        for _lit5 in ("False", "0.0"):
+            _typed = own_source.splitlines(keepends=True)
+            _typed[_call_rows[0]] = _typed[_call_rows[0]].replace("[0]", "[" + _lit5 + "]", 1)
+            gott = _git_gate_alignment_failures("".join(_typed))
+            if not any("source order" in ft for ft in gott):
+                failures.append("(git-gate alignment) a {} label index (round-5: exact type int "
+                                "required) must be a finding naming the source order "
+                                "(got {})".format(_lit5, gott))
+        _swapped[_call_rows[0]] = _swapped[_call_rows[0]].replace("[0]", "[1]", 1)
+        _swapped[_call_rows[1]] = _swapped[_call_rows[1]].replace("[1]", "[0]", 1)
+        gots = _git_gate_alignment_failures("".join(_swapped))
+        if not any("source order" in fg for fg in gots):
+            failures.append("(git-gate alignment) a swapped label index must be a finding naming "
+                            "the source order (got {})".format(gots))
+
+    # Round-6: the import capture itself, edited OUT (the duplicate is an appended vector above).
+    _capture_line = "_GATE_IMPORT_BINDINGS = (" + "_git_gate, " + "_git_available)\n"
+    if own_source.count(_capture_line) != 1:
+        failures.append("(git-gate alignment) expected exactly one import-capture line to edit "
+                        "for the round-6 zero-capture vector")
+    else:
+        got_cap = _git_gate_alignment_failures(own_source.replace(_capture_line, "", 1))
+        if not any("capture must appear exactly" in f_cap for f_cap in got_cap):
+            failures.append("(git-gate alignment) a missing import capture (round-6: the runtime "
+                            "identity check reads it) must be a finding (got {})".format(got_cap))
+
+    # Round-8 (codex 2): the _planned_probe def, edited OUT (a SECOND def is a swap-line
+    # vector above); zero defs and two defs are both findings, so the exactly-one def bound
+    # is red-on-revert on BOTH sides (a `> 1` relaxation would readmit a removed def).
+    _planned_def_block = ("        def _planned_probe(plan=plan):\n"
+                          "            return plan.pop(0) if plan else " + "real_probe()\n")
+    if own_source.count(_planned_def_block) != 1:
+        failures.append("(git-gate alignment) expected exactly one _planned_probe def block to "
+                        "edit for the round-8 zero-def vector")
+    else:
+        got_zero = _git_gate_alignment_failures(own_source.replace(_planned_def_block, "", 1))
+        if not any("exactly one def of _planned_probe" in f_zero for f_zero in got_zero):
+            failures.append("(git-gate alignment) ZERO defs of _planned_probe (round-8: the "
+                            "def-count bound is two-sided) must be a finding naming the def "
+                            "count (got {})".format(got_zero))
+
+    # Round-6: the RUNTIME identity check, red-on-revert for the rebinding class the static scan
+    # kept missing across rounds 4 to 6: identity through the module's own namespace decides, so
+    # one IN-PLACE module rebinding stands for every spelling of that class (a globals() store, a
+    # sys.modules attribute store, an import binding). A temporary rebinding restored between
+    # checkpoints and a local shadow that never rebinds the module sit OUTSIDE that class; the
+    # witness below holds the first escape visible, and _gate_identity_failures states the
+    # guarantee exactly (round-7). The module key is found BY IDENTITY too, so this test needs no
+    # name literal the static backstop would have to allow. Round-9: the planted rebindings go
+    # into globals(), the namespace the gated calls resolve through, never sys.modules[__name__].
+    space_idn = globals()
+    for tag_idn, bound_idn in zip(("the gate", "the probe"), _GATE_IMPORT_BINDINGS):
+        name_idn = next((key_idn for key_idn, val_idn in space_idn.items()
+                         if val_idn is bound_idn), None)
+        if name_idn is None:
+            # Already rebound before this test ran (the rebound-gate nested run reaches here):
+            # that drift is itself a named identity failure, and the per-gate and end-of-suite
+            # identity checks name it with the drifted binding.
+            failures.append("(git-gate identity) the object captured at import for {} is bound "
+                            "to no module name (rebound before this test ran)".format(tag_idn))
+            continue
+        got_idn = []
+        space_idn[name_idn] = lambda *_args_idn: False
+        try:
+            _gate_identity_failures(got_idn, "under a planted rebinding")
+        finally:
+            space_idn[name_idn] = bound_idn
+        if not any("captured at import" in f_idn and name_idn in f_idn for f_idn in got_idn):
+            failures.append("(git-gate identity) a rebinding of {} must be an identity failure "
+                            "naming {} (got {})".format(tag_idn, name_idn, got_idn))
+    got_idn = []
+    _gate_identity_failures(got_idn, "with the bindings intact")
+    if got_idn:
+        failures.append("(git-gate identity) intact bindings must pass the identity check "
+                        "(got {})".format(got_idn))
+
+    # Round-7 (codex 3 / claude MEDIUM-2) DISCLOSED-RESIDUAL WITNESS: a temporary rebinding
+    # restored between checkpoints escapes the identity check BY DESIGN (checkpoints observe
+    # states, never the dispatch between them). The witness reproduces the escape: a stand-in
+    # gate is bound, dispatched through the module namespace, and restored between two
+    # checkpoint reads; the failure list must stay empty and the stand-in must have run.
+    # Round-8 (codex 3): the witness dispatches through the module namespace read HERE, at
+    # the witness itself, independently of the production gate calls (the static backstop
+    # pins those to direct _git_gate names), so it demonstrates ONLY this residual and makes
+    # no claim about changes to production dispatch, which it cannot observe.
+    gate_name_res = next((key_res for key_res, val_res in space_idn.items()
+                          if val_res is _GATE_IMPORT_BINDINGS[0]), None)
+    if gate_name_res is not None:
+        got_res = []
+        _gate_identity_failures(got_res, "before a temporary rebinding")
+        ran_res = []
+        space_idn[gate_name_res] = lambda *_args_res: bool(ran_res.append(True))
+        try:
+            stood_res = space_idn[gate_name_res]("a label the stand-in ignores", [])
+        finally:
+            space_idn[gate_name_res] = _GATE_IMPORT_BINDINGS[0]
+        _gate_identity_failures(got_res, "after the restore")
+        if got_res or ran_res != [True] or stood_res is not False:
+            failures.append("(git-gate identity) the restore-between-checkpoints witness moved: "
+                            "a temporary rebinding restored between checkpoints is the DISCLOSED "
+                            "residual of the identity check (got failures={}, ran={}, "
+                            "returned={!r})".format(got_res, ran_res, stood_res))
+
+    # Round-8 (codex 1): the CO-REBINDING vector, red at the round-7 pin: the gate and the
+    # public import capture rebound TOGETHER through the module namespace (both keys found by
+    # identity, so this test needs no name literal). The round-7 checker reread its reference
+    # from the rebound module binding and reported nothing; the checker now validates the
+    # module capture against its definition-time reference, so BOTH rebindings are named.
+    cap_key_co = next((key_co for key_co, val_co in space_idn.items()
+                       if val_co is _GATE_IMPORT_BINDINGS), None)
+    gate_key_co = next((key_co for key_co, val_co in space_idn.items()
+                        if val_co is _GATE_IMPORT_BINDINGS[0]), None)
+    if cap_key_co is None or gate_key_co is None:
+        failures.append("(git-gate identity) the import capture or the gate has no module "
+                        "binding, so the co-rebinding vector cannot run (that drift is "
+                        "itself a named identity failure above)")
+    else:
+        real_cap_co = space_idn[cap_key_co]
+        real_gate_co = real_cap_co[0]
+        got_co = []
+        space_idn[gate_key_co] = lambda *_args_co: False
+        space_idn[cap_key_co] = (space_idn[gate_key_co], real_cap_co[1])
+        try:
+            _gate_identity_failures(got_co, "under a planted co-rebinding")
+        finally:
+            space_idn[cap_key_co] = real_cap_co
+            space_idn[gate_key_co] = real_gate_co
+        if not any("is not the capture made at import" in f_co for f_co in got_co) or not any(
+                gate_key_co in f_co and "is not the object captured at import" in f_co
+                for f_co in got_co):
+            failures.append("(git-gate identity) a co-rebinding of the gate and the import "
+                            "capture must name BOTH the drifted capture and the drifted gate "
+                            "(round-8: the round-7 checker read its reference from the "
+                            "rebound module binding and reported nothing; got {})".format(
+                                got_co))
+
+    # Round-9 (claude 1), red at the round-8 pin: a SYS.MODULES SWAP beside an in-place
+    # rebinding. The gate is rebound in the module namespace (key found by identity) while
+    # sys.modules[__name__] holds a decoy module carrying the ORIGINAL objects. The round-8
+    # checker read vars(sys.modules[__name__]) and reported nothing although the gated calls
+    # resolve through the rebound namespace; the checker now reads that namespace itself.
+    import types
+    gate_key_sw = next((key_sw for key_sw, val_sw in space_idn.items()
+                        if val_sw is _GATE_IMPORT_BINDINGS[0]), None)
+    if gate_key_sw is None:
+        failures.append("(git-gate identity) the gate has no module binding, so the "
+                        "sys.modules-swap vector cannot run (that drift is itself a named "
+                        "identity failure above)")
+    else:
+        real_mod_sw = sys.modules[__name__]
+        decoy_sw = types.ModuleType(__name__)
+        vars(decoy_sw).update(space_idn)
+        got_sw = []
+        space_idn[gate_key_sw] = lambda *_args_sw: False
+        sys.modules[__name__] = decoy_sw
+        try:
+            _gate_identity_failures(got_sw, "beside a planted sys.modules swap")
+        finally:
+            sys.modules[__name__] = real_mod_sw
+            space_idn[gate_key_sw] = _GATE_IMPORT_BINDINGS[0]
+        if not any(gate_key_sw in f_sw and "is not the object captured at import" in f_sw
+                   for f_sw in got_sw):
+            failures.append("(git-gate identity) an in-place rebinding of the gate beside a "
+                            "sys.modules swap must name the drifted gate (round-9: the round-8 "
+                            "checker read the swapped module and reported nothing; got "
+                            "{})".format(got_sw))
+
+    # Round-9 (claude 1), red at the round-8 pin: a checkpoint that SUPPLIES the reference. The
+    # gate and the capture are co-rebound (keys found by identity) and the rebound capture is
+    # passed explicitly, positionally and by keyword. The round-8 checker took it as its _ref
+    # and reported nothing; the checker now holds its reference in a closure and accepts only
+    # (failures, where), so either call is a TypeError, never a silent pass.
+    if cap_key_co is not None and gate_key_co is not None:
+        real_cap_ex = space_idn[cap_key_co]
+        rebound_ex = (lambda *_args_ex: False, real_cap_ex[1])
+        for tag_ex, call_ex in (
+                ("positionally", lambda got_ex: _gate_identity_failures(
+                    got_ex, "with a supplied reference", rebound_ex)),
+                ("by keyword", lambda got_ex: _gate_identity_failures(
+                    got_ex, "with a supplied reference", _ref=rebound_ex))):
+            got_ex = []
+            space_idn[gate_key_co] = rebound_ex[0]
+            space_idn[cap_key_co] = rebound_ex
+            try:
+                call_ex(got_ex)
+            except TypeError:
+                refused_ex = True
+            else:
+                refused_ex = False
+            finally:
+                space_idn[cap_key_co] = real_cap_ex
+                space_idn[gate_key_co] = real_cap_ex[0]
+            if not refused_ex:
+                failures.append("(git-gate identity) a reference supplied {} must be refused "
+                                "(round-9: the round-8 checker took the rebound capture as its "
+                                "reference and reported nothing; got {})".format(tag_ex, got_ex))
+
+    # Round-7 (fix item 1): the per-label accounting, one unit vector per gate label. Each
+    # vector feeds _gate_accounting_failures a record list missing EXACTLY ONE label and
+    # requires the diagnostic naming that label and no other, so dropping any single label
+    # from the accounting is red under its own vector, never masked by a diagnostic a
+    # different label produced. The intact, NOT-RUN-record and duplicate-record cases pin
+    # both sides of the exactly-one bound (0 records and 2 records are each findings; 1,
+    # from either source, never is).
+    # Round-8 (codex 4), correcting the round-7 account: omitting label 0 from the accounting
+    # draws THREE assertions, not two (its unit vector here, the duplicate-record vector
+    # below, whose expected ran=2 finding the omission suppresses, and the rebound-gate run's
+    # per-label assertion); labels 1-5 each draw two (unit vector and rebound-gate assertion).
+    got_av = []
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS))
+    if got_av:
+        failures.append("(git-gate accounting) a complete record list must satisfy the "
+                        "accounting (got {})".format(got_av))
+    for miss_av, miss_label_av in enumerate(_GIT_GATE_LABELS):
+        got_av = []
+        _gate_accounting_failures(got_av, [lab_av for lab_av in _GIT_GATE_LABELS
+                                           if lab_av is not miss_label_av])
+        named_av = [f_av for f_av in got_av
+                    if "(git-gate accounting) {!r}".format(miss_label_av) in f_av]
+        if len(got_av) != 1 or len(named_av) != 1:
+            failures.append("(git-gate accounting) label {} left unaccounted must draw exactly "
+                            "one diagnostic, naming {!r} (got {})".format(
+                                miss_av, miss_label_av, got_av))
+    got_av = ["NOT RUN: " + _GIT_GATE_LABELS[0] + ": its probe failed (unit vector)"]
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS[1:]))
+    if len(got_av) != 1:
+        failures.append("(git-gate accounting) a NOT RUN line is a label's one record and must "
+                        "satisfy the accounting (got {})".format(got_av[1:]))
+    got_av = []
+    _gate_accounting_failures(got_av, list(_GIT_GATE_LABELS) + [_GIT_GATE_LABELS[0]])
+    if not any("(git-gate accounting) {!r}".format(_GIT_GATE_LABELS[0]) in f_av
+               and "ran=2" in f_av for f_av in got_av):
+        failures.append("(git-gate accounting) a DUPLICATE record (ran=2) must be a finding "
+                        "naming the label; exactly one is a two-sided bound (got {})".format(
+                            got_av))
+
+    # QA round-9 codex minor: the drift consumer requires EXACTLY ONE DRIFT-STATES record. A
+    # duplicate (identical or contradictory) and a malformed record are failures that a later
+    # record cannot erase; with the pre-fix last-record-wins loop all three sequences read clean.
+    import json as _json9
+    good9 = dict((path_, want_) for path_, want_, _msg in _DRIFT_CHILD_EXPECT)
+    bad9 = dict(good9)
+    bad9["fifo.txt"] = "match"
+    rec9 = "DRIFT-STATES " + _json9.dumps(good9, sort_keys=True)
+    if _drift_child_failures(0, "UNCHECKED big.txt\n" + rec9 + "\n", ""):
+        failures.append("(R9 drift record) a single valid DRIFT-STATES record must be accepted")
+    for tag9, lines9 in (
+            ("duplicate-identical", [rec9, rec9]),
+            ("bad-then-good", ["DRIFT-STATES " + _json9.dumps(bad9, sort_keys=True), rec9]),
+            ("malformed-then-good", ["DRIFT-STATES (not json", rec9])):
+        if not _drift_child_failures(0, "UNCHECKED big.txt\n" + "\n".join(lines9) + "\n", ""):
+            failures.append("(R9 drift record) {}: more than one DRIFT-STATES record must fail; "
+                            "a later record never erases an earlier one".format(tag9))
+    # QA round-10 codex minor: a key repeated INSIDE the one record fails, named, in either order
+    # (json.loads keeps the last value, so codex's record read clean with "drift" last).
+    for tag10, first10, last10 in (("match first", "match", "drift"),
+                                   ("drift first", "drift", "match")):
+        rec10 = ('DRIFT-STATES {"fifo.txt":"' + first10 + '","lnkdir/leaf.txt":"drift",'
+                 '"lnkfile.txt":"drift","fifo.txt":"' + last10 + '","emptyfifo.txt":"drift",'
+                 '"big.txt":"unchecked"}')
+        got10 = _drift_child_failures(0, "UNCHECKED big.txt\n" + rec10 + "\n", "")
+        if not any("repeats the key(s) fifo.txt" in f10 for f10 in got10):
+            failures.append("(R10 drift duplicate key) {}: a DRIFT-STATES record repeating "
+                            "'fifo.txt' must fail naming the key (got {!r})".format(tag10, got10))
 
     # F-TOML-BARE-VALUEERROR-CLASS: a predecessor TOML carrying an over-long integer literal (a BARE
     # ValueError) or a parser overflow (a RecursionError) must fail closed as GateError at the _show_toml
@@ -1965,35 +7402,78 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
     # refusal) under another.
     import tempfile as _tempfile
-    with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
-        tc_repo = Path(tc_dir)
-        (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
-        (tc_repo / "deep.toml").write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
-        _git_init_commit(tc_repo, "toml class fixtures")
-        prev_digits = sys.get_int_max_str_digits()
-        sys.set_int_max_str_digits(4300)
-        real_loads, real_load = tomllib.loads, tomllib.load
+    # The fixture commit is REAL git work (init/add/commit with check=True), so it runs behind
+    # a named gate (round-4 claude MINOR-3); git absent at the START stops the whole suite in
+    # fixture_git_lifecycle, which raises RuntimeError: self-test requires git (round-5), and a
+    # fixture commit that fails AFTER this block's successful probe is caught below and recorded
+    # as this block's NOT RUN naming the OBSERVED cause, the exception type and text (round-6
+    # codex 6; round-7 codex 4 / claude MINOR-5: a CalledProcessError can also mean a refused
+    # commit, so the message no longer asserts git was lost, and the first nested run in
+    # _not_run_net_vectors carries the in-suite vector), never an unnamed traceback.
+    _gate_identity_failures(failures, _GIT_GATE_LABELS[0])
+    if _git_gate(_GIT_GATE_LABELS[0], failures):
+        with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
+            tc_repo = Path(tc_dir)
+            (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
+            (tc_repo / "deep.toml").write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
+            try:
+                _git_init_commit(tc_repo, "toml class fixtures")
+            except (OSError, subprocess.CalledProcessError) as tc_exc:
+                _not_run(failures, _GIT_GATE_LABELS[0], "its fixture commit failed after this "
+                         "block's successful probe ({}: {}); a lost git and a refused commit "
+                         "both land here, fail-closed under the observed cause".format(
+                             type(tc_exc).__name__, tc_exc))
+            else:
+                prev_digits = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(4300)
+                real_loads, real_load = tomllib.loads, tomllib.load
 
-        def overflowing_loads(text, **kwargs):
-            if "injected-overflow" in text:
-                raise RecursionError("injected parser overflow")
-            return real_loads(text, **kwargs)
+                def overflowing_loads(text, **kwargs):
+                    if "injected-overflow" in text:
+                        raise RecursionError("injected parser overflow")
+                    return real_loads(text, **kwargs)
 
-        tomllib.loads = overflowing_loads
-        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
-        try:
-            for tc_name, tc_needle in (("bigint.toml", ""), ("deep.toml", "injected parser overflow")):
+                tomllib.loads = overflowing_loads
+                tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"),
+                                                                      **kwargs)
                 try:
-                    _show_toml(tc_repo, "HEAD", tc_name)
-                    failures.append("_show_toml accepted {}".format(tc_name))
-                except GateError as exc:
-                    if tc_needle not in str(exc):
-                        failures.append("_show_toml refused {} without its finding ({})".format(tc_name, exc))
-                except (ValueError, RecursionError) as exc:
-                    failures.append("_show_toml let a bare {} escape on {}".format(type(exc).__name__, tc_name))
-        finally:
-            tomllib.loads, tomllib.load = real_loads, real_load
-            sys.set_int_max_str_digits(prev_digits)
+                    for tc_name, tc_needle in (("bigint.toml", ""),
+                                               ("deep.toml", "injected parser overflow")):
+                        try:
+                            _show_toml(tc_repo, "HEAD", tc_name)
+                            failures.append("_show_toml accepted {}".format(tc_name))
+                        except GateError as exc:
+                            if tc_needle not in str(exc):
+                                failures.append("_show_toml refused {} without its finding "
+                                                "({})".format(tc_name, exc))
+                        except (ValueError, RecursionError) as exc:
+                            failures.append("_show_toml let a bare {} escape on {}".format(
+                                type(exc).__name__, tc_name))
+                finally:
+                    tomllib.loads, tomllib.load = real_loads, real_load
+                    sys.set_int_max_str_digits(prev_digits)
+                gate_ran.append(_GIT_GATE_LABELS[0])
+
+    # QA round-11 claude F1: main() reached by IMPORTING this module (never through the `if
+    # __name__ == "__main__" and sys.argv[1:] == []` guard that invokes _stage1_main) leaves
+    # _STAGE1_ROOT at its None default; main() must refuse exit 2 naming the missing hand-off,
+    # never silently run() against an unrelated cwd.
+    label11h = "(R11 import main, no hand-off) main() imported with no stage-1 hand-off refuses exit 2"
+    _r11_src = ("import sys; sys.path.insert(0,'tools'); sys.argv=['x']; import "
+                "check_release_delta as m; sys.exit(m.main())")
+    try:
+        proc11 = subprocess.run([sys.executable, "-I", "-B", "-c", _r11_src],
+                                 cwd=str(repo_root()), capture_output=True, env=_selftest_env(),
+                                 timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc11:
+        failures.append("fixture setup ({}): could not run the gate ({})".format(label11h, exc11))
+    else:
+        out11 = (proc11.stdout + proc11.stderr).decode("utf-8", "replace")
+        if (proc11.returncode != 2 or "no stage-1 hand-off was recorded" not in out11
+                or "Traceback" in out11):
+            failures.append("{}: expected exit 2 with 'no stage-1 hand-off was recorded' and no "
+                            "traceback (got rc={}: {})".format(label11h, proc11.returncode,
+                                                                out11.strip()[-300:]))
 
     def _rows(*specs):
         # specs: (kind, target, release[, impact-or-old-class][, new-class]). The row's `id` IS the target
@@ -2238,15 +7718,23 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         pass
 
     # --- repin / self-test mode resolution (VC-4 QA #9) ------------------------------------------
-    def _opts(self_test=False, repin=False, target=None):
-        return {"self_test": self_test, "repin": repin, "target": target}
+    def _opts(self_test=False, repin=False, target=None, stage2_repo=None, stage2_tree=None):
+        return {"self_test": self_test, "repin": repin, "target": target,
+                "stage2_repo": stage2_repo, "stage2_tree": stage2_tree}
     _cases = [(_opts(), "run"),
               (_opts(self_test=True), "self-test"),
               (_opts(repin=True, target="1.0.0"), "repin"),
               (_opts(target="1.0.0"), "error"),               # --target without --repin never runs
               (_opts(repin=True), "error"),                   # --repin without --target is incomplete
               (_opts(repin=True, target="1.0.0", self_test=True), "error"),   # mixed with --self-test
-              (_opts(target="1.0.0", self_test=True), "error")]
+              (_opts(target="1.0.0", self_test=True), "error"),
+              # stage-2 re-execution mode (QA round 5): BOTH internal args resolve to 'stage2'; either
+              # alone, or mixed with another mode, is 'error'.
+              (_opts(stage2_repo="/r", stage2_tree="/t"), "stage2"),
+              (_opts(stage2_repo="/r"), "error"),
+              (_opts(stage2_tree="/t"), "error"),
+              (_opts(stage2_repo="/r", stage2_tree="/t", self_test=True), "error"),
+              (_opts(stage2_repo="/r", stage2_tree="/t", repin=True, target="1.0.0"), "error")]
     for opts, want in _cases:
         got = _resolve_mode(opts)
         if got != want:
@@ -2569,7 +8057,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
 
     # --- materialize_tree_raw preserves git file modes (round-7 finding 4) ------------------------
     import stat as _stat
-    if _git_available():
+    _gate_identity_failures(failures, _GIT_GATE_LABELS[1])
+    if _git_gate(_GIT_GATE_LABELS[1], failures):
         import shutil as _sh4
         import tempfile as _tf4
         mtmp = Path(_tf4.mkdtemp(prefix="aiqt-delta-mode-"))
@@ -2593,16 +8082,22 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                                 "(finding 4)")
         finally:
             _sh4.rmtree(mtmp, ignore_errors=True)
+        gate_ran.append(_GIT_GATE_LABELS[1])
 
     # --- bump computation --------------------------------------------------------------------------
     if _claimed_rank("1.0.0", "1.0.1") != PATCH or _claimed_rank("1.0.0", "1.1.0") != MINOR \
             or _claimed_rank("1.0.0", "2.0.0") != MAJOR:
         failures.append("_claimed_rank: PATCH/MINOR/MAJOR mapping is wrong")
-    try:
-        _claimed_rank("1.1.0", "1.0.0")
-        failures.append("_claimed_rank: expected GateError when head does not increase")
-    except GateError:
-        pass
+    # Every non-increase stays a GateError at _claimed_rank: a decrease, an EQUAL version (run() routes an
+    # equal head to _post_release_head first, which accepts only the post-release paths), and a malformed
+    # predecessor or head version.
+    for _pv, _hv in (("1.1.0", "1.0.0"), ("1.0.0", "1.0.0"), ("x", "1.0.0"), ("1.0.0", "x")):
+        try:
+            _claimed_rank(_pv, _hv)
+            failures.append("_claimed_rank: expected GateError when head {} does not increase over {}".format(
+                _hv, _pv))
+        except GateError:
+            pass
     # (round-4 codex finding 1) _parse GUARDS its int() conversion: a component within the SemVer grammar can
     # still exceed CPython's integer-string-conversion digit limit (default 4300) and raise ValueError. An
     # oversized component is malformed input, so _parse returns None (a cannot-evaluate every gate handles as
@@ -2629,17 +8124,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     import shutil
     import tempfile
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-selftest-"))
-    except OSError:
+        tmp = Path(tempfile.mkdtemp(prefix=_E2E_TMP_PREFIX))
+    except OSError as exc:
         tmp = None
+        _not_run(failures, "every end-to-end case (genesis, unreachable-predecessor, real full-pack and "
+                 "POST-RELEASE)", "no writable temp directory ({})".format(exc))
 
-    if tmp is None:
-        print("SELF-TEST NOTE: no writable temp directory; the genesis and unreachable-predecessor "
-              "end-to-end cases were SKIPPED (the classification-leg coverage above still ran)",
-              file=sys.stderr)
-        e2e_ran = False
-    else:
-        e2e_ran = True
+    if tmp is not None:
 
         def _valid_manifest(genesis):
             # A STRUCTURALLY valid manifest carrying the EXACT mandatory top-level keyset (round-5 finding
@@ -2658,9 +8149,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             (g / ".aiqt" / "manifest.toml").write_text(_valid_manifest("true"), encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (g / rel).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(g) != 2:
+            rc_g, err_g = _run_quiet_root_err(g)
+            if rc_g != 2 or "apex-corpus-id must be" not in err_g:
                 failures.append("genesis structural: a record tree whose structure cannot be validated "
-                                "must fail closed exit 2 (QA #1), not pass")
+                                "must fail closed exit 2 NAMING the structural finding (QA #1; "
+                                "round-5 codex 5: an absent git also exits 2, which must not satisfy "
+                                "this assertion), got rc={} stderr={!r}".format(
+                                    rc_g, err_g.strip()[-200:]))
 
             # (genesis-mismatch) zero rows but a valid manifest whose genesis is not true -> exit 2.
             gm = tmp / "genesis-mismatch"
@@ -2668,8 +8163,11 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             (gm / ".aiqt" / "manifest.toml").write_text(_valid_manifest("false"), encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (gm / rel).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(gm) != 2:
-                failures.append("genesis flag mismatch: expected fail-closed exit 2")
+            rc_gm, err_gm = _run_quiet_root_err(gm)
+            if rc_gm != 2 or "does not declare genesis = true" not in err_gm:
+                failures.append("genesis flag mismatch: expected fail-closed exit 2 naming the 2.5 "
+                                "mismatch (round-5: exit 2 alone cannot tell it from an absent "
+                                "git), got rc={} stderr={!r}".format(rc_gm, err_gm.strip()[-200:]))
 
             # (unreachable predecessor) a one-row releases record (a COMPLETE attestation row, so the strict
             # loader passes and the failure is genuinely the unresolvable commit, not the schema) whose
@@ -2686,8 +8184,17 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             (u / CHANGELOG_REL).write_text(
                 '[[release]]\nversion = "1.1.0"\n', encoding="utf-8")
             (u / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(u) != 2:
-                failures.append("unreachable predecessor: expected fail-closed exit 2")
+            rc_u, err_u = _run_quiet_root_err(u)
+            # Round-6 (claude MINOR-2): the needle carries the PLANTED commit id: the bare
+            # "cannot resolve" substring was also satisfied by the HEAD-resolution GateError of
+            # a git that RUNS but FAILS ("git cannot resolve HEAD at ..."), not only by an
+            # absent git's distinct message.
+            if rc_u != 2 or "cannot resolve {!r}".format("a" * 40 + "^{commit}") not in err_u:
+                failures.append("unreachable predecessor: expected fail-closed exit 2 naming the "
+                                "unresolvable PLANTED commit (round-5/6: an absent git and a git "
+                                "that runs but fails also exit 2, and neither may satisfy this "
+                                "assertion), got rc={} stderr={!r}".format(
+                                    rc_u, err_u.strip()[-200:]))
 
             # === REAL run()/CLI MALFORMED-INPUT FIXTURES (finding 9) ===================================
             # Each drives the REAL run(root) on a real record tree (a genesis-base tree, or a real
@@ -2772,7 +8279,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # object). Commit 1 carries a malformed clause inventory; the working tree (HEAD) carries a
             # one-row releases record pointing at commit 1, so run() resolves the predecessor via git show
             # and the strict inventory validator fails closed exit 2 BEFORE any delta leg runs.
-            if _git_available():
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[2])
+            if _git_gate(_GIT_GATE_LABELS[2], failures):
                 def _predecessor_dupclause(dirname):
                     repo = tmp / dirname
                     (repo / ".aiqt" / "core").mkdir(parents=True)
@@ -2802,12 +8310,14 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 if _run_quiet_root(_predecessor_dupclause("m-pred-dupclause")) != 2:
                     failures.append("real run(): a duplicate clause-id in the PREDECESSOR inventory must "
                                     "fail closed exit 2 (finding 1, predecessor object)")
+                gate_ran.append(_GIT_GATE_LABELS[2])
 
             # (predecessor ownership via git PLUMBING, VC-4 QA #11) build a real two-commit git repo with
             # an ownership map and tracked files; _ownership_classes_at must read the FIRST commit's tree
             # via git show / git ls-tree (never a materialized worktree) and classify it, while HEAD carries
             # an extra file. Env is neutralized (git_tracked strips GIT_*; commits use a fixed identity).
-            if _git_available():
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[3])
+            if _git_gate(_GIT_GATE_LABELS[3], failures):
                 repo = tmp / "own-repo"
                 (repo / ".aiqt" / "core").mkdir(parents=True)
                 (repo / "pkg").mkdir()
@@ -2843,6 +8353,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                     if len(wt) != 1:
                         failures.append("predecessor ownership: a worktree was materialized ({} listed); "
                                         "the git-show path must create none".format(len(wt)))
+                gate_ran.append(_GIT_GATE_LABELS[3])
 
             # === REAL FULL-PACK TWO-RELEASE run() (finding 9, findings 1 + 2) =========================
             # A COMPLETE pack tree (a `git archive HEAD` of this repo) is committed as the predecessor
@@ -2854,15 +8365,238 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # not be: on the pre-fix gate the CLEAN case FAILS exit 1 (finding 2: the id-keyed row was matched
             # by the invented `subject`, left unconsumed, so a PATCH became an undispositioned MAJOR) and the
             # format-version case PASSES exit 0 (finding 1: the loader never validated format-version). Both
-            # now behave (0 and 2). Skipped with a printed note where git or archive is unavailable.
-            if _git_available():
-                real_ran = _real_pack_e2e(tmp, failures)
-            else:
-                real_ran = False
-                print("SELF-TEST NOTE: git unavailable; the real full-pack two-release run() case was "
-                      "SKIPPED", file=sys.stderr)
+            # now behave (0 and 2). A case that cannot run (no git, no archive, a fixture that cannot be
+            # built, or corpus content it needs) is a NAMED NOT RUN failure, never a skip beside a PASS;
+            # so is a case that loses its discriminating power on this host's git or as root.
+            # ---- QA round-6 codex blocker 1 / claude 3: a git REFUSAL is never the checkout
+            # path. Simulated dubious-ownership refusals (a real safe.directory refusal needs a
+            # foreign-OWNED repository, which an unprivileged self-test cannot create and the
+            # funnels' GIT_* scrub makes uninjectable by environment; the end-to-end members of
+            # the class, a corrupt HEAD, a bad config and a PATH without git, run as real CLI
+            # launches in _post_release_e2e): the funnels are patched to answer rc=128 with git's
+            # dubious-ownership refusal, and stage 1 and the routing must each fail closed.
+            label6d = "(R6 dubious) a dubious-ownership refusal fails closed, never the fallback"
+            _dubious6 = subprocess.CompletedProcess(
+                ["git"], 128, b"",
+                b"fatal: detected dubious ownership in repository at '/r6'\n")
+            _real_s1g = _stage1_git
+            globals()["_stage1_git"] = lambda *_a, **_k: _dubious6
+            try:
+                err6 = io.StringIO()
+                with redirect_stderr(err6):
+                    rc6 = _stage1_main()
+            finally:
+                globals()["_stage1_git"] = _real_s1g
+            if rc6 != 2 or "no probe positively established" not in err6.getvalue():
+                failures.append("{}: stage 1 must exit 2 on a dubious-ownership refusal (got "
+                                "{!r}); a git failure is never permission to run checkout "
+                                "code".format(label6d, rc6))
+            _real_g6 = _git
+            globals()["_git"] = lambda *_a, **_k: _dubious6
+            try:
+                try:
+                    got6 = _head_commit_or_none(tmp / "r6-dubious")
+                    failures.append("{}: routing must raise GateError on a dubious-ownership "
+                                    "refusal, got {!r}".format(label6d, got6))
+                except GateError as exc6:
+                    if "no probe positively established" not in str(exc6):
+                        failures.append("{}: wrong GateError: {}".format(label6d, exc6))
+            finally:
+                globals()["_git"] = _real_g6
+
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[4])
+            if _git_gate(_GIT_GATE_LABELS[4], failures):
+                # ---- QA round-6 codex majors 3/4 / claude 2, extended round 7 (claude F1/F2):
+                # the drift advisory reads nothing it must not, blocks on nothing, and classifies
+                # every special-file swap as drift. The outside copies behind the symlinked parent
+                # AND behind the swapped final-component symlink carry the COMMITTED bytes, so a
+                # follow-and-read concludes "clean" (round-7 M7); a FIFO swapped in for a NON-EMPTY
+                # blob is drift via the descriptor-bound regular-file check, and a FIFO swapped in
+                # for an EMPTY blob is drift via that check ALONE (round-7 M9: size 0 hashes to
+                # the empty blob); an over-cap sparse file is UNCHECKED, never read. The whole
+                # advisory runs in a CHILD with its own timeout so a lost O_NONBLOCK pin (round-7
+                # M11) is a NAMED failure, never a hung suite.
+                dr6 = tmp / "r6-drift"
+                (dr6 / "lnkdir").mkdir(parents=True)
+                (dr6 / "lnkdir" / "leaf.txt").write_text("leaf bytes\n", encoding="utf-8")
+                (dr6 / "lnkfile.txt").write_text("lnkfile bytes\n", encoding="utf-8")
+                (dr6 / "fifo.txt").write_text("fifo bytes\n", encoding="utf-8")
+                (dr6 / "emptyfifo.txt").write_text("", encoding="utf-8")
+                (dr6 / "big.txt").write_text("big bytes\n", encoding="utf-8")
+                _git_init_commit(dr6, "r6 drift fixture")
+                outside6 = tmp / "r6-drift-outside"
+                outside6.mkdir()
+                (outside6 / "leaf.txt").write_text("leaf bytes\n", encoding="utf-8")
+                (outside6 / "lnkfile.txt").write_text("lnkfile bytes\n", encoding="utf-8")
+                shutil.rmtree(dr6 / "lnkdir")
+                os.symlink(outside6, dr6 / "lnkdir")
+                os.unlink(dr6 / "lnkfile.txt")
+                os.symlink(outside6 / "lnkfile.txt", dr6 / "lnkfile.txt")
+                os.unlink(dr6 / "fifo.txt")
+                os.mkfifo(dr6 / "fifo.txt")
+                os.unlink(dr6 / "emptyfifo.txt")
+                os.mkfifo(dr6 / "emptyfifo.txt")
+                os.unlink(dr6 / "big.txt")
+                with open(dr6 / "big.txt", "wb") as bf6:
+                    bf6.truncate(_DRIFT_ADVISORY_SIZE_CAP + 1)
+                child7 = (
+                    "import importlib.util, io, json, sys\n"
+                    "from contextlib import redirect_stderr\n"
+                    "sys.path.insert(0, {tools!r})\n"
+                    "spec = importlib.util.spec_from_file_location('crd_r7_drift', {gate!r})\n"
+                    "mod = importlib.util.module_from_spec(spec)\n"
+                    "spec.loader.exec_module(mod)\n"
+                    "states = {{}}\n"
+                    "real = mod._drift_entry_state\n"
+                    "def rec(root, path_b, committed_symlink, want):\n"
+                    "    st = real(root, path_b, committed_symlink, want)\n"
+                    "    states[path_b.decode('utf-8', 'replace')] = st\n"
+                    "    return st\n"
+                    "mod._drift_entry_state = rec\n"
+                    "buf = io.StringIO()\n"
+                    "with redirect_stderr(buf):\n"
+                    "    mod._warn_checkout_drift(mod.Path({root!r}))\n"
+                    "sys.stdout.write(buf.getvalue())\n"
+                    "sys.stdout.write('DRIFT-STATES ' + json.dumps(states, sort_keys=True) + "
+                    "'\\n')\n").format(
+                        tools=str(Path(__file__).resolve().parent),
+                        gate=str(Path(__file__).resolve()), root=str(dr6))
+                try:
+                    drift7 = subprocess.run([sys.executable, "-I", "-B", "-c", child7],
+                                            capture_output=True, env=_selftest_env(), timeout=300)
+                except subprocess.TimeoutExpired:
+                    drift7 = None
+                    failures.append("(R7 drift nonblock): the drift advisory BLOCKED for over "
+                                    "300s on a FIFO open; the O_NONBLOCK pin on the final open is "
+                                    "missing (a NAMED failure, never a hung suite)")
+                if drift7 is not None:
+                    failures.extend(_drift_child_failures(
+                        drift7.returncode, drift7.stdout.decode("utf-8", "replace"),
+                        drift7.stderr.decode("utf-8", "replace")))
+                # QA round-7 claude F1: a `..` component must never walk out of the root. The
+                # outside file carries exactly the bytes its blob id names, so the pre-fix walk
+                # READ it and answered match; the component refusal answers drift. `.` is pinned
+                # via the over-cap file (pre-fix answer unchecked, never drift). QA round-8 claude
+                # F4: of the component inputs only `..` and ./big.txt DISCRIMINATE the refusal.
+                # big.txt/ and a//b.txt are regression pins only, NOT evidence for it: without the
+                # refusal they already answer drift (ENOTDIR, ENOENT; an empty name never opens).
+                import hashlib as _hl7
+                outside_b7 = b"outside bytes, committed copy\n"
+                (outside6 / "outside.txt").write_bytes(outside_b7)
+                want7 = _hl7.sha1(b"blob " + str(len(outside_b7)).encode("ascii") + b"\x00"
+                                  + outside_b7).hexdigest()
+                if _drift_entry_state(dr6, b"../r6-drift-outside/outside.txt", False,
+                                      want7) != "drift":
+                    failures.append("(R7 drift dotdot): a `..` path component must be refused as "
+                                    "drift; the walk read a file OUTSIDE the root")
+                if _drift_entry_state(dr6, b"./big.txt", False, want7) != "drift":
+                    failures.append("(R7 drift component) b'./big.txt': a `.` path component "
+                                    "must be refused as drift (without the refusal the over-cap "
+                                    "file answers unchecked)")
+                for bad7 in (b"big.txt/", b"a//b.txt"):
+                    if _drift_entry_state(dr6, bad7, False, want7) != "drift":
+                        failures.append("(R7 drift empty component, regression pin) {!r}: an "
+                                        "empty path component must be drift".format(bad7))
+
+                # ---- QA round-7 claude F3, asserted directly on the two tracked-set enumerators
+                # the checkout-judged branches consume: gen_manifest.git_tracked and
+                # _index_materialized_tree each pin core.fsmonitor=false (with the funnels'
+                # protocol.allow / GIT_NO_LAZY_FETCH pins), so a repo-config fsmonitor hook never
+                # runs through either. The genesis route is also asserted end-to-end in
+                # _post_release_e2e (R7 fsmonitor genesis); the delta branch reaches the
+                # enumerators through these same two call sites only.
+                label7t = "(R7 fsmonitor git_tracked/_index_materialized_tree)"
+                fsm7 = tmp / "r7-fsmon-tree"
+                fsm7.mkdir()
+                (fsm7 / "tracked.txt").write_text("tracked bytes\n", encoding="utf-8")
+                _git_init_commit(fsm7, "r7 fsmonitor tree fixture")
+                mark7t = tmp / "r7-fsmon-tree-ran.marker"
+                hook7t = tmp / "r7-fsmon-tree.sh"
+                hook7t.write_text("#!/bin/sh\n: >> " + str(mark7t) + "\nexit 1\n",
+                                  encoding="utf-8")
+                hook7t.chmod(0o755)
+                subprocess.run(["git", "-C", str(fsm7), "config", "core.fsmonitor",
+                                str(hook7t)], capture_output=True, env=_selftest_env())
+                (fsm7 / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+                _index_materialized_tree(fsm7, "r7 fsmonitor")
+                got7t = gen_manifest.git_tracked(fsm7)
+                if "tracked.txt" not in got7t or "untracked.txt" not in got7t:
+                    failures.append("{}: the throwaway index + tracked-set read is wrong "
+                                    "(got {})".format(label7t, sorted(got7t)))
+                if mark7t.exists():
+                    failures.append("{}: the repo-config core.fsmonitor hook RAN under "
+                                    "git_tracked / _index_materialized_tree; the "
+                                    "core.fsmonitor=false pin is not effective".format(label7t))
+
+                # ---- QA round-6 codex blocker 2: a promisor repository's missing object is a
+                # refusal, never a lazy-fetch transport; the marker sshCommand must never run.
+                label6p = "(R6 promisor) a missing object never starts a lazy fetch"
+                for where6, env6 in (("funnel env", _substitution_free_env()),
+                                     ("_release_schema env",
+                                      _release_schema._substitution_free_env())):
+                    if env6.get("GIT_NO_LAZY_FETCH") != "1":
+                        failures.append("{}: {} does not pin GIT_NO_LAZY_FETCH=1".format(
+                            label6p, where6))
+                senv6 = _selftest_env()
+                psrc6 = tmp / "r6-promisor-src"
+                psrc6.mkdir()
+                (psrc6 / "payload.txt").write_text("promisor payload\n", encoding="utf-8")
+                _git_init_commit(psrc6, "promisor source")
+                subprocess.run(["git", "-C", str(psrc6), "config", "uploadpack.allowfilter",
+                                "true"], capture_output=True, env=senv6)
+                pro6 = tmp / "r6-promisor"
+                cl6 = subprocess.run(["git", "clone", "-q", "--no-checkout",
+                                      "--filter=blob:none", "file://" + str(psrc6), str(pro6)],
+                                     capture_output=True, env=senv6)
+                if cl6.returncode != 0:
+                    failures.append("fixture setup ({}): partial clone failed ({}); coverage "
+                                    "that did not run FAILS the self-test".format(
+                                        label6p,
+                                        cl6.stderr.decode("utf-8", "replace").strip()[:200]))
+                else:
+                    mark6 = tmp / "r6-ssh-ran.marker"
+                    ssh6 = tmp / "r6-ssh.sh"
+                    ssh6.write_text("#!/bin/sh\n: > " + str(mark6) + "\nexit 1\n",
+                                    encoding="utf-8")
+                    ssh6.chmod(0o755)
+                    for k6, v6 in (("remote.origin.url", "ssh://r6.invalid/none"),
+                                   ("core.sshCommand", str(ssh6))):
+                        subprocess.run(["git", "-C", str(pro6), "config", k6, v6],
+                                       capture_output=True, env=senv6)
+                    h6 = subprocess.run(["git", "-C", str(pro6), "rev-parse", "HEAD"],
+                                        capture_output=True, env=senv6
+                                        ).stdout.decode("ascii", "replace").strip()
+                    try:
+                        _release_schema.verified_path_blob(pro6, h6, "payload.txt")
+                        failures.append("{}: the missing blob was READ; a promisor fetch must "
+                                        "never satisfy a gate read".format(label6p))
+                    except SchemaError as exc6p:
+                        if "missing" not in str(exc6p):
+                            failures.append("{}: expected a missing-object refusal, got: "
+                                            "{}".format(label6p, exc6p))
+                    if mark6.exists():
+                        failures.append("{}: the core.sshCommand marker RAN; a lazy fetch "
+                                        "started a transport mid-read".format(label6p))
+                gate_ran.append(_GIT_GATE_LABELS[4])
+
+            _gate_identity_failures(failures, _GIT_GATE_LABELS[5])
+            if _git_gate(_GIT_GATE_LABELS[5], failures):
+                _real_pack_not_run_vectors(tmp, failures)
+                _not_run_net_vectors(tmp, failures)
+                _e2e_git_cases(tmp, failures)
+                gate_ran.append(_GIT_GATE_LABELS[5])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    # Round-6 (codex 1 / claude MEDIUM-1): the gate and probe bindings are verified BY IDENTITY at
+    # each gated block above and here at the end, and every gate label must account for exactly
+    # one record, its body's last statement or its NOT RUN line (_gate_accounting_failures,
+    # extracted round-7 with one red-on-revert vector per label), so a module rebinding still in
+    # place at a checkpoint and a bypassed or vanished block are each a named failure at run time,
+    # whatever the static backstop missed; the restored-rebinding and local-shadow escapes are
+    # disclosed at _gate_identity_failures.
+    _gate_identity_failures(failures, "at the end of the self-test")
+    _gate_accounting_failures(failures, gate_ran)
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -2875,31 +8609,83 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             "the id-lifecycle born/retirement release-and-uniqueness rows and corpus-id diff (#3), the "
             "combined multi-leg consumption, the Step-2 disposition-schema acceptance and id-uniqueness "
             "(#5), the repin/self-test mode resolution (#9), and the PATCH/MINOR/MAJOR bump computation")
-    if e2e_ran:
-        full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
-                     "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
-                     "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
-                     "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
-                     "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
-                     "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
-                     "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
-                     "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
-                     "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
-                     "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
-                     "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
-                     "a renderers.toml integer target (finding 8) each exit 2 hold") \
-                    if real_ran else \
-                    "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
-        print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
-              "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
-              "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
-              "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
-              "top-level key, a duplicate manifest source, junk default-correction and classless "
-              "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
-              "round-3 finding 1){}".format(core, full_pack))
-    else:
-        print("SELF-TEST PASS (PARTIAL): {}; the end-to-end cases were SKIPPED (no writable temp "
-              "directory), so those paths are UNVERIFIED this run".format(core))
+    full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
+                 "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
+                 "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
+                 "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
+                 "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
+                 "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
+                 "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
+                 "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
+                 "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
+                 "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
+                 "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
+                 "a renderers.toml integer target (finding 8) each exit 2 hold")
+    full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
+                  "revisions: the attestation row alone and plus the correctly placed changelog tag key "
+                  "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
+                  "mode-only change or a deletion on each post-release path, a non-descendant head "
+                  "(bare, and masked by an info/grafts parent rewrite), a stale manifest, an "
+                  "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
+                  "other than the tag key (bare, and masked by a refs/replace blob substitution, with "
+                  "the funneled _show read asserted directly), a corrupt or stale COMMITTED manifest "
+                  "masked by a blob replacement, a clean/smudge filter, or skip-worktree, "
+                  "a mis-placed tag key (EOF/older table, the TOML-only catch), "
+                  "and a head version below the newest row each fail; a staged-only edit and untracked "
+                  "files are a stderr ADVISORY over an exit-0 committed verdict, an assume-unchanged "
+                  "working-tree overwrite never reaches the verdict, and the three admitted byte-level "
+                  "variants (a releases.toml comment, a CRLF tag line, the tag key before the version "
+                  "line) exit 0 (QA round-3); the round-4 substitution and provenance cases (a "
+                  "GIT_DIR decoy, a forged object-directory overlay with the funneled _show read "
+                  "asserted directly, an overwritten loose object refused by the per-object "
+                  "re-hash, a committed profiles artifact with the checkout copy deleted, a gate "
+                  "import diverging from the committed HEAD copy, and the materialized committed "
+                  "tree running its OWN validator copies) each refuse exit 2, and a skipped "
+                  "archive/extract/build coverage set now FAILS the self-test; the QA round-5 "
+                  "launch cases over a dedicated fixture (stage-1 re-execution of the committed "
+                  "gate copy, with an untracked tools/tempfile.py shadow, a crafted __pycache__ "
+                  ".pyc, a repo-config core.fsmonitor hook, and a repo-config clean filter and "
+                  "post-index-change hook each left inert at exit 2, the "
+                  "checkout routing records reverted to the release still routed POST-RELEASE "
+                  "from committed objects, an inherited PYTHONPATH/sitecustomize ignored by "
+                  "every -I child, and the accepted state re-executing to exit 0) and the "
+                  "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
+                  "and the verified ancestry walk refusing a forged intermediate commit, "
+                  "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
+                  "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
+                  "a simulated dubious-ownership refusal fails closed in stage 1 and in "
+                  "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
+                  ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
+                  "control still reaches the checkout gate; and round 8: a damaged ancestor "
+                  "reached through a symlinked launch path, a bare ancestor with a corrupt "
+                  "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
+                  "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
+                  "checkout gate; and round 9: a symlink followed by `..` and a symlinked "
+                  "gate file never hide the gate's physical repository, an unsearchable "
+                  "ancestor fails closed, and the refusal names the marker it found; and "
+                  "round 10: a pipe read through /dev/fd/N and a source run with no __file__ "
+                  "each exit 2 with no traceback, and a non-git copy run from inside another "
+                  "repository judges its own root, not the cwd; and round 11: an imported "
+                  "main() with no stage-1 hand-off exits 2 by name), the no-follow bounded drift "
+                  "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
+                  "file; and round 7: a final-component symlink to an outside committed copy, "
+                  "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
+                  "states judged by exact name, a child-bounded FIFO open; and rounds 9 "
+                  "and 10: exactly one DRIFT-STATES record, with no key repeated inside it, "
+                  "and the fsmonitor pins held on the genesis route and on "
+                  "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
+                  "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
+                  "stage-2 sitecustomize isolation hold; and the replayed "
+                  "pre-row gate "
+                  "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
+                  "pre-row control; a malformed genesis tree exits 2) holds) hold")
+    print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
+          "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
+          "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
+          "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
+          "top-level key, a duplicate manifest source, junk default-correction and classless "
+          "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
+          "round-3 finding 1){}".format(core, full_pack))
     return 0
 
 
@@ -2907,7 +8693,8 @@ def _parse_args(argv):
     """Parse argv, REJECTING any DUPLICATE option (round-7 finding 7): a repeated flag or value option is a
     conflicting/ambiguous invocation and returns None -> exit 2 BEFORE dispatch, matching release-build's
     seen-option discipline. Returns the opts dict, or None on an unknown or duplicate option."""
-    opts = {"self_test": False, "repin": False, "target": None}
+    opts = {"self_test": False, "repin": False, "target": None,
+            "stage2_repo": None, "stage2_tree": None}
     seen = set()
     i = 0
     while i < len(argv):
@@ -2926,6 +8713,15 @@ def _parse_args(argv):
             seen.add(arg)
             opts["target"] = argv[i + 1]
             i += 2
+        elif arg in ("--stage2-repo", "--stage2-tree") and i + 1 < len(argv):
+            # The INTERNAL stage-2 re-execution arguments (set by stage 1, never by hand): the judged
+            # repository and the verified materialization of its HEAD this copy runs from.
+            if arg in seen:
+                print("error: duplicate option {}".format(arg), file=sys.stderr)
+                return None
+            seen.add(arg)
+            opts["stage2_repo" if arg == "--stage2-repo" else "stage2_tree"] = argv[i + 1]
+            i += 2
         else:
             print("usage: check_release_delta.py [--repin --target V] | --self-test (no option may be "
                   "repeated)", file=sys.stderr)
@@ -2937,8 +8733,14 @@ def _resolve_mode(opts):
     """Classify an option set into exactly one dispatch mode BEFORE any work runs, so a mixed or incomplete
     invocation can never fall through to a real run (VC-4 QA #9). Any invocation touching the repin family
     (--repin or --target) resolves to 'repin' (the fail-closed 10.4 stub) or 'error', never 'run' or
-    'self-test'. Returns one of: 'self-test', 'run', 'repin', 'error'."""
+    'self-test'. Returns one of: 'self-test', 'run', 'repin', 'stage2', 'error'."""
     repin_family = opts["repin"] or opts["target"] is not None
+    if opts["stage2_repo"] is not None or opts["stage2_tree"] is not None:
+        # The internal stage-2 mode: BOTH arguments are required and no other mode may be mixed in.
+        if (opts["stage2_repo"] is not None and opts["stage2_tree"] is not None
+                and not opts["self_test"] and not repin_family):
+            return "stage2"
+        return "error"
     if opts["self_test"]:
         return "error" if repin_family else "self-test"
     if repin_family:
@@ -2957,6 +8759,31 @@ def main():
               "--target without --repin, a --repin without --target, or a repin option combined with "
               "--self-test is a mixed or incomplete mode and is rejected fail-closed", file=sys.stderr)
         return 2
+    if mode == "stage2":
+        # Stage 2 of the re-execution (a design decision): this process IS the
+        # committed copy, launched by stage 1 from a verified materialization of HEAD's tree. Sanity:
+        # the running gate file must live under the named tree; then judge the named repository.
+        tree = Path(opts["stage2_tree"]).resolve()
+        if tree not in Path(__file__).resolve().parents:
+            print("error: --stage2-tree does not contain the running gate file; the stage-2 copy "
+                  "must run from the materialized committed tree; fail-closed", file=sys.stderr)
+            return 2
+        diag_path = os.environ.get("AIQT_RELEASE_DELTA_STAGE2_DIAG") if _STAGE2_RESULT else None
+        if diag_path:
+            # The gate's own diagnostics go to their own capture, which stage 1 relays, so the
+            # error stream stays empty apart from the result writer's boundary line and any
+            # fault Python reports there (_stage2_arm_result; security-seci-fail-closed).
+            with open(diag_path, "w", encoding="utf-8", errors="backslashreplace") as diag, \
+                    redirect_stderr(diag):
+                stage2_rc = run(Path(opts["stage2_repo"]).resolve())
+        else:
+            stage2_rc = run(Path(opts["stage2_repo"]).resolve())
+        if _STAGE2_RESULT is not None:
+            # The settled verdict the atexit result writer (registered first, run last) binds to
+            # this child's exit code and pid; stage 1 requires it beside exit 0 and an error
+            # stream holding only the writer's boundary line (security-seci-fail-closed).
+            _STAGE2_RESULT["code"] = stage2_rc
+        return stage2_rc
     if mode == "self-test":
         return self_test_main()
     if mode == "repin":
@@ -2966,7 +8793,13 @@ def main():
         print("error: --repin is the 10.4 adopter mode; its doctor packaging is adopter-experience-"
               "owned and not wired at this release; fail-closed", file=sys.stderr)
         return 2
-    return run(repo_root())
+    if _STAGE1_ROOT is None:
+        # QA round-10 claude F2: the single-stage gate judges ONLY the physical root stage 1
+        # inspected and handed off; with no hand-off there is no inspected root to judge.
+        print("error: the single-stage checkout gate runs only on the physical gate root stage 1 "
+              "established; no stage-1 hand-off was recorded; fail-closed", file=sys.stderr)
+        return 2
+    return run(Path(_STAGE1_ROOT))
 
 
 if __name__ == "__main__":

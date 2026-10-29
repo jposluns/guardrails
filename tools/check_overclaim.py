@@ -38,8 +38,8 @@ THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
      residues it renders are kept marketing-clean AT THEIR SOURCE (see the source-side residue-cleanliness
      leg below), so no per-page carve-out is needed. This is robust by construction: a plain scan over the
      whole page cannot be fooled by an exemption heuristic.
-  2. The hand-authored repo prose roster (README.md, SCOPE.md, SYSTEM-HARDENING.md, aiqt-barebones.md):
-     RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
+  2. The hand-authored repo prose roster (README.md, INSTRUCTION-BUDGET.md, SCOPE.md, SYSTEM-HARDENING.md,
+     aiqt-barebones.md): RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
      CLAUDE.md) are gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster
      carries the hand-authored remainder, including the shipped starter file aiqt-barebones.md. Every rostered path is REQUIRED; an absent one is exit 2. Nothing is dormant
      today (every rostered surface exists), so the roster is a single declared constant with no idle
@@ -240,13 +240,26 @@ mechanism claim and is deliberately NOT matched (no "works", no efficacy verb go
 
 Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required surface, fail-closed).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_overclaim.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import base64
 import binascii
 import json
 import os
 import re
 import stat
-import sys
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
@@ -291,7 +304,7 @@ NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
 # the clause leaves a different noun, subject, or conjunction between itself and the guarantee, so it does
 # NOT clear: "not only ... but also", "no other ...", "without exception ... guarantees", "no doubt ...
 # guarantees", and "requires no setup and guarantees" all still FLAG. This binds the open-ended affirmative-
-# negator idiom space by ADJACENCY rather than enumeration (Architect decision 2026-09-21); an adverb between
+# negator idiom space by ADJACENCY rather than enumeration (maintainer decision 2026-09-21); an adverb between
 # the negator and the guarantee ("does not always guarantee") is deliberately not cleared - the safe direction.
 NEG_AUX_TAIL = re.compile(
     r"^\s*(?:"
@@ -397,14 +410,16 @@ THIRD_PARTY_TITLES = (
 # gensrc-registered generated outputs. DISCLOSURE.md/CHANGELOG.md/ROADMAP.md/CLAUDE.md are registered and
 # arrive through collector 3; these are the hand-authored remainder, including the shipped starter file
 # aiqt-barebones.md (in .aiqt/manifest.toml and in-scope for check_portability.py, but not gensrc-generated,
-# so the overclaim gate reaches it only through this roster) and the gates-manifest SOURCE
+# so the overclaim gate reaches it only through this roster), the budget page INSTRUCTION-BUDGET.md (the
+# instruction-budget prose moved there out of README.md and is likewise not gensrc-generated, so it
+# stays scanned only through this roster), and the gates-manifest SOURCE
 # .aiqt/core/gates/manifest.toml (scanned as raw text so a banned overclaim in a gate RESIDUE string cannot
 # escape; it is a source, not a gensrc target, so it too is reachable only here). Every path is REQUIRED
 # (absent = exit 2). Nothing is dormant today, so this is a single declared constant, not idle dormant/armed
 # machinery. NOTE: the gates manifest now carries THIS gate's own residue AND is a scanned surface, so that
 # residue must itself stay clean under the gate (verified: it uses no banned release-integrity vocabulary).
-REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md", "aiqt-barebones.md",
-                     ".aiqt/core/gates/manifest.toml")
+REPO_PROSE_ROSTER = ("README.md", "INSTRUCTION-BUDGET.md", "SCOPE.md", "SYSTEM-HARDENING.md",
+                     "aiqt-barebones.md", ".aiqt/core/gates/manifest.toml")
 
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
 # window), "intent" (skip when a negator OR an intent hedge is in that window), or
@@ -1444,7 +1459,7 @@ def _md_row_cells(line):
 # The exact header cells and the separator shape render_md emits for the '## Rules' table. A data row is a
 # 4-cell '| ... |' row (its interior pipes escaped by _md_cell); the separator '|---|---|---|---|' carries no
 # interior ' | ' so _md_row_cells rejects it, hence the dedicated separator pattern below.
-_MD_RULES_HEADER = ["Rule", "Corpus ID", "Status", "How enforced or intended"]
+_MD_RULES_HEADER = ["Rule", "Corpus ID", "Status", gen_enforcement_register.COLUMN_HEADING]  # single-sourced
 _MD_SEP_RE = re.compile(r"\|(?:\s*:?-+:?\s*\|)+")
 
 
@@ -2557,7 +2572,12 @@ def _self_test():
     failures.extend(_page_bound_source_self_test())
     failures.extend(_asset_closure_self_test())
     failures.extend(_block_boundary_negation_self_test())
-    close_failures, close_runs = _close_vector_self_test()
+    import _close_selftest
+    try:
+        close_failures, close_runs = _close_vector_self_test()
+    except _close_selftest._StCensusError as exc:     # the descriptor census cannot read one: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     failures.extend(close_failures)
 
     if failures:
@@ -2901,6 +2921,17 @@ def _collector_self_test():
             failures.append("COLLECTOR: absent roster surface should fail closed (_FailClosed)")
         except _FailClosed:
             pass
+
+        # (b2) the roster covers INSTRUCTION-BUDGET.md (the budget prose moved out of README.md and
+        # must not leave this roster's coverage with it): an overclaim appended to it is a finding.
+        # MUTATION: dropping INSTRUCTION-BUDGET.md from REPO_PROSE_ROSTER leaves the file unscanned
+        # and this case fails.
+        r = _make_root("budget-roster")
+        with (r / "INSTRUCTION-BUDGET.md").open("a", encoding="utf-8") as fh:
+            fh.write("The release is tamper-evident.\n")
+        f = _collect(r, [], set())
+        if not any("INSTRUCTION-BUDGET.md" in x for x in f):
+            failures.append("COLLECTOR: an overclaim appended to INSTRUCTION-BUDGET.md must be a finding")
 
         # (c) a registered file target absent -> _FailClosed.
         r = _make_root("absentfile")

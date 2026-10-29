@@ -69,12 +69,12 @@
         <span class="chip ok"><code>opf init</code></span>
         <span class="chip ok"><code>opf render</code></span>
         <span class="chip ok"><code>opf doctor</code></span>
-        <span class="chip ok"><code>opf upgrade</code></span>
         <span class="chip ok"><code>opf absorb</code></span>
         <span class="chip ok"><code>opf record</code></span>
         (absorb with read-only changelog drafting and freeze-digest output; record with create,
         transition, done-with-receipt, and worklog-append). The ordinary <code>opf import</code> modes
-        are retired and refuse with exit 2.</li>
+        are retired and refuse with exit 2, and <code>opf upgrade</code> refuses with exit 2, since the
+        reference tooling defines no store upgrade.</li>
       <li>Conformance is self-asserted and says so; no unqualified conformance claim is emitted.</li>
     </ul>
   </div>
@@ -85,8 +85,8 @@
     <p class="eyebrow">What comes next</p>
     <h2>What comes next</h2>
     <ul class="clean">
-      <li><code>opf migrate</code> and <code>opf sync</code> complete the standard's nine-verb
-        vocabulary; both are planned and currently exit 2 (not yet implemented) in the reference CLI.</li>
+      <li><code>opf migrate</code> and <code>opf sync</code>, two of the standard's ten command verbs,
+        are planned and currently exit 2 (not yet implemented) in the reference CLI.</li>
       <li>Full module record schemas remain planned. Digest canonicalization is already implemented in
         the reference release and changelog helpers.</li>
     </ul>

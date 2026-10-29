@@ -1,0 +1,2698 @@
+#!/usr/bin/env python3
+"""OPF adoption completion evaluator: the read-only deterministic checks 1 to 4 and 6 (slice 1) and the
+wiring probe frame of check 5 (slice 2) (OPF-SPEC 1.3.0).
+
+Spec sections implemented: 14.1 (the clean-start completion-check roster: checks 1 authority and freshness,
+2 discovery accounting, 3 preservation and restore, 4 operational readiness and 6 retirement readiness; a
+completion-check failure or cannot-evaluate reports incomplete and retires nothing), 14.1's homes-1 clause
+(the completion checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is
+inactive until homes 2) and 4.2 (C-EVIDENCE-ENUM MUST NOT run or read anything on homes 1; the section 14.1
+completion checks carry the evidence digest verification). Check 5 (wiring) verifies the deny-capable
+enforcement surface is installed as planned and runs its four probes through a caller-supplied prober, but
+it is never VALID in this release: the shipped pack carries no deny program and no live probe adapter (the
+deferred enforcement pack, PR6), so with every other condition met it is CANNOT-EVALUATE naming PR6, and the
+roster this module reports is never green on its own (roster_green requires all six checks VALID).
+
+Read-only: every live read is contained and no-follow through the apply shell's own reader
+(_opf_adopt_apply._read_live, single-linked regular files only), nothing is written to the live tree, and no
+process is spawned by this module: check 5's probes, the roster's one process-spawning harness, run only
+through the prober the caller supplies, as check 4's doctor run does. The one write is check 3's restore
+exercise, which copies archived bytes into a private TemporaryDirectory scratch and digest-verifies the copy
+there; it never restores over the live tree.
+
+Inputs: the product root, the adoption run id, and a doctor callable (product_root to the
+_opf_check StoreValidation shape: status, findings, cannot_evaluate). The doctor's git observations are a
+process-spawning gather, so the caller supplies the run (store_doctor builds one from caller-supplied inert
+observations); with no doctor, check 4 is CANNOT-EVALUATE, never a pass. Check 5 takes a prober callable
+(product_root, surface, probe) answering "denied" or "allowed" for one probe against one installed surface,
+deciding and never writing; with no prober, check 5 is CANNOT-EVALUATE, never a pass.
+
+Outcome model (single-sourced from _opf_store): each check is VALID (green), INVALID (red, with findings) or
+CANNOT-EVALUATE (an input it cannot read or parse, never a pass). An absent required artefact (no approval,
+no receipt, an absent preimage or live file) is a finding; an unreadable or malformed one is
+CANNOT-EVALUATE. A plan that does not re-prove (frozen_plan) leaves every check CANNOT-EVALUATE.
+
+Check ownership, so one mutation flips one check (the canonical single-mutation flips of the self-test),
+holds for fixtures that deliberately repair the other bindings a mutation disturbs; a raw tamper on a
+bundle artefact that more than one check reads is a shared-check case moving those checks together, each
+from its own sentence. The shared-check cases the self-test exercises are: the bundle's planning-inventory
+copy tampered without a re-emitted inventory row moves checks 2 and 3 (check 2 reads the copy, check 3
+verifies the bundle that lists it, so the canonical check-2 flips re-emit the row); a garbled approval
+without a re-emitted inventory row moves checks 1 and 3 (check 1 reads the approval, check 3 verifies the
+bundle that lists it); and a replaced occupying-source archive copy moves checks 3 and 6 (check 3 verifies
+the bundle that lists it, check 6 compares the archived bytes to the plan digest).
+Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the division of labour is:
+  1 authority-freshness: the frozen plan re-proves and names this run, the bundle's approval binds it
+    (approval_findings), the receipt core validates and binds the run, product, plan and inventory digests,
+    store root and release manifest and records both release anchor flags (independent_anchor_observed,
+    anchor_agreement) True (the apply shell's own receipt_binding_refusals, the rule adoption_record
+    refuses by), it records the approval itself, each receipt file row names a plan source with its
+    disposition and before_digest, the live preimages of the sources the plan leaves live and no other
+    check owns (keep, and non-occupying migrate) still equal their plan digests, and every planned
+    destination apply has already written and no other check owns (init-store members, non-CI create-file
+    and plant-governance paths, enable-hook registrations, and the registration
+    chain's final manifest) holds exactly its planned bytes. The retire-disposed live files are check 6's,
+    so an edited retire source flips check 6 only; the non-occupying move sources are check 3's; the
+    rendered views, CI members and consumer repointings are check 4's; a move-file destination is written
+    only by the post-green relocation, so before green it is no live destination; and the receipt is
+    compared by content in the receipt leg, because outcome events append to its file.
+  2 discovery-accounting: the planning inventory (`opf.adoption.planning-inventory/v1`, the bytes the
+    plan's inventory_digest seals), read from the run's evidence bundle where apply persists the copy
+    re-derivation proved (an absent copy is a finding; an unreadable or malformed one is CANNOT-EVALUATE),
+    re-seals to the plan's inventory_digest; every candidate,
+    empty directory and inventoried file entry, wherever it lies, has a plan disposition or lies under a
+    recorded exclusion (the store control area counts as one, spec 14.2); the whole observation must be the
+    one the planner builds, by the planner's OWN build (rebuilt_observation_problem): the entry rows, one per path,
+    are read back as the listing they record (_opf_adopt_plan.RowListing) and the planner's one rule set,
+    _opf_adopt_plan.build_observation (the same function _inventory runs over the live tree: roots, exclusions,
+    the walk in its own order with every bound, the total byte budget and the depth below the root the walk
+    began from included, absent and excluded rows, the row rule, availability and the candidate and
+    empty-directory derivations), is run over it with the recorded roots, exclusions and walk table; a
+    refusal, or any recorded field (_opf_adopt_plan.BUILT_FIELDS) other than the one it returns, is
+    CANNOT-EVALUATE naming it, never a pass, and nothing here re-models the planner; every plan
+    source is an observed file whose digest equals its plan digest.
+  3 preservation-restore: the run's evidence bundle verifies from disk (_opf_adopt_apply.verify_bundle, the
+    homes-1 evidence digest verification: every inventory and every payload it lists), and the bundle
+    inventory this check re-reads must again pass the apply shell's own inventory validator
+    (_opf_adopt_apply.validate_inventory), else CANNOT-EVALUATE; every
+    archive-preserved source (retire, migrate and occupying, spec 14.2) sits at its run archive path,
+    digest-matched and claimed by the bundle inventory, and the restore exercise reproduces each preserved
+    file's bytes in scratch. A non-occupying move source is preserved at its move destination only by the
+    post-green relocation (spec 14.2), so before green this check verifies its frozen live bytes against
+    the plan digest instead and requires no archive copy of it.
+  4 operational-readiness: the store resolves to the planned identity (an absent store is a finding, so a
+    de-adopted repository cannot pass as NOT-APPLICABLE); the CI leg is proven only by template
+    identity, never by reading workflow syntax (_ci_template_identity): per CI row the plan names
+    exactly one workflow member, a file directly under .github/workflows/ (default
+    .github/workflows/opf.yml), whose recorded digest is the pack's shipped template
+    opf/enforcement/ci/github-actions.yml and whose live bytes equal that template; every CI member is live
+    at its plan digest; and the recipe the template runs, opf/enforcement/ci/opf-ci.sh, is live and equals
+    the pack's shipped recipe by digest. The two reference files are themselves authenticated: each is
+    read contained and no-follow under the pack root and must equal the sha256 embedded in this module
+    (generated and drift-gated by tools/gen_secret_patterns.py), so a reference replaced, symlinked or
+    unreadable in the working tree is CANNOT-EVALUATE. Any other workflow content, any other path, an
+    absent or modified copy, an absent or modified recipe, or a shipped file that cannot be read is
+    CANNOT-EVALUATE, the reason telling the adopter to install the template unmodified (OPF_TOOL, which
+    moves the CLI the recipe launches, is unsupported in this release: the plan models no variant); every
+    planned view
+    destination holds exactly its planned bytes, a formerly occupied destination included (spec 14.1: once
+    apply commits, restoring an archived file to the live tree takes a fresh plan, so old occupant bytes
+    there are drift the plan does not account for); every consumer repointing holds its planned new bytes;
+    and every doctor finding fails the check, none set aside (doctor evidence whose findings or
+    cannot_evaluate is missing or not a list is CANNOT-EVALUATE, never read as empty). Check 4 is NEVER
+    VALID in this release: the shipped floor asserts store presence, not identity (the CI identity
+    assertion is the deferred U25), so with every other condition met the check is CANNOT-EVALUATE naming
+    U25; an earlier failure keeps its own reason. U25_CI_IDENTITY_ASSERTED is the one switch that lets
+    it grade VALID, to be set only in the release that ships U25.
+  5 wiring: every member of each deny-capable enforcement row (a platform deny hook or the staged-snapshot
+    pre-commit check, PROBED_MEANS) is live at its plan digest, and the caller's prober answers the four
+    probes for each such row: a direct write to the planned store manifest and a direct write under this
+    run's adoption archive are denied, and the sanctioned writer (opf record) writing that manifest and the
+    renderer (opf render) writing a planned view destination are allowed. Both directions are required, so
+    a surface that denies nothing and an over-broad one that also blocks a sanctioned path are both red. A
+    probed row's member is also a check 1 planned destination, so its drift moves checks 1 and 5 together
+    (each from its own sentence: check 1 a destination, check 5 the installed surface it probes); instruction
+    rows deny nothing and are never probed, and the CI row is check 4's. Server-side branch protection is
+    adopter-attested on the plan's CI row (the plan validator requires that residual) and never probed. Check
+    5 is NEVER VALID in this release: with every other condition met it is CANNOT-EVALUATE naming the
+    deferred enforcement pack (PR6); PR6_DENY_PROBES_SHIPPED is the one switch that lets it grade VALID.
+  6 retirement-readiness: each retire-disposed source that occupied no managed destination is present live
+    with its plan digest; each archived occupying source still equals its plan digest in the archive.
+
+DISCLOSED RESIDUALS: the receipt core schema requires a null after_digest for retire and move rows, which
+TOML cannot spell, so check 1 compares only the receipt rows present and cannot require one row per source;
+check 2 trusts the planning inventory the run's evidence bundle supplies (the one copy, persisted by apply
+and digest-checked by check 3's bundle verification too) once it re-seals to the plan's bound digest, and
+takes as recorded what only the store manifest fixes (the exclusions, and the walk table's deliverables,
+resolved flag, manifest path and manifest byte count, the last counted against the total byte bound), since
+the inventory does not carry the manifest bytes; the resolved flag must agree with a recorded resolution,
+and for a root none of whose ancestors the walk recorded, whether its parent existed is the walk table's
+unreached record (the rows cannot show it: it moves only that root's path bytes and one entry-bound test);
+check 4 is CANNOT-EVALUATE until U25 ships the CI store-identity assertion (U25_CI_IDENTITY_ASSERTED), so
+the roster cannot be green in this release on check 4 alone either; the reference digests authenticate
+the CI floor files against this module's own embedded constants, so they are only as trustworthy as this
+module's bytes (an attacker who can rewrite the evaluator itself is out of scope);
+check 4's doctor verdict is only as complete as the caller's observations; check 4's CI leg proves byte
+identity with the shipped template and recipe, not what GitHub runs: it does not see another workflow in the
+repository that cancels or shadows this one (for example a concurrency group with cancel-in-progress),
+branch-protection or ruleset settings that do not require this workflow's check, or GitHub-side settings
+that disable Actions or this workflow; it does not read the opf/tools/opf.py the recipe launches, the
+remote actions the template names by tag (actions/checkout, actions/setup-python) or the runner image; it
+compares against the template beside this evaluator, so a later pack release that changes the template
+leaves a plan whose recorded workflow digest pins the earlier template CANNOT-EVALUATE until it is planned
+again; and it is not a run of CI. Check 5 is CANNOT-EVALUATE until PR6 ships the pack's deny programs and
+their probe adapters (PR6_DENY_PROBES_SHIPPED), so the roster cannot be green in this release on check 5
+alone either; its verdict is only as faithful as the caller's prober, which this module does not
+authenticate (in this release a prober can only be a fixture); a probe asks one representative target per
+probe (the store manifest, one file name under the run's adoption archive, one planned view), not every
+protected path; and the probes say nothing about shell or interpreter wrapping, per-clone hook installation
+or same-user tampering, which the plan discloses as residuals.
+
+Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
+modules, so the standalone-closure property holds.
+
+Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate.
+"""
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_adopt_complete.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+import hashlib
+import os
+import re
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _opf_adopt as schema          # noqa: E402
+import _opf_adopt_apply as apply     # noqa: E402
+import _opf_adopt_plan as planner    # noqa: E402
+import _opf_store as store           # noqa: E402
+from _opf_emit import EmitError, emit_checked  # noqa: E402
+
+VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
+# The roster in the spec's numbered order (the plan's own vocabulary); this module evaluates all six.
+CHECKS = schema.COMPLETION_CHECKS
+AUTHORITY, DISCOVERY, PRESERVATION, OPERATIONAL, WIRING, RETIREMENT = CHECKS
+PLANNING_INVENTORY_FORMAT = "opf.adoption.planning-inventory/v1"
+# The planning inventory's closed entry-kind vocabulary: the planner's own (_opf_adopt_plan's observation rows).
+ENTRY_KINDS = planner.ENTRY_KINDS
+
+
+class Unevaluable(Exception):
+    """An input the check cannot read or parse: the check is CANNOT-EVALUATE, never a pass."""
+
+
+class CheckResult:
+    __slots__ = ("status", "findings")
+
+    def __init__(self, status, findings=()):
+        self.status = status
+        self.findings = list(findings)
+
+
+class _Report:
+    def __init__(self):
+        self.findings, self.cannot = [], []
+
+    def finding(self, msg):
+        self.findings.append(msg)
+
+    def result(self):
+        if self.cannot:
+            return CheckResult(CANNOT_EVALUATE, ["cannot evaluate: " + c for c in self.cannot] + self.findings)
+        return CheckResult(INVALID if self.findings else VALID, self.findings)
+
+
+class _Evaluation:
+    __slots__ = ("product_root", "root_fd", "run_id", "plan", "doctor", "prober")
+
+
+def _digest(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _read(ev, relpath):
+    """The live bytes at `relpath` (contained, no-follow, single-linked), or None when absent."""
+    try:
+        _fst, data = apply._read_live(ev.root_fd, relpath)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable(str(exc))
+    return data
+
+
+def _canonical(data, label):
+    try:
+        return apply._canonical_toml(data, label)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable(str(exc))
+
+
+def _sources(ev):
+    return ev.plan["sources"]
+
+
+# --- check 1: authority and freshness -----------------------------------------------------------------
+
+def _planned_destinations(ev):
+    """Check 1's destination sweep: the {path: digest} of every planned destination apply has already
+    written and no other roster check owns. Render-views members, CI enforcement members and consumer
+    repointings are check 4's; the record-adoption receipt is compared by content in the receipt leg
+    (outcome events append to its file); a move-file destination is written only by the post-green
+    relocation (spec 14.2), so before green it is not a live destination. A register-unmanaged chain
+    rewrites the frozen store manifest, so the chain's last new_digest replaces any scaffolded member
+    digest there (_opf_adopt's registration-chain validation pins the chain to program order)."""
+    plan = ev.plan
+    ci = {m["path"] for row in plan["enforcement"] if row["platform"] == "ci" for m in row["members"]}
+    wanted = {}
+    for op in plan["ops"]:
+        if op["op"] in ("create-file", "plant-governance"):
+            if op["path"] not in ci:
+                wanted[op["path"]] = op["content_digest"]
+        elif op["op"] == "init-store":
+            member_root = op[schema._MEMBER_ROOTS[op["op"]]]
+            for member in op["members"]:
+                dest = schema._compose(member_root, member["path"])
+                if dest not in ci:
+                    wanted[dest] = member["digest"]
+        elif op["op"] == "enable-hook":
+            wanted[op["registration_path"]] = op["new_digest"]
+    manifest = schema.store_manifest(plan["store"])
+    for op in plan["ops"]:
+        if op["op"] == "register-unmanaged" and manifest is not None:
+            wanted[manifest] = op["new_digest"]
+    return wanted
+
+
+def _check_authority(ev, rep):
+    """Spec 14.1 check 1: 'Authority and freshness: roots, destinations and live preimages still match
+    the approved plan.' Roots and the binding chain: the approval and the receipt bind this run and plan;
+    destinations: _planned_destinations; live preimages: the sources the plan leaves live that no other
+    check owns (keep, and non-occupying migrate)."""
+    plan, run_id = ev.plan, ev.run_id
+    approval_bytes = _read(ev, apply.approval_rel(run_id))
+    approval = None
+    if approval_bytes is None:
+        rep.finding("no approval in the run's evidence bundle ({}): nothing authorizes this run".format(
+            apply.approval_rel(run_id)))
+    else:
+        approval = _canonical(approval_bytes, "the run's approval")
+        for f in apply.approval_findings(approval, plan):
+            rep.finding("approval: " + f)
+    receipt_bytes = _read(ev, apply.receipt_rel(run_id))
+    receipt = None
+    if receipt_bytes is None:
+        rep.finding("no adoption receipt in the run's evidence bundle ({})".format(apply.receipt_rel(run_id)))
+    else:
+        receipt = _canonical(receipt_bytes, "the adoption receipt core")
+        checked = schema.validate_receipt_core(receipt)
+        if checked.status == CANNOT_EVALUATE:
+            raise Unevaluable("receipt core: " + "; ".join(checked.findings))
+        if checked.status != VALID:
+            for f in checked.findings:
+                rep.finding("receipt core: " + f)
+            receipt = None
+    if receipt is not None:
+        _receipt_binding(ev, rep, receipt, approval)
+    for source in _sources(ev):
+        if not (source["disposition"] == "keep"
+                or (source["disposition"] == "migrate" and not source["occupying"])):
+            continue
+        data = _read(ev, source["path"])
+        if data is None:
+            rep.finding("live preimage {!r} ({}) is absent from the live tree".format(
+                source["path"], source["disposition"]))
+        elif _digest(data) != source["digest"]:
+            rep.finding("live preimage {!r} ({}) no longer matches its plan digest: bound-item drift takes a "
+                        "fresh plan (spec 14.1)".format(source["path"], source["disposition"]))
+    wanted = _planned_destinations(ev)
+    for dest in sorted(wanted):
+        data = _read(ev, dest)
+        if data is None:
+            rep.finding("planned destination {!r} is absent from the live tree".format(dest))
+        elif _digest(data) != wanted[dest]:
+            rep.finding("planned destination {!r} no longer holds its planned bytes: bound-item drift "
+                        "takes a fresh plan (spec 14.1)".format(dest))
+
+
+def _receipt_binding(ev, rep, receipt, approval):
+    """Check 1's receipt leg: the receipt core binds this run and the approved plan and records both
+    release anchor flags True, by the apply shell's own rule (receipt_binding_refusals,
+    the refusals adoption_record raises), and records its approval and the plan's sources as the plan binds
+    them."""
+    plan = ev.plan
+    for refusal in apply.receipt_binding_refusals(ev.run_id, plan, receipt):
+        rep.finding("receipt: " + refusal + " (adoption_record refuses it)")
+    if approval is not None and receipt["approval"] != approval:
+        rep.finding("the receipt's approval is not the run's recorded approval")
+    by_path = dict((row["path"], row) for row in _sources(ev))
+    for row in receipt["files"]:
+        source = by_path.get(row["path"])
+        if source is None:
+            rep.finding("receipt file {!r} is not a source of the approved plan".format(row["path"]))
+        elif row["disposition"] != source["disposition"] or row["before_digest"] != source["digest"]:
+            rep.finding("receipt file {!r} records {} {} but the approved plan binds {} {}".format(
+                row["path"], row["disposition"], row["before_digest"], source["disposition"],
+                source["digest"]))
+
+
+# --- check 2: discovery accounting --------------------------------------------------------------------
+
+# The fields of the observation's walk table (_opf_adopt_plan.build_observation records it).
+_WALK_FIELDS = ("deliverables", "manifest_bytes", "manifest_path", "resolved", "unreached")
+
+
+def _differences(built, recorded):
+    """The paths whose rows differ between two entry lists (each sorted, one row per path)."""
+    ours, theirs = dict((r["path"], r) for r in built), dict((r["path"], r) for r in recorded)
+    only = sorted(set(theirs) - set(ours))
+    missing = sorted(set(ours) - set(theirs))
+    changed = sorted(p for p in set(ours) & set(theirs) if ours[p] != theirs[p])
+    return "recorded only {}, built only {}, recorded otherwise {}".format(only, missing, changed)
+
+
+def rebuilt_observation_problem(obs):
+    """Why the observation `obs` is not the one the planner's own build_observation returns over the
+    listing its rows record, or None when it is. The rows are first held only to what a listing needs (a
+    path, a kind in the planner's vocabulary, a file's integer size and string digest; else the planner's
+    row rule, entry_row_problem, names the defect) and to one row per path, so they ARE a listing
+    (_opf_adopt_plan.RowListing); the planner's one rule set (build_observation, which _inventory runs over
+    the live tree) is then run over it with the observation's recorded roots, exclusions and walk, and must
+    neither refuse nor return anything but the recorded fields (BUILT_FIELDS), field for field. There is no
+    second model of the planner here."""
+    lists = ("exclusions", "entries", "candidates", "empty_directories", "sources", "targets", "scope")
+    if not (isinstance(obs, dict) and all(isinstance(obs.get(k), list) for k in lists)):
+        return "the observation lacks {}".format(", ".join(lists))
+    walk = obs.get("walk")
+    if not (isinstance(walk, dict) and sorted(map(str, walk)) == sorted(_WALK_FIELDS)
+            and isinstance(walk["deliverables"], list) and all(isinstance(p, str) for p in walk["deliverables"])
+            and isinstance(walk["unreached"], list) and all(isinstance(p, str) for p in walk["unreached"])
+            and type(walk["resolved"]) is bool and isinstance(walk["manifest_path"], str)
+            and type(walk["manifest_bytes"]) is int and walk["manifest_bytes"] >= 0):
+        return "the observation records no walk table of {}".format(", ".join(_WALK_FIELDS))
+    resolution = obs.get("resolution")
+    if isinstance(resolution, dict) and ((resolution.get("status") == store.RESOLVED) != walk["resolved"]
+                                         or resolution.get("manifest_path") != walk["manifest_path"]):
+        return "the walk's resolved flag or manifest path disagrees with the recorded resolution"
+    exclusions = [r for r in obs["exclusions"] if isinstance(r, dict) and isinstance(r.get("path"), str)]
+    rows = {}
+    for i, row in enumerate(obs["entries"]):
+        # Only what a listing needs of a row; every other rule is build_observation's, in its walk order.
+        if not (isinstance(row, dict) and isinstance(row.get("path"), str) and row["path"]
+                and row.get("kind") in planner.ENTRY_KINDS
+                and (row["kind"] != "file" or (type(row.get("size")) is int
+                                               and isinstance(row.get("digest"), str)))):
+            problem = planner.entry_row_problem(row, exclusions) or "entry {!r} is no listing row".format(row)
+            return "entry [{}]: {}; the planner never records such a row".format(i, problem)
+        if row["path"] in rows:
+            return "entry {!r} is duplicated: the accounting is ambiguous".format(row["path"])
+        rows[row["path"]] = row
+    try:
+        built = planner.build_observation(
+            planner.RowListing(rows, walk["unreached"]), sources=obs["sources"], targets=obs["targets"],
+            exclusions=obs["exclusions"], walk=walk)
+    except (planner.PlanError, TypeError, ValueError, KeyError, RecursionError) as exc:
+        return "the planner refuses it: {}".format(exc)
+    for field in planner.BUILT_FIELDS:
+        if built[field] != obs.get(field):
+            detail = "built {!r}".format(built[field])
+            if field == "entries":
+                detail = _differences(built[field], obs[field])
+                ruled = [planner.entry_row_problem(row, exclusions)
+                         for row in obs[field] if row not in built[field]]
+                detail += "".join("; " + problem for problem in [p for p in ruled if p][:1])
+            return "its {} are not the ones the planner builds from its entries ({})".format(field, detail)
+    return None
+
+
+def _check_discovery(ev, rep):
+    """Spec 14.1 check 2: 'Discovery accounting: every inventory entry has a disposition or recorded
+    exclusion.' Every inventoried file, wherever it lies, and every candidate and empty directory needs a
+    plan disposition or a recorded exclusion. The planning inventory is the bundle copy apply persists
+    (apply.planning_inventory_rel), the one source: an absent copy is a finding, like an absent approval
+    (module outcome model); an unreadable or malformed one is CANNOT-EVALUATE. First the whole observation
+    must be the one the planner's own
+    build_observation returns over the listing its rows record (rebuilt_observation_problem; module
+    docstring, check 2), so an ambiguous, malformed, contradictory or unproducible record is CANNOT-EVALUATE,
+    never a pass, and the containment test below only ever sees paths the planner's own walk recorded."""
+    rel = apply.planning_inventory_rel(ev.run_id)
+    data = _read(ev, rel)
+    if data is None:
+        rep.finding("no planning inventory in the run's evidence bundle ({}): apply persists the sealed "
+                    "copy, and discovery accounting needs its entries".format(rel))
+        return
+    doc = _canonical(data, "the planning inventory")
+    if doc.get("format") != PLANNING_INVENTORY_FORMAT:
+        raise Unevaluable("the planning inventory format {!r} is not {}".format(
+            doc.get("format"), PLANNING_INVENTORY_FORMAT))
+    body = dict(doc)
+    claimed = body.pop("inventory_digest", None)
+    try:
+        sealed = _digest(emit_checked(body).encode("utf-8"))
+    except EmitError as exc:
+        raise Unevaluable("the planning inventory cannot be re-sealed ({})".format(exc))
+    if claimed != sealed:
+        rep.finding("the planning inventory's inventory_digest does not seal its own bytes")
+    if claimed != ev.plan["inventory_digest"]:
+        rep.finding("the planning inventory {!r} is not the one the approved plan binds ({!r})".format(
+            claimed, ev.plan["inventory_digest"]))
+    obs = doc.get("observation")
+    problem = rebuilt_observation_problem(obs)
+    if problem is not None:
+        raise Unevaluable("the planning inventory's observation is not one the planner builds: {}; a "
+                          "contradictory, ambiguous or unproducible record is never graded".format(problem))
+    excluded = [row["path"] for row in obs["exclusions"]]
+    entries = dict((row["path"], row) for row in obs["entries"])
+    recorded = dict((label, obs[label]) for label in ("candidates", "empty_directories"))
+    needing = set(recorded["candidates"]) | set(recorded["empty_directories"])
+    needing |= {p for p, row in entries.items() if row["kind"] == "file"}
+    disposed = {row["path"] for row in _sources(ev)}
+    for path in sorted(needing):
+        if path in disposed or schema._in_control_area(path) or any(planner._under(path, e) for e in excluded):
+            continue
+        rep.finding("inventory entry {!r} has neither a disposition nor a recorded exclusion".format(path))
+    for source in _sources(ev):
+        row = entries.get(source["path"])
+        if not (isinstance(row, dict) and row.get("kind") == "file" and row.get("digest") == source["digest"]):
+            rep.finding("plan source {!r} is not an inventoried file with its plan digest".format(source["path"]))
+
+
+# --- check 3: preservation and restore ----------------------------------------------------------------
+
+def _restore_exercise(items):
+    """Restore each (source path, archived bytes, plan digest) into a private scratch tree, never over the
+    live tree, and return the source paths whose restored bytes do not reproduce the plan digest."""
+    failed = []
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-restore-") as scratch:
+        for path, data, digest in items:
+            target = os.path.join(scratch, *path.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "xb") as out:
+                out.write(data)
+            with open(target, "rb") as back:
+                if _digest(back.read()) != digest:
+                    failed.append(path)
+    return failed
+
+
+def _check_preservation(ev, rep):
+    """Spec 14.1 check 3: 'Preservation and restore: each retirement preimage, preserved at apply for a
+    retire-disposed file and for a non-occupying migrate-disposed source alike, and each archived occupying
+    source (section 14.2) exists, digest-matched, under `.working/archive/adoption/<run-id>/`, and a
+    restore exercise reproduces its bytes.' A non-occupying move source has no archive copy before green:
+    spec 14.2 relocates it only after the plan-bound green completion check, with digest-verified
+    preservation, so this check accepts its move-destination preservation and verifies its frozen LIVE
+    bytes against the plan digest instead."""
+    try:
+        bundle = apply.verify_bundle(ev.product_root, ev.run_id)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable(str(exc))
+    if bundle.status == CANNOT_EVALUATE:
+        raise Unevaluable("evidence bundle: " + "; ".join(bundle.findings))
+    for f in bundle.findings:
+        rep.finding("evidence bundle: " + f)
+    listed = set()
+    inventory = _read(ev, apply.inventory_rel(ev.run_id))
+    if inventory is not None:
+        doc = _canonical(inventory, "the bundle inventory")
+        # The re-read inventory is held to the apply shell's own validator, as verify_bundle's read was.
+        checked = apply.validate_inventory(doc, ev.run_id)
+        if checked.status == CANNOT_EVALUATE:
+            raise Unevaluable("the bundle inventory: " + "; ".join(checked.findings))
+        rows = doc.get("file")
+        if not (isinstance(rows, list) and all(isinstance(r, dict) and isinstance(r.get("path"), str)
+                                                for r in rows)):
+            raise Unevaluable("the bundle inventory carries no well-formed file rows")
+        listed = {r["path"] for r in rows}
+    items = []
+    for source in _sources(ev):
+        preserved = source.get("preservation")
+        if preserved is None:
+            continue
+        if source["disposition"] == "move" and not source["occupying"]:
+            # Pre-green the move has not run (spec 14.2): the frozen live source IS the preserved bytes.
+            data = _read(ev, source["path"])
+            if data is None:
+                rep.finding("move-disposed {!r} is absent from the live tree, so nothing preserves at its "
+                            "move destination".format(source["path"]))
+            elif _digest(data) != source["digest"]:
+                rep.finding("move-disposed {!r} no longer matches its plan digest: a drifted source MUST "
+                            "NOT be moved (spec 14.2)".format(source["path"]))
+            continue
+        if preserved != apply.archive_rel(ev.run_id, source["path"]):
+            rep.finding("{!r} is preserved at {!r}, not under this run's adoption archive".format(
+                source["path"], preserved))
+            continue
+        data = _read(ev, preserved)
+        if data is None:
+            rep.finding("preimage {!r} of {!r} is missing from the adoption archive".format(
+                preserved, source["path"]))
+            continue
+        if _digest(data) != source["digest"]:
+            rep.finding("preimage {!r} does not match the plan digest of {!r}".format(preserved, source["path"]))
+            continue
+        if preserved not in listed:
+            rep.finding("preimage {!r} is not claimed by the run's bundle inventory".format(preserved))
+        items.append((source["path"], data, source["digest"]))
+    try:
+        failed = _restore_exercise(items)
+    except OSError as exc:
+        raise Unevaluable("the restore exercise could not run in scratch ({})".format(exc))
+    for path in failed:
+        rep.finding("the restore exercise did not reproduce the bytes of {!r}".format(path))
+
+
+# --- check 4: operational readiness -------------------------------------------------------------------
+
+def store_doctor(observations=None):
+    """A doctor callable for check 4: resolve the store and run the whole-store validator over the caller's
+    inert git-derived observations (gathering them spawns git, which this slice never does)."""
+    def run(product_root):
+        import _opf_check
+        return _opf_check.validate_store(store.resolve_store(Path(product_root)), observations=observations)
+    return run
+
+
+# The pack's shipped CI floor (opf/enforcement/ci beside these tools): the GitHub Actions template an adopter
+# installs unmodified (its header: "Copy this file to .github/workflows/opf.yml") and the recipe that
+# template runs. Check 4 proves the CI leg by byte identity with these two files, never by reading workflow
+# syntax, so any other workflow content is CANNOT-EVALUATE. The reference files sit in a writable tree, so
+# each is read contained and no-follow from the pack root (_shipped) and authenticated against the digest
+# embedded below; a mismatch, a symlink or a read error is CANNOT-EVALUATE.
+_PACK_ROOT = Path(__file__).resolve().parent.parent
+_SHIPPED_TEMPLATE = "enforcement/ci/github-actions.yml"
+_SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
+# The released digests of those two files (bare-hex sha256), generated and drift-gated: editing either file
+# without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
+# BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
+_SHIPPED_TEMPLATE_SHA256 = '3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262'
+_SHIPPED_RECIPE_SHA256 = 'f630855b4c96918e3e4e7e87cf8f4811c186e8ab59b6890be042b9631a70020c'
+# END generated OPF CI floor digests
+# Spec 14.1 check 4 requires that "CI asserts store presence and identity". The shipped recipe asserts
+# presence only (doctor --require-store, then render --check); the CI identity assertion is the deferred
+# U25 (the template's own header says so). This is the one switch for it: while it is False, check 4's CI
+# leg is CANNOT-EVALUATE naming U25 once every other check-4 condition holds, so check 4 is never VALID on
+# a presence-only floor. Set it True only in the release whose shipped recipe performs the U25 identity
+# assertion (that recipe change regenerates _SHIPPED_RECIPE_SHA256 above).
+U25_CI_IDENTITY_ASSERTED = False
+_U25_DEFERRED = ("the shipped CI floor asserts store presence only (doctor --require-store, then render "
+                 "--check); spec 14.1 check 4 also requires CI to assert store identity, which is the "
+                 "deferred CI receipt-identity comparison (U25), so this check cannot be VALID until U25 "
+                 "ships")
+# The repository path the template's one run step names (`run: sh opf/enforcement/ci/opf-ci.sh .`): the
+# pack sits at opf/, and the recipe launches opf/tools/opf.py beside it unless OPF_TOOL is set.
+_CI_RECIPE_REL = "opf/enforcement/ci/opf-ci.sh"
+_TEMPLATE_RUN_LINE = b"        run: sh " + _CI_RECIPE_REL.encode("ascii") + b" .\n"
+# GitHub reads workflows only from files directly under .github/workflows/: a plan naming a workflow
+# elsewhere, a subdirectory included, names a file GitHub never runs.
+_WORKFLOW_DIR = ".github/workflows/"
+_WORKFLOW_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.ya?ml")
+_INSTALL_UNMODIFIED = ("install the pack's template opf/enforcement/ci/github-actions.yml unmodified at the "
+                       "workflow path the plan names (default .github/workflows/opf.yml), with the recipe "
+                       "opf/enforcement/ci/opf-ci.sh unmodified, and plan the adoption again; a modified, "
+                       "extended or relocated copy is not supported in this release, and neither is "
+                       "OPF_TOOL (the pack at a path other than opf/)")
+
+
+def _is_workflow(path):
+    return path.endswith((".yml", ".yaml"))
+
+
+def _shipped(rel, expected):
+    """The authenticated bytes of one shipped CI floor file: read contained and no-follow under the pack
+    root (the apply shell's reader: a symlink, special or multiply-linked file refuses) and equal to the
+    `expected` bare-hex sha256 embedded in this evaluator. Absent, unreadable, symlinked or mismatched is
+    Unevaluable (fail closed), never trusted as the reference."""
+    root_fd = None
+    try:
+        root_fd = apply._open_product_root(_PACK_ROOT)
+        _fst, data = apply._read_live(root_fd, rel)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable("cannot read the pack's shipped CI file {} ({})".format(rel, exc))
+    finally:
+        if root_fd is not None:
+            store._close_fd_exc_safe(root_fd)
+    if data is None:
+        raise Unevaluable("cannot read the pack's shipped CI file {} (absent)".format(rel))
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise Unevaluable("the pack's shipped CI file {} does not match the digest embedded in this evaluator "
+                          "(regenerate with tools/gen_secret_patterns.py when the release changes it); an "
+                          "unauthenticated reference is never trusted".format(rel))
+    return data
+
+
+def _shipped_floor():
+    """The authenticated (template, recipe) bytes of the pack's shipped CI floor."""
+    return (_shipped(_SHIPPED_TEMPLATE, _SHIPPED_TEMPLATE_SHA256),
+            _shipped(_SHIPPED_RECIPE, _SHIPPED_RECIPE_SHA256))
+
+
+def _ci_template_identity(ev, row):
+    """Check 4's CI leg for one CI enforcement row: the reasons the row does not prove the shipped CI floor
+    installed unmodified, [] when it does. The row names exactly one workflow member, a file directly under
+    .github/workflows/; the plan records that member at the shipped template's digest and its live bytes
+    equal the template; every member of the row is live at its plan digest (a planned recipe member at the
+    shipped recipe's digest); and the recipe the template runs (_CI_RECIPE_REL) is live and equals the
+    shipped recipe by digest, planned or not. No workflow syntax is read. A shipped file that cannot be
+    read or does not match its embedded digest (_shipped), or a shipped template that does not run that
+    recipe, is Unevaluable."""
+    template, recipe = _shipped_floor()
+    if _TEMPLATE_RUN_LINE not in template:
+        raise Unevaluable("the pack's shipped template {} does not run {}: the pack is inconsistent".format(
+            _SHIPPED_TEMPLATE, _CI_RECIPE_REL))
+    why = []
+    workflows = [member["path"] for member in row["members"] if _is_workflow(member["path"])]
+    if len(workflows) != 1:
+        why.append("the CI row names {} workflow members, not exactly one".format(len(workflows)))
+    for member in row["members"]:
+        path, data = member["path"], _read(ev, member["path"])
+        if data is None:
+            why.append("CI member {!r} is absent".format(path))
+        elif _digest(data) != member["digest"]:
+            why.append("CI member {!r} does not match its planned bytes".format(path))
+        if _is_workflow(path):
+            name = path[len(_WORKFLOW_DIR):] if path.startswith(_WORKFLOW_DIR) else ""
+            if _WORKFLOW_NAME_RE.fullmatch(name) is None:
+                why.append("CI workflow {!r} is not a file directly under {}, where GitHub reads "
+                           "workflows".format(path, _WORKFLOW_DIR))
+            if member["digest"] != _digest(template):
+                why.append("the plan records CI workflow {!r} at a digest that is not the pack's shipped "
+                           "template {}".format(path, Path(_SHIPPED_TEMPLATE).name))
+            elif data is not None and data != template:
+                why.append("live CI workflow {!r} is not byte-identical to the pack's shipped template "
+                           "{}".format(path, Path(_SHIPPED_TEMPLATE).name))
+        elif path == _CI_RECIPE_REL and member["digest"] != _digest(recipe):
+            why.append("the plan records the CI recipe {!r} at a digest that is not the pack's shipped "
+                       "recipe".format(path))
+    live = _read(ev, _CI_RECIPE_REL)
+    if live is None:
+        why.append("the recipe the template runs, {!r}, is absent".format(_CI_RECIPE_REL))
+    elif _digest(live) != _digest(recipe):
+        why.append("the recipe the template runs, {!r}, is not the pack's shipped recipe".format(_CI_RECIPE_REL))
+    return why
+
+
+def _check_operational(ev, rep):
+    """Spec 14.1 check 4: 'Operational readiness: the store resolves to the planned identity, and CI
+    asserts store presence and identity so absence cannot pass as NOT-APPLICABLE. Doctor validity and
+    declared-view byte drift are evaluated on the live tree, where apply has already rendered every
+    declared view, a formerly occupied destination included, and any drift the plan does not account for
+    fails the check. Consumer repointings match the plan.' The plan accounts for a view destination by
+    binding its rendered member digest, nothing else: old occupant bytes there are unaccounted drift (spec
+    14.1: once apply commits, restoring an archived file takes a fresh plan), and no doctor finding is ever
+    set aside. CI asserts only through the pack's shipped template and recipe installed unmodified
+    (_ci_template_identity); any other CI is CANNOT-EVALUATE, never VALID. That floor asserts store
+    presence, not identity (U25 is deferred), so while U25_CI_IDENTITY_ASSERTED is False a check with no
+    other finding or cannot-evaluate reason is CANNOT-EVALUATE naming U25; an earlier failure keeps its own
+    reason."""
+    plan = ev.plan
+    resolution = store.resolve_store(Path(ev.product_root))
+    if resolution.status == store.NOT_ADOPTED:
+        rep.finding("no store resolves at the product root: a de-adopted repository fails check 4, never "
+                    "NOT-APPLICABLE")
+    elif resolution.status != store.RESOLVED:
+        raise Unevaluable("the store does not resolve ({}: {})".format(resolution.status, resolution.detail))
+    else:
+        try:
+            same = os.path.samefile(resolution.store_root,
+                                    os.path.join(ev.product_root, plan["store"]["store_root"]))
+        except OSError as exc:
+            raise Unevaluable("cannot compare the resolved store root ({})".format(exc))
+        if not same or resolution.machine_rel != plan["store"]["machine_rel"]:
+            rep.finding("the store resolves to {} {!r}, not the planned identity {!r} {!r}".format(
+                resolution.store_root, resolution.machine_rel, plan["store"]["store_root"],
+                plan["store"]["machine_rel"]))
+    ci = [row for row in plan["enforcement"] if row["platform"] == "ci"]
+    if not ci:
+        rep.finding("the plan binds no CI enforcement row, so CI cannot assert store presence")
+    for row in ci:
+        why = _ci_template_identity(ev, row)
+        if why:
+            rep.cannot.append("CI is not the pack's shipped CI floor installed unmodified, and this check proves "
+                              "the CI leg only by that byte identity: {}; {}".format(
+                                  "; ".join(why), _INSTALL_UNMODIFIED))
+    occupants = {s["path"]: s["digest"] for s in _sources(ev) if s["occupying"]}
+    for op in plan["ops"]:
+        if op["op"] == "render-views":
+            for member in op["members"]:
+                dest = schema._compose(op[schema._MEMBER_ROOTS[op["op"]]], member["path"])
+                data = _read(ev, dest)
+                if data is None:
+                    rep.finding("planned view {!r} is missing".format(dest))
+                elif _digest(data) == member["digest"]:
+                    continue
+                elif _digest(data) == occupants.get(dest):
+                    rep.finding("planned view destination {!r} still holds the old occupant's bytes: once "
+                                "apply commits, restoring an archived file to the live tree takes a fresh "
+                                "plan, so this drift fails the check (spec 14.1)".format(dest))
+                else:
+                    rep.finding("planned view destination {!r} holds bytes the plan does not account "
+                                "for".format(dest))
+        elif op["op"] == "repoint-consumer":
+            data = _read(ev, op["path"])
+            if data is None or _digest(data) != op["new_digest"]:
+                rep.finding("consumer {!r} does not hold its planned repointing".format(op["path"]))
+    if ev.doctor is None:
+        raise Unevaluable("no doctor run was supplied; doctor validity is never assumed")
+    result = ev.doctor(ev.product_root)
+    status = getattr(result, "status", None)
+    cannot = getattr(result, "cannot_evaluate", None)
+    findings = getattr(result, "findings", None)
+    # Missing or non-list doctor evidence is never read as empty: it is CANNOT-EVALUATE.
+    if not isinstance(cannot, list) or not isinstance(findings, list):
+        raise Unevaluable("doctor evidence is not list-shaped (cannot_evaluate {}, findings {})".format(
+            type(cannot).__name__, type(findings).__name__))
+    if cannot or status not in (VALID, INVALID):
+        raise Unevaluable("doctor: {} {}".format(status, "; ".join(map(str, cannot))))
+    if status == INVALID and not findings:
+        raise Unevaluable("doctor reports INVALID with no finding")
+    for f in findings:
+        # Spec 14.1 check 4: any drift the plan does not account for fails the check, and the plan accounts
+        # only by binding digests, so every doctor finding is reported; none is set aside.
+        rep.finding("doctor: {}".format(f))
+    if not U25_CI_IDENTITY_ASSERTED and not rep.findings and not rep.cannot:
+        rep.cannot.append(_U25_DEFERRED)
+
+
+# --- check 5: wiring ----------------------------------------------------------------------------------
+
+# The enforcement means whose deny decision a probe drives (spec 14.1): a platform deny hook and the
+# staged-snapshot pre-commit check. An instructions row denies nothing (its required residual is unverified
+# platform denial) and the CI row is check 4's; server-side branch protection is adopter-attested, never
+# probed (the plan validator requires the CI row to disclose it, _opf_adopt.ENFORCEMENT_REQUIRED_RESIDUALS).
+PROBED_MEANS = ("deny-hook", "staged-pre-commit")
+# A prober's closed answer to one probe; any other answer is CANNOT-EVALUATE, never read as either.
+PROBE_OUTCOMES = ("denied", "allowed")
+# The four probes of spec 14.1 check 5, in the spec's order: (name, the answer the check requires, the actor
+# the probe stands for, the finding's label). "direct" is a plain file write (an assistant tool call or a
+# hand edit offered for commit); the other two actors are the sanctioned OPF writer and renderer.
+WIRING_PROBES = (("store-write", "denied", "direct", "a direct store write"),
+                 ("archive-write", "denied", "direct", "a direct write under this run's adoption archive"),
+                 ("sanctioned-writer", "allowed", "opf record", "the sanctioned writer"),
+                 ("render", "allowed", "opf render", "the render path"))
+# The file name the archive-write probe names under this run's adoption archive (a probe asks the surface
+# for its decision; nothing is written there).
+_ARCHIVE_PROBE = "opf-wiring-probe.md"
+# Spec 14.1 check 5 requires the installed pack probed on the live tree. The shipped pack carries deny
+# programs (opf/enforcement holds the Claude Code deny hook and the staged pre-commit check beside the CI
+# floor) but no live probe adapter for any platform; the adapters are the deferred enforcement pack (PR6),
+# so no shipped program is probed yet. This is the one switch for it: while it is False, check 5 is
+# CANNOT-EVALUATE naming PR6 once every other check-5 condition holds, so no prober (a fixture included)
+# makes it VALID. Set it True only in the release that ships PR6's deny programs and probe adapters.
+PR6_DENY_PROBES_SHIPPED = False
+_PR6_DEFERRED = ("the shipped enforcement pack carries no deny program and no live probe adapter for any "
+                 "platform (opf/enforcement holds the CI floor only); spec 14.1 check 5 requires the installed "
+                 "pack probed on the live tree, which is the deferred enforcement pack (PR6), so this check "
+                 "cannot be VALID until PR6 ships")
+
+
+def _wiring_probes(ev):
+    """Each WIRING_PROBES entry for this plan as (name, required answer, actor, label, target path): a direct
+    write to the planned store manifest (_opf_adopt.store_manifest), a direct write under this run's
+    adoption archive (_opf_adopt_apply.archive_rel), the sanctioned writer writing that same manifest, and
+    the renderer writing the first planned view destination. A probe without a target is Unevaluable."""
+    plan = ev.plan
+    manifest = schema.store_manifest(plan["store"])
+    if manifest is None:
+        raise Unevaluable("the plan's store identity names no store manifest, so the store-write probe has "
+                          "no target")
+    views = [schema._compose(op[schema._MEMBER_ROOTS[op["op"]]], member["path"])
+             for op in plan["ops"] if op["op"] == "render-views" for member in op["members"]]
+    if not views:
+        raise Unevaluable("the plan renders no declared view, so the render probe has no target")
+    try:
+        archive = apply.archive_rel(ev.run_id, _ARCHIVE_PROBE)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable(str(exc))
+    targets = dict([("store-write", manifest), ("archive-write", archive), ("sanctioned-writer", manifest),
+                    ("render", views[0])])
+    return [(name, expect, actor, label, targets[name]) for name, expect, actor, label in WIRING_PROBES]
+
+
+def _check_wiring(ev, rep):
+    """Spec 14.1 check 5: 'Wiring: the enforcement pack is installed and probed, with a direct store write
+    denied, a write under `.working/archive/adoption/<run-id>/` denied, and sanctioned writer and render
+    paths succeeding on the live tree. Server-side branch protection is adopter-attested, explicitly outside
+    the local probe's guarantee.' Installed: every member of each deny-capable row (PROBED_MEANS) is live at
+    its plan digest; a row that is not is a finding and is not probed, since a probe proves only the surface
+    it runs against. Probed: the caller's prober answers each probe (_wiring_probes) for each installed row,
+    and both directions must hold, so neither a surface that denies nothing nor an over-broad one that also
+    blocks the sanctioned writer or renderer passes. A missing prober, a raising prober or an answer outside
+    PROBE_OUTCOMES is CANNOT-EVALUATE. While PR6_DENY_PROBES_SHIPPED is False a check with no other finding
+    or cannot-evaluate reason is CANNOT-EVALUATE naming PR6; an earlier failure keeps its own reason."""
+    rows = [row for row in ev.plan["enforcement"] if row["means"] in PROBED_MEANS]
+    if not rows:
+        rep.finding("the plan binds no deny-capable enforcement row ({}), so nothing denies a direct store "
+                    "write: an unprobed surface is never green".format(", ".join(PROBED_MEANS)))
+    installed = []
+    for row in rows:
+        why = []
+        for member in row["members"]:
+            data = _read(ev, member["path"])
+            if data is None:
+                why.append("member {!r} is absent".format(member["path"]))
+            elif _digest(data) != member["digest"]:
+                why.append("member {!r} does not hold its planned bytes".format(member["path"]))
+        if why:
+            rep.finding("the {} enforcement surface ({}) is not installed as planned: {}; it is not probed, "
+                        "since a probe proves only the surface it runs against".format(
+                            row["platform"], row["means"], "; ".join(why)))
+        else:
+            installed.append(row)
+    probes = _wiring_probes(ev)
+    if ev.prober is None:
+        raise Unevaluable("no wiring prober was supplied; a denial or a sanctioned path is never assumed")
+    for row in installed:
+        for name, expect, actor, label, path in probes:
+            surface = dict(platform=row["platform"], means=row["means"],
+                           members=[dict(member) for member in row["members"]])
+            try:
+                got = ev.prober(ev.product_root, surface, dict(probe=name, actor=actor, path=path))
+            except Exception as exc:  # noqa: BLE001  a raising prober fails closed, named
+                raise Unevaluable("the {} probe on the {} surface raised {!r}".format(name, row["platform"], exc))
+            if type(got) is not str or got not in PROBE_OUTCOMES:
+                raise Unevaluable("the {} probe on the {} surface answered {}, not one of {}".format(
+                    name, row["platform"], repr(got) if type(got) is str else "a " + type(got).__name__,
+                    ", ".join(PROBE_OUTCOMES)))
+            if got == expect:
+                continue
+            if expect == "denied":
+                rep.finding("the {} surface ({}) allows {} ({} writing {!r}): the enforcement pack does not "
+                            "deny it (spec 14.1 check 5)".format(row["platform"], row["means"], label, actor, path))
+            else:
+                rep.finding("the {} surface ({}) denies {} ({} writing {!r}): an over-broad deny blocks a "
+                            "sanctioned path (spec 14.1 check 5)".format(
+                                row["platform"], row["means"], label, actor, path))
+    if not PR6_DENY_PROBES_SHIPPED and not rep.findings and not rep.cannot:
+        rep.cannot.append(_PR6_DEFERRED)
+
+
+# --- check 6: retirement readiness --------------------------------------------------------------------
+
+def _check_retirement(ev, rep):
+    """Spec 14.1 check 6: 'Retirement readiness: each retire-disposed file that occupied no managed
+    destination is present in the live tree and its live bytes still equal its plan digest, and each
+    archived occupying source still equals its plan digest in the archive.'"""
+    for source in _sources(ev):
+        if source["occupying"]:
+            data = _read(ev, source["preservation"])
+            if data is None or _digest(data) != source["digest"]:
+                rep.finding("archived occupying source {!r} no longer equals its plan digest in the "
+                            "archive".format(source["path"]))
+        elif source["disposition"] == "retire":
+            data = _read(ev, source["path"])
+            if data is None:
+                rep.finding("retire-disposed {!r} is absent from the live tree".format(source["path"]))
+            elif _digest(data) != source["digest"]:
+                rep.finding("retire-disposed {!r} changed since the plan: a changed old file MUST NOT be "
+                            "retired (spec 14.1)".format(source["path"]))
+
+
+_CHECK_FUNCTIONS = {AUTHORITY: "_check_authority", DISCOVERY: "_check_discovery",
+                    PRESERVATION: "_check_preservation", OPERATIONAL: "_check_operational",
+                    WIRING: "_check_wiring", RETIREMENT: "_check_retirement"}
+
+
+def _run_check(name, ev):
+    rep = _Report()
+    try:
+        globals()[_CHECK_FUNCTIONS[name]](ev, rep)
+    except Unevaluable as exc:
+        rep.cannot.append(str(exc))
+    except Exception as exc:  # noqa: BLE001  any other escape (an injected doctor's included) fails closed
+        rep.cannot.append("{} raised {!r}; failing closed".format(name, exc))
+    return rep.result()
+
+
+def evaluate(product_root, run_id, *, doctor=None, prober=None):
+    """The roster verdicts {check name: CheckResult} in the spec's order (spec 14.1). Check 5 is never VALID
+    while PR6_DENY_PROBES_SHIPPED is False. Read-only over the live tree; every unreadable input is
+    CANNOT-EVALUATE. The planning inventory is read only from the run's bundle copy
+    (apply.planning_inventory_rel(run_id)): there is no caller-supplied replacement for it."""
+    ev = _Evaluation()
+    ev.product_root, ev.run_id, ev.doctor, ev.prober = str(product_root), run_id, doctor, prober
+    ev.plan, ev.root_fd = None, None
+    try:
+        ev.root_fd = apply._open_product_root(product_root)
+        if not apply.is_run_id(run_id):
+            raise Unevaluable("run id {!r} does not match the adoption grammar".format(run_id))
+        plan_bytes = _read(ev, apply.plan_rel(run_id))
+        if plan_bytes is None:
+            raise Unevaluable("no approved plan in the run's evidence bundle ({})".format(apply.plan_rel(run_id)))
+        try:
+            ev.plan = apply.frozen_plan(plan_bytes)
+        except apply.AdoptApplyError as exc:
+            raise Unevaluable(str(exc))
+        if ev.plan["run_id"] != run_id:
+            raise Unevaluable("the bundle's plan names run {!r}".format(ev.plan["run_id"]))
+        results = {name: _run_check(name, ev) for name in CHECKS}
+    except (Unevaluable, apply.AdoptApplyError) as exc:
+        results = {name: CheckResult(CANNOT_EVALUATE, ["cannot evaluate: {}".format(exc)]) for name in CHECKS}
+    finally:
+        if ev.root_fd is not None:
+            store._close_fd_exc_safe(ev.root_fd)
+    return results
+
+
+def roster_green(results):
+    """True only when every one of the six roster checks is VALID (spec 14.1: retirement needs green)."""
+    return all(name in results and results[name].status == VALID for name in CHECKS)
+
+
+# --- self-test ----------------------------------------------------------------------------------------
+
+_RUN = "adopt-20260917T120000Z-0123456789abcdef"
+# The fixture's CI floor: None installs the pack's shipped template and recipe; a vector patches either with
+# other bytes, which the fixture's plan then records, so the change is digest-bound (a post-apply tree).
+_CI_BYTES = None
+_CI_RECIPE_BYTES = None
+# Extra planning inventory entry rows a vector adds to the fixture; the fixture seals and binds them (its plan,
+# approval, receipt and bundle inventory), so no seal or binding failure can stand in for the check graded.
+_EXTRA_ENTRIES = ()
+# Extra empty_directories paths, and (path, changes) edits to existing entry rows, sealed and bound alike.
+_EXTRA_EMPTY = ()
+_ENTRY_EDITS = ()
+# Extra (platform, path, bytes) enforcement members a vector appends after that platform's canonical members;
+# the fixture plants them and its plan records them (each by its plant row), so they are digest-bound.
+_EXTRA_MEMBERS = ()
+# A function a vector applies to the whole observation (its lists edited in place) before the fixture seals it.
+_OBSERVATION_EDIT = None
+# The planner's recorded source and target roots for the fixture (sorted, non-overlapping, as
+# _opf_adopt_plan._roots); the recorded scope is every one of them plus the detection roots.
+_SOURCE_ROOTS = ["adopter", "legacy", "notes"]
+_TARGET_ROOTS = []
+_CI_PATH = ".github/workflows/opf.yml"
+_RENDERED = b"rendered todo view\n"
+_MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
+_CONSUMER = "consumer/USES.md"
+_CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
+# The enforcement members the plant rows plant beside the CI floor: the pre-commit launchers and the tool entry
+# point with the rest of its tool tree, which both launcher rows bind under the opf/ mirror
+# (_opf_adopt.canonical_plan_bindings), the registration file and the deny hook it runs, and the instruction
+# files. Check 1's destination sweep owns each but the tool tree, whose files are CI members too.
+_PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
+         "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
+         "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
+         schema.HOOK_MEMBER: b"deny hook\n",
+         "AGENTS.md": b"agents instructions\n", "GEMINI.md": b"gemini instructions\n",
+         ".cursor/rules/opf.mdc": b"cursor instructions\n"}
+
+
+def _pack():
+    """_PACK with every other file of the tool tree (_opf_adopt.tool_tree), each planted as one short line."""
+    return dict([(path, b"tool module\n") for path in schema.tool_tree()] + list(_PACK.items()))
+_HOOK = "opf/enforcement/precommit/pre-commit"   # the pre-commit row's first member
+_LIVE = {"legacy/RULES.md": b"old rules\n", "notes/old.md": b"old notes\n", ".working/TODO.md": b"old todo\n",
+         "adopter/MOVE.md": b"move me\n"}
+
+
+def _ci_floor():
+    """The fixture's (workflow, recipe) bytes: the shipped files unless a vector patches them."""
+    template, recipe = _shipped_floor() if _CI_BYTES is None or _CI_RECIPE_BYTES is None else (None, None)
+    return (template if _CI_BYTES is None else _CI_BYTES,
+            recipe if _CI_RECIPE_BYTES is None else _CI_RECIPE_BYTES)
+
+
+class _Doctor:
+    """A doctor stub returning one fixed StoreValidation-shaped verdict."""
+
+    def __init__(self, status=VALID, findings=(), cannot=()):
+        self.status, self.findings, self.cannot_evaluate = status, list(findings), list(cannot)
+
+    def __call__(self, product_root):
+        return self
+
+
+class _Surface:
+    """A fixture enforcement surface, the prober of the self-test: per probed platform a policy deciding each
+    probe. "guard" (the default) denies a direct write into the store's machine directory or under the
+    adoption archive and allows everything else; "none" is the deny hook removed (allows every probe); "all"
+    is an over-broad deny (denies every probe); "open-store", "open-archive", "deny-writer" and "deny-render"
+    each break exactly one probe; any other policy value is returned verbatim (a malformed prober). It records
+    every call and never writes."""
+
+    _BROKEN = dict([("open-store", ("store-write", "allowed")), ("open-archive", ("archive-write", "allowed")),
+                    ("deny-writer", ("sanctioned-writer", "denied")), ("deny-render", ("render", "denied"))])
+
+    def __init__(self, policies=None):
+        self.policies, self.calls = dict(policies or ()), []
+
+    def __call__(self, product_root, surface, probe):
+        self.calls.append((surface["platform"], dict(probe)))
+        policy = self.policies.get(surface["platform"], "guard")
+        if policy == "none":
+            return "allowed"
+        if policy == "all":
+            return "denied"
+        if policy in self._BROKEN and probe["probe"] == self._BROKEN[policy][0]:
+            return self._BROKEN[policy][1]
+        if policy != "guard" and policy not in self._BROKEN:
+            return policy
+        guarded = probe["actor"] == "direct" and probe["path"].startswith((".working/toml/",
+                                                                            ".working/archive/adoption/"))
+        return "denied" if guarded else "allowed"
+
+
+def _put(root, rel, data):
+    path = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as out:
+        out.write(data)
+
+
+def _emit(doc):
+    return emit_checked(doc).encode("utf-8")
+
+
+def _sealed(doc, field):
+    body = dict(doc)
+    body.pop(field, None)
+    return dict(body, **dict([(field, _digest(_emit(body)))]))
+
+
+def _install_rows(enforcement):
+    """The rows planting every enforcement member (_opf_adopt.enforcement_install_ops). A vector that moves the
+    CI workflow off its destination (_CI_PATH patched) still plants it from the workflow template, a path the
+    plan leaves unconstrained, so the plan carries the moved path."""
+    canonical = schema.ENFORCEMENT_LAUNCHERS[0][2]
+    rows = schema.enforcement_install_ops([dict(row, members=[
+        dict(m, path=canonical if m["path"] == _CI_PATH else m["path"]) for m in row["members"]])
+        for row in enforcement])
+    return [dict(row, path=_CI_PATH) if row.get("path") == canonical else row for row in rows]
+
+
+def _fixture(root):
+    """A post-apply product tree for one run: a retired non-occupying source frozen live, a migrate source
+    frozen live, a non-occupying move source frozen live (its relocation waits for green, spec 14.2), an
+    occupying source at the TODO.md view destination archived and its view rendered, a repointed consumer
+    under a recorded exclusion, the store scaffolded, every enforcement member planted (the CI floor is the
+    shipped template and recipe unless a vector patches _CI_BYTES or _CI_RECIPE_BYTES), and the run's
+    bundle (plan, approval, receipt, planning inventory, inventory). Returns the planning inventory bytes."""
+    import _opf_init
+    import tomllib
+    manifest = _opf_init.build_manifest().encode("utf-8")
+    sources = []
+    for path, disposition, occupying in (("legacy/RULES.md", "retire", False), ("notes/old.md", "migrate", False),
+                                         (".working/TODO.md", "retire", True), ("adopter/MOVE.md", "move", False)):
+        preservation = _MOVE_DEST if disposition == "move" else apply.archive_rel(_RUN, path)
+        sources.append(dict(path=path, digest=_digest(_LIVE[path]), disposition=disposition,
+                            occupying=occupying, preservation=preservation))
+    sources.sort(key=lambda row: row["path"])
+    bindings = schema.canonical_plan_bindings()
+    workflow, recipe = _ci_floor()
+    pack = _pack()
+    for row in bindings["enforcement"]:
+        if row["platform"] == "ci":
+            row["members"] = [dict(path=_CI_PATH, digest=_digest(workflow)),
+                              dict(path=_CI_RECIPE_REL, digest=_digest(recipe))] + [
+                dict(path=m["path"], digest=_digest(pack[m["path"]])) for m in row["members"] if m["path"] in pack]
+        else:
+            row["members"] = [dict(path=m["path"], digest=_digest(pack[m["path"]])) for m in row["members"]]
+            row["members"] += [dict(path=path, digest=_digest(data))
+                               for platform, path, data in _EXTRA_MEMBERS if platform == row["platform"]]
+    init = schema.canonical_op("init-store")
+    init["members"] = [dict(path=".working/toml/manifest.toml", digest=_digest(manifest))]
+    render = schema.canonical_op("render-views")
+    render["members"] = [dict(path=".working/TODO.md", digest=_digest(_RENDERED))]
+    ops = [dict(op="retire-file", path=s["path"], preimage_digest=s["digest"])
+           for s in sources if s["disposition"] == "retire"]
+    ops += [dict(op="move-file", source="adopter/MOVE.md", destination=_MOVE_DEST,
+                 source_digest=_digest(_LIVE["adopter/MOVE.md"])),
+            dict(op="repoint-consumer", path=_CONSUMER, old_digest=_digest(_CONSUMER_OLD),
+                 new_digest=_digest(_CONSUMER_NEW)),
+            init, render] + _install_rows(bindings["enforcement"])
+    # The entries as _inventory records them: each live file, the machine store a recorded exclusion the walk
+    # of .working meets (recorded excluded, never read), every directory enumerated on the way to them, and
+    # every other scope path outside the exclusions absent. The consumer's exclusion lies under no walked
+    # directory, so the planner records nothing there. A vector's extra rows are recorded as given.
+    exclusions = [dict(path=".working/toml", reason="machine-store"),
+                  dict(path="consumer", reason="adopter-owned consumers, repointed by the plan")]
+    scope = sorted(set(_SOURCE_ROOTS) | set(_TARGET_ROOTS) | set(planner.DETECTION_ROOTS))
+    walked = [dict(path=p, kind="file", size=len(_LIVE[p]), digest=_digest(_LIVE[p])) for p in sorted(_LIVE)]
+    walked.append(dict(path=".working/toml", kind="excluded"))
+    entries = walked + [dict(row) for row in _EXTRA_ENTRIES]
+    recorded = set(row["path"] for row in entries)
+    for row in walked:
+        parts = row["path"].split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if parent not in recorded and any(planner._under(parent, s) for s in scope):
+                entries.append(dict(path=parent, kind="directory"))
+                recorded.add(parent)
+    entries += [dict(path=p, kind="absent") for p in scope
+                if p not in recorded and not any(planner._under(p, x["path"]) for x in exclusions)]
+    for path, changes in _ENTRY_EDITS:
+        for row in entries:
+            if row["path"] == path:
+                row.update(changes)
+    entries.sort(key=lambda row: row["path"])
+    # The walk table: the default manifest's deliverables (already detection roots), the resolved store's
+    # manifest read, and every scope path whose recorded ancestor is absent, which the walk never reaches.
+    kinds = dict((row["path"], row["kind"]) for row in entries)
+    unreached = [p for p in scope if any(kinds.get("/".join(p.split("/")[:i])) == "absent"
+                                         for i in range(1, p.count("/") + 1))]
+    walk = dict(deliverables=planner._deliverable_destinations(tomllib.loads(manifest.decode("utf-8"))),
+                resolved=True, manifest_path=".working/toml/manifest.toml", manifest_bytes=len(manifest),
+                unreached=sorted(unreached))
+    observation = dict(exclusions=exclusions, entries=entries, candidates=sorted(_LIVE),
+                       empty_directories=sorted(_EXTRA_EMPTY), sources=list(_SOURCE_ROOTS),
+                       targets=list(_TARGET_ROOTS), scope=scope, walk=walk)
+    if _OBSERVATION_EDIT is not None:
+        _OBSERVATION_EDIT(observation)
+    inventory = _sealed(dict(format=PLANNING_INVENTORY_FORMAT, decisions=[], observation=observation),
+                        "inventory_digest")
+    plan = dict(format=schema.PLAN_FORMAT, schema=schema.SCHEMA_VERSION, product="aiqt",
+                inventory_digest=inventory["inventory_digest"], run_id=_RUN, revision=bindings["revision"],
+                store=dict(store_root=".", machine_rel=".working/toml", adoption="first-adoption"),
+                sources=sources, effects=schema.derive_effects(ops, sources, ".working/toml/manifest.toml", _RUN),
+                release=bindings["release"], prompt_pack=bindings["prompt_pack"],
+                enforcement=bindings["enforcement"], completion=schema.plan_completion(),
+                import_policy=schema.plan_import_policy(bindings["skip_policy"], sources), ops=ops)
+    plan = _sealed(plan, "plan_digest")
+    approval = dict(actor="maintainer", approved_at="2026-09-17T12:30:00Z", plan_digest=plan["plan_digest"],
+                    inventory_digest=plan["inventory_digest"])
+    receipt = schema.canonical_receipt_core()
+    receipt.update(run_id=_RUN, plan_digest=plan["plan_digest"], inventory_digest=plan["inventory_digest"],
+                   approval=approval, import_runs=[])
+    receipt["release"]["manifest_sha256"] = plan["release"]["manifest_sha256"]
+    receipt["files"] = [dict(path="notes/old.md", before_digest=_digest(_LIVE["notes/old.md"]),
+                             after_digest=_digest(_LIVE["notes/old.md"]), disposition="migrate")]
+    bundle = {apply.plan_rel(_RUN): _emit(plan), apply.approval_rel(_RUN): _emit(approval),
+              apply.receipt_rel(_RUN): _emit(receipt),
+              apply.planning_inventory_rel(_RUN): _emit(inventory)}
+    for s in sources:
+        if s["disposition"] in ("retire", "migrate") or s["occupying"]:
+            bundle[s["preservation"]] = _LIVE[s["path"]]
+    for rel, data in bundle.items():
+        _put(root, rel, data)
+    _put(root, apply.inventory_rel(_RUN), apply.emit_inventory(
+        _RUN, [apply.inventory_row(rel, data) for rel, data in bundle.items()], plan_digest=plan["plan_digest"]))
+    for rel in ("legacy/RULES.md", "notes/old.md", "adopter/MOVE.md"):
+        _put(root, rel, _LIVE[rel])
+    _put(root, _CONSUMER, _CONSUMER_NEW)
+    _put(root, ".working/TODO.md", _RENDERED)
+    _put(root, ".working/toml/manifest.toml", manifest)
+    _put(root, _CI_PATH, workflow)
+    _put(root, _CI_RECIPE_REL, recipe)
+    for rel, data in pack.items():
+        _put(root, rel, data)
+    for _platform, rel, data in _EXTRA_MEMBERS:
+        _put(root, rel, data)
+    return _emit(inventory)
+
+
+def _case(mutate=None):
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+        inv = _fixture(root)
+        kwargs = dict(doctor=_Doctor(), prober=_Surface())
+        if mutate is not None:
+            kwargs.update(mutate(root, inv) or {})
+        return evaluate(root, _RUN, **kwargs)
+
+
+def _case_inventory():
+    """The fixture's planning inventory bytes, the tree discarded."""
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+        return _fixture(root)
+
+
+def _reference_case(template=None, recipe=None, symlinked=()):
+    """The round-10 reproductions: the pack's reference CI floor replaced in a scratch pack root, `template`
+    or `recipe` bytes standing in for the shipped file, installed live and recorded by the plan (as an edit
+    matched by the live copy would be); each pack-relative name in `symlinked` becomes a symlink to its
+    bytes outside the pack root. With nothing replaced and nothing symlinked it is the genuine floor."""
+    from unittest import mock
+    here = sys.modules[__name__]
+    genuine = _shipped_floor()
+    floor = dict([(_SHIPPED_TEMPLATE, genuine[0] if template is None else template),
+                  (_SHIPPED_RECIPE, genuine[1] if recipe is None else recipe)])
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-pack-") as scratch:
+        pack = os.path.join(scratch, "opf")
+        for rel, data in floor.items():
+            if rel in symlinked:
+                _put(scratch, "elsewhere/" + rel, data)
+                os.makedirs(os.path.dirname(os.path.join(pack, *rel.split("/"))), exist_ok=True)
+                os.symlink(os.path.join(scratch, "elsewhere", *rel.split("/")), os.path.join(pack, *rel.split("/")))
+            else:
+                _put(pack, rel, data)
+        with mock.patch.object(here, "_PACK_ROOT", Path(pack)), \
+                mock.patch.object(here, "_CI_BYTES", floor[_SHIPPED_TEMPLATE]), \
+                mock.patch.object(here, "_CI_RECIPE_BYTES", floor[_SHIPPED_RECIPE]):
+            return _case()
+
+
+def _parity_trees():
+    """The producer-parity trees: (label, files, directories, sources, targets, unmanaged, bound sweeps), each
+    sweep a function of the observation the producer builds with every bound lifted, returning the bounds to
+    grade under. `unmanaged` None leaves the tree storeless; a list resolves a default store registering those
+    unmanaged paths (a recorded exclusion each)."""
+    deep = "/".join(["n"] * 4)
+    chain32 = ".working/imports" + "/d" * 31
+
+    def sizes(obs):
+        return sum(row["size"] for row in obs["entries"] if row["kind"] == "file") + obs["walk"]["manifest_bytes"]
+
+    def total(obs):
+        return [dict(MAX_TOTAL_BYTES=sizes(obs) + d) for d in (0, -1)]
+
+    def entries(obs):
+        return [dict(MAX_ENTRIES=len(obs["entries"]) + d) for d in (0, -1, -3)]
+
+    def path_bytes(obs):
+        walked = sum(len(row["path"].encode("utf-8")) for row in obs["entries"])
+        return [dict(MAX_PATH_BYTES=walked + d) for d in (0, -3, -40)]
+
+    def depth(obs):
+        return [dict(MAX_DEPTH=d) for d in (2, 3, 4)]
+
+    def plain(obs):
+        return [dict(MAX_ENTRIES=planner.MAX_ENTRIES)]  # the shipped bounds
+
+    def at_depth(*bounds):
+        return lambda obs: [dict(MAX_DEPTH=d) for d in bounds]
+
+    claude31 = ".claude" + "/d" * 31
+    claude32 = ".claude" + "/d" * 32
+    big = 8 * 1024 * 1024
+    return (
+        ("empty-product", {}, [], [], [], None, (plain,)),
+        ("one-source-file", {"legacy/a.md": b"a\n"}, [], ["legacy"], [], None, (plain, total, entries)),
+        ("nested-roots", {"a/b/c/f": b"f", "a/g": b"g"}, [], ["a"], ["a/b/c"], None, (plain, depth, path_bytes)),
+        ("nested-target-parent-missing", {"a/f": b"f"}, [], ["a"], ["a/x/y"], None, (plain, entries, path_bytes)),
+        ("target-without-walked-ancestor", {"q.md": b"q"}, [], [], ["zz/y"], None, (plain, entries, path_bytes)),
+        ("target-under-walked-parent", {"p/f": b"f"}, ["p/x"], ["p"], ["p/x"], None, (plain, entries)),
+        ("empty-directories", {"src/f": b"f"}, ["src/e1", "src/e2/e3", ".working/empty"], ["src"], [], None,
+         (plain, entries)),
+        ("depth-at-bound", {"s/" + deep + "/f": b"f"}, [], ["s"], [], None, (depth,)),
+        ("nested-root-depth", {"s/" + deep + "/f": b"f"}, [], ["s"], ["s/n/n"], None, (depth,)),
+        ("detection-dirs", {".claude/x.json": b"{}", "CLAUDE.md": b"c", ".github/workflows/w.yml": b"w"}, [],
+         [], [], None, (plain, entries, path_bytes)),
+        ("file-bytes", {"s/f": b"x" * 64}, [], ["s"], [], None,
+         (lambda obs: [dict(MAX_FILE_BYTES=64), dict(MAX_FILE_BYTES=63)],)),
+        ("total-bytes", {"s/a": b"a" * 40, "s/b": b"b" * 40, "t/c": b"c" * 20}, [], ["s", "t"], [], None, (total,)),
+        ("directory-names", dict(("s/f{:02d}".format(i), b"x") for i in range(30)), [], ["s"], [], None,
+         (lambda obs: [dict(MAX_ENTRIES=len(obs["entries"])), dict(MAX_ENTRIES=29)],)),
+        ("unresolved-working-content", {".working/notes/n.md": b"n"}, [], [], [], None, (plain, total)),
+        ("resolved-store", {"legacy/r.md": b"r"}, [], ["legacy"], [], [], (plain, total, entries)),
+        ("resolved-unmanaged-exclusion", {".working/private/p": b"p", "legacy/r.md": b"r"}, [], ["legacy"], [],
+         [".working/private"], (plain, total, path_bytes)),
+        ("resolved-nested-depth", {".working/imports/a/b/c/f": b"f"}, [], [], [".working/imports/a"], [],
+         (depth,)),
+        ("many-roots", {"r1/f": b"1", "r2/f": b"2", "r3/g/h": b"3"}, [], ["r1", "r2", "r3"], ["t1", "t2/u"], None,
+         (plain, entries, path_bytes)),
+        ("deliverables", {"VERSION": b"1.0\n", "CHANGELOG.md": b"c"}, [], [], [], None, (plain, total)),
+        ("review-total-bytes", dict((".working/imports/f{}".format(i), bytes(big)) for i in range(9)), [], [],
+         [], [], (plain, lambda obs: [dict(MAX_TOTAL_BYTES=sizes(obs) - big)])),
+        ("review-nested-depth", {chain32 + "/d/f": b"x"}, [], [], [chain32 + "/d"], [], (plain,)),
+        ("review-nested-depth-control", {chain32 + "/f": b"x"}, [], [], [chain32], [], (plain,)),
+        # Absent roots: the walker probes each requested root at depth 0 and never lists an absent name, so
+        # an absent row beneath a recorded directory is no child of it (QA round 15: the 32-deep chain).
+        ("review-absent-under-depth-bound", {}, [claude32], [], [claude32 + "/missing"], None,
+         (plain, at_depth(31, 32, 33), entries, path_bytes)),
+        ("absent-deep-under-depth-bound", {}, [claude32], [], [claude32 + "/missing/x/y"], None,
+         (plain, at_depth(31, 32, 33), entries, path_bytes)),
+        ("absent-beside-depth-bound", {claude32 + "/f": b"f"}, [], [], [claude31 + "/missing"], None,
+         (plain, at_depth(31, 32), entries, path_bytes)),
+        ("absent-under-source", {"s/a/f": b"f", "s/g": b"g"}, [], ["s"], ["s/a/missing", "s/zz/y"], None,
+         (plain, depth, entries, path_bytes)),
+        ("absent-at-entry-bound", dict(("s/f{:02d}".format(i), b"x") for i in range(12)), [], ["s"],
+         ["s/missing", "t/u/v"], None, (plain, entries, path_bytes, total)),
+        ("absent-under-absent-parent", {"CLAUDE.md": b"c"}, [], [], [".github", "gone/x", "gone2"], None,
+         (plain, entries, path_bytes)),
+        ("absent-under-resolved-store", {".working/imports/a/f": b"f"}, [], [],
+         [".working/imports/a/missing", ".working/imports/b/c"], [], (plain, depth, entries, path_bytes)),
+    ) + _random_parity_trees(plain, entries, path_bytes, at_depth(1, 2, 3, 4, 5))
+
+
+def _random_parity_trees(*sweeps, count=16, seed=447):
+    """Seeded random producer-parity trees (storeless): one to six files and directories under the tops src,
+    legacy, .claude, .github and .gemini, a directory path at most five components long and a file path at
+    most six. Only .claude and .gemini are detection roots; .github content sits outside the .github/workflows
+    detection root. About half the trees declare one top as a source; the rest declare none, so their src,
+    legacy and .github content is never walked. Each tree requests one to three targets, none beneath
+    another, most of them absent (a missing name, or a missing chain, beneath an existing directory, beneath
+    the product root, or beneath another absent target's parent), so absent rows lie beside and beneath
+    walked directories routinely."""
+    import random
+    rng = random.Random(seed)
+    tops = ("src", "legacy", ".claude", ".github", ".gemini")
+    trees = []
+    for n in range(count):
+        files, dirs, existing = {}, [], set()
+        for i in range(rng.randint(1, 6)):
+            parts = [rng.choice(tops)] + [rng.choice("abc") for _ in range(rng.randint(0, 4))]
+            existing.update("/".join(parts[:k]) for k in range(1, len(parts) + 1))
+            if rng.random() < 0.6:
+                files["/".join(parts) + "/f{}".format(i)] = bytes(rng.randint(0, 3))
+            else:
+                dirs.append("/".join(parts))
+        sources = [rng.choice(sorted({p.split("/")[0] for p in existing}))] if rng.random() < 0.5 else []
+        targets = []
+        for k in range(rng.randint(1, 3)):
+            if rng.random() < 0.15:
+                path = rng.choice(sorted(existing))
+            else:
+                base = rng.choice(sorted(existing) + [""] + [t.rpartition("/")[0] for t in targets if "/" in t])
+                path = "/".join(([base] if base else []) +
+                                ["x{}{}{}".format(n, k, j) for j in range(rng.choice((1, 1, 2, 3)))])
+            if not any(planner._under(path, t) or planner._under(t, path) for t in targets):
+                targets.append(path)
+        trees.append(("random-{:02d}".format(n), files, dirs, sources, targets, None, sweeps))
+    return tuple(trees)
+
+
+def _parity_sweep():
+    """investigate() on each parity tree under each swept bound, beside rebuilt_observation_problem over the
+    observation the producer seals with every bound lifted: they agree when both accept (the producer's
+    observation then equal to the lifted one) or both refuse, the rebuild naming the producer's own text.
+    Returns (all agreed, accepted count, refused count, tree count)."""
+    import _opf_init
+    import tomllib
+    from unittest import mock
+    lifted = dict(MAX_ENTRIES=10 ** 6, MAX_DEPTH=10 ** 3, MAX_PATH_BYTES=10 ** 9, MAX_FILE_BYTES=10 ** 9,
+                  MAX_TOTAL_BYTES=10 ** 10)
+    agreed, accepted, refused = True, 0, 0
+    trees = _parity_trees()
+    for label, files, dirs, sources, targets, unmanaged, sweeps in trees:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-parity-") as root:
+            for rel, data in files.items():
+                _put(root, rel, data)
+            for rel in dirs:
+                os.makedirs(os.path.join(root, *rel.split("/")), exist_ok=True)
+            if unmanaged is not None:
+                manifest = tomllib.loads(_opf_init.build_manifest())
+                manifest["unmanaged"]["paths"] = list(unmanaged)
+                _put(root, ".working/toml/manifest.toml", _emit(manifest))
+            with mock.patch.multiple(planner, **lifted):
+                free = planner.investigate(root, sources=sources, targets=targets)
+            if free.status != VALID:
+                return False, accepted, refused, label
+            sealed = tomllib.loads(free.observation.decode("utf-8"))
+            for sweep in sweeps:
+                for bounds in sweep(sealed):
+                    with mock.patch.multiple(planner, **bounds):
+                        got = planner.investigate(root, sources=sources, targets=targets)
+                        problem = rebuilt_observation_problem(sealed)
+                    if got.status == VALID:
+                        accepted += 1
+                        agreed = agreed and problem is None and got.observation == free.observation
+                    else:
+                        refused += 1
+                        agreed = agreed and problem is not None and got.findings[0] in problem
+                    if not agreed:
+                        return False, accepted, refused, "{} {} {} {}".format(label, bounds, got.findings, problem)
+            # Each absent target, declared a source instead: the producer refuses it, and the rebuild over
+            # the observation recording it so refuses with the producer's text.
+            kinds = {row["path"]: row["kind"] for row in sealed["entries"]}
+            for path in [t for t in sealed["targets"] if kinds.get(t) == "absent"]:
+                swapped = dict(sealed, sources=sorted(sealed["sources"] + [path]),
+                               targets=[t for t in sealed["targets"] if t != path])
+                with mock.patch.multiple(planner, **lifted):
+                    got = planner.investigate(root, sources=swapped["sources"], targets=swapped["targets"])
+                    problem = rebuilt_observation_problem(swapped)
+                refused += 1
+                agreed = agreed and got.status != VALID and problem is not None and got.findings[0] in problem
+                if not agreed:
+                    return False, accepted, refused, "{} source {} {} {}".format(label, path, got.findings, problem)
+    return agreed, accepted, refused, len(trees)
+
+
+def _walker_stops():
+    """How many of the walker's early stops (a directory listed past MAX_ENTRIES names, a file past
+    MAX_FILE_BYTES, the reads past MAX_TOTAL_BYTES) happen inside the filesystem walker, short of the whole
+    directory or file, with the text rebuilt_observation_problem names over the unbounded observation."""
+    import tomllib
+    from unittest import mock
+    seen = []
+
+    class Watched(planner._TreeListing):
+        def children(self, parent, name, node, visit):
+            def counted(sub, names):
+                seen.append(("names", len(names)))
+                return visit(sub, names)
+            return super().children(parent, name, node, counted)
+
+        def read(self, parent, name, node, budget):
+            try:
+                return super().read(parent, name, node, budget)
+            except planner.PlanError as exc:
+                seen.append(("read", str(exc)))
+                raise
+
+    lifted = dict(MAX_ENTRIES=10 ** 6, MAX_FILE_BYTES=10 ** 9, MAX_TOTAL_BYTES=10 ** 10)
+    stops = 0
+    for files, bounds, text, stopped in (
+            (dict(("s/f{:02d}".format(i), b"x") for i in range(60)), dict(MAX_ENTRIES=40),
+             "directory exceeds entry bound", ("names", 41)),
+            ({"s/f": b"x" * 100}, dict(MAX_FILE_BYTES=64), "file exceeds byte bound: 'f'",
+             ("read", "file exceeds byte bound: 'f'")),
+            ({"s/a": b"a" * 40, "s/b": b"b" * 40}, dict(MAX_TOTAL_BYTES=60), "inventory exceeds byte bounds",
+             ("read", "inventory exceeds byte bounds"))):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-parity-") as root:
+            for rel, data in files.items():
+                _put(root, rel, data)
+            with mock.patch.multiple(planner, **lifted):
+                free = planner.investigate(root, sources=["s"])
+            sealed = tomllib.loads(free.observation.decode("utf-8")) if free.observation else {}
+            del seen[:]
+            with mock.patch.object(planner, "_TreeListing", Watched), mock.patch.multiple(planner, **bounds):
+                got = planner.investigate(root, sources=["s"])
+                problem = rebuilt_observation_problem(sealed) or ""
+        stops += got.findings == (text,) and text in problem and stopped in seen
+    return stops
+
+
+def _only(results, expected):
+    """True when each roster check has its expected status: VALID unless named, except check 5, whose default
+    is its baseline (CANNOT-EVALUATE naming PR6 while PR6_DENY_PROBES_SHIPPED is False, VALID with it on)."""
+    wiring = VALID if PR6_DENY_PROBES_SHIPPED else CANNOT_EVALUATE
+    return all(results[name].status == expected.get(name, wiring if name == WIRING else VALID) for name in CHECKS)
+
+
+def _says(results, name, text):
+    return any(text in f for f in results[name].findings)
+
+
+def _reseal_inventory(inv, sort_entries=True, **changes):
+    """The planning inventory with `changes` made to its observation, resealed; changed entries are recorded
+    in path order, as the planner records them, unless `sort_entries` is False."""
+    import tomllib
+    doc = tomllib.loads(inv.decode("utf-8"))
+    if sort_entries and "entries" in changes:
+        changes = dict(changes, entries=sorted(changes["entries"], key=lambda row: str(row.get("path"))))
+    doc["observation"].update(changes)
+    return _emit(_sealed(doc, "inventory_digest"))
+
+
+def _remove(root, rel):
+    os.remove(os.path.join(root, *rel.split("/")))
+
+
+def _append(root, rel, data):
+    with open(os.path.join(root, *rel.split("/")), "ab") as fh:
+        fh.write(data)
+
+
+def _retoml(root, rel, mutate):
+    """Parse a fixture TOML artefact, mutate it in place, and write it back canonically re-emitted."""
+    import tomllib
+    with open(os.path.join(root, *rel.split("/")), "rb") as fh:
+        doc = tomllib.load(fh)
+    mutate(doc)
+    _put(root, rel, _emit(doc))
+
+
+def _reinventory(root):
+    """Re-seal the bundle inventory over the bundle's current bytes, so a rewritten member's row matches
+    again (check 3's bundle verification holds)."""
+    import tomllib
+    with open(os.path.join(root, *apply.inventory_rel(_RUN).split("/")), "rb") as fh:
+        doc = tomllib.load(fh)
+    fresh = []
+    for row in doc["file"]:
+        with open(os.path.join(root, *row["path"].split("/")), "rb") as fh:
+            fresh.append(apply.inventory_row(row["path"], fh.read()))
+    _put(root, apply.inventory_rel(_RUN), apply.emit_inventory(
+        _RUN, fresh, plan_digest=doc["adoption"]["plan_digest"]))
+
+
+def _rereceipt(root, mutate):
+    """Rewrite the run's receipt through `mutate`, then re-seal the bundle inventory over the bundle's
+    current bytes, so the tamper reaches only check 1's receipt leg (check 3's bundle verification holds)."""
+    _retoml(root, apply.receipt_rel(_RUN), mutate)
+    _reinventory(root)
+
+
+def _replant(root, data):
+    """Replace the bundle's planning-inventory copy with `data` and re-seal its inventory row, so the
+    change reaches only check 2 (check 3's bundle verification holds)."""
+    _put(root, apply.planning_inventory_rel(_RUN), data)
+    _reinventory(root)
+
+
+def _toml_file(root, rel):
+    """A fixture TOML artefact, parsed."""
+    import tomllib
+    with open(os.path.join(root, *rel.split("/")), "rb") as fh:
+        return tomllib.load(fh)
+
+
+def _entries(inv):
+    import tomllib
+    return tomllib.loads(inv.decode("utf-8"))["observation"]["entries"]
+
+
+def _unclaim(root, rel):
+    """Drop `rel` from the run's bundle inventory, re-emitted through the canonical emitter."""
+    import tomllib
+    with open(os.path.join(root, *apply.inventory_rel(_RUN).split("/")), "rb") as fh:
+        doc = tomllib.load(fh)
+    rows = [r for r in doc["file"] if r["path"] != rel]
+    _put(root, apply.inventory_rel(_RUN), apply.emit_inventory(
+        _RUN, rows, plan_digest=doc["adoption"]["plan_digest"]))
+
+
+_DRIFT = ("C-VIEW-DRIFT: view 'TODO.md' target '.working/TODO.md' has drifted from its generated source "
+          "(spec 5.8/10)")
+
+
+def _flip_1(root, inv):
+    _put(root, "notes/old.md", b"edited notes\n")
+
+
+# An unaccounted file under a recorded source root, recorded as the planner would: a file entry and a candidate.
+_STRAY = dict(path="legacy/stray.md", kind="file", size=6, digest=_digest(b"stray\n"))
+
+
+def _strayed(inv, entries=(), candidates=()):
+    """The planning inventory with _STRAY (and any further entry rows and candidates) recorded, resealed."""
+    return _reseal_inventory(inv, entries=_entries(inv) + [_STRAY] + list(entries),
+                             candidates=sorted(sorted(_LIVE) + [_STRAY["path"]] + list(candidates)))
+
+
+def _flip_2(root, inv):
+    _replant(root, _strayed(inv))
+
+
+def _flip_3(root, inv):
+    _remove(root, apply.archive_rel(_RUN, "legacy/RULES.md"))
+
+
+def _flip_4(root, inv):
+    _put(root, ".working/TODO.md", b"unplanned bytes\n")
+
+
+def _occupied(root, inv):
+    _put(root, ".working/TODO.md", _LIVE[".working/TODO.md"])
+    return dict(doctor=_Doctor(INVALID, [_DRIFT]))
+
+
+def _flip_6(root, inv):
+    _put(root, "legacy/RULES.md", b"edited rules\n")
+
+
+def _symlinked(root, inv):
+    _remove(root, "legacy/RULES.md")
+    os.symlink("../notes/old.md", os.path.join(root, "legacy", "RULES.md"))
+
+
+# Each roster check's canonical single-mutation flip (the spec numbers the checks, so the flips are fixed).
+_FLIPS = ((AUTHORITY, _flip_1), (DISCOVERY, _flip_2), (PRESERVATION, _flip_3), (OPERATIONAL, _flip_4),
+          (RETIREMENT, _flip_6))
+
+
+def _tree(root):
+    out = {}
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            with open(os.path.join(base, name), "rb") as fh:
+                out[os.path.relpath(os.path.join(base, name), root)] = fh.read()
+    return out
+
+
+def _red(name, status=INVALID):
+    return dict([(name, status)])
+
+
+def self_test():
+    """Synthetic post-apply fixtures under TemporaryDirectory, judged on each check's returned status and a
+    named finding. No network and no process: the doctor is a stub, or the store validator with no
+    observations. Exit 0 all pass, 1 a failed check, 2 a harness error."""
+    _child_status_refusal_exit("_opf_adopt_complete.py")
+    from unittest import mock
+    here = sys.modules[__name__]
+    results = []
+
+    def check(name, ok):
+        results.append((name, bool(ok)))
+
+    try:
+        # The U25 switch as shipped (off): the genuine floor installed unmodified leaves check 4
+        # CANNOT-EVALUATE naming U25 and nothing else, checks 1, 2, 3 and 6 green and check 5 at its baseline
+        # (CANNOT-EVALUATE naming PR6 while that switch is off, see _only); an earlier check-4 failure
+        # keeps its own reason (never U25), whether a finding (de-adopted), a modified live recipe, or a
+        # reference file that does not match its embedded digest.
+        def _u25_only(results):
+            return (_only(results, _red(OPERATIONAL, CANNOT_EVALUATE))
+                    and results[OPERATIONAL].findings == ["cannot evaluate: " + _U25_DEFERRED])
+
+        shipped_off = _case()
+        check("check-4-u25-off-shipped-floor-cannot", not U25_CI_IDENTITY_ASSERTED and _u25_only(shipped_off)
+              and _says(shipped_off, OPERATIONAL, "(U25)"))
+        gone = type("Resolution", (), dict(status=store.NOT_ADOPTED, detail="no store"))()
+        with mock.patch.object(store, "resolve_store", lambda *a, **k: gone):
+            absent_off = _case()
+        check("check-4-u25-off-finding-keeps-reason", _only(absent_off, _red(OPERATIONAL))
+              and _says(absent_off, OPERATIONAL, "never NOT-APPLICABLE")
+              and not _says(absent_off, OPERATIONAL, "U25"))
+        recipe_off = _case(lambda r, i: _append(r, _CI_RECIPE_REL, b"# x\n"))
+        check("check-4-u25-off-ci-reason-kept", _only(recipe_off, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(recipe_off, OPERATIONAL, "is not the pack's shipped recipe")
+              and not _says(recipe_off, OPERATIONAL, "U25"))
+        exit0 = b"#!/bin/sh\nexit 0\n"
+        reference_off = _reference_case(recipe=exit0)
+        check("check-4-u25-off-reference-reason-kept", _only(reference_off, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(reference_off, OPERATIONAL, "does not match the digest embedded")
+              and not _says(reference_off, OPERATIONAL, "U25"))
+        # Every vector below runs with the switch on, the state U25 ships: the check-4 machinery is graded
+        # as it will be then, and the switch-on baseline is VALID.
+        mock.patch.object(here, "U25_CI_IDENTITY_ASSERTED", True).start()
+        base = _case()
+        check("baseline-green-1-4-6", _only(base, {}))
+        # Check 2 reads the bundle's planning-inventory copy, the one source: no caller keyword exists
+        # (red if evaluate reverts to a planning_inventory keyword, or if the bundle read breaks).
+        check("check-2-reads-bundle-inventory", base[DISCOVERY].status == VALID
+              and set(evaluate.__kwdefaults__ or {}) == {"doctor", "prober"})
+        check("check-4-u25-switch-on-valid", U25_CI_IDENTITY_ASSERTED and _only(base, {}))
+        check("roster-never-green-without-check-5", not roster_green(base))
+        greenable = dict(base, **dict([(WIRING, CheckResult(VALID))]))
+        check("roster-green-needs-all-six", roster_green(greenable))
+        for name in CHECKS:
+            check("roster-red-on-" + name + "-invalid",
+                  not roster_green(dict(greenable, **dict([(name, CheckResult(INVALID))]))))
+            check("roster-red-on-" + name + "-cannot",
+                  not roster_green(dict(greenable, **dict([(name, CheckResult(CANNOT_EVALUATE))]))))
+        partial = dict(greenable)
+        del partial[RETIREMENT]
+        check("roster-red-on-missing-name", not roster_green(partial))
+        # Check 5 (wiring) with the PR6 switch as shipped (off): the genuine fixture surface leaves check 5
+        # CANNOT-EVALUATE with the PR6 reason alone, every other check as the baseline; a missing prober and a
+        # surface that denies nothing each keep their own reason and never name PR6.
+        check("check-5-pr6-off-genuine-cannot", not PR6_DENY_PROBES_SHIPPED and _only(base, {})
+              and base[WIRING].status == CANNOT_EVALUATE
+              and base[WIRING].findings == ["cannot evaluate: " + _PR6_DEFERRED] and _says(base, WIRING, "(PR6)"))
+        unprobed = _case(lambda r, i: dict(prober=None))
+        check("check-5-pr6-off-no-prober-keeps-reason", _only(unprobed, {})
+              and _says(unprobed, WIRING, "no wiring prober") and not _says(unprobed, WIRING, "PR6"))
+        opened = _case(lambda r, i: dict(prober=_Surface(dict([("claude-code", "none")]))))
+        check("check-5-pr6-off-finding-keeps-reason", _only(opened, _red(WIRING))
+              and not _says(opened, WIRING, "PR6"))
+        # Every other check-5 vector runs with the switch on, the state PR6 ships, so the probe machinery is
+        # graded as it will be then; the genuine fixture surface is then VALID.
+        with mock.patch.object(here, "PR6_DENY_PROBES_SHIPPED", True):
+            surface = _Surface()
+            green = _case(lambda r, i: dict(prober=surface))
+            check("check-5-switch-on-genuine-valid", green[WIRING].status == VALID and _only(green, {}))
+            check("roster-green-only-with-both-deferred-switches-on", roster_green(green))
+            probed = sorted(set(platform for platform, _probe in surface.calls))
+            check("check-5-probes-deny-capable-rows-only", probed == ["claude-code", "pre-commit"])
+            archive = apply.archive_rel(_RUN, _ARCHIVE_PROBE)
+            want = set([("store-write", "direct", ".working/toml/manifest.toml"),
+                        ("archive-write", "direct", archive),
+                        ("sanctioned-writer", "opf record", ".working/toml/manifest.toml"),
+                        ("render", "opf render", ".working/TODO.md")])
+            check("check-5-probe-targets", len(surface.calls) == 8
+                  and archive.startswith(".working/archive/adoption/" + _RUN + "/")
+                  and all(set((c["probe"], c["actor"], c["path"]) for p, c in surface.calls if p == platform)
+                          == want for platform in probed))
+            # The discriminating pair: the deny hook removed turns the negative probes red, and an over-broad
+            # deny that blocks the sanctioned writer turns the positive probes red (a check asserting denial
+            # alone would pass the over-broad surface).
+            for platform in ("claude-code", "pre-commit"):
+                removed = _case(lambda r, i, p=platform: dict(prober=_Surface(dict([(p, "none")]))))
+                check("flip-5-deny-removed-" + platform, _only(removed, _red(WIRING))
+                      and _says(removed, WIRING, "allows a direct store write")
+                      and _says(removed, WIRING, "allows a direct write under this run's adoption archive")
+                      and not _says(removed, WIRING, "over-broad"))
+                broad = _case(lambda r, i, p=platform: dict(prober=_Surface(dict([(p, "all")]))))
+                check("flip-5-over-broad-" + platform, _only(broad, _red(WIRING))
+                      and _says(broad, WIRING, "denies the sanctioned writer")
+                      and _says(broad, WIRING, "denies the render path") and not _says(broad, WIRING, "allows"))
+            # Each probe on its own: a surface that breaks exactly one probe is red with exactly that finding.
+            for policy, text in (("open-store", "allows a direct store write"),
+                                 ("open-archive", "allows a direct write under this run's adoption archive"),
+                                 ("deny-writer", "denies the sanctioned writer"),
+                                 ("deny-render", "denies the render path")):
+                got = _case(lambda r, i, q=policy: dict(prober=_Surface(dict([("claude-code", q)]))))
+                check("flip-5-one-probe-" + policy, _only(got, _red(WIRING)) and len(got[WIRING].findings) == 1
+                      and _says(got, WIRING, text))
+            # Fail closed: a missing or raising prober, or an answer outside PROBE_OUTCOMES, is CANNOT-EVALUATE.
+            check("check-5-no-prober-cannot", _only(_case(lambda r, i: dict(prober=None)),
+                                                    _red(WIRING, CANNOT_EVALUATE)))
+
+            def _raising_prober(product_root, surface, probe):
+                raise RuntimeError("probe harness crashed")
+
+            raised = _case(lambda r, i: dict(prober=_raising_prober))
+            check("check-5-prober-raises-cannot", _only(raised, _red(WIRING, CANNOT_EVALUATE))
+                  and _says(raised, WIRING, "raised"))
+            # A str subclass equal to "denied" is not the exact str the prober contract promises (the house
+            # entry-gate rule): it is refused, never compared.
+            subclassed = type("_Answer", (str,), dict())("denied")
+            for label, answer in (("none", None), ("true", True), ("bytes", b"denied"), ("other-word", "maybe"),
+                                  ("upper", "DENIED"), ("empty", ""), ("str-subclass", subclassed)):
+                got = _case(lambda r, i, a=answer: dict(prober=_Surface(dict([("claude-code", a)]))))
+                check("check-5-answer-" + label + "-cannot", _only(got, _red(WIRING, CANNOT_EVALUATE))
+                      and _says(got, WIRING, "not one of"))
+            # Installed: a probed row's member absent or drifted is red, and that row is not probed; the
+            # member is check 1's planned destination too, so check 1 moves with it.
+            pair = dict([(AUTHORITY, INVALID), (WIRING, INVALID)])
+            for label, mutate in (("absent", lambda r: _remove(r, ".claude/settings.json")),
+                                  ("drifted", lambda r: _put(r, ".claude/settings.json", b"tampered bytes\n"))):
+                watched = _Surface()
+                got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
+                check("check-5-member-" + label + "-red", _only(got, pair)
+                      and _says(got, WIRING, "claude-code enforcement surface (deny-hook) is not installed")
+                      and sorted(set(p for p, _probe in watched.calls)) == ["pre-commit"])
+            # Every member of a probed row is checked, not only the first: the pre-commit row binds the hook,
+            # its installer and the tool tree with its entry point (_opf_adopt.enforcement_launch_members), so
+            # with all of them planted the surface is green, and the hook or the installer absent, or the installer drifted, reds
+            # checks 1 and 5 and leaves the pre-commit row unprobed. A loop over the first member alone (or the
+            # last alone) passes one of these vectors and fails another.
+            second = "opf/enforcement/precommit/install.sh"
+            watched = _Surface()
+            got = _case(lambda r, i, w=watched: dict(prober=w))
+            check("check-5-second-member-control-valid", got[WIRING].status == VALID and _only(got, {})
+                  and sorted(set(p for p, _probe in watched.calls)) == ["claude-code", "pre-commit"])
+            for label, member, mutate in (
+                    ("second-absent", second, lambda r: _remove(r, second)),
+                    ("second-drifted", second, lambda r: _put(r, second, b"tampered bytes\n")),
+                    ("first-absent", _HOOK, lambda r: _remove(r, _HOOK))):
+                watched = _Surface()
+                got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
+                check("check-5-member-" + label + "-red", _only(got, pair)
+                      and _says(got, WIRING, "pre-commit enforcement surface (staged-pre-commit) is not installed")
+                      and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
+                                else "member {!r} does not hold its planned bytes".format(member))
+                      and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
+            # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
+            check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
+                r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))
+            # Server-side branch protection is adopter-attested on the plan's CI row and never probed.
+            check("check-5-branch-protection-attested-not-probed",
+                  "server-side-protection-adopter-attested" in schema.ENFORCEMENT_REQUIRED_RESIDUALS["ci-checks"]
+                  and "ci-checks" not in PROBED_MEANS and "ci" not in probed)
+            # The probe roster is load-bearing: emptied, a surface that denies nothing grades VALID.
+            with mock.patch.object(here, "WIRING_PROBES", ()):
+                check("check-5-probe-roster-load-bearing", _only(_case(lambda r, i: dict(
+                    prober=_Surface(dict([("claude-code", "none")])))), dict()))
+        for name, flip in _FLIPS:
+            check("flip-" + name + "-red-only", _only(_case(flip), _red(name)))
+        check("flip-1-names-live-preimage", _says(_case(_flip_1), AUTHORITY, "live preimage 'notes/old.md'"))
+        check("flip-2-names-unaccounted", _says(_case(_flip_2), DISCOVERY, "'legacy/stray.md' has neither"))
+        check("flip-3-names-missing-preimage", _says(_case(_flip_3), PRESERVATION, "missing from the adoption"))
+        check("flip-4-names-unplanned", _says(_case(_flip_4), OPERATIONAL, "does not account"))
+        check("flip-6-names-changed", _says(_case(_flip_6), RETIREMENT, "MUST NOT be retired"))
+        # Check 1: the approval and receipt binding legs, then the planned-destination sweep.
+        noauth = _case(lambda r, i: _remove(r, apply.approval_rel(_RUN)))
+        check("check-1-approval-absent-red", noauth[AUTHORITY].status == INVALID
+              and _says(noauth, AUTHORITY, "nothing authorizes"))
+        unbound = _case(lambda r, i: _retoml(r, apply.approval_rel(_RUN),
+                                             lambda d: d.update(plan_digest="sha256:" + "f" * 64)))
+        check("check-1-approval-unbound-red", unbound[AUTHORITY].status == INVALID
+              and _says(unbound, AUTHORITY, "approval:"))
+        rebound = _case(lambda r, i: _retoml(r, apply.receipt_rel(_RUN), lambda d: d.update(
+            run_id="adopt-20260917T120000Z-aaaaaaaaaaaaaaaa")))
+        check("check-1-receipt-unbound-red", rebound[AUTHORITY].status == INVALID
+              and _says(rebound, AUTHORITY, "name different adoption runs"))
+        # One vector per receipt-binding comparison: each key, the release manifest, the approval, and the
+        # file rows (a foreign path, a changed disposition, a changed before_digest). The receipt core's own
+        # approval must agree with its plan and inventory digests, so those tampers move both together.
+        other = "sha256:" + "e" * 64
+        for key, value in (("product", "opf"), ("plan_digest", other), ("inventory_digest", other),
+                           ("store_root", "sub")):
+            def _bind(d, key=key, value=value):
+                d[key] = value
+                if key in d["approval"]:
+                    d["approval"][key] = value
+            got = _case(lambda r, i, f=_bind: _rereceipt(r, f))
+            check("check-1-receipt-{}-bound".format(key), _only(got, _red(AUTHORITY))
+                  and _says(got, AUTHORITY, "does not bind the approved plan's {}".format(key)))
+        released = _case(lambda r, i: _rereceipt(r, lambda d: d["release"].update(
+            manifest_sha256=other)))
+        check("check-1-receipt-release-bound", _only(released, _red(AUTHORITY))
+              and _says(released, AUTHORITY, "does not bind the approved plan's release.manifest_sha256"))
+        reapproved = _case(lambda r, i: _rereceipt(r, lambda d: d["approval"].update(
+            actor="someone-else")))
+        check("check-1-receipt-approval-bound", _only(reapproved, _red(AUTHORITY))
+              and _says(reapproved, AUTHORITY, "not the run's recorded approval"))
+        for label, change, text in (("foreign-path", dict(path="elsewhere/X.md"), "is not a source"),
+                                    ("disposition", dict(disposition="keep"), "but the approved plan binds"),
+                                    ("before-digest", dict(before_digest=other), "but the approved plan binds")):
+            got = _case(lambda r, i, c=change: _rereceipt(r, lambda d: d["files"][0].update(c)))
+            check("check-1-receipt-file-" + label, _only(got, _red(AUTHORITY)) and _says(got, AUTHORITY, text))
+        norec = _case(lambda r, i: _remove(r, apply.receipt_rel(_RUN)))
+        check("check-1-receipt-absent-red", norec[AUTHORITY].status == INVALID
+              and _says(norec, AUTHORITY, "no adoption receipt"))
+        badcore = _case(lambda r, i: _rereceipt(r, lambda d: d.update(store_root="../x")))
+        check("check-1-receipt-core-invalid-red", _only(badcore, _red(AUTHORITY))
+              and _says(badcore, AUTHORITY, "receipt core:"))
+        alien = _case(lambda r, i: _rereceipt(r, lambda d: d.update(product="zzz")))
+        check("check-1-receipt-core-cannot", _only(alien, _red(AUTHORITY, CANNOT_EVALUATE)))
+        gone_pre = _case(lambda r, i: _remove(r, "notes/old.md"))
+        check("check-1-live-preimage-absent-red", _only(gone_pre, _red(AUTHORITY))
+              and _says(gone_pre, AUTHORITY, "is absent from the live tree"))
+        dest = _case(lambda r, i: _put(r, ".claude/settings.json", b"tampered bytes\n"))
+        # A probed enforcement member is check 1's planned destination and check 5's installed surface, so
+        # its drift moves both (module docstring, check 5); check 1's own verdict is unchanged.
+        both = dict([(AUTHORITY, INVALID), (WIRING, INVALID)])
+        check("flip-1-destination-drift", _only(dest, both)
+              and _says(dest, AUTHORITY, "planned destination '.claude/settings.json'"))
+        check("flip-1-destination-absent", _only(_case(lambda r, i: _remove(r, _HOOK)),
+                                                 both))
+        drifted = _case(lambda r, i: _append(r, ".working/toml/manifest.toml", b"# drift\n"))
+        check("check-1-manifest-drift-red", _only(drifted, _red(AUTHORITY))
+              and _says(drifted, AUTHORITY, "planned destination '.working/toml/manifest.toml'"))
+        # Check 2: the seal and binding legs, whole-tree accounting, ambiguous or malformed entries.
+        excluded = _case(_flip_2)
+        check("check-2-excluded-entry-accounted", _says(excluded, DISCOVERY, "'legacy/stray.md' has neither")
+              and any(row == dict(path=".working/toml", kind="excluded") for row in _entries(_case_inventory()))
+              and not _says(excluded, DISCOVERY, "'.working/toml' has neither"))
+        rekeyed = _case(lambda r, i: _replant(r, _reseal_inventory(
+            i, exclusions=[dict(path=".working/toml", reason="machine"), dict(path="consumer", reason="other")])))
+        check("check-2-unbound-inventory-red", rekeyed[DISCOVERY].status == INVALID
+              and _says(rekeyed, DISCOVERY, "not the one the approved plan binds"))
+
+        def _tamper_seal(inv):
+            import tomllib
+            doc = tomllib.loads(inv.decode("utf-8"))
+            doc["decisions"] = [dict(note="tampered after sealing")]
+            return _emit(doc)
+
+        check("check-2-tampered-seal-red", _says(_case(lambda r, i: _replant(r, _tamper_seal(i))),
+                                                 DISCOVERY, "does not seal its own bytes"))
+        uninv = _case(lambda r, i: _replant(r, _reseal_inventory(
+            i, entries=[row for row in _entries(i) if row["path"] != "legacy/RULES.md"],
+            candidates=[p for p in sorted(_LIVE) if p != "legacy/RULES.md"], empty_directories=["legacy"])))
+        check("check-2-source-not-inventoried-red",
+              _says(uninv, DISCOVERY, "'legacy/RULES.md' is not an inventoried file"))
+        stray_entry = dict(path=".claude/unaccounted.md", kind="file", size=2, digest="sha256:" + "b" * 64)
+        anywhere = _case(lambda r, i: _replant(r, _reseal_inventory(
+            i, entries=[row for row in _entries(i) if row["path"] != ".claude"]
+            + [dict(path=".claude", kind="directory"), stray_entry])))
+        check("check-2-inventoried-file-outside-working-red", _only(anywhere, _red(DISCOVERY))
+              and _says(anywhere, DISCOVERY, "'.claude/unaccounted.md' has neither"))
+        dup_entry = dict(path="legacy/RULES.md", kind="file", size=1, digest="sha256:" + "a" * 64)
+        check("closed-duplicate-entry", _only(_case(lambda r, i: _replant(r, _reseal_inventory(
+            i, entries=_entries(i) + [dup_entry]))), _red(DISCOVERY, CANNOT_EVALUATE)))
+        check("closed-malformed-entry", _only(_case(lambda r, i: _replant(r, _reseal_inventory(
+            i, entries=_entries(i) + [dict(path=123, kind="nonsense")]))), _red(DISCOVERY, CANNOT_EVALUATE)))
+        check("closed-undigested-file-entry", _only(_case(lambda r, i: _replant(
+            r, _reseal_inventory(i, entries=_entries(i) + [dict(
+                path="legacy/undigested.md", kind="file")]))), _red(DISCOVERY, CANNOT_EVALUATE)))
+        # The bundle copy tampered WITHOUT its inventory row re-emitted moves checks 2 and 3 together, one
+        # of the documented shared-check cases (module docstring): check 2 reads the copy and
+        # check 3 verifies the bundle that lists it.
+        unrowed = _case(lambda r, i: _put(r, apply.planning_inventory_rel(_RUN), _strayed(i)))
+        check("check-2-unrowed-tamper-flips-2-and-3",
+              _only(unrowed, dict([(DISCOVERY, INVALID), (PRESERVATION, INVALID)]))
+              and _says(unrowed, DISCOVERY, "'legacy/stray.md' has neither")
+              and _says(unrowed, PRESERVATION, "does not match its recorded size and sha256"))
+
+        # Round 12: entries the planner never records, each sealed and bound by the fixture itself
+        # (_EXTRA_ENTRIES), so every other check stays VALID: an excluded entry under no recorded exclusion
+        # is a contradictory record and a non-canonical path escaping a recorded exclusion is malformed; both
+        # are CANNOT-EVALUATE naming the entry, while the same file entry at a canonical path stays INVALID.
+        def _with_entries(*rows):
+            with mock.patch.object(here, "_EXTRA_ENTRIES", rows):
+                return _case()
+
+        foreign = dict(path="foreign.md", kind="file", size=1, digest=_digest(b"x"))
+        control = _with_entries(dict(foreign, path="CLAUDE.md"))
+        check("check-2-unexcluded-file-control-red", _only(control, _red(DISCOVERY))
+              and _says(control, DISCOVERY, "'CLAUDE.md' has neither"))
+        orphan = _with_entries(dict(path="foreign.md", kind="excluded"))
+        check("check-2-excluded-without-exclusion-cannot", _only(orphan, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(orphan, DISCOVERY, "'foreign.md' is recorded excluded but lies under no recorded"))
+        escaping = _with_entries(dict(foreign, path="consumer/../foreign.md"))
+        check("check-2-noncanonical-entry-cannot", _only(escaping, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(escaping, DISCOVERY, "entry path 'consumer/../foreign.md'"))
+        check("check-2-excluded-under-exclusion-valid", _only(_with_entries(), {})
+              and dict(path=".working/toml", kind="excluded") in _entries(_case_inventory()))
+        # Round 13: each producer invariant is re-checked by calling the producer's own function. Check 1:
+        # a receipt whose release anchor flags are not both True is refused by adoption_record, and check 1
+        # now says so through the same receipt_binding_refusals; the genuine receipt passes both.
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        def _record(mutate=None):
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+                _fixture(root)
+                if mutate is not None:
+                    _rereceipt(root, mutate)
+                plan_doc = _toml_file(root, apply.plan_rel(_RUN))
+                receipt_doc = _toml_file(root, apply.receipt_rel(_RUN))
+            try:
+                apply.adoption_record(_RUN, plan_doc, receipt_doc, now)
+            except apply.AdoptApplyError as exc:
+                return str(exc)
+            return None
+
+        check("check-1-r13-genuine-receipt-producer-accepts", _record() is None)
+        anchorless = "the receipt records no observed, agreeing"
+        for flag in ("independent_anchor_observed", "anchor_agreement"):
+            def _unanchor(d, flag=flag):
+                d["release"][flag] = False
+            got = _case(lambda r, i, f=_unanchor: _rereceipt(r, f))
+            check("check-1-r13-anchor-" + flag + "-red", _only(got, _red(AUTHORITY))
+                  and _says(got, AUTHORITY, anchorless) and anchorless in (_record(_unanchor) or ""))
+            with mock.patch.object(apply, "receipt_binding_refusals", lambda *a: []):
+                check("check-1-r13-anchor-" + flag + "-load-bearing",
+                      _only(_case(lambda r, i, f=_unanchor: _rereceipt(r, f)), {}))
+        # Check 2: an empty directory omitted from empty_directories (the r12 reproduction) is
+        # CANNOT-EVALUATE, the redundant list re-derived from the entries by the planner's own derivation;
+        # the discriminating control records it and is INVALID, unaccounted.
+        hollow = dict(path=".working/unaccounted-empty", kind="directory")
+        omitted = _with_entries(hollow)
+        check("check-2-r13-omitted-empty-directory-cannot", _only(omitted, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(omitted, DISCOVERY, "its empty_directories are not the ones the planner builds "
+                                            "from its entries (built ['.working/unaccounted-empty'])"))
+        with mock.patch.object(here, "_EXTRA_EMPTY", (hollow["path"],)):
+            recorded = _with_entries(hollow)
+        check("check-2-r13-recorded-empty-directory-control-red", _only(recorded, _red(DISCOVERY))
+              and _says(recorded, DISCOVERY, "'.working/unaccounted-empty' has neither"))
+        with mock.patch.object(planner, "empty_directories", lambda rows, roots: []):
+            check("check-2-r13-empty-derivation-load-bearing", _only(_with_entries(hollow), {}))
+        # Check 2: a file row is held to the planner's own row rule (entry_row_problem): the r12
+        # reproduction (size -1) and each other row the planner never records are CANNOT-EVALUATE.
+        def _edited(path, **changes):
+            with mock.patch.object(here, "_ENTRY_EDITS", ((path, changes),)):
+                return _case()
+
+        for label, path, changes, text in (
+                ("size-negative", "legacy/RULES.md", dict(size=-1), "size -1"),
+                ("size-bool", "legacy/RULES.md", dict(size=True), "size True"),
+                ("size-over-bound", "legacy/RULES.md", dict(size=planner.MAX_FILE_BYTES + 1),
+                 "file exceeds byte bound: 'RULES.md'"),
+                ("size-string", "legacy/RULES.md", dict(size="10"), "is not the byte count"),
+                ("extra-field", "legacy/RULES.md", dict(note="x"), "records fields"),
+                ("excluded-with-digest", ".working/toml", dict(digest=_digest(b"x")), "records fields")):
+            got = _edited(path, **changes)
+            check("check-2-r13-entry-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
+                  and _says(got, DISCOVERY, text))
+        under = _with_entries(dict(path="consumer/other.md", kind="file", size=1, digest=_digest(b"x")))
+        check("check-2-r13-file-under-exclusion-cannot", _only(under, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(under, DISCOVERY, "lies under a recorded exclusion"))
+        with mock.patch.object(planner, "entry_row_problem", lambda row, exclusions: None):
+            check("check-2-r13-row-rule-load-bearing", _only(_edited("legacy/RULES.md", size=-1), {}))
+        # Round 14 and 15: the whole observation must be the one the planner's own build_observation returns
+        # over the listing its rows record (rebuilt_observation_problem). Each vector is sealed and bound by
+        # the fixture, so only check 2 grades it: CANNOT-EVALUATE naming the problem; with the rebuild flipped
+        # off the same inventory grades VALID, so the rebuild is what refuses it.
+        def _observed(sources=None, targets=(), extra=(), edit=None, bounds=()):
+            patches = [mock.patch.object(here, "_SOURCE_ROOTS", sources or _SOURCE_ROOTS),
+                       mock.patch.object(here, "_TARGET_ROOTS", list(targets)),
+                       mock.patch.object(here, "_EXTRA_ENTRIES", tuple(extra)),
+                       mock.patch.object(here, "_OBSERVATION_EDIT", edit)]
+            patches += [mock.patch.object(planner, name, value) for name, value in bounds]
+            for patch in patches:
+                patch.start()
+            try:
+                return _case()
+            finally:
+                for patch in reversed(patches):
+                    patch.stop()
+
+        def _drop_path(path):
+            def edit(obs):
+                obs["entries"][:] = [row for row in obs["entries"] if row["path"] != path]
+            return edit
+
+        def _scope_without(path):
+            def edit(obs):
+                obs["scope"].remove(path)
+                _drop_path(path)(obs)
+            return edit
+
+        def _duplicate(path):
+            def edit(obs):
+                obs["entries"][:] = sorted(obs["entries"] + [row for row in obs["entries"] if row["path"] == path],
+                                           key=lambda row: row["path"])
+            return edit
+
+        def _walk_edit(**changes):
+            def edit(obs):
+                obs["walk"].update(changes)
+            return edit
+
+        baseline_entries = _entries(_case_inventory())
+        imports_file = dict(path=".working/imports/x.md", kind="file", size=1, digest=_digest(b"x"))
+        # The round-15 reproductions: nine 8 MiB files past the total byte bound (seven are the control), and a
+        # file 33 levels below .working reached through a nested target root (32 levels is the control).
+        mib8 = dict(kind="file", size=8 * 1024 * 1024, digest=_digest(bytes(8 * 1024 * 1024)))
+
+        def _imports(count):
+            return [dict(path=".working/imports", kind="directory")] + [
+                dict(mib8, path=".working/imports/f{}".format(i)) for i in range(count)]
+
+        def _chain(length):
+            chain = [".working/imports" + "/d" * i for i in range(length)]
+            return (dict(targets=[chain[-1]], extra=[dict(path=x, kind="directory") for x in chain]
+                         + [dict(path=chain[-1] + "/f", kind="file", size=1, digest=_digest(b"x"))]))
+
+        vectors = (
+            ("r15-repro-total-bytes", dict(extra=_imports(9)), "inventory exceeds byte bounds"),
+            ("r15-repro-nested-root-depth", _chain(32), "inventory entry/path/depth bound exceeded"),
+            ("r15-walk-unreached-invented", dict(edit=_walk_edit(unreached=["CLAUDE.md"])),
+             "its walk are not the ones the planner builds"),
+            ("r15-walk-missing", dict(edit=lambda obs: obs.pop("walk")), "records no walk table"),
+            ("repro-missing-source-root", dict(sources=sorted(_SOURCE_ROOTS + ["missing"])),
+             "declared source is unavailable: 'missing'"),
+            ("repro-absent-root-with-child", dict(extra=[dict(path="legacy", kind="absent")]),
+             "declared source is unavailable: 'legacy'"),
+            ("roots-targets-unsorted", dict(targets=[".gemini", ".claude"]),
+             "its targets are not the ones the planner builds"),
+            ("exclusions-unsorted", dict(edit=lambda obs: obs["exclusions"].reverse()),
+             "its exclusions are not the ones the planner builds"),
+            ("exclusions-root-beneath", dict(targets=["consumer/x"]),
+             "source is in an excluded subtree: 'consumer/x'"),
+            ("scope-omits-detection-root", dict(edit=_scope_without("CLAUDE.md")),
+             "its scope are not the ones the planner builds"),
+            ("scope-unsorted", dict(edit=lambda obs: obs["scope"].reverse()),
+             "its scope are not the ones the planner builds"),
+            ("entries-duplicated", dict(edit=_duplicate("CLAUDE.md")), "entry 'CLAUDE.md' is duplicated"),
+            ("entries-unsorted", dict(edit=lambda obs: obs["entries"].reverse()),
+             "its entries are not the ones the planner builds"),
+            ("scope-path-unrecorded", dict(edit=_drop_path("CLAUDE.md")), "built only ['CLAUDE.md']"),
+            ("parent-unrecorded", dict(extra=[imports_file]), "recorded only ['.working/imports/x.md']"),
+            ("top-level-unwalked", dict(extra=[dict(path="foreign.md", kind="absent")]),
+             "recorded only ['foreign.md']"),
+            ("excluded-beneath-exclusion", dict(extra=[dict(path=".working/toml/x.toml", kind="excluded")]),
+             "recorded only ['.working/toml/x.toml']"),
+            ("beneath-absent", dict(targets=[".github"], extra=[dict(path=".github", kind="absent"), dict(
+                path=".github/workflows", kind="directory")]), "recorded otherwise ['.github/workflows']"),
+            ("beneath-file", dict(targets=[".working/imports/x"], extra=[dict(
+                imports_file, path=".working/imports"), dict(path=".working/imports/x", kind="absent")]),
+             "component '.working/imports' of '.working/imports/x' (recorded file)"),
+            ("bounds-entries", dict(bounds=[("MAX_ENTRIES", len(baseline_entries) - 1)]),
+             "inventory entry/path/depth bound exceeded"),
+            ("bounds-path-bytes", dict(bounds=[("MAX_PATH_BYTES", 0)]), "inventory entry/path/depth bound exceeded"),
+            ("bounds-depth", dict(bounds=[("MAX_DEPTH", 0)]), "inventory entry/path/depth bound exceeded"),
+            ("bounds-file-bytes", dict(bounds=[("MAX_FILE_BYTES", 8)]),
+             "file exceeds byte bound: '.working/toml/manifest.toml'"),
+        )
+        for label, vector, text in vectors:
+            got = _observed(**vector)
+            check("check-2-rebuild-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
+                  and _says(got, DISCOVERY, text))
+            with mock.patch.object(here, "rebuilt_observation_problem", lambda obs: None):
+                check("check-2-rebuild-" + label + "-load-bearing", _only(_observed(**vector), {}))
+        # The controls: seven 8 MiB files and a file 32 levels below .working through the nested target root
+        # (the producer accepts both), legacy recorded a directory with its child, and an absent scope path
+        # beneath an absent one (recorded unreached, as the planner records a nested root whose parent is
+        # missing), all grade VALID.
+        for label, vector in (("r15-total-bytes-control", dict(extra=_imports(7))),
+                              ("r15-nested-root-depth-control", _chain(31)),
+                              ("directory-control", dict(extra=[dict(path="legacy", kind="directory")])),
+                              ("absent-beneath-absent-control", dict(
+                                  targets=[".github"], extra=[dict(path=".github", kind="absent")]))):
+            check("check-2-rebuild-" + label + "-valid", _only(_observed(**vector), {}))
+        # The field-for-field comparison is load-bearing on its own: with it emptied, a row the walk never
+        # reaches (one the build simply does not return) grades VALID.
+        with mock.patch.object(planner, "BUILT_FIELDS", ()):
+            check("check-2-rebuild-comparison-load-bearing",
+                  _only(_observed(extra=[dict(path="foreign.md", kind="absent")]), {}))
+        check("check-2-rebuild-directory-in-baseline", dict(path="legacy", kind="directory") in baseline_entries)
+        # The producer refuses the missing root with the same words, and the observation it builds for a
+        # tree with legacy/RULES.md passes the rebuild, recording legacy a directory beside its child.
+        import tomllib
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+            refused = planner.investigate(root, sources=["missing"])
+            _put(root, "legacy/RULES.md", _LIVE["legacy/RULES.md"])
+            built = planner.investigate(root, sources=["legacy"])
+        built_obs = tomllib.loads(built.observation.decode("utf-8")) if built.observation else {}
+        check("check-2-r14-producer-refuses-missing-root", refused.status == CANNOT_EVALUATE
+              and refused.findings == ("declared source is unavailable: 'missing'",))
+        check("check-2-r14-producer-observation-passes", built.status == VALID
+              and rebuilt_observation_problem(built_obs) is None
+              and dict(path="legacy", kind="directory") in built_obs.get("entries", []))
+        # Producer parity: investigate() on a real tree and the rebuild over its sealed observation agree.
+        agreed, accepted, refused_count, trees = _parity_sweep()
+        check("check-2-rebuild-producer-parity", agreed and accepted >= 100 and refused_count >= 100 and trees >= 45)
+        # The walker stops early only where build_observation refuses (its docstring): on each tree the
+        # producer's refusal is raised while the walker lists or reads, before it has listed or read it all,
+        # and the rebuild over the observation sealed with the bounds lifted refuses with the same text.
+        check("check-2-rebuild-walker-stops-only-where-build-refuses", _walker_stops() == 3)
+        # Check 4: the formerly occupied destination, the doctor contract, store identity, CI and views.
+        occ = _case(_occupied)
+        check("check-4-old-occupant-red", _only(occ, _red(OPERATIONAL)))
+        check("check-4-old-occupant-named", _says(occ, OPERATIONAL, "still holds the old occupant's bytes")
+              and _says(occ, OPERATIONAL, "doctor: C-VIEW-DRIFT"))
+        check("check-4-doctor-drift-red", _only(_case(lambda r, i: dict(doctor=_Doctor(INVALID, [_DRIFT]))),
+                                                _red(OPERATIONAL)))
+        check("check-4-doctor-invalid-red", _only(_case(lambda r, i: dict(doctor=_Doctor(INVALID, ["C-X: y"]))),
+                                                  _red(OPERATIONAL)))
+        check("check-4-doctor-cannot", _only(_case(lambda r, i: dict(doctor=_Doctor(CANNOT_EVALUATE, [], ["z"]))),
+                                             _red(OPERATIONAL, CANNOT_EVALUATE)))
+        check("check-4-doctor-valid-with-cannot-list", _only(_case(lambda r, i: dict(
+            doctor=_Doctor(VALID, [], ["z"]))), _red(OPERATIONAL, CANNOT_EVALUATE)))
+        check("check-4-doctor-alien-status", _only(_case(lambda r, i: dict(doctor=_Doctor("GREENISH"))),
+                                                   _red(OPERATIONAL, CANNOT_EVALUATE)))
+        check("check-4-doctor-invalid-no-findings", _only(_case(lambda r, i: dict(doctor=_Doctor(INVALID))),
+                                                          _red(OPERATIONAL, CANNOT_EVALUATE)))
+        broken = _Doctor(VALID)
+        broken.findings = ("C-X: y",)  # iterable, but not the list the doctor contract promises
+        check("check-4-doctor-findings-not-list", _only(_case(lambda r, i: dict(doctor=broken)),
+                                                        _red(OPERATIONAL, CANNOT_EVALUATE)))
+
+        # Missing or non-list doctor evidence is CANNOT-EVALUATE, never read as an empty list.
+        for label, value in (("absent", None), ("none", None), ("false", False), ("zero", 0), ("dict", {}),
+                             ("string", ""), ("tuple", ())):
+            for field in ("cannot_evaluate", "findings"):
+                shaped = _Doctor(VALID)
+                if label == "absent":
+                    delattr(shaped, field)
+                else:
+                    setattr(shaped, field, value)
+                check("check-4-doctor-{}-{}-cannot".format(field, label), _only(
+                    _case(lambda r, i, d=shaped: dict(doctor=d)), _red(OPERATIONAL, CANNOT_EVALUATE)))
+
+        def _raising(product_root):
+            raise RuntimeError("doctor crashed")
+
+        check("check-4-doctor-raises-cannot", _only(_case(lambda r, i: dict(doctor=_raising)),
+                                                    _red(OPERATIONAL, CANNOT_EVALUATE)))
+        check("check-4-no-doctor-cannot", _only(_case(lambda r, i: dict(doctor=None)),
+                                                _red(OPERATIONAL, CANNOT_EVALUATE)))
+        check("check-4-store-doctor-unobserved-not-green",
+              _case(lambda r, i: dict(doctor=store_doctor()))[OPERATIONAL].status != VALID)
+        check("check-4-manifest-removed-not-green", _only(_case(lambda r, i: _remove(
+            r, ".working/toml/manifest.toml")),
+            dict([(OPERATIONAL, CANNOT_EVALUATE), (AUTHORITY, INVALID)])))
+        gone = type("Resolution", (), dict(status=store.NOT_ADOPTED, detail="no store"))()
+        with mock.patch.object(store, "resolve_store", lambda *a, **k: gone):
+            absent = _case()
+        check("check-4-de-adopted-red", _only(absent, _red(OPERATIONAL))
+              and _says(absent, OPERATIONAL, "never NOT-APPLICABLE"))
+        real_resolve = store.resolve_store
+
+        def _misresolve(path, **kw):
+            found = real_resolve(path, **kw)
+            return type("Resolution", (), dict(status=found.status, store_root=found.store_root,
+                                               machine_rel=".working/other", detail=None))()
+
+        with mock.patch.object(store, "resolve_store", _misresolve):
+            misid = _case()
+        check("check-4-store-identity-red", _only(misid, _red(OPERATIONAL))
+              and _says(misid, OPERATIONAL, "not the planned identity"))
+
+        def _misrooted(path, **kw):
+            found = real_resolve(path, **kw)
+            return type("Resolution", (), dict(status=found.status, store_root=tempfile.gettempdir(),
+                                               machine_rel=found.machine_rel, detail=None))()
+
+        with mock.patch.object(store, "resolve_store", _misrooted):
+            misroot = _case()
+        check("check-4-store-root-identity-red", _only(misroot, _red(OPERATIONAL))
+              and _says(misroot, OPERATIONAL, "not the planned identity"))
+        # The CI leg by template identity (_ci_template_identity): the shipped template and recipe installed
+        # verbatim are VALID; any other workflow or recipe is CANNOT-EVALUATE, the reason naming the template
+        # to install unmodified and OPF_TOOL as unsupported, never VALID and never INVALID. Each vector changes
+        # only the CI floor, so only check 4 moves (_only).
+        template, recipe = _shipped_floor()
+        verbatim = _case()
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+            _fixture(root)
+            with open(os.path.join(root, *_CI_PATH.split("/")), "rb") as fh:
+                installed = fh.read()
+        check("check-4-ci-template-verbatim-valid", _only(verbatim, {}) and installed == template
+              and _TEMPLATE_RUN_LINE in template and b"Copy this file to .github/workflows/opf.yml" in template)
+
+        def _ci_cannot(results, *texts):
+            return (_only(results, _red(OPERATIONAL, CANNOT_EVALUATE))
+                    and _says(results, OPERATIONAL, "install the pack's template")
+                    and _says(results, OPERATIONAL, "OPF_TOOL")
+                    and all(_says(results, OPERATIONAL, text) for text in texts))
+
+        flipped = template.replace(b"name: OPF\n", b"name: OPG\n", 1)
+        command = b"sh " + _CI_RECIPE_REL.encode("ascii") + b" ."
+        # A modified copy the plan records, the round-9 reproductions among them (rebased on the shipped
+        # template): a canonical job beside a schema error, a step without run carrying a broken with:, two
+        # invalid job ids, and |- and | chomping of the run line. Each is CANNOT-EVALUATE, the reader they
+        # exercised being gone.
+        for label, bad in (
+                ("byte-changed", flipped),
+                ("comment-added", template + b"# a local note\n"),
+                ("r9-canonical-job-masks-schema-error", template + (
+                    b"  bad:\n    runs-on: ubuntu-latest\n    permissions: {contents: banana}\n"
+                    b"    steps:\n      - run: opf doctor --require-store\n")),
+                ("r9-step-without-run", template.replace(b"uses: actions/checkout@v4",
+                                                         b"uses: actions/checkout@v4\n        with: [broken]")),
+                ("r9-job-id-dotted", template.replace(b"  opf:", b"  opf.bad:")),
+                ("r9-job-id-digit", template.replace(b"  opf:", b'  "1opf":')),
+                ("r9-strip-chomping", template.replace(b"run: " + command + b"\n",
+                                                       b"run: |-\n          " + command + b"\n\n\n")),
+                ("r9-clip-chomping", template.replace(b"run: " + command + b"\n",
+                                                      b"run: |\n          " + command + b"\n\n\n"))):
+            with mock.patch.object(here, "_CI_BYTES", bad):
+                got = _case()
+            check("check-4-ci-" + label, bad != template and _ci_cannot(got, "is not the pack's shipped template"))
+        # The identity leg is load-bearing: with it emptied, the modified copy the plan records is VALID.
+        with mock.patch.object(here, "_CI_BYTES", flipped), \
+                mock.patch.object(here, "_ci_template_identity", lambda ev, row: []):
+            check("check-4-ci-identity-load-bearing", _only(_case(), {}))
+        check("check-4-ci-edited-after-plan", _ci_cannot(_case(lambda r, i: _put(r, _CI_PATH, flipped)),
+                                                         "does not match its planned bytes", "is not byte-identical"))
+        check("check-4-ci-member-absent", _ci_cannot(_case(lambda r, i: _remove(r, _CI_PATH)),
+                                                     "'.github/workflows/opf.yml' is absent"))
+
+        def _relocated(root, inv):
+            _put(root, ".github/workflows/other.yml", template)
+            _remove(root, _CI_PATH)
+
+        check("check-4-ci-other-path", _ci_cannot(_case(_relocated), "'.github/workflows/opf.yml' is absent"))
+        for path in ("ci/opf.yml", ".github/workflows/sub/opf.yml", ".github/opf.yml"):
+            with mock.patch.object(here, "_CI_PATH", path):
+                got = _case()
+            check("check-4-ci-not-a-workflow-path-" + path, _ci_cannot(got, "is not a file directly under"))
+        # A workflow installed under any file name but opf.yml is refused by the frozen plan itself (the CI
+        # launcher is installed as opf.yml, _opf_adopt.ENFORCEMENT_LAUNCHERS), so every check is CANNOT-EVALUATE;
+        # check 4's own legs for such a path (a hidden name, a plan-named path) are direct-call vectors below.
+        for path in (".github/workflows/.yml", ".github/workflows/floor.yaml"):
+            with mock.patch.object(here, "_CI_PATH", path):
+                got = _case()
+            check("check-4-ci-workflow-name-refused-by-plan-" + path,
+                  all(got[name].status == CANNOT_EVALUATE for name in CHECKS)
+                  and _says(got, AUTHORITY, "is neither a launcher, by its installed file name"))
+        check("check-4-ci-recipe-edited", _ci_cannot(_case(lambda r, i: _put(r, _CI_RECIPE_REL, recipe + b"# x\n")),
+                                                     "does not match its planned bytes",
+                                                     "is not the pack's shipped recipe"))
+        weakened = recipe.replace(b"|| exit $?", b"|| true")
+        with mock.patch.object(here, "_CI_RECIPE_BYTES", weakened):
+            got = _case()
+        check("check-4-ci-recipe-modified-planned", weakened != recipe and _ci_cannot(
+            got, "at a digest that is not the pack's shipped recipe", "is not the pack's shipped recipe"))
+        check("check-4-ci-recipe-absent", _ci_cannot(_case(lambda r, i: _remove(r, _CI_RECIPE_REL)),
+                                                     "'opf/enforcement/ci/opf-ci.sh' is absent"))
+        with mock.patch.object(here, "_TEMPLATE_RUN_LINE", b"        run: sh elsewhere/opf-ci.sh .\n"):
+            got = _case()
+        check("check-4-ci-template-inconsistent-cannot", _only(got, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(got, OPERATIONAL, "the pack is inconsistent"))
+        # The reference files are authenticated (_shipped): the round-10 reproductions, each a reference
+        # file replaced or symlinked in the pack and matched by the live copy the plan records, were VALID
+        # before and are CANNOT-EVALUATE now; the genuine floor in the same scratch pack root stays VALID,
+        # and each embedded digest is load-bearing.
+        def _unauthenticated(results, text):
+            return _only(results, _red(OPERATIONAL, CANNOT_EVALUATE)) and _says(results, OPERATIONAL, text)
+
+        if_false = template.replace(b"    runs-on: ubuntu-latest\n", b"    if: false\n    runs-on: ubuntu-latest\n")
+        check("check-4-r10-scratch-pack-genuine-valid", _only(_reference_case(), {}))
+        for label, kwargs, text in (
+                ("reference-recipe-exit-0", dict(recipe=exit0), "does not match the digest embedded"),
+                ("reference-recipe-weakened", dict(recipe=weakened), "does not match the digest embedded"),
+                ("reference-template-if-false", dict(template=if_false), "does not match the digest embedded"),
+                ("reference-recipe-symlink-exit-0", dict(recipe=exit0, symlinked=(_SHIPPED_RECIPE,)),
+                 "a symlink or special entry is refused"),
+                ("reference-recipe-symlink-genuine", dict(symlinked=(_SHIPPED_RECIPE,)),
+                 "a symlink or special entry is refused"),
+                ("reference-template-symlink-genuine", dict(symlinked=(_SHIPPED_TEMPLATE,)),
+                 "a symlink or special entry is refused")):
+            check("check-4-r10-" + label, if_false != template and _TEMPLATE_RUN_LINE in if_false
+                  and _unauthenticated(_reference_case(**kwargs), text))
+        for attr in ("_SHIPPED_TEMPLATE_SHA256", "_SHIPPED_RECIPE_SHA256"):
+            with mock.patch.object(here, "_CI_BYTES", template), mock.patch.object(here, "_CI_RECIPE_BYTES", recipe), \
+                    mock.patch.object(here, attr, "0" * 64):
+                got = _case()
+            check("check-4-embedded-digest-load-bearing-" + attr, _unauthenticated(
+                got, "does not match the digest embedded"))
+        noview = _case(lambda r, i: _remove(r, ".working/TODO.md"))
+        check("check-4-view-missing-red", _only(noview, _red(OPERATIONAL))
+              and _says(noview, OPERATIONAL, "is missing"))
+        repointed = _case(lambda r, i: _put(r, _CONSUMER, b"stale consumer\n"))
+        check("check-4-repoint-drifted-red", _only(repointed, _red(OPERATIONAL))
+              and _says(repointed, OPERATIONAL, "planned repointing"))
+        # Check 3: archive preservation, bundle claims, the move source, and the restore exercise.
+        corrupt = _case(lambda r, i: _put(r, apply.archive_rel(_RUN, "legacy/RULES.md"), b"other\n"))
+        check("check-3-preimage-corrupted", _only(corrupt, _red(PRESERVATION))
+              and _says(corrupt, PRESERVATION, "does not match the plan digest of"))
+        unclaimed = _case(lambda r, i: _unclaim(r, apply.archive_rel(_RUN, "legacy/RULES.md")))
+        check("check-3-unclaimed-preimage-red", _only(unclaimed, _red(PRESERVATION))
+              and _says(unclaimed, PRESERVATION, "not claimed by the run's bundle inventory"))
+        moved = _case(lambda r, i: _put(r, "adopter/MOVE.md", b"EDITED\n"))
+        check("check-3-move-source-drifted-red", _only(moved, _red(PRESERVATION))
+              and _says(moved, PRESERVATION, "MUST NOT be moved"))
+        check("check-3-move-source-absent-red", _only(_case(lambda r, i: _remove(r, "adopter/MOVE.md")),
+                                                      _red(PRESERVATION)))
+        check("check-3-restore-mismatch-found", _restore_exercise([("a/b.md", b"x", _digest(b"y"))]) == ["a/b.md"])
+        check("check-3-restore-match-clean", _restore_exercise([("a/b.md", b"x", _digest(b"x"))]) == [])
+        with mock.patch.object(here, "_restore_exercise", lambda items: [row[0] for row in items]):
+            check("check-3-restore-load-bearing", _only(_case(), _red(PRESERVATION)))
+        check("check-6-retire-absent", _only(_case(lambda r, i: _remove(r, "legacy/RULES.md")), _red(RETIREMENT)))
+        check("check-6-occupying-archive-changed", _case(lambda r, i: _put(
+            r, apply.archive_rel(_RUN, ".working/TODO.md"), b"x\n"))[RETIREMENT].status == INVALID)
+        # Fail closed: unreadable or unparseable input is CANNOT-EVALUATE, never a pass.
+        every = dict((name, CANNOT_EVALUATE) for name in CHECKS)
+        check("closed-plan-garbage", _only(_case(lambda r, i: _put(r, apply.plan_rel(_RUN), b"x = [")), every))
+        check("closed-plan-absent", _only(_case(lambda r, i: _remove(r, apply.plan_rel(_RUN))), every))
+        check("closed-approval-garbage", _only(_case(lambda r, i: _put(r, apply.approval_rel(_RUN), b"= 1")),
+                                               dict([(AUTHORITY, CANNOT_EVALUATE), (PRESERVATION, INVALID)])))
+        check("closed-receipt-garbage", _case(lambda r, i: _put(
+            r, apply.receipt_rel(_RUN), b"[["))[AUTHORITY].status == CANNOT_EVALUATE)
+        # The planning-inventory copy: absent (its row removed with it, so check 3 holds) is a check-2
+        # FINDING naming the bundle path, like an absent approval; unreadable or malformed stays
+        # CANNOT-EVALUATE.
+        def _deplant(r):
+            _unclaim(r, apply.planning_inventory_rel(_RUN))
+            _remove(r, apply.planning_inventory_rel(_RUN))
+
+        absent_inv = _case(lambda r, i: _deplant(r))
+        check("check-2-bundle-inventory-absent-finding", _only(absent_inv, _red(DISCOVERY))
+              and _says(absent_inv, DISCOVERY, "no planning inventory in the run's evidence bundle")
+              and _says(absent_inv, DISCOVERY, apply.planning_inventory_rel(_RUN)))
+        check("check-2-bundle-inventory-garbage-cannot", _only(_case(lambda r, i: _replant(r, b"x = [")),
+                                                               _red(DISCOVERY, CANNOT_EVALUATE)))
+        check("closed-bundle-inventory-garbage", _case(lambda r, i: _put(
+            r, apply.inventory_rel(_RUN), b"x = ["))[PRESERVATION].status == CANNOT_EVALUATE)
+        check("closed-symlink-retire-source", _case(_symlinked)[RETIREMENT].status == CANNOT_EVALUATE)
+        with mock.patch.object(apply, "verify_bundle", lambda *a: schema._cannot("bundle unreadable")):
+            check("closed-bundle-cannot-load-bearing", _only(_case(), _red(PRESERVATION, CANNOT_EVALUATE)))
+        check("closed-bad-run-id", all(r.status == CANNOT_EVALUATE for r in evaluate("/", "../x").values()))
+        other_run = "adopt-20260917T120000Z-aaaaaaaaaaaaaaaa"
+
+        def _other_run_plan(r, i):
+            # A self-consistent VALID plan for another run (its preservation homes renamed with it).
+            doc = _toml_file(r, apply.plan_rel(_RUN))
+            doc["sources"] = [dict(row, preservation=row["preservation"].replace(_RUN, other_run))
+                              for row in doc["sources"]]
+            doc["effects"] = schema.derive_effects(doc["ops"], doc["sources"], ".working/toml/manifest.toml",
+                                                   other_run)
+            _put(r, apply.plan_rel(_RUN), _emit(_sealed(dict(doc, run_id=other_run), "plan_digest")))
+
+        renamed = _case(_other_run_plan)
+        check("closed-plan-names-other-run", _only(renamed, every)
+              and _says(renamed, AUTHORITY, "names run"))
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+            inv = _fixture(root)
+            before = _tree(root)
+            evaluate(root, _RUN, doctor=_Doctor(), prober=_Surface())
+            check("read-only-live-tree", _tree(root) == before)
+        # Direct-call vectors for legs a VALID frozen plan cannot reach end to end: a foreign preservation
+        # destination and a missing CI row (frozen_plan refuses both plans), and check 2's accounting leg
+        # alone (the canonical _flip_2 also moves the bound inventory digest).
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+            inv = _fixture(root)
+            ev = _Evaluation()
+            ev.product_root, ev.run_id, ev.doctor = root, _RUN, _Doctor()
+            ev.root_fd = apply._open_product_root(root)
+            try:
+                plan = apply.frozen_plan(_read(ev, apply.plan_rel(_RUN)))
+                tampered = [dict(row) for row in plan["sources"]]
+                for row in tampered:
+                    if row["path"] == "legacy/RULES.md":
+                        row["preservation"] = "elsewhere/RULES.md"
+                ev.plan = dict(plan, sources=tampered)
+                direct = _Report()
+                _check_preservation(ev, direct)
+                check("check-3-foreign-preservation-red", direct.result().status == INVALID
+                      and any("not under this run's adoption archive" in f for f in direct.findings))
+
+                def _ci_direct(members):
+                    ev.plan = dict(plan, enforcement=[dict(row, members=members) if row["platform"] == "ci"
+                                                      else row for row in plan["enforcement"]])
+                    report = _Report()
+                    try:
+                        _check_operational(ev, report)
+                    except Unevaluable as exc:
+                        report.cannot.append(str(exc))
+                    return report.result()
+
+                def _named(result, text):
+                    return result.status == CANNOT_EVALUATE and any(text in f for f in result.findings)
+
+                # The recipe is read live whether or not the CI row plans it; the row names exactly one
+                # workflow; a shipped file that cannot be read fails closed.
+                workflow_only = [dict(path=_CI_PATH, digest=_digest(template))]
+                check("check-4-ci-recipe-unplanned-direct", _ci_direct(workflow_only).status == VALID)
+                _put(root, ".github/workflows/second.yml", template)
+                check("check-4-ci-two-workflows-direct", _named(_ci_direct(workflow_only + [dict(
+                    path=".github/workflows/second.yml", digest=_digest(template))]), "2 workflow members"))
+                check("check-4-ci-no-workflow-direct", _named(_ci_direct(
+                    [dict(path=_CI_RECIPE_REL, digest=_digest(recipe))]), "0 workflow members"))
+                # Check 4 reads the workflow at the path the plan names, never the default: with the default
+                # removed, the template at another plan-named workflow path is VALID, and a hidden name is not a
+                # workflow file GitHub reads.
+                _remove(root, _CI_PATH)
+                _put(root, ".github/workflows/floor.yaml", template)
+                check("check-4-ci-plan-named-path-valid-direct", _ci_direct([dict(
+                    path=".github/workflows/floor.yaml", digest=_digest(template))]).status == VALID)
+                _put(root, ".github/workflows/.yml", template)
+                check("check-4-ci-hidden-workflow-name-direct", _named(_ci_direct([dict(
+                    path=".github/workflows/.yml", digest=_digest(template))]), "is not a file directly under"))
+                _put(root, _CI_PATH, template)
+                for attr, name in (("_SHIPPED_TEMPLATE", "github-actions.yml"), ("_SHIPPED_RECIPE", "opf-ci.sh")):
+                    with mock.patch.object(here, attr, "enforcement/ci/absent/" + name):
+                        unread = _ci_direct(workflow_only)
+                    check("check-4-ci-shipped-unreadable-" + name,
+                          _named(unread, "cannot read the pack's shipped CI file"))
+                _remove(root, _CI_RECIPE_REL)
+                check("check-4-ci-recipe-unplanned-absent-direct", _named(
+                    _ci_direct(workflow_only), "the recipe the template runs, 'opf/enforcement/ci/opf-ci.sh', is absent"))
+                ev.plan = dict(plan, enforcement=[row for row in plan["enforcement"]
+                                                 if row["platform"] != "ci"])
+                direct = _Report()
+                _check_operational(ev, direct)
+                check("check-4-no-ci-row-red",
+                      any("binds no CI enforcement row" in f for f in direct.findings))
+                import tomllib
+                inv2 = _strayed(inv)
+                _put(root, apply.planning_inventory_rel(_RUN), inv2)
+                ev.plan = dict(plan, inventory_digest=tomllib.loads(
+                    inv2.decode("utf-8"))["inventory_digest"])
+                direct = _Report()
+                _check_discovery(ev, direct)
+                check("check-2-accounting-only-red", direct.result().status == INVALID
+                      and len(direct.findings) > 0
+                      and all("has neither a disposition" in f for f in direct.findings))
+
+                def _discovery(**changes):
+                    resealed = _reseal_inventory(inv, **changes)
+                    _put(root, apply.planning_inventory_rel(_RUN), resealed)
+                    ev.plan = dict(plan, inventory_digest=tomllib.loads(resealed.decode("utf-8"))["inventory_digest"])
+                    report = _Report()
+                    try:
+                        _check_discovery(ev, report)
+                    except Unevaluable:
+                        return None
+                    return report.findings
+
+                check("check-2-empty-directory-accounted", _discovery(entries=_entries(inv) + [dict(
+                    path="legacy/empty", kind="directory")], empty_directories=["legacy/empty"]) == [
+                    "inventory entry 'legacy/empty' has neither a disposition nor a recorded exclusion"])
+                check("check-2-control-area-exempt", _discovery(entries=_entries(inv) + [dict(
+                    path=".working/imports", kind="directory"), dict(
+                    path=".working/imports/x.md", kind="file", size=1, digest=_digest(b"x"))]) == [])
+                check("check-2-alien-kind-cannot", _discovery(entries=_entries(inv) + [dict(
+                    path="legacy/odd.md", kind="symlink")]) is None)
+                redigested = [dict(row, digest="sha256:" + "c" * 64) if row["path"] == "legacy/RULES.md" else row
+                              for row in _entries(inv)]
+                check("check-2-source-digest-bound", _discovery(entries=redigested) == [
+                    "plan source 'legacy/RULES.md' is not an inventoried file with its plan digest"])
+                # Every other path check 2 tests containment on is held to the planner's validator too.
+                recorded = tomllib.loads(inv.decode("utf-8"))["observation"]["exclusions"]
+                check("check-2-noncanonical-exclusion-cannot", _discovery(
+                    exclusions=recorded + [dict(path="consumer/..", reason="x")]) is None)
+                check("check-2-noncanonical-candidate-cannot", _discovery(
+                    candidates=sorted(_LIVE) + ["consumer/../stray.md"]) is None)
+                check("check-2-git-candidate-cannot", _discovery(candidates=sorted(_LIVE) + [".git/config"]) is None)
+                check("check-2-noncanonical-empty-directory-cannot", _discovery(
+                    empty_directories=["empty//dir"]) is None)
+
+                # Round 13: the redundant lists re-derived by the planner's own derivations, and the source
+                # roots held to the planner's own _roots; each disagreement is CANNOT-EVALUATE naming it.
+                def _refused(**changes):
+                    resealed = _reseal_inventory(inv, **changes)
+                    _put(root, apply.planning_inventory_rel(_RUN), resealed)
+                    ev.plan = dict(plan, inventory_digest=tomllib.loads(resealed.decode("utf-8"))["inventory_digest"])
+                    try:
+                        _check_discovery(ev, _Report())
+                    except Unevaluable as exc:
+                        return str(exc)
+                    return ""
+
+                ghost = dict(path="legacy/ghost.md", kind="file", size=1, digest=_digest(b"g"))
+                hollow_dir = dict(path="legacy/hollow", kind="directory")
+                for label, changes, text in (
+                        ("candidate-without-entry", dict(candidates=sorted(sorted(_LIVE) + ["legacy/ghost.md"])),
+                         "its candidates are not the ones the planner builds"),
+                        ("candidate-omitted-under-root", dict(entries=_entries(inv) + [ghost]),
+                         "'legacy/RULES.md', 'legacy/ghost.md', 'notes/old.md'])"),
+                        ("candidates-unsorted", dict(candidates=sorted(_LIVE, reverse=True)), "its candidates are not"),
+                        ("candidates-duplicated", dict(candidates=sorted(sorted(_LIVE) + ["legacy/RULES.md"])),
+                         "its candidates are not"),
+                        ("empty-directory-without-entry", dict(empty_directories=["legacy/hollow"]),
+                         "its empty_directories are not the ones the planner builds from its entries (built [])"),
+                        ("empty-directory-with-descendant", dict(empty_directories=["legacy"]),
+                         "its empty_directories are not the ones the planner builds from its entries (built [])"),
+                        ("empty-directory-omitted-under-root", dict(entries=_entries(inv) + [hollow_dir]),
+                         "(built ['legacy/hollow'])"),
+                        ("sources-overlapping", dict(sources=["legacy", "legacy/sub"]), "overlapping"),
+                        ("sources-unsorted", dict(sources=["notes", "legacy", "adopter"]), "its sources are not"),
+                        ("sources-noncanonical", dict(sources=["legacy/../notes"]),
+                         "invalid contained file/directory path"),
+                        ("sources-not-list", dict(sources="legacy"), "lacks")):
+                    check("check-2-r13-" + label + "-cannot", text in _refused(**changes))
+                # The controls: the same rows recorded as the planner records them grade, never refuse.
+                check("check-2-r13-candidate-recorded-control", _refused(
+                    entries=_entries(inv) + [ghost], candidates=sorted(sorted(_LIVE) + [ghost["path"]])) == "")
+                check("check-2-r13-empty-directory-recorded-control", _refused(
+                    entries=_entries(inv) + [hollow_dir], empty_directories=["legacy/hollow"]) == "")
+                # The per-file read cap at both ends (the journal reader refuses only when total > cap,
+                # inclusive at the cap): the bundle copy read with the cap one over and exactly at its
+                # size grades, and one byte under is CANNOT-EVALUATE naming the cap.
+                _put(root, apply.planning_inventory_rel(_RUN), inv)
+                ev.plan = plan
+                copy_size = os.stat(os.path.join(
+                    root, *apply.planning_inventory_rel(_RUN).split("/"))).st_size
+                capped = {}
+                for offset in (1, 0, -1):
+                    with mock.patch.object(apply._journal, "_MAX_PRODUCT_READ_BYTES", copy_size + offset):
+                        capped[offset] = _run_check(DISCOVERY, ev)
+                check("check-2-read-cap-above-size-reads", capped[1].status == VALID)
+                check("check-2-read-cap-at-size-reads", capped[0].status == VALID)
+                check("check-2-read-cap-one-under-cannot", capped[-1].status == CANNOT_EVALUATE
+                      and any("read cap" in f for f in capped[-1].findings))
+                # Check 1's destination sweep over every op kind it owns (the fixture plants none of these).
+                extra = [dict(op="create-file", path="docs/NEW.md", content_digest="sha256:" + "1" * 64),
+                         dict(op="plant-governance", path="CLAUDE.md", content_digest="sha256:" + "2" * 64),
+                         dict(op="enable-hook", registration_path=".opf/hooks/registry.json",
+                              new_digest="sha256:" + "3" * 64),
+                         dict(op="register-unmanaged", new_digest="sha256:" + "4" * 64)]
+                ev.plan = dict(plan, ops=plan["ops"] + extra)
+                wanted = _planned_destinations(ev)
+                check("check-1-destinations-every-op-kind", wanted.get("docs/NEW.md") == "sha256:" + "1" * 64
+                      and wanted.get("CLAUDE.md") == "sha256:" + "2" * 64
+                      and wanted.get(".opf/hooks/registry.json") == "sha256:" + "3" * 64
+                      and wanted.get(".working/toml/manifest.toml") == "sha256:" + "4" * 64
+                      and _CI_PATH not in wanted and _CI_RECIPE_REL not in wanted
+                      and ".working/TODO.md" not in wanted)
+                # Check 5's legs a VALID frozen plan cannot reach end to end (frozen_plan refuses both plans): no
+                # deny-capable row is red, never vacuously green, and no rendered view leaves the render probe
+                # without a target, CANNOT-EVALUATE.
+                ev.prober = _Surface()
+                ev.plan = dict(plan, enforcement=[row for row in plan["enforcement"]
+                                                 if row["means"] not in PROBED_MEANS])
+                direct = _Report()
+                _check_wiring(ev, direct)
+                check("check-5-no-deny-capable-row-red", direct.result().status == INVALID
+                      and any("no deny-capable enforcement row" in f for f in direct.findings))
+                ev.plan = dict(plan, ops=[op for op in plan["ops"] if op["op"] != "render-views"])
+                direct = _Report()
+                try:
+                    _check_wiring(ev, direct)
+                except Unevaluable as exc:
+                    direct.cannot.append(str(exc))
+                check("check-5-no-render-target-cannot", direct.result().status == CANNOT_EVALUATE
+                      and any("render probe has no target" in f for f in direct.result().findings))
+                # Each probe target is derived from the plan and the run, never a default path: by direct call
+                # (the plan validator refuses a store root other than ".") a store under nested with another machine
+                # directory, views rendered under nested/views and another run's id move every target with
+                # them, and the render probe takes the first planned view. Each literal is spelled out, so
+                # replacing store_manifest, the view composition or archive_rel with a default path fails.
+                other_run = "adopt-20261001T000000Z-fedcba9876543210"
+                rendered = [dict(op, store_root="nested/views", members=op["members"] + [dict(
+                    path=".working/LATER.md", digest=_digest(b"later\n"))]) if op["op"] == "render-views" else op
+                            for op in plan["ops"]]
+                ev.plan = dict(plan, store=dict(plan["store"], store_root="nested", machine_rel=".working/machine"),
+                               ops=rendered)
+                ev.run_id = other_run
+                try:
+                    targets = [(name, path) for name, _expect, _actor, _label, path in _wiring_probes(ev)]
+                finally:
+                    ev.run_id = _RUN
+                check("check-5-probe-targets-follow-plan", targets == [
+                    ("store-write", "nested/.working/machine/manifest.toml"),
+                    ("archive-write", ".working/archive/adoption/" + other_run + "/" + _ARCHIVE_PROBE),
+                    ("sanctioned-writer", "nested/.working/machine/manifest.toml"),
+                    ("render", "nested/views/.working/TODO.md")])
+                # Check 3 re-reads the bundle inventory after verify_bundle: that read is held to the apply
+                # shell's own inventory validator too (here verify_bundle is stubbed VALID, so only it grades).
+                ev.plan = plan
+                bundled = _toml_file(root, apply.inventory_rel(_RUN))
+                bundled["file"].append(apply.inventory_row("../escape.md", b"x"))
+                _put(root, apply.inventory_rel(_RUN), _emit(bundled))
+                direct = _Report()
+                with mock.patch.object(apply, "verify_bundle", lambda *a: schema._ok()):
+                    try:
+                        _check_preservation(ev, direct)
+                    except Unevaluable as exc:
+                        direct.cannot.append(str(exc))
+                check("check-3-bundle-inventory-validated", direct.result().status == CANNOT_EVALUATE
+                      and any("the bundle inventory:" in f for f in direct.result().findings))
+            finally:
+                store._close_fd_exc_safe(ev.root_fd)
+        # Dispatch wiring: each roster name runs exactly its own check function. (These replace the former
+        # removal-mutant vectors, which could not fail: an emptied check body always grades VALID.)
+        for name in CHECKS:
+            probe = "dispatch-probe-" + name
+
+            def _probing(ev, rep, _probe=probe):
+                rep.finding(_probe)
+
+            with mock.patch.object(here, _CHECK_FUNCTIONS[name], _probing):
+                probed = _case()
+            check("dispatch-" + name + "-load-bearing", probed[name].status == INVALID
+                  and _says(probed, name, probe)
+                  and all(probed[n].status == base[n].status for n in CHECKS if n != name))
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never an uncaught exit-1 escape
+        print("OPF-ADOPT-COMPLETE SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return 2
+    finally:
+        mock.patch.stopall()
+    failed = [name for name, ok in results if not ok]
+    for name in failed:
+        print("FAIL: " + name, file=sys.stderr)
+    print("OPF-ADOPT-COMPLETE SELF-TEST: {} checks, {} failed".format(len(results), len(failed)))
+    return 1 if failed else 0
+
+
+def main():
+    if sys.argv[1:] in (["--self-test"], ["--selftest"]):
+        return self_test()
+    print("usage: _opf_adopt_complete.py --self-test (a library module: evaluate() and roster_green())",
+          file=sys.stderr)
+    return 2
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. The modules it imports hold child launch
+# and wait calls, so under an ignored SIGCHLD a failing child they start would read as a pass. Its
+# self-test starts no child itself; the guard still runs as the first statement of self_test(), so a
+# launch added there later is covered, and at the entry line before main(); the entry line comes after
+# the --self-test statement that opf.py requires first in the __main__ block. An import of this module
+# runs nothing.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    sys.exit(_child_status_refusal_exit("_opf_adopt_complete.py") or main())

@@ -45,7 +45,10 @@ byte-canon for an arbitrary captured body (a CRLF, a line with trailing whitespa
 codepoint would land in the bytes verbatim). The subset supports strings of any content, including
 newlines; the canonical FORM of that support is escaping. _byte_canon is the authority for the
 byte rules; the self-test reconciles this module's forbidden-codepoint set against it and runs every
-emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The en dash (U+2013) and em
+emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The line and paragraph separators
+U+2028 and U+2029 (_byte_canon.LINE_SEPARATORS, outside the forbidden set) are escaped too and reconciled
+the same way; an earlier emitter wrote them literally, and matches_store_bytes and prior_separator_spelling
+let a caller accept a store file or a recorded digest in that spelling. The en dash (U+2013) and em
 dash (U+2014) escaping is a SEPARATE house-style no-dash guarantee, not part of the byte_canon forbidden
 set, so the emitted bytes are dash-free by construction independent of what byte_canon covers.
 
@@ -69,11 +72,16 @@ Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 mi
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_emit.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_emit.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import datetime
 import math
@@ -100,6 +108,13 @@ _ZERO_WIDTH = frozenset(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)
 _BIDI = frozenset(chr(c) for c in (0x061C, 0x200E, 0x200F)
                   + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
 _FORBIDDEN_CODEPOINTS = _ZERO_WIDTH | _BIDI
+
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR (_byte_canon.LINE_SEPARATORS, kept apart from the
+# forbidden set so render and record do not refuse a store that holds one): str.splitlines() splits on both,
+# so they are escaped too and never reach the emitted bytes literally. The self-test asserts this constant
+# equals _byte_canon.LINE_SEPARATORS, as it does for the forbidden set. An emitter before this escape wrote
+# them literally; matches_store_bytes and prior_separator_spelling accept that earlier spelling.
+_LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
 
 # House-style no-dash guarantee, separate from byte_canon (which does not cover dashes): the en dash
 # (U+2013) and em dash (U+2014) are escaped so they never reach the emitted bytes literally, whatever
@@ -141,13 +156,14 @@ _MAX_EMIT_BYTES = 64 * 1024 * 1024
 def _escape_basic(s):
     """Render `s` as a TOML basic string (with surrounding quotes), escaping every character that must
     not appear literally: the two structural characters (\\ and \"), the C0 controls and DEL and the C1
-    controls, and the byte-canon forbidden codepoints. The en dash (U+2013) and em dash (U+2014) are also
-    escaped, so the emitted bytes are dash-free whatever the input carries; that is a house-style no-dash
-    guarantee, separate from byte_canon (which does not cover dashes). Everything else, including ordinary
-    printable unicode, is left literal. A lone surrogate has no UTF-8 encoding, so it is rejected
-    fail-closed (EmitError) rather than returned in a document whose bytes cannot be encoded. The result
-    contains no raw CR, no forbidden codepoint, no dash byte, and (because the closing quote follows the
-    content) never leaves a line with trailing whitespace."""
+    controls, the byte-canon forbidden codepoints, and the line and paragraph separators U+2028 and U+2029.
+    The en dash (U+2013) and em dash (U+2014) are also escaped, so the emitted bytes are dash-free whatever
+    the input carries; that is a house-style no-dash guarantee, separate from byte_canon (which does not
+    cover dashes). Everything else, including ordinary printable unicode, is left literal. A lone surrogate
+    has no UTF-8 encoding, so it is rejected fail-closed (EmitError) rather than returned in a document
+    whose bytes cannot be encoded. The result contains no raw CR, no forbidden codepoint, no line or
+    paragraph separator, no dash byte, and (because the closing quote follows the content) never leaves a
+    line with trailing whitespace."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -155,7 +171,8 @@ def _escape_basic(s):
             raise EmitError("string contains a lone surrogate (U+{:04X}) with no UTF-8 encoding".format(o))
         if ch in _NAMED_ESCAPES:
             out.append(_NAMED_ESCAPES[ch])
-        elif o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _HOUSE_STYLE_DASHES:
+        elif (o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _LINE_SEPARATORS
+              or ch in _HOUSE_STYLE_DASHES):
             out.append("\\u{:04X}".format(o))
         else:
             out.append(ch)
@@ -550,13 +567,47 @@ def emit_checked(document):
     except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
         raise EmitError("emitted document did not reparse as TOML; fail-closed")
     except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
-        # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
+        # reparse or comparison failure (a RecursionError from deep nesting or, from CPython 3.14.8, a
+        # >1000-part dotted key, or a
         # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
         # emit_checked honours the same no-uncontrolled-exception contract as emit() and U7's `except
         # EmitError` fail-closed path is never bypassed by a leaked exception.
         raise EmitError("emitted document could not be reparsed or compared for the round-trip proof; "
                         "fail-closed")
     return text
+
+
+# Each separator's UTF-8 bytes paired with the escape text the emitter now writes for it inside a basic string.
+_SEPARATOR_ESCAPES = tuple(sorted((ch.encode("utf-8"), "\\u{:04X}".format(ord(ch)).encode("ascii"))
+                                  for ch in _LINE_SEPARATORS))
+# One escape of an emitted basic string that the earlier spelling depends on: an escaped backslash (matched
+# whole, so the text after it is never read as an escape) or the escape of a separator.
+_SEPARATOR_ESCAPE_RE = re.compile(r"\\(?:\\|u({}))".format(
+    "|".join("{:04X}".format(ord(ch)) for ch in sorted(_LINE_SEPARATORS))))
+
+
+def matches_store_bytes(raw, fresh):
+    """True iff `raw`, the bytes read from a store file, reproduce `fresh`, the canonical emission (UTF-8
+    bytes) of raw's own parsed model: exactly, or as an emitter before the U+2028/U+2029 escape wrote them,
+    meaning that replacing every literal U+2028 and U+2029 in `raw` with its escape text gives exactly
+    `fresh`. Accepting that earlier spelling is sound because TOML admits either character only inside a
+    string or a comment, a canonical document carries no comment and only basic strings, and inside a basic
+    string the literal character and its escape read back as the same value. A literal one in a comment or
+    in a literal string, and any other byte difference, still fail. The caller's next write re-spells the
+    file with the escapes."""
+    if raw == fresh:
+        return True
+    for literal, escape in _SEPARATOR_ESCAPES:
+        raw = raw.replace(literal, escape)
+    return raw == fresh
+
+
+def prior_separator_spelling(text):
+    """`text`, a canonical emission, as an emitter before the U+2028/U+2029 escape spelled it: each
+    `\\u2028` and `\\u2029` escape written as the literal character. Every backslash in emitted text opens
+    an escape inside a basic string, so an escaped backslash is consumed whole and the text after it is never
+    read as a separator escape. A digest recorded over a body before that escape is the digest of this text."""
+    return _SEPARATOR_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(0), text)
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -763,15 +814,19 @@ def _fixture_send_subject(peer, subject, subject_fd):
 
 def _fixture_ack_subject(fd):
     """Release the subject, strictly AFTER the receipt send returned: an acknowledged
-    subject is always addressable through its delivered receipt (QA18 codex F2). A
-    subject that already died is tolerated (its wait status is authoritative), and the
-    write end closes either way, so a guardian that dies before acknowledging always
-    hands the blocked subject an EOF."""
+    subject is always addressable through its delivered receipt (QA18 codex F2). The
+    write is reported, observed: True only when os.write wrote the one ack byte, and
+    False when it failed with OSError -- a subject that already died is tolerated (its
+    wait status is authoritative). The write end closes either way, so a guardian that
+    dies before acknowledging always hands the blocked subject an EOF. The guardian
+    ignores the report (supervision reads the subject's status); a caller certifying
+    the release to a third party publishes only on True, never on a swallowed
+    failure."""
     import os
     try:
-        os.write(fd, b"A")
+        return os.write(fd, b"A") == 1
     except OSError:
-        pass  # the subject is already gone: supervision reads its status
+        return False  # the subject is already gone: supervision reads its status
     finally:
         os.close(fd)
 
@@ -1517,7 +1572,7 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
 
 
 # array is required: socket.send_fds/recv_fds cold-import it inside their own
-# bodies, so importing socket alone does not load it (QA19 F4).
+# bodies, so importing socket alone does not load it.
 _FIXTURE_GUARDIAN_MODULES = (
     "array", "ctypes", "errno", "gc", "json", "pathlib", "resource", "select",
     "signal", "socket", "time", "traceback")
@@ -1622,7 +1677,7 @@ class _FixtureProcess:
     fork; construction resources are never disposed while the launcher can still
     use them. A failed construction (e.g. thread exhaustion) aborts the launch,
     releases every resource, and surfaces the original error. Cancellation
-    masking (fix 2w/2x): close() runs its ENTIRE ownership decision, transfer,
+    masking: close() runs its ENTIRE ownership decision, transfer,
     collection and cleanup sequence -- and poll() its collection-to-recording
     step -- with SIGINT and SIGTERM masked on the calling thread
     (pthread_sigmask), and the LAUNCHER is created with the same pair blocked
@@ -1631,15 +1686,15 @@ class _FixtureProcess:
     single-threaded caller EVERY thread blocks the pair during the sequence
     and even a PROCESS-directed cancellation -- the real Ctrl-C delivery
     shape, which the kernel may hand to ANY thread with it unblocked -- stays
-    kernel-pending (QA19 F2, QA20, QA21 claude F1). The prior mask is
+    kernel-pending. The prior mask is
     captured by QUERY before the restoring try and the block is the try's
-    FIRST statement, restored exactly in the finally (QA21 claude F3): a
+    FIRST statement, restored exactly in the finally: a
     cancellation landing before the block installs disposes NOTHING, not
     even the thread's signal state, and close() can simply run again. The
     pending cancellation is delivered AT the restore, inside close()/poll()'s
-    own finally (QA21 claude F4): close() then raises the KeyboardInterrupt
+    own finally: close() then raises the KeyboardInterrupt
     itself, with any in-flight refusal preserved on the exception chain
-    (callers walk __context__). The deferral is BOUNDED (QA21 gemini F3, an
+    (callers walk __context__). The deferral is BOUNDED (an
     accepted trade-off: guaranteed ownership and cleanup over immediate
     termination): every masked wait carries its own deadline, so a pending
     cancellation -- including a job supervisor's SIGTERM -- is delayed at
@@ -1674,23 +1729,23 @@ class _FixtureProcess:
     buffered receipt before closing that socket. A guardian that cannot be
     collected within the bounded cleanup budget is frozen (SIGSTOP via its
     pidfd, so a live guardian's pid/pgid cannot be recycled), then the
-    receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP
-    (fix 2y): while the frozen guardian lives it is the tree's subreaper, so
+    receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP:
+    while the frozen guardian lives it is the tree's subreaper, so
     every observed member is verified through its OWN pidfd against /proc
     -- group membership AND a CURRENT parent chain reaching the guardian
     anchor,
     re-checked AFTER the pidfd is opened -- NEVER a numeric killpg and NEVER
-    a census anchored on the subject's bare numeric pid (QA20 claude F1,
-    QA21 codex F3, fix 2y codex F1: only unreapability pins a pid or pgid
-    NUMBER against reuse; neither a held pidfd nor SIGSTOP delivery does).
+    a census anchored on the subject's bare numeric pid (only unreapability
+    pins a pid or pgid NUMBER against reuse; neither a held pidfd nor
+    SIGSTOP delivery does).
     Members die BEFORE the leader (the census excludes the leader; its
     held-pidfd SIGKILL runs last), so no member is stranded by its leader's
     death, and every observed member the census could not address is
-    accounted (fix 2y codex F2; a member no census observed -- the
+    accounted (a member no census observed -- the
     disclosed fork-race and pid-wraparound residual -- can be neither
-    addressed nor accounted, per the ruling PD-335-TREE-CLAIM-STALL). The
-    "tree" claim then rests on OBSERVATION, never on the kill sends alone
-    (fix 2z; maintainer ruling PD-335-TREE-CLAIM-STALL):
+    addressed nor accounted, so the refusal discloses it rather than
+    claiming past it). The
+    "tree" claim then rests on OBSERVATION, never on the kill sends alone:
     while the guardian stays frozen, a bounded verification census must
     observe NO live, signalable group member in TWO CONSECUTIVE clean
     passes -- an observation, never a proof (a continuously forking chain
@@ -1702,19 +1757,17 @@ class _FixtureProcess:
     the named partial accounting. Then the guardian itself is SIGKILLed. On ANY guardian
     failure, escalated or not -- including a failure FIRST collected by
     poll(), which kills the subject AT COLLECTION TIME and records the
-    failure for close() to prove and re-raise (QA19 F1), an UNRESOLVED
+    failure for close() to prove and re-raise, an UNRESOLVED
     collection (guardian reaped, status never validated, no failure
-    recorded: treated as a failure of close()'s own, QA20 codex F1), and a
+    recorded: treated as a failure of close()'s own), and a
     LOST-OWNERSHIP collection (the guardian disappeared without this
-    close()'s reap, fix 2y claude Finding 2) -- a receipt-identified subject
+    close()'s reap) -- a receipt-identified subject
     is killed and its disappearance proven on its pidfd or refused loudly;
     on every one of those guardian-DEAD paths the kill is SUBJECT-ONLY: the
     dead guardian owns no orphans, so NO member census runs, NO new pidfds
-    are opened, and only the already-held subject pidfd is signalled (fix
-    2y, D2).
+    are opened, and only the already-held subject pidfd is signalled.
 
-    Refusal wording, class-wide (each names ONLY the steps actually taken,
-    QA19 F3 / QA20 claude F3 / fix 2y codex F2):
+    Refusal wording, class-wide (each names ONLY the steps actually taken):
 
       kill state ran               refusal names
       ---------------------------  ------------------------------------------
@@ -1743,7 +1796,7 @@ class _FixtureProcess:
     of a subject whose guardian is DEAD survive the subject-only
     kill (no process owns the orphans after the subreaper guardian's death,
     so a census there could only trust recyclable numbers and unverifiable
-    reparented chains; fix 2y, D2) -- both disclosed in the refusal, never
+    reparented chains) -- both disclosed in the refusal, never
     claimed killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
     extra coverage, failing closed to these residuals where unavailable.
     Hosts without pidfd degrade escalation to guardian-only with the same
@@ -1793,7 +1846,7 @@ class _FixtureProcess:
         self._launcher = None
         self._launch_error = None
         # The recorded guardian failure, set at COLLECTION time by whichever
-        # collector reads the failed report first (QA19 F1); close() re-raises
+        # collector reads the failed report first; close() re-raises
         # it after addressing the receipt-identified subject.
         self._failure = None
         self._launch_lock = threading.Lock()
@@ -2131,7 +2184,7 @@ class _FixtureProcess:
         """Record a supervision failure at COLLECTION time, whichever collector
         observed it first: close() must address the receipt-identified subject
         and re-raise the recorded failure even when poll() or start() was the
-        collector that read the failed report (QA19 F1). A recorded failure
+        collector that read the failed report. A recorded failure
         is a RESOLVED collection; the subject-cleanup obligation it creates is
         tracked by `cleaned`, never by `unresolved`."""
         self._failure = failure
@@ -2384,8 +2437,8 @@ class _FixtureProcess:
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
         launcher has not recorded its result yet, ABANDON the launch to it (the
-        launcher is then the fork's last owner and collects its own fork,
-        QA19 F2) and report True; a result recorded in the meantime keeps this
+        launcher is then the fork's last owner and collects its own fork)
+        and report True; a result recorded in the meantime keeps this
         close() the owner."""
         with self._launch_lock:
             if self._launched.is_set():
@@ -2449,8 +2502,8 @@ class _FixtureProcess:
         # path, because the launcher and its guardian can still use it all. An
         # exception raised INSIDE this coordination -- normally impossible for a
         # masked cancellation, but reachable by a pre-mask interpreter flag or a
-        # non-signal asynchronous exception -- must leave the same owner
-        # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
+        # non-signal asynchronous exception -- must leave the same owner:
+        # the launcher for an unrecorded launch (abandoned under the
         # launch lock before re-raising), or this close(), which finishes
         # collecting before re-raising.
         def release_launcher():
@@ -2605,31 +2658,30 @@ class _FixtureProcess:
 
     def _escalation_refusal(self, failure):
         """Annotate an escalated refusal with ONLY what the escalation
-        actually did (QA19 F3), accounting every observed member (fix 2y,
-        codex F2; a member no census observed -- the disclosed fork-race
+        actually did, accounting every observed member (a member no
+        census observed -- the disclosed fork-race
         and pid-wraparound residual -- can be neither addressed nor
-        accounted, per the ruling PD-335-TREE-CLAIM-STALL):
+        accounted, so the refusal discloses it rather than claiming past it):
         "subject tree killed" is claimed ONLY when the guardian-anchored
         census addressed every OBSERVED member (a census can only address
         members it observed) AND the bounded post-kill verification
         census then OBSERVED no live, signalable member left in two
-        consecutive clean passes (fix 2z: the claim rests on observation,
-        never on the kill sends alone; the maintainer ruling
-        PD-335-TREE-CLAIM-STALL words even that claim as an observation with
+        consecutive clean passes (the claim rests on observation,
+        never on the kill sends alone; even that claim
+        is worded as an observation with
         its residual, never a proof); a census with skipped or unknown
         members names them, and unverifiable entries -- possible members,
-        never established ones (round 24, claude F1) -- are named apart; a
+        never established ones -- are named apart; a
         subject-only kill (no guardian ownership) disclosed its unaddressed
-        descendants (the orphan-escape residual, pdeathsig-backed, D2). A
+        descendants (the orphan-escape residual, pdeathsig-backed). A
         census kill recorded by a PRIOR interrupted close ("tree"/"partial")
         is disclosed with the same accounting, claiming the pidfd exit proof
-        only when this close actually ran it (fix 2z, claude F4). The freeze
+        only when this close actually ran it. The freeze
         needs the guardian's pidfd, and the subject kill with its exit proof
         needs the receipt's subject pidfd, so a pid-only receipt
         (pidfd-absent host) is a guardian-only escalation whose subject
         cleanup is UNVERIFIED, and a missing receipt is INCOMPLETE cleanup
-        -- never a claimed kill this close() could not address (QA18 codex
-        F2)."""
+        -- never a claimed kill this close() could not address."""
         frozen = ("guardian frozen" if self.pidfd is not None
                   else "guardian not frozen: no pidfd")
         if self._subject_kill == "tree":
@@ -2834,13 +2886,13 @@ class _FixtureProcess:
                             self._read_report(raw)
                         except ChildStatusUnavailable:
                             pass  # recorded by _read_report; addressed below
-                # HOISTED out of the not-collected gate (QA19 F1): the subject
+                # HOISTED out of the not-collected gate: the subject
                 # kill and exit proof run on ANY guardian failure, including one
                 # FIRST collected by poll() -- the layer's primary collection
                 # path, which killed the subject pin-first at collection time
                 # and recorded the failure for this close(). An armed guardian
                 # collected WITHOUT a validated status or recorded failure is
-                # UNRESOLVED (QA20 codex F1): the subject's fate is unknown, so
+                # UNRESOLVED: the subject's fate is unknown, so
                 # close() treats it as a failure of its own. A startup failure
                 # start() already surfaced (never armed) has no subject and
                 # nothing to re-raise.
@@ -3260,7 +3312,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
                 child.close()
             except ChildStatusUnavailable as exc:
                 # close() re-raises a recorded failure the poll above already
-                # reported (QA19 F1) AFTER addressing the receipt-identified
+                # reported AFTER addressing the receipt-identified
                 # subject, possibly ANNOTATED (subject-only kill disclosure,
                 # pid-only receipt): report each refusal once, keeping the
                 # annotated form when one extends the other.
@@ -3319,7 +3371,9 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
     one) releases the ones already opened and is this check's own named failure, never an escaping
     exception. The stack's release closes a number only while fstat still returns the identity recorded at
     its open, so a number this check expected released, and another lane reopened onto any other file, is
-    never closed by this check's cleanup either (#378 P1). `reuse`, when a leg passes one, is called with
+    never closed by this check's cleanup either (#378 P1). Only EBADF reads as released there: any other
+    fstat error is a failure naming the number, which is left open (its file is unknown), never read as
+    released. `reuse`, when a leg passes one, is called with
     the descriptors after gc.collect() and before they are checked, so the leg can put another file on one.
     Returns the failures."""
     import contextlib
@@ -3348,8 +3402,11 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
         """Close fd only while it still names the file recorded at its open, this check's own."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return                                        # released already: never closed again
+        except OSError as exc:
+            if exc.errno != errno.EBADF:                  # unreadable, never read as released: named, left open
+                failures.append("guardian-close-reuse setup failure: cleanup cannot evaluate descriptor {}: "
+                                "{!r}".format(fd, exc))
+            return                                        # EBADF: released already, never closed again
         if (st.st_dev, st.st_ino) != ident:
             return                                        # another file holds the number now: not ours
         try:
@@ -3410,8 +3467,9 @@ def _st_guardian_close_reuse():
     private directory, so a number it expected released is closed only while fstat shows that file's
     identity, by the leg and by the setup check's own cleanup alike: an identity leg shows a number another
     lane reopened onto another file is never closed and is no failure, a reuse leg shows the setup check
-    reports a number replaced after gc.collect() and its cleanup leaves that number open, and a genuine leak
-    is still reported and closed.
+    reports a number replaced after gc.collect() and its cleanup leaves that number open, a genuine leak
+    is still reported and closed, and a cleanup leg shows an fstat EIO in the setup check's own release is
+    its failure naming that number, left open, never read as released.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
@@ -3523,15 +3581,27 @@ def _st_guardian_close_reuse():
         ident, a file this leg created in its private directory, which no other lane opens and whose inode
         stays taken while the directory exists. The number may since belong to another thread's open, so a
         number naming any other file (another lane's /dev/null included) is never closed (#378 P1). Returns
-        whether it closed fd."""
+        True when it closed fd, False when fd is released (EBADF, the only error read as released) or names
+        another file, and for any other fstat error a cannot-evaluate string naming fd: that number is never
+        closed (its file is unknown) and never read as released."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return False
+            return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
         if (st.st_dev, st.st_ino) != ident:
             return False
         os.close(fd)
         return True
+
+    def left_open(fd, ident, what):
+        """The leak verdict on a number this leg expected released: [] when it is released or names another
+        file, else the named failure: `what` left open (and closed here), or a number fstat cannot read."""
+        closed = close_if_left_open(fd, ident)
+        if closed is True:
+            return [what + " was left open"]
+        return [what + ": " + closed] if closed else []
 
     def own_file(name):
         """A descriptor on a new file in the private directory, with its (st_dev, st_ino) taken at open."""
@@ -3544,10 +3614,14 @@ def _st_guardian_close_reuse():
         return fd, (st.st_dev, st.st_ino)
 
     def identity(fd):
+        """fd's (st_dev, st_ino); None once fd is closed (EBADF only); any other fstat error returns a
+        cannot-evaluate string naming fd, which matches no identity and is never read as released."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return None
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return None
+            return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
         return st.st_dev, st.st_ino
     with tempfile.TemporaryDirectory(prefix="opf-emit-setup-") as private:   # kept until every number is checked
         got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails, private)
@@ -3555,9 +3629,29 @@ def _st_guardian_close_reuse():
             failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
                             "named failure alone, got {}".format(got or "green"))
         for fd, ident in opened:
-            if close_if_left_open(fd, ident):
-                failures.append("guardian-close-reuse setup failure with its second open failing: the "
-                                "descriptor opened first was left open")
+            failures += left_open(fd, ident, "guardian-close-reuse setup failure with its second open failing: "
+                                             "the descriptor opened first")
+        # The leak verdict fails closed: a number left open on this leg's own file whose fstat fails EIO is
+        # reported naming it, never read as released. An independent fstat must still see it open, else the
+        # case proves nothing; the leg then closes it, its own file.
+        held, ident = own_file("unreadable")
+        import os as _os_census                   # patched through an alias: `os` itself is never rebound here
+        real_fstat = _os_census.fstat
+
+        def unreadable(number, *args, **kwargs):
+            if number == held:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = unreadable
+        try:
+            got = left_open(held, ident, "held")
+        finally:
+            _os_census.fstat = real_fstat
+        if len(got) != 1 or "cannot evaluate descriptor {}:".format(held) not in got[0] or identity(held) != ident:
+            failures.append("guardian-close-reuse leak verdict under a census EIO: expected the held descriptor "
+                            "named cannot-evaluate and left open, got {}".format(got or "released"))
+        if identity(held) == ident:
+            os.close(held)
         # Another lane opening a file onto the released number: dup2 puts a descriptor on this leg's own
         # "other-lane" file onto a number this leg still owns, so the number is never free for a real lane to
         # take meanwhile. It must not be closed and must not be reported; the leg then closes it only while
@@ -3570,9 +3664,12 @@ def _st_guardian_close_reuse():
             except BaseException:
                 os.close(reused)                          # dup2 failed: still this leg's own file
                 raise
-            if close_if_left_open(reused, ident):
+            closed = close_if_left_open(reused, ident)
+            if closed is True:
                 failures.append("guardian-close-reuse identity check: closed a number another lane reopened "
                                 "onto another file")
+            elif closed:
+                failures.append("guardian-close-reuse identity check: " + closed)
             elif identity(reused) != other_ident:
                 failures.append("guardian-close-reuse identity check: the number another lane reopened no "
                                 "longer names that lane's file")
@@ -3599,11 +3696,42 @@ def _st_guardian_close_reuse():
             os.close(other)
         # A genuine leak: a number still naming this leg's own file is reported and closed.
         leaked, ident = own_file("leaked")
-        if not close_if_left_open(leaked, ident) or identity(leaked) == ident:
+        after = identity(leaked) if close_if_left_open(leaked, ident) is True else ident
+        if after == ident or isinstance(after, str):
             failures.append("guardian-close-reuse identity check: a descriptor left open on this leg's own "
                             "file was not reported and closed")
             if identity(leaked) == ident:
                 os.close(leaked)
+        # The setup check's cleanup fails closed: fstat of the second descriptor it opened fails EIO in its
+        # ExitStack release alone (the check's own reads before it succeed), so that descriptor must be named
+        # cannot-evaluate and left open, never read as released; every other one is released. The check's
+        # own private directory is removed on return, but the open descriptor keeps its inode, so its
+        # identity stays unique; the leg then closes it while it still names the check's file.
+        seen = []
+
+        def capture(fresh):
+            seen.extend((fd, identity(fd)) for fd in fresh)
+        real_fstat = _os_census.fstat
+
+        def cleanup_unreadable(number, *args, **kwargs):
+            if len(seen) == 4 and number == seen[1][0] and sys._getframe(1).f_code.co_name == "release":
+                raise OSError(errno.EIO, "injected cleanup read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = cleanup_unreadable
+        try:
+            got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, reuse=capture)
+        finally:
+            _os_census.fstat = real_fstat
+        if len(seen) != 4 or len(got) != 1 or "cleanup cannot evaluate descriptor {}:".format(seen[1][0]) \
+                not in got[0] or identity(seen[1][0]) != seen[1][1]:
+            failures.append("guardian-close-reuse setup failure with its cleanup fstat failing EIO: expected "
+                            "the unreadable descriptor named cannot-evaluate and left open, got "
+                            "{}".format(got or "green"))
+        for number, recorded_ident in seen[:1] + seen[2:]:
+            failures += left_open(number, recorded_ident, "guardian-close-reuse setup failure with its cleanup "
+                                                          "fstat failing EIO: descriptor {}".format(number))
+        if len(seen) == 4 and identity(seen[1][0]) == seen[1][1]:
+            os.close(seen[1][0])                          # the check's own file, left open by design
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
@@ -3638,9 +3766,10 @@ def self_test():
               file=sys.stderr)
         return 2
     if not (isinstance(getattr(byte_canon, "FORBIDDEN", None), dict)
+            and isinstance(getattr(byte_canon, "LINE_SEPARATORS", None), dict)
             and callable(getattr(byte_canon, "scan_bytes", None))):
-        print("error: the byte-canon authority lacks the expected FORBIDDEN/scan_bytes interface; "
-              "fail-closed", file=sys.stderr)
+        print("error: the byte-canon authority lacks the expected FORBIDDEN/LINE_SEPARATORS/scan_bytes "
+              "interface; fail-closed", file=sys.stderr)
         return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
@@ -3649,6 +3778,13 @@ def self_test():
         failures.append("forbidden-codepoint set disagrees with _byte_canon.FORBIDDEN "
                         "(missing {}, extra {})".format(sorted(authority - set(_FORBIDDEN_CODEPOINTS)),
                                                         sorted(set(_FORBIDDEN_CODEPOINTS) - authority)))
+    # The line and paragraph separators are escaped too; that set MUST match the authority's separate
+    # LINE_SEPARATORS constant the same way (it is kept out of FORBIDDEN, so the check above cannot see it).
+    separator_authority = set(byte_canon.LINE_SEPARATORS.values())
+    if set(_LINE_SEPARATORS) != separator_authority:
+        failures.append("line-separator set disagrees with _byte_canon.LINE_SEPARATORS "
+                        "(missing {}, extra {})".format(sorted(separator_authority - set(_LINE_SEPARATORS)),
+                                                        sorted(set(_LINE_SEPARATORS) - separator_authority)))
 
     # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
     # sys.modules cache, so a poisoned _byte_canon entry cannot substitute an always-clean scanner
@@ -3683,6 +3819,11 @@ def self_test():
         findings = byte_canon.scan_bytes(text.encode("utf-8"))
         if findings:
             failures.append("{}: emitted bytes are not byte-canonical: {}".format(label, findings))
+        # scan_bytes leaves the separators to the repository gate, so check the authority's set directly.
+        literal = sorted(ch for b, ch in byte_canon.LINE_SEPARATORS.items() if b in text.encode("utf-8"))
+        if literal:
+            failures.append("{}: emitted bytes carry a literal line or paragraph separator: {}".format(
+                label, ["U+{:04X}".format(ord(ch)) for ch in literal]))
 
     def _round_trips(document, label):
         try:
@@ -3715,6 +3856,7 @@ def self_test():
                            "    boom()\r\nRuntimeError: boom\t(with a tab)"),
         "empty-string": "",
         "quotes-and-equals": 'a = "b" # not a comment, just a body',
+        "line-separators": "one" + chr(0x2028) + "two" + chr(0x2029) + "three \\u2028 text",
     }
     for name, body in fuzz.items():
         # As a top-level leaf, nested in a table, and as a field inside an array of tables, so the body
@@ -3728,7 +3870,8 @@ def self_test():
             failures.append("fuzz/{}: body did not round-trip faithfully".format(name))
 
     # A forbidden / awkward codepoint in a KEY is quoted and escaped, and still round-trips.
-    _round_trips({"a" + chr(0x200B) + "b": "x", "BACKLOG.md": "y", "with space": "z", "": "empty-key"},
+    _round_trips({"a" + chr(0x200B) + "b": "x", "BACKLOG.md": "y", "with space": "z", "": "empty-key",
+                  "c" + chr(0x2028) + "d" + chr(0x2029): "w"},
                  "fuzz/keys")
 
     # --- constrained-subset coverage: every accepted shape --------------------------------------------
@@ -3777,6 +3920,53 @@ def self_test():
         failures.append("house-style/dashes: an en/em dash reached the emitted bytes literally")
     if tomllib.loads(dash_text)["body"] != dashes:
         failures.append("house-style/dashes: the dash body did not round-trip faithfully")
+
+    # Line and paragraph separators: U+2028 and U+2029 are written with TOML's own \u2028 and \u2029 escapes,
+    # in a value and in a quoted key, and read back unchanged. Their neighbours U+2027 and U+2030 stay
+    # literal, so the escape covers exactly the two.
+    ls, ps = chr(0x2028), chr(0x2029)
+    seps = "a{}b{}c".format(ls, ps)
+    sep_model = {"body": seps, "k" + ls: "v"}
+    sep_text = emit(sep_model)
+    if sep_text != 'body = "a\\u2028b\\u2029c"\n"k\\u2028" = "v"\n':
+        failures.append("line-separators: the separators are not written as the \\u2028 and \\u2029 "
+                        "escapes ({!r})".format(sep_text))
+    if tomllib.loads(sep_text) != sep_model:
+        failures.append("line-separators: a separator value or key did not round-trip faithfully")
+    _round_trips(sep_model, "line-separators/round-trip")
+    neighbours = chr(0x2027) + chr(0x2030)
+    if emit({"body": neighbours}) != 'body = "{}"\n'.format(neighbours):
+        failures.append("line-separators: U+2027 or U+2030 was escaped; only U+2028 and U+2029 are")
+
+    # The earlier spelling: an emitter before that escape wrote the separators literally. matches_store_bytes
+    # accepts stored bytes only when replacing each literal separator with its escape gives exactly the fresh
+    # emission; a literal separator in a comment or a literal string, and any other byte difference, fail.
+    fresh = emit({"body": seps}).encode("utf-8")
+    prior = 'body = "{}"\n'.format(seps).encode("utf-8")
+    slash = emit({"body": "\\" + ls}).encode("utf-8")
+    for label, raw, canonical, want in (
+            ("exact", fresh, fresh, True),
+            ("prior-spelling", prior, fresh, True),
+            ("prior-backslash-then-separator", 'body = "\\\\{}"\n'.format(ls).encode("utf-8"), slash, True),
+            ("comment-separator", "# n{}\n".format(ls).encode("utf-8") + prior, fresh, False),
+            ("comment-separator-only", "# n{}\n".format(ls).encode("utf-8") + fresh, fresh, False),
+            ("literal-string", "body = 'a{}b{}c'\n".format(ls, ps).encode("utf-8"), fresh, False),
+            ("other-byte", prior.replace(b"body = ", b"body  = "), fresh, False),
+            ("extra-newline", prior + b"\n", fresh, False)):
+        if matches_store_bytes(raw, canonical) is not want:
+            failures.append("store-bytes/{}: matches_store_bytes returned {}; expected {}".format(
+                label, not want, want))
+    # prior_separator_spelling turns each separator escape back into the literal character, never the text
+    # after an escaped backslash, and its result reads back as the same model.
+    for label, model, want in (
+            ("separators", {"body": seps}, 'body = "{}"\n'.format(seps)),
+            ("escaped-backslash-then-text", {"body": "x\\u2028y"}, 'body = "x\\\\u2028y"\n'),
+            ("backslash-then-separator", {"body": "\\" + ps}, 'body = "\\\\{}"\n'.format(ps)),
+            ("separator-key", {"k" + ls: "v"}, '"k{}" = "v"\n'.format(ls)),
+            ("no-separator", {"body": "plain"}, 'body = "plain"\n')):
+        got = prior_separator_spelling(emit(model))
+        if got != want or tomllib.loads(got) != model:
+            failures.append("prior-spelling/{}: got {!r}; expected {!r}".format(label, got, want))
 
     # Signed-zero canonicalization: the two model-equal float inputs 0.0 and -0.0 emit byte-identically
     # (-0.0 normalizes to 0.0), and -0.0 still round-trips (it is model-equal to its 0.0 reparse).
@@ -3891,6 +4081,7 @@ def self_test():
 
     # ===== ROUND-6 codex: run_bounded watchdog hardening (this is the shared implementation imported by
     # _opf_check and _opf_release, so proving it here holds for all three self-tests) ====================
+    import errno
     import os as _os6
     import signal as _sig6
     import resource as _res6
@@ -3995,10 +4186,14 @@ def self_test():
         _close_real6 = _os6.close
 
         def _st_ident6(fd):
+            """fd's (st_dev, st_ino); None once fd is closed (EBADF, the only error read as closed). Any other
+            fstat error returns a cannot-evaluate string naming fd, never None that a caller reads as released."""
             try:
                 _st = _os6.fstat(fd)
-            except OSError:
-                return None
+            except OSError as _exc:
+                if _exc.errno == errno.EBADF:
+                    return None
+                return "cannot evaluate descriptor {}: {!r}".format(fd, _exc)
             return _st.st_dev, _st.st_ino
 
         def _cap_pipe_into(cap):
@@ -4028,13 +4223,18 @@ def self_test():
             return True
 
         def _cap_left_open6(cap):
-            """Whether the captured rfd is left open: no close released it and fstat still shows its identity."""
-            return cap.get("released") is False and _st_ident6(cap["rfd"]) == cap["ident"]
+            """True when the captured rfd is left open (no close released it and fstat still shows its identity),
+            False when released, and the cannot-evaluate string naming it when its fstat fails other than
+            EBADF: never read as released, and never closed (its file is unknown)."""
+            if cap.get("released") is not False:
+                return False
+            _got = _st_ident6(cap["rfd"])
+            return _got if isinstance(_got, str) else _got == cap["ident"]
 
         def _cap_reuse_kept6(cap, label, key="rfd"):
             """After a reuse run the captured number (cap[key]) must still name the other-lane pipe; the leg then
             closes it, its own descriptor. Returns the failures."""
-            if cap.get(key) is None or _st_ident6(cap[key]) != _oth6:
+            if cap.get(key) is None or isinstance(_oth6, str) or _st_ident6(cap[key]) != _oth6:
                 return ["run_bounded/{}-reused-number: a number another lane reused was closed or replaced "
                         "({})".format(label, cap.get(key))]
             _close_real6(cap[key])
@@ -4042,6 +4242,29 @@ def self_test():
         _oth_r6, _oth_w6 = _pipe_real6()                   # the other-lane file: this leg's own pipe
         _oth6 = _st_ident6(_oth_r6)
         _cap6 = dict()
+
+        # The left-open check fails closed: a captured, unreleased rfd still open whose fstat fails EIO is the
+        # cannot-evaluate string naming it, never read as released. An independent fstat must still see it
+        # open, else the case proves nothing.
+        _eio_r6, _eio_w6 = _pipe_real6()
+        _eio_cap6 = dict(rfd=_eio_r6, ident=_st_ident6(_eio_r6), released=False)
+        _eio_real6 = _os6.fstat
+
+        def _eio_fstat6(fd, *args, **kwargs):
+            if fd == _eio_r6:
+                raise OSError(errno.EIO, "injected census read failure")
+            return _eio_real6(fd, *args, **kwargs)
+        _os6.fstat = _eio_fstat6
+        try:
+            _eio_got6 = _cap_left_open6(_eio_cap6)
+        finally:
+            _os6.fstat = _eio_real6
+        if not (isinstance(_eio_got6, str) and "descriptor {}:".format(_eio_r6) in _eio_got6) \
+                or _st_ident6(_eio_r6) != _eio_cap6["ident"]:
+            failures.append("run_bounded/left-open-census-eio: an EIO fstat of a held captured rfd read as "
+                            "{!r}, not cannot-evaluate naming it".format(_eio_got6))
+        _close_real6(_eio_r6)
+        _close_real6(_eio_w6)
 
         def _cap_close6(fd):
             if not _cap_release6(_cap6, fd, _close_real6):
@@ -4058,14 +4281,16 @@ def self_test():
                 _os6.pipe = _pipe_real6
                 _os6.close = _close_real6
             _leaked6 = _cap_left_open6(_cap6)
-            if _leaked6:
+            if _leaked6 is True:
                 _close_real6(_cap6["rfd"])                 # still this leg's own pipe: close the leak it detected
             if _leak_res != "LEAKCHK":
                 failures.append("run_bounded/leak-check-setup{}: the capture run did not return its "
                                 "token".format(_tag6))
-            if _leaked6:
+            if _leaked6 is True:
                 failures.append("run_bounded/parent-rfd-leak{}: the parent did not close the pipe read fd "
                                 "(a descriptor leaks per call)".format(_tag6))
+            elif _leaked6:
+                failures.append("run_bounded/parent-rfd-census{}: {}".format(_tag6, _leaked6))
             elif _reuse6:
                 failures += _cap_reuse_kept6(_cap6, "parent-rfd")
 
@@ -4118,10 +4343,13 @@ def self_test():
                 _os6.pipe = _pipe_real6
                 _os6.fork = _fork_real7
                 _os6.close = _close_real7
-            if _cap7.get("rfd") is not None and _cap_left_open6(_cap7):
+            _left7 = _cap7.get("rfd") is not None and _cap_left_open6(_cap7)
+            if _left7 is True:
                 _close_real7(_cap7["rfd"])                 # still this leg's own pipe: close the leak it detected
                 failures.append("run_bounded/wfd-close-raise-rfd-leak{}: a raising parent wfd close skipped the "
                                 "rfd cleanup (read fd leaked; finding 7)".format(_tag7))
+            elif _left7:
+                failures.append("run_bounded/wfd-close-raise-rfd-census{}: {}".format(_tag7, _left7))
             elif _reuse7:
                 failures += _cap_reuse_kept6(_cap7, "wfd-close-raise-rfd")
             if _reuse7:
@@ -4392,8 +4620,8 @@ def self_test():
         failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
     # --- emit_checked reparse/compare backstop: ANY non-control-flow failure fails closed to EmitError --
-    # A >1000-part dotted key makes tomllib raise RecursionError (NOT TOMLDecodeError) on 3.12/3.13, and
-    # either the reparse or the comparison can raise MemoryError on a large store-derived model; the
+    # Deep nesting, and from CPython 3.14.8 a >1000-part dotted key, make tomllib raise RecursionError (NOT
+    # TOMLDecodeError), a many-part key can raise MemoryError under a memory limit, and either the reparse or the comparison can raise MemoryError on a large store-derived model; the
     # contract (docstring) and U7's `except EmitError` fail-closed path require these to become EmitError,
     # never escape uncontrolled. Swap the module tomllib for a stub whose loads() raises a
     # non-TOMLDecodeError and assert the conversion; a mutant catching only TOMLDecodeError, or dropping

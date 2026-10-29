@@ -107,11 +107,16 @@ primitive or git binary, or a fixture base inside a git repository), never a cle
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_init_substrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_init_substrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import datetime
 import hashlib
@@ -1064,6 +1069,47 @@ def settle_operation(writer, operation_id):
             raise InitSubstrateError("cannot remove the empty operation directory {} ({})".format(
                 operation_id, exc))
         return tuple(swept), True
+    finally:
+        os.close(ops_fd)
+
+
+def discard_reversed_operation(writer, operation_id):
+    """Remove ONE recorded operation directory (its plan and milestone records) under the live
+    writer, for an operation whose WORKTREE effects a coupled, preserving journal has verifiably
+    REVERSED: the caller proves the reversal first (every creation the operation's plan authorized
+    is absent again), and this layer removes only the record that would otherwise authorize a
+    resume of the reversed work. Staging leftovers are swept first; an entry that is neither the
+    plan nor a milestone record refuses (preserved evidence, never discarded); the operation's
+    journals and recorded outcomes are NOT removed (attempt evidence outlives the record)."""
+    _require_live_capability(writer)
+    if type(operation_id) is not str or not _OP_ID_RE.match(operation_id):
+        raise InitSubstrateError("operation id {!r} is not well-formed".format(operation_id))
+    ops_fd = _open_ops_for_write(writer)
+    try:
+        op_fd, op_ident = _open_existing_op_dir(ops_fd, operation_id)
+        label = "ops/{}".format(operation_id)
+        try:
+            _sweep_record_staging(ops_fd, operation_id, op_fd, op_ident, label)
+            names = _list_dir_fresh(ops_fd, operation_id, op_ident, label)
+            for name in names:
+                if name != PLAN_NAME and not _PHASE_FILE_RE.match(name):
+                    raise InitSubstrateError("{} holds {!r}, neither the plan nor a milestone "
+                                             "record; preserved, never discarded".format(label,
+                                                                                         name))
+            for name in names:
+                try:
+                    os.unlink(name, dir_fd=op_fd)
+                except OSError as exc:
+                    raise InitSubstrateError("cannot remove {}/{} ({})".format(label, name, exc))
+            os.fsync(op_fd)
+        finally:
+            os.close(op_fd)
+        try:
+            os.rmdir(operation_id, dir_fd=ops_fd)
+            os.fsync(ops_fd)
+        except OSError as exc:
+            raise InitSubstrateError("cannot remove the reversed operation directory {} "
+                                     "({})".format(operation_id, exc))
     finally:
         os.close(ops_fd)
 

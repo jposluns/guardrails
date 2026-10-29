@@ -10,11 +10,16 @@ reversal reports identify the measured candidate content digest only.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_opf_init_observe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_opf_init_observe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import argparse
 import hashlib
@@ -80,6 +85,14 @@ class Objects:
     def history(self, **limits):
         return self.module.RawHistory(self.read, object_format="sha1",
                                        budget=self.module.Budget(self.module.Limits(**limits)))
+
+
+# A case returns this (it otherwise returns None) when its reversal cannot be discriminated here:
+# os.O_PATH is absent, so the walk keeps its documented O_RDONLY fallback and the reversal IS the
+# production behaviour. The runner then reports the reversal UNAVAILABLE, never red, and refuses the
+# declaration on a platform that has os.O_PATH.
+NO_O_PATH = ("os.O_PATH absent: the walk keeps its documented O_RDONLY fallback, so the reversal is "
+             "the production behaviour here")
 
 
 def check(value, identity):
@@ -259,6 +272,179 @@ def absent_evidence(module):
         raise AssertionError(identity)
 
 
+PINNED, NEWEST, PARENT = "a" * 40, "b" * 40, "c" * 40
+POINTER_BLOB = b"100644 blob " + b"d" * 40 + b"\t.opf.toml\0"
+POINTER_TREE = b"040000 tree " + b"d" * 40 + b"\t.opf.toml\0"
+WORKING_TREE = b"040000 tree " + b"e" * 40 + b"\t.working\0"
+
+
+def scripted(rev_list, prefix="", pinned=PINNED, **extra):
+    """git answers keyed by the exact argv prior_store_holder must send; extra maps a
+    commit's probe (tree, parent or listing) to its answer. An answer that is an int is
+    that nonzero exit with empty output."""
+    base = prefix + "/" if prefix else ""
+    escaped = "".join("\\" + ch if ch in "*?[]\\" else ch for ch in base)
+    answers = {("rev-parse", "--is-shallow-repository"): b"false\n",
+               ("rev-list", "--first-parent", "--max-count=1", pinned, "--",
+                ":(literal)" + base + ".opf.toml",
+                ":(glob)" + escaped + ".working/*/manifest.toml"): rev_list}
+    for commit, tree in extra.get("trees", {}).items():
+        answers[("--literal-pathspecs", "ls-tree", "-z", commit, "--",
+                 base + ".opf.toml", base + ".working")] = tree
+    for commit, parent in extra.get("parents", {}).items():
+        answers[("rev-parse", "--verify", "--quiet", commit + "^1")] = parent
+    for commit, listing in extra.get("listings", {}).items():
+        answers[("ls-tree", "-r", "-z", "--name-only", commit + ":" + base + ".working")] = listing
+    return answers
+
+
+def holder(module, answers, prefix="", grafts=None, pinned=PINNED):
+    """prior_store_holder over scripted answers: (holder, or ("refused", code, detail), calls).
+    An unscripted argv answers rc 128, so a changed command refuses rather than passing."""
+    import _opf_observe
+    calls = []
+    snapshots = list(grafts or [("fixture", "absent")] * 2)
+
+    class Adapter:
+        def __init__(self, git, root):
+            pass
+
+        def graft_snapshot(self, budget):
+            return snapshots.pop(0)
+
+    def run_git(git, root, args, *rest, **kwargs):
+        calls.append((root, list(args)))
+        out = answers.get(tuple(args))
+        if out is None:
+            return _opf_observe._GitOutcome(True, 128, b"", "unscripted fixture command")
+        if type(out) is int:
+            return _opf_observe._GitOutcome(True, out, b"", "scripted fixture failure")
+        return _opf_observe._GitOutcome(True, 0, out, "")
+
+    module.GitObjects = Adapter
+    real = _opf_observe._run_git
+    _opf_observe._run_git = run_git
+    try:
+        result = module.prior_store_holder("/fixture/git", "/fixture/repo", pinned_head=pinned,
+                                           prefix=prefix, object_format="sha1")
+    except module.ObservationError as exc:
+        result = ("refused", exc.code, exc.detail)
+    finally:
+        _opf_observe._run_git = real
+    return result, calls
+
+
+def refused_as(module, result):
+    return type(result) is tuple and result[:2] == ("refused", module.CANNOT_EVALUATE)
+
+
+def holder_first_parent(module):
+    result, calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                            trees={NEWEST: POINTER_BLOB}))
+    check(result == NEWEST and all(root == "/fixture/repo" for root, _args in calls),
+          "prior-holder-first-parent-walk")
+
+
+def holder_deletion_parent(module):
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"", PARENT: POINTER_BLOB},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(result == PARENT, "prior-holder-deletion-parent")
+
+
+def holder_manifest(module):
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: WORKING_TREE},
+                                             listings={NEWEST: b"toml/manifest.toml\0"}))
+    check(result == NEWEST, "prior-holder-manifest-one-level-down")
+
+
+def holder_pointer_blob(module):
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: POINTER_TREE, PARENT: b""},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(refused_as(module, result)
+          and "rather than guessing" in result[2], "prior-holder-pointer-must-be-blob")
+
+
+def holder_no_hit(module):
+    result, _calls = holder(module, scripted(b""))
+    check(result is None, "prior-holder-no-hit-none")
+
+
+def holder_escaped(module):
+    result, _calls = holder(module, scripted(b"", prefix="we[X]"), prefix="we[X]")
+    check(result is None, "prior-holder-prefix-glob-escaped")
+
+
+def holder_shallow(module):
+    answers = scripted(NEWEST.encode() + b"\n", trees={NEWEST: POINTER_BLOB})
+    answers[("rev-parse", "--is-shallow-repository")] = b"true\n"
+    result, _calls = holder(module, answers)
+    check(refused_as(module, result) and "SHALLOW" in result[2],
+          "prior-holder-shallow-refused")
+
+
+def holder_graft_recheck(module):
+    result, _calls = holder(module, scripted(b""),
+                            grafts=[("fixture", "absent"), ("fixture", "changed")])
+    check(refused_as(module, result) and "metadata changed" in result[2],
+          "prior-holder-grafts-rechecked")
+
+
+def holder_git_failure(module):
+    # rev-list exits 128 (a pinned head git cannot resolve) with empty output: read as an
+    # empty walk that would be "no prior store", so the exit status alone must refuse.
+    result, _calls = holder(module, scripted(128))
+    check(refused_as(module, result) and result[2].startswith("rc 128:"),
+          "prior-holder-git-failure-refused")
+
+
+def holder_bad_pinned(module):
+    # An uppercase OID is malformed; git would resolve it, and the scripted walk answers
+    # empty, so only the shape check refuses, before any git read.
+    bad = PINNED.upper()
+    result, calls = holder(module, scripted(b"", pinned=bad), pinned=bad)
+    check(refused_as(module, result) and result[2] == "invalid commit OID" and calls == [],
+          "prior-holder-malformed-pinned-head")
+
+
+def holder_bad_object_id(module):
+    # The walk answers a name that is not an OID, and that name's tree would hold a pointer.
+    result, _calls = holder(module, scripted(b"not-a-commit\n",
+                                             trees={"not-a-commit": POINTER_BLOB}))
+    check(refused_as(module, result) and result[2] == "unexpected object id",
+          "prior-holder-unexpected-object-id")
+
+
+def holder_shallow_unexpected(module):
+    # A git too old for --is-shallow-repository echoes the flag back: neither true nor false.
+    answers = scripted(b"")
+    answers[("rev-parse", "--is-shallow-repository")] = b"--is-shallow-repository\n"
+    result, _calls = holder(module, answers)
+    check(refused_as(module, result) and "unexpected --is-shallow-repository" in result[2],
+          "prior-holder-shallow-answer-unexpected")
+
+
+def holder_listing_no_tab(module):
+    # Three fields but no tab: without the tab test the entry names nothing, the hit reads
+    # as a deletion, and the parent's pointer would be reported.
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"100644 blob " + b"d" * 40 + b"\0",
+                                                    PARENT: POINTER_BLOB},
+                                             parents={NEWEST: PARENT.encode() + b"\n"}))
+    check(refused_as(module, result) and "unparseable ls-tree entry" in result[2],
+          "prior-holder-listing-tab-required")
+
+
+def holder_listing_two_fields(module):
+    # A tab but only two fields: without the field count the pointer would match as a blob.
+    result, _calls = holder(module, scripted(NEWEST.encode() + b"\n",
+                                             trees={NEWEST: b"100644 blob\t.opf.toml\0"}))
+    check(refused_as(module, result) and "unparseable ls-tree entry" in result[2],
+          "prior-holder-listing-three-fields")
+
+
 def scope_omission(module):
     db = Objects(module)
     h = db.commit({".working/entry": b"present"})
@@ -292,9 +478,9 @@ def graft_close(module):
         def call(fault):
             real = _opf_store._open_dir_nofollow
 
-            def arm(path):
+            def arm(path, **kwargs):
                 _opf_store._open_dir_nofollow = real
-                return fault.arm(real(path))
+                return fault.arm(real(path, **kwargs))
             _opf_store._open_dir_nofollow = arm
             try:
                 module.GitObjects.graft_snapshot(source, None)
@@ -311,6 +497,145 @@ def graft_close(module):
                 raise AssertionError("graft-close-reuse")
             if problems:
                 raise RuntimeError("graft-close-reuse: {}".format(problems))
+
+
+def graft_search_only(module):
+    """The grafts walk crosses a SEARCH-ONLY ancestor (mode 0111, the owner-bound spelling of the
+    root-owned 0711 scratch shape) and still classifies absence, because every component is opened in
+    the shared walk's traverse mode (_opf_store._WALK_O_TRAVERSE: O_PATH, search permission only,
+    where it exists), and a SYMLINKED intermediate still refuses (CANNOT-EVALUATE, never followed).
+    The reversal (components opened O_RDONLY again) is red by the recorded open flags wherever
+    os.O_PATH exists (uid 0 included) and also red behaviourally (EACCES) for a uid the mode bits
+    bind. On a platform without O_PATH the walk keeps the O_RDONLY fallback by design: there the case
+    asserts the documented fallback refusal instead (a bound uid's search-only ancestor refuses
+    CANNOT-EVALUATE with EACCES), still pins the symlink refusal, and returns NO_O_PATH, so the
+    runner reports the reversal UNAVAILABLE (simulated_fallback runs this branch where O_PATH exists)."""
+    import os
+    import tempfile
+    import _opf_store
+    identity = "graft-search-only-ancestor"
+    fallback = not hasattr(os, "O_PATH")
+    with tempfile.TemporaryDirectory(prefix="opf-graft-searchonly-") as directory:
+        base = os.path.realpath(directory)
+        shield = os.path.join(base, "shield")
+        os.makedirs(os.path.join(shield, "info"))
+        target = os.path.join(shield, "info", "grafts")
+        source = types.SimpleNamespace(run=lambda args, budget: (target + "\n").encode("utf-8"),
+                                       product_root="/")
+        recorded = []
+        real_open = os.open
+
+        def recording_open(*args, **kwargs):
+            if kwargs.get("dir_fd") is not None:
+                recorded.append(args[1])
+            return real_open(*args, **kwargs)
+
+        bound = os.geteuid() != 0
+        if bound:
+            os.chmod(shield, 0o111)
+        try:
+            os.open = recording_open
+            try:
+                try:
+                    outcome = module.GitObjects.graft_snapshot(source, None)
+                except module.ObservationError as exc:
+                    outcome = ("refused", exc.code, exc.detail)
+            finally:
+                os.open = real_open
+        finally:
+            if bound:
+                os.chmod(shield, 0o755)
+        if fallback and bound:
+            # The documented fallback: a search-only ancestor still refuses, fail-closed (EACCES).
+            check(outcome[0] == "refused" and outcome[1] == module.CANNOT_EVALUATE
+                  and "[Errno 13]" in outcome[2], identity)
+        else:
+            check(len(outcome) == 3 and outcome[0] == target and outcome[2] == "absent", identity)
+        want = _opf_store._WALK_O_TRAVERSE
+        check(bool(recorded) and all(flags & want == want and flags & os.O_NOFOLLOW
+                                     for flags in recorded), identity)
+        # A symlinked intermediate still refuses through the traverse mode, never followed off-tree.
+        os.symlink("shield", os.path.join(base, "lnk"))
+        twisted = os.path.join(base, "lnk", "info", "grafts")
+        src2 = types.SimpleNamespace(run=lambda args, budget: (twisted + "\n").encode("utf-8"),
+                                     product_root="/")
+        refuses(module, lambda: module.GitObjects.graft_snapshot(src2, None),
+                module.CANNOT_EVALUATE, identity)
+    return NO_O_PATH if fallback else None
+
+
+def graft_search_only_root(module):
+    """The grafts walk opens the filesystem root "/" in the traverse mode too (traverse_only=True),
+    because it only traverses it, so a search-only "/" is classifiable. The host root is never
+    chmodded: the open of "/" is fault-injected to refuse EACCES whenever its flags lack os.O_PATH,
+    which is the open a search-only root refuses. The reversal (the root opened readable again) is
+    red wherever os.O_PATH exists, uid 0 included (the injection is flag-driven, not mode-driven).
+    Without os.O_PATH every root open lacks it: the case asserts the documented fallback refusal
+    instead and returns NO_O_PATH, so the runner reports the reversal UNAVAILABLE."""
+    import errno
+    import os
+    import tempfile
+    identity = "graft-search-only-root"
+    o_path = getattr(os, "O_PATH", 0)
+    with tempfile.TemporaryDirectory(prefix="opf-graft-searchonly-root-") as directory:
+        base = os.path.realpath(directory)
+        os.makedirs(os.path.join(base, "info"))
+        target = os.path.join(base, "info", "grafts")
+        source = types.SimpleNamespace(run=lambda args, budget: (target + "\n").encode("utf-8"),
+                                       product_root="/")
+        roots = []
+        real_open = os.open
+
+        def search_only_root_open(*args, **kwargs):
+            if args[0] in ("/", "//") and kwargs.get("dir_fd") is None:
+                roots.append(args[1])
+                if not (o_path and args[1] & o_path):
+                    raise PermissionError(errno.EACCES, "injected: search-only filesystem root", args[0])
+            return real_open(*args, **kwargs)
+
+        os.open = search_only_root_open
+        try:
+            try:
+                outcome = module.GitObjects.graft_snapshot(source, None)
+            except module.ObservationError as exc:
+                outcome = ("refused", exc.code, exc.detail)
+        finally:
+            os.open = real_open
+    check(len(roots) == 1, identity)                      # the injection was reached, exactly once
+    if not o_path:
+        check(outcome[0] == "refused" and outcome[1] == module.CANNOT_EVALUATE
+              and "injected: search-only filesystem root" in outcome[2], identity)
+        return NO_O_PATH
+    check(len(outcome) == 3 and outcome[0] == target and outcome[2] == "absent", identity)
+    return None
+
+
+TRAVERSE_CASES = ("graft-search-only-ancestor", "graft-search-only-root")
+
+
+def simulated_fallback(source):
+    """The traverse-mode cases through the runner, on the documented no-O_PATH fallback SIMULATED
+    where os.O_PATH exists: os.O_PATH is hidden and _opf_store._WALK_O_TRAVERSE set to os.O_RDONLY,
+    the value _opf_store computes without O_PATH. Each case must pass by asserting the fallback
+    refusal, and the runner must report each reversal UNAVAILABLE (never red, never survived). A
+    native run on a platform without O_PATH is not claimed by this simulation."""
+    import os
+    import _opf_store
+    if not hasattr(os, "O_PATH"):
+        print("FALLBACK-SIMULATION not run: os.O_PATH is absent, so the native run above IS the fallback")
+        return
+    rows = [row for row in CASES if row[0] in TRAVERSE_CASES]
+    check([row[0] for row in rows] == list(TRAVERSE_CASES), "simulated-fallback:cases")
+    saved_path, saved_walk = os.O_PATH, _opf_store._WALK_O_TRAVERSE
+    del os.O_PATH
+    _opf_store._WALK_O_TRAVERSE = os.O_RDONLY
+    try:
+        unavailable = run(source, reversals=True, cases=rows, label="SIMULATED-FALLBACK")
+    finally:
+        os.O_PATH = saved_path
+        _opf_store._WALK_O_TRAVERSE = saved_walk
+    check(unavailable == list(TRAVERSE_CASES), "simulated-fallback:unavailable")
+    print("FALLBACK-SIMULATED", ",".join(unavailable), "PASS reversal=UNAVAILABLE")
 
 
 # Each case owns a deliberate reversal and a reached assertion identity. No syntax
@@ -351,6 +676,44 @@ CASES = [
      "if evidence_commit not in chain:", "if False:"),
     ("seed-absent-evidence", absent_evidence,
      'source.run(["cat-file", "-e", evidence_commit], budget)', "pass"),
+    ("prior-holder-first-parent-walk", holder_first_parent,
+     '"rev-list", "--first-parent", "--max-count=1", pinned_head',
+     '"rev-list", "--max-count=1", pinned_head'),
+    ("prior-holder-deletion-parent", holder_deletion_parent,
+     'holder = commit_id(read(["rev-parse", "--verify", "--quiet", newest + "^1"]))',
+     "holder = newest"),
+    ("prior-holder-manifest-one-level-down", holder_manifest,
+     "return any(len(parts) == 2 and parts[0] and parts[1] == manifest",
+     "return any(False"),
+    ("prior-holder-pointer-must-be-blob", holder_pointer_blob,
+     'and fields[1] == b"blob"', "and True"),
+    ("prior-holder-no-hit-none", holder_no_hit, "if newest.strip():", "if True:"),
+    ("prior-holder-prefix-glob-escaped", holder_escaped,
+     'return "".join("\\\\" + ch if ch in "*?[]\\\\" else ch for ch in text)', "return text"),
+    ("prior-holder-shallow-refused", holder_shallow, 'if shallow == b"true\\n":', "if False:"),
+    ("prior-holder-grafts-rechecked", holder_graft_recheck,
+     'rather than guessing")\n    if source.graft_snapshot(budget) != grafts:',
+     'rather than guessing")\n    if False:'),
+    ("prior-holder-git-failure-refused", holder_git_failure,
+     "if not outcome.completed or outcome.rc != 0:", "if not outcome.completed:"),
+    ("prior-holder-malformed-pinned-head", holder_bad_pinned,
+     "if not oid_ok(pinned_head, object_format):", "if False:"),
+    ("prior-holder-unexpected-object-id", holder_bad_object_id,
+     "if not oid_ok(text, object_format):", "if False:"),
+    ("prior-holder-shallow-answer-unexpected", holder_shallow_unexpected,
+     'if shallow != b"false\\n":', "if False:"),
+    ("prior-holder-listing-tab-required", holder_listing_no_tab,
+     'if tab != b"\\t" or len(fields) != 3:', "if len(fields) != 3:"),
+    ("prior-holder-listing-three-fields", holder_listing_two_fields,
+     'if tab != b"\\t" or len(fields) != 3:', 'if tab != b"\\t":'),
+    ("graft-search-only-ancestor", graft_search_only,
+     "next_fd = os.open(component, _opf_store._WALK_O_TRAVERSE | os.O_DIRECTORY\n"
+     "                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)",
+     "next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY\n"
+     "                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)"),
+    ("graft-search-only-root", graft_search_only_root,
+     'fd = _opf_store._open_dir_nofollow("/", traverse_only=True)',
+     'fd = _opf_store._open_dir_nofollow("/")'),
     ("graft-close-reuse", graft_close,
      "prev, fd = fd, next_fd                    # ownership moves first: a failed close is\n"
      "                os.close(prev)                            # never closed again by the finally (P1, #378)",
@@ -369,18 +732,29 @@ for field, value, identity in (
                   "limits.validate()", "pass"))
 
 
-def run(source, *, reversals=False):
+def run(source, *, reversals=False, cases=None, label=""):
+    import os
+    cases = CASES if cases is None else cases
+    tag = "-" + label if label else ""
     digest = hashlib.sha256(source.encode()).hexdigest()
-    ids = [row[0] for row in CASES]
+    ids = [row[0] for row in cases]
     if len(ids) != len(set(ids)):
         raise RuntimeError("duplicate declared test identity")
-    for number, (identity, test, old, new) in enumerate(CASES):
+    unavailable = []
+    for number, (identity, test, old, new) in enumerate(cases):
         module = load_candidate(source, "_pr4_candidate_" + str(number))
-        test(module)
-        print("PASS", identity)
+        reason = test(module)
+        print("PASS" + tag, identity)
+        if reason is not None and (reason != NO_O_PATH or hasattr(os, "O_PATH")):
+            raise RuntimeError("reversal declared unavailable without cause: " + identity)
         if reversals:
             if source.count(old) != 1:
                 raise RuntimeError("mutation target is not unique: " + identity)
+            if reason is not None:
+                # Neither red nor survived: the case declared its reversal indiscriminable here.
+                unavailable.append(identity)
+                print("REVERSAL-UNAVAILABLE" + tag, identity, "reason=" + reason)
+                continue
             changed = source.replace(old, new, 1)
             mutant = load_candidate(changed, "_pr4_mutant_" + str(number))
             try:
@@ -395,7 +769,10 @@ def run(source, *, reversals=False):
             print("RED-ON-REVERT", identity, "assertion=" + identity,
                   "restored=PASS",
                   "candidate_sha256=" + digest)
-    print("EXECUTED", ",".join(ids))
+    print("EXECUTED" + tag, ",".join(ids))
+    if unavailable:
+        print("RED-ON-REVERT" + tag, "UNAVAILABLE", ",".join(unavailable))
+    return unavailable
 
 
 
@@ -514,6 +891,7 @@ if __name__ == "__main__":
     here = pathlib.Path(__file__).parent
     source = here.joinpath("_opf_init_observe.py").read_text(encoding="utf-8")
     run(source, reversals=args.red_on_revert)
+    simulated_fallback(source)
     shared_source = here.joinpath("_opf_observe.py").read_text(encoding="utf-8")
     functions = {node.name: ast.get_source_segment(shared_source, node) + "\n"
                  for node in ast.parse(shared_source).body if isinstance(node, ast.FunctionDef)}
