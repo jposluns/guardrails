@@ -20678,7 +20678,100 @@ _ORCH_SHELL_KEYWORDS = frozenset((
 _ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
-def _orch_foreground_scan(command, bash_word_starts, amps=None):
+def _orch_heredoc_spec(command, i):
+    """The here-document opened by the `<<` or `<<-` operator at command[i], as (delimiter, quoted,
+    strip_tabs): the delimiter word after quote removal, whether any part of it was quoted (a single- or
+    double-quoted span or a backslash escape, which makes bash read the body as literal data), and whether
+    the operator is `<<-` (bash strips leading tabs from each body line and from the delimiter line). None
+    when this reading does not parse the word: no word, a quote left open, a backslash-newline, a `$` or a
+    backquote anywhere in it, or a backslash inside its double quotes."""
+    n = len(command)
+    j = i + 2
+    strip_tabs = j < n and command[j] == "-"
+    j += 1 if strip_tabs else 0
+    while j < n and command[j] in " \t":
+        j += 1
+    word, quoted = [], False
+    while j < n and command[j] not in _ORCH_BASH_WORD_BREAKS:
+        ch = command[j]
+        if ch in "'\"":
+            close = command.find(ch, j + 1)
+            part = command[j + 1:close]
+            if close == -1 or (ch == '"' and any(c in part for c in "\\$`")):
+                return None
+            word.append(part)
+            quoted, j = True, close + 1
+        elif ch == "\\":
+            if j + 1 >= n or command[j + 1] == "\n":
+                return None
+            word.append(command[j + 1])
+            quoted, j = True, j + 2
+        elif ch in "$`":
+            return None
+        else:
+            word.append(ch)
+            j += 1
+    delimiter = "".join(word)
+    return (delimiter, quoted, strip_tabs) if delimiter else None
+
+
+# The one line shape that opens a here-document the detach scan may skip as data: `cat > FILE <<'DELIM'`
+# (or `>>`, or a double-quoted delimiter), blanks allowed around the operators and nothing else on the line:
+# no other word, no wrapper or assignment before cat, no second redirect or here-document, no quote, '$',
+# backslash, '|', ';', '&', '(', ')', backquote or '#'. It is only ever read as one write of a command made
+# of nothing but such writes (_orch_heredoc_data_command), never as a line inside a longer command.
+_ORCH_HEREDOC_DATA_LINE = re.compile(
+    r"[ \t]*cat[ \t]*>>?[ \t]*([A-Za-z0-9_./+,:@%=-]+)[ \t]*<<[ \t]*(?:'([A-Za-z0-9_.+-]+)'|\"([A-Za-z0-9_.+-]+)\")[ \t]*")
+
+
+def _orch_heredoc_data_line(line):
+    """The delimiter of the here-document line opens when line is, whole, one plain write
+    `cat > FILE <<'DELIM'` (or `>>`, or a double-quoted delimiter; _ORCH_HEREDOC_DATA_LINE) whose FILE is a
+    plain word naming a file outside /dev and /proc with no '..' component, so cat's output cannot be the
+    shell's own (/dev/stdout, /dev/fd/1, /proc/self/fd/1); else None. A relative FILE is read as written,
+    not against the working directory, and a symlink is not followed, so a FILE that reaches that output only
+    through a changed directory or a symlink is not seen (disclosed). This line test alone proves nothing
+    about the body: a later command in the same call can run the written file, so the body is data only when
+    the whole command is such writes (_orch_heredoc_data_command)."""
+    match = _ORCH_HEREDOC_DATA_LINE.fullmatch(line)
+    if not match:
+        return None
+    parts = [part for part in match.group(1).split("/") if part not in ("", ".")]
+    if not parts or ".." in parts or parts[0] in ("dev", "proc"):
+        return None
+    return match.group(2) or match.group(3)
+
+
+def _orch_heredoc_data_command(command):
+    """True when the WHOLE command is nothing but one or more plain cat writes, each a line
+    _orch_heredoc_data_line accepts, then its body, then a line that is exactly its delimiter, the writes
+    separated only by newlines. No other command word may appear anywhere: a later '.', source, bash or
+    ./path can run a written file, and an earlier hash, alias, function, enable, builtin, command, exec,
+    eval or PATH or other assignment can make `cat` run something else, so any such line makes every body
+    code. Only then does cat copy each body into its file with nothing in the command running it, and only
+    then are the bodies data. The word cat is trusted as written: a function, alias or builtin named cat
+    the shell already holds, or an inherited PATH or other environment that resolves cat to a shell or
+    another program, is not seen (disclosed in the manifest). An empty command is not such a command."""
+    lines = command.split("\n")
+    i, n, writes = 0, len(lines), 0
+    while i < n:
+        if not lines[i]:
+            i += 1
+            continue
+        delimiter = _orch_heredoc_data_line(lines[i])
+        if delimiter is None:
+            return False
+        i += 1
+        while i < n and lines[i] != delimiter:
+            i += 1
+        if i == n:
+            return False  # no delimiter line: bash reads the rest of the command as this body
+        i += 1
+        writes += 1
+    return writes > 0
+
+
+def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
     quote or meets a `#` whose comment reading depends on context, None otherwise. amps, when given, is a
@@ -20695,7 +20788,15 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
     the `$(...)` and backquote substitutions opened there: a `#` that is not right after a word character
     while one is open (outside a single-quoted span in it) is a comment to bash, which can hide the string's
     closing quote, so it is uncertain too. The guard runs BOTH and denies when either reports, so the bash
-    rule can only ADD denies to the historical one."""
+    rule can only ADD denies to the historical one. The pass skips a here-document body as data in ONE
+    case only: the WHOLE command is nothing but one or more plain `cat > FILE <<'DELIM'` writes (or `>>`, or
+    a double-quoted delimiter), each with its body and delimiter line, separated only by newlines, with no
+    other command word anywhere (_orch_heredoc_data_command); each body, whose delimiter this pass also
+    parses (_orch_heredoc_spec) with nothing open on the nesting stack, then resumes the pass past its
+    delimiter line unread. In every other command, one where a write is followed or preceded by any other
+    command (a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
+    other assignment that can rename cat) included, every body is read as shell text, as it is when
+    skip_bodies is False."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
@@ -20704,6 +20805,16 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
     dq_nest = _NestStack()  # the substitutions opened inside the current double-quoted string: "(" or a backquote
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
+    heredocs = []  # the here-documents opened on the current line, each a _orch_heredoc_spec or None
+    # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
+    # bash ends elsewhere, so no later here-document is skipped.
+    code_body = False
+    # The first '(', backquote or '$[' anywhere in the command: a here-document opened after one may sit in
+    # a substitution or an arithmetic expansion, whose body bash can end elsewhere, so it is never skipped.
+    grouped = min((at for at in (command.find("("), command.find("`"), command.find("$[")) if at != -1),
+                  default=len(command))
+    # Whether the whole command is nothing but plain cat writes, the one case whose bodies are data.
+    data_command = skip_bodies and _orch_heredoc_data_command(command)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -20763,6 +20874,22 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
                     break  # no later line: the comment runs to the end of the string, nothing more to scan
                 i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
                 continue
+        if ch == "\n" and heredocs:
+            # The bodies of the here-documents opened on this line start here. Only where the whole command
+            # is nothing but plain cat writes to files (_orch_heredoc_data_command) does nothing in it run a
+            # body, so only there is a quoted body literal data the scan resumes past, its quotes shifting
+            # nothing. In any other command (a write followed by '. ./s.sh' or 'bash s.sh', or preceded by
+            # 'hash -p /usr/bin/bash cat', included) the body is read as shell text, as before.
+            specs, heredocs = heredocs, []
+            literal = (data_command and not nest and not code_body
+                       and all(spec and spec[1] for spec in specs))
+            end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
+                           if literal else (i, False))
+            if closed:
+                prev_dup, prev, after_dollar = False, "break", False
+                i = end
+                continue
+            code_body = True
         if ch.isspace():
             prev_dup, after_dollar = False, False
             prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
@@ -20801,6 +20928,11 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
             amps.append(i)
             i += 1
             continue
+        if (skip_bodies and ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
+                and not (prev_dup and command[i - 1] == "<")):
+            # A here-document operator (not a here-string, nor the second '<' of one already read). One
+            # opened inside a grouping or with something open on the stack records None, never skipped.
+            heredocs.append(_orch_heredoc_spec(command, i) if i < grouped and not nest else None)
         _nest_track(nest, ch, after_dollar)
         if ch in "()":
             prev = "paren"
@@ -20816,7 +20948,7 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
     return "unbalanced" if in_single or in_double else None
 
 
-def _orch_foreground_detach_kind(command):
+def _orch_foreground_detach_kind(command, skip_bodies=True):
     """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote
     or meets a `#` whose comment reading depends on context, else None. The historical rule and bash's `#`
     word-start rule are both run so that the bash rule only ADDS denies: a `#` after a character bash does
@@ -20826,8 +20958,9 @@ def _orch_foreground_detach_kind(command):
     real `&` on the next line. A `#` right after a `(`, `)` or backquote (`x=$(true)#`, `(true)#`), or at a
     word start inside an open parenthesis, ${...} or backquote substitution, or inside a "$(...)" or
     backquote substitution in a double-quoted string, is uncertain under both rules, and a backslash-newline
-    before a `#` changes nothing under either."""
-    kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
+    before a `#` changes nothing under either. skip_bodies as for _orch_foreground_scan."""
+    kinds = (_orch_foreground_scan(command, False, skip_bodies=skip_bodies),
+             _orch_foreground_scan(command, True, skip_bodies=skip_bodies))
     if "detach" in kinds:
         return "detach"
     return "unbalanced" if "unbalanced" in kinds else None
@@ -20841,13 +20974,13 @@ def _orch_foreground_detach_kind(command):
 _ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
 
 
-def _orch_foreground_amps(command):
+def _orch_foreground_amps(command, skip_bodies=True):
     """The indices of every bare `&` either scan rule reads in command, each rule reading on past each one
-    (_orch_foreground_scan with amps), or None when either rule's pass ends inside a quote or meets a `#`
-    whose comment reading depends on context, so it does not read the command to its end."""
+    (_orch_foreground_scan with amps and skip_bodies), or None when either rule's pass ends inside a quote
+    or meets a `#` whose comment reading depends on context, so it does not read the command to its end."""
     amps = []
     for bash_word_starts in (False, True):
-        if _orch_foreground_scan(command, bash_word_starts, amps) is not None:
+        if _orch_foreground_scan(command, bash_word_starts, amps, skip_bodies) is not None:
             return None
     return amps
 
@@ -20910,12 +21043,14 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
     holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
     ANSI-C $'...' quote or behind an escape; a scan that ends inside a quote or meets an uncertain '#'
-    ("unbalanced", an apostrophe in a quoted here-document's body included); and a command the lexer reads
+    ("unbalanced", an apostrophe in a here-document body the scan reads as shell text included: an
+    unquoted delimiter's, or a quoted one's the scan does not skip); and a command the lexer reads
     in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
     where it places an `&` inside one of the three shapes but bash reads that `&` as an operator, the detach
     is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
-    appends True to where that narrowing reads the scan's "detach" as None, so a caller that must know
-    whether it did reads the list instead of running the scan again.
+    appends True to where that narrowing reads the scan's "detach" as None, or where the scan reads None
+    and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
+    caller that must know whether it did reads the list instead of running the scan again.
 
     COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
     scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
@@ -20934,15 +21069,29 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     if any(seg.sep_after == "&" for seg in segments):
         return "detach"
     kind = _orch_foreground_detach_kind(command)
+    if kind is None and lifts is not None:
+        # The scan's skip of a quoted here-document body can read as no detach where reading that body as
+        # text gave a detach the narrowing lifts; the caller is told of that lift as before, so the
+        # out-of-scope note keeps its lifted reading of such a command.
+        if (_orch_foreground_detach_kind(command, skip_bodies=False) == "detach"
+                and _orch_foreground_amps_lifted(command, skip_bodies=False)):
+            lifts.append(True)
+        return None
     if kind != "detach":
         return kind
-    amps = _orch_foreground_amps(command)
-    places = _orch_lexed_amp_places(command, amps) if amps else None
-    if places is not None and all(place in _ORCH_AMP_PLACES for place in places):
+    if _orch_foreground_amps_lifted(command):
         if lifts is not None:
             lifts.append(True)
         return None
     return kind
+
+
+def _orch_foreground_amps_lifted(command, skip_bodies=True):
+    """True when both scan rules read the whole command, find a bare `&`, and the shared lexer places every
+    one of them in a lifting place (_ORCH_AMP_PLACES): the narrowing of _orch_foreground_detach_lexed."""
+    amps = _orch_foreground_amps(command, skip_bodies)
+    places = _orch_lexed_amp_places(command, amps) if amps else None
+    return places is not None and all(place in _ORCH_AMP_PLACES for place in places)
 
 
 def _orch_foreground_detach(command):
@@ -20977,21 +21126,39 @@ def _orch_foreground_detach(command):
     (the false-allow residual below). A genuinely balanced, quoted `&` is literal and correctly ignored.
 
     NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only, as its own quote
-    tracking reads the outer level. Grammar it does not model (a here-document body, a nested shell string,
+    tracking reads the outer level. Grammar it does not model (a here-document body it does not skip as
+    literal data, a nested shell string,
     an alias or function that renames a detacher, and runtime detachers such as nohup/setsid/disown/coproc)
     is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
     inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest.
+    in the manifest. It judges only the `&` the top-level shell reads: a here-document body fed to a shell
+    is read as code, but the guard's lexer narrowing still lifts an `&` such a body holds under a quoted
+    delimiter where the scan reads the rest of the command to its end (`bash <<'EOF'` then `job &`), a
+    silent allow disclosed in the manifest.
 
-    OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as CODE, not data, even under a
-    quoted delimiter (<<'EOF'). The guard's lexer reading lifts that for an `&` only: a body `&` under a
-    quoted delimiter (`cat > f <<'EOF'` then `Fix A & B`, or `say "a & b"` in the commit-message form
-    "$(cat <<'EOF' ... EOF)") is allowed where the scan reads the rest of the command to its end. A body
-    with an unbalanced apostrophe (`the user's file`), or one whose quote leaves the scan open at the end,
+    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
+    command is nothing but one or more plain cat writes (_orch_heredoc_data_command): each a line holding
+    only cat, one output redirect to a plain file and one quoted here-document operator (<<'EOF' or
+    <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and nothing open, then its
+    body and a line that is, whole, its delimiter, the writes separated only by newlines, with no other
+    command word anywhere. Only in such a command does a quote, `&` or substitution in a body (`cat > f
+    <<'EOF'` then `the user's file`) read as no detach. Every other body it reads as CODE: a quoted
+    delimiter's in a cat write followed or preceded by any other command (the same write followed by a
+    line `true` included), an unquoted delimiter's, one fed to a shell or any consumer it cannot show only
+    writes the body to a file (cat to standard output and tee included), the commit-message form's in
+    "$(cat <<'EOF' ... EOF)", one in a subshell or after any '(' or backquote, one after a body read as
+    code, and one with no delimiter line.
+    The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say "a &
+    b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
+    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
+    to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
     is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The remedy is to quote the delimiter where the body needs no expansion, or to write the
-    text to a file and pass the file.
+    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
+    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
+    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
+    nothing but such writes, then run any other command in a separate call, or to write the text to a file
+    and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -21007,9 +21174,10 @@ def _orch_foreground_detach(command):
     (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
     quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
     substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
-    quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
-    including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
-    real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
+    quote, above all an apostrophe or double quote in a here-document body the scan reads as code (an
+    unquoted delimiter's, a quoted one's it does not skip, the double-quoted commit-message form's), which
+    flips the scan's quote state so that a LATER real bare `&` (between two here-documents, or before a
+    second stray quote that rebalances the scan)
     reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that bash reads as quoted text
     but the scan reads as a comment, where a double-quoted string nested inside a double-quoted "$(...)"
     ends the scan's double quote early, so a `#` inside the nested string reads as a word-start comment
@@ -22656,7 +22824,10 @@ def orch_truncation_guard(data):
                 "prove that a later '&' is quoted or commented text rather than a bare detach; it is denied "
                 "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
                 "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
-                "here-document body (scanned as code even under a quoted delimiter) or an ANSI-C $'...' "
+                "here-document body this scan reads as code (an unquoted delimiter's, or a quoted one's it "
+                "cannot end at a whole delimiter line or whose command may run it: only a command of "
+                "nothing but plain cat > file writes is read as writing data, so write such text with "
+                "cat in a call of its own) or an ANSI-C $'...' "
                 "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
