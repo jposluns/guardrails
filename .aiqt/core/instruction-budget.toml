@@ -10,7 +10,8 @@
 # blank lines outside fenced code is removed; every other comment is counted. tools/check_instruction_budget.py
 # states the full grammar. The gate fails when PACK exceeds `ratchet`.
 #
-#   ratchet              the PACK figure enforced today. Lower it as the pack shrinks; raise it only with a
+#   ratchet              the PACK figure enforced today. Lower it as the pack shrinks, except for the
+#                        deliberate headroom recorded in the 2026-10-29 entry below; raise it only with a
 #                        reviewed reason.
 #                        Raised 112222 -> 128358 when the counting rule changed, not the content: the gate
 #                        began counting the modelled header of each of the 134 loaded files (16136 units;
@@ -73,12 +74,25 @@
 #                        with the version the label names is a changed entry (secsup.7): rule files
 #                        117745 -> 118003 (+258 units); managed block 360 and file headers 16136
 #                        unchanged. Recorded approval: the maintainer, 2026-10-18.
+#                        Raised 134499 -> 134685 on 2026-10-29 under the maintainer's recorded decision of
+#                        2026-10-29 to audit every rule for redundancy, merge overlaps, then set a new cap
+#                        with headroom; the two rule-file merges that audit proposed are not part of this
+#                        change. Measured PACK 134495 -> 133126 (-1369 units) from same-meaning cuts and
+#                        shortened cross-references in estsep, obsbeh, vfxcmt, wowo01, grdinp, cntdef,
+#                        citint, kltwat, tmrrst and cntprd: rule files 117999 -> 116630; managed block 360
+#                        and file headers 16136 unchanged. The ratchet is that measured PACK 133126, plus
+#                        559 units ESTIMATED for four queued seed folds (draft wording, not measured), plus
+#                        a 1000-unit margin. The margin is deliberate headroom approved by the maintainer
+#                        on 2026-10-29 under that same decision, not a stale saving: the gate's
+#                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
+#                        it. When a queued fold lands, record its measured cost here against the 559-unit
+#                        estimate.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 134499
+ratchet = 134685
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

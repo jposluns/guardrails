@@ -19,7 +19,7 @@ reason = "Scope note on the rule itself; no obligation of its own."
 
 [[exempt]]
 corpus-id = "citint"
-text = "This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the\nspecific reference captured when the claim is made, never reconstructed from memory, and the\nobligations above scope that capture to a file opened this session at the commit under review."
+text = "This rule narrows the reference-capture rule (refcap) to a file opened this session at the commit under review."
 reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
 
 [[exempt]]
@@ -44,7 +44,7 @@ reason = "Example illustrating cntprd.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "cntprd"
-text = "This complements the measured-and-estimated-figures-stay-separate rule on an orthogonal axis:\nthat rule attaches a figure's grade, measured or estimated; this one attaches its definition, the\npredicate that selected it; a sound figure carries both."
+text = "This complements the measured-and-estimated-figures-stay-separate rule: that rule attaches a\nfigure's grade, this one its predicate; a sound figure carries both."
 reason = "Cross-reference to the measured-and-estimated-figures-stay-separate rule (estsep); no obligation of its own."
 
 [[exempt]]
@@ -119,16 +119,6 @@ reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obl
 
 [[exempt]]
 corpus-id = "estsep"
-text = "It forbids the unlabelled blend: an estimate\nfolded into a measured total, the whole presented as measured."
-reason = "Restates estsep.1; it adds no obligation."
-
-[[exempt]]
-corpus-id = "estsep"
-text = "The label is the release."
-reason = "Summary of estsep.2; it adds no obligation."
-
-[[exempt]]
-corpus-id = "estsep"
 text = "A figure that\ncarries its grade honestly is sound however uncertain; one that hides it misreports precision it does\nnot have."
 reason = "Rationale for estsep.2; no obligation of its own."
 
@@ -144,11 +134,6 @@ reason = "Scope note separating a static read from the behavioural claim obsbeh.
 
 [[exempt]]
 corpus-id = "obsbeh"
-text = "A\nconfident assertion of unobserved behaviour is not made."
-reason = "Closing restatement of obsbeh.1; it adds no obligation."
-
-[[exempt]]
-corpus-id = "obsbeh"
 text = "A claim that a shared or external resource has failed, or that you are blocked because it has, is a\nbehavioural claim about the resource's live state; a symptom seen only in your own dependent work, a killed\nworker or a rejected payload, is not that observation and cannot tell a resource-wide failure from a\nself-caused local condition such as your own footprint or a malformed request."
 reason = "Classifies a resource-failure claim as a behavioural claim and names what does not count as observing it; the obligation it triggers is obsbeh.10."
 
@@ -161,11 +146,6 @@ reason = "Cross-reference to trkasy.5 (a truncated deliverable is not observable
 corpus-id = "vfxcmt"
 text = "Applying a fix on disk is not the same as landing it."
 reason = "Rationale for vfxcmt.1; no obligation of its own."
-
-[[exempt]]
-corpus-id = "vfxcmt"
-text = "A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim."
-reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it); it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"
@@ -289,11 +269,6 @@ reason = "Classifies a detached child as launched asynchronous work, so trkasy.6
 
 [[exempt]]
 corpus-id = "wowo01"
-text = "Parallelism lives in the research stage; authority\nand seriality live in the apply stage."
-reason = "Summary of wowo01.1; it adds no obligation."
-
-[[exempt]]
-corpus-id = "wowo01"
 text = "The residual is not limited to on-disk config: it spans the non-`GIT_` environment (HOME,\nXDG_CONFIG_HOME, PATH, TMPDIR), on-disk git configuration and attributes (repository, global, or system\n`.gitconfig` and `.gitattributes`), index and ignore state, submodules and embedded repositories,\nconfigured hooks and filters, PATH-based git resolution, and partial-clone object availability, all of\nwhich git reads by design."
 reason = "Disclosed residual of wowo01.7; no obligation of its own."
 
@@ -324,7 +299,7 @@ reason = "Scope note: an over-firing layer is outside what dfdpth.1 recommends; 
 
 [[exempt]]
 corpus-id = "tmrrst"
-text = "This is the companion of the kill-timeout rule:\nthat one keeps a wrapper's bound from cutting a correctly-waiting callee short, while this one\nkeeps a borrower's restore from silently moving or losing the deadline the caller had already set."
+text = "This is the companion of the kill-timeout rule (kltwat)."
 reason = "Cross-reference to the kill-timeout rule (kltwat); no obligation of its own."
 
 [[exempt]]
@@ -339,7 +314,7 @@ reason = "States the hazard that kltwat.4, the clause after the ';', guards agai
 
 [[exempt]]
 corpus-id = "kltwat"
-text = "This is the companion of\nthe bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust resources, while this\none keeps a bound that is meant to allow completion from being set below the callee's own end-to-end\nbudget, so a command that is waiting correctly is not cut short and then misread as the failure it was\ntolerating."
+text = "This is the companion of\nthe bounded-consumption rule, which sets a ceiling so a runaway cannot exhaust resources."
 reason = "Cross-reference to the bounded-consumption rule; no obligation of its own."
 
 [[exempt]]
