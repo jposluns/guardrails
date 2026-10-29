@@ -10776,10 +10776,10 @@ def _main_isolated(monitor):
         finally:
             aiqt_hooks._commit_git = _orig_commit_git
 
-        # === F-R2-1: the no-remote exemption is restricted to a LONE, directly-bound `git commit`. A COMPOUND
-        # command's pre-command remote-absence probe is STALE (a `cd remote-repo && commit` lands in a repo the
-        # probe never saw; a `git remote add && commit` adds the remote AFTER the probe ran), so a compound /
-        # multi-segment / cd-bearing / redirected commit is handled EXACTLY as before the exemption: DENY when
+        # === F-R2-1: the no-remote exemption is restricted to a LONE `git commit` (admitted cd/pushd aside, whose
+        # target the probe reads). A COMPOUND command's pre-command remote-absence probe is otherwise STALE (a
+        # `git remote add && commit` adds the remote AFTER the probe ran), so a compound /
+        # multi-segment / redirected commit is handled EXACTLY as before the exemption: DENY when
         # it lands on a protected branch. Each DENY below runs from a no-remote main-HEAD session cwd (nr_none),
         # so it is fail-to-pass under a revert - reverting the lone_direct restriction makes the exemption
         # (nr_none has no remote) ALLOW these compound/redirected commits (the over-fire the finding reported).
@@ -10796,8 +10796,8 @@ def _main_isolated(monitor):
         # not the repo), and reds if the lone-form exemption is broken.
         pexpect("(pl-fr1-0) lone 'git commit' on main in a no-remote repo ALLOWS (the exemption, lone form)",
                 "git commit -m x", "allow", cwd=str(nr_none))
-        # cd into a (remote-backed) repo then commit: compound -> exemption withheld -> DENY. Reverting reds it.
-        pexpect("(pl-fr1-1) 'cd <remote-repo> && git commit' DENIES (compound; pre-command state is stale)",
+        # cd into a (remote-backed) repo then commit: the exemption is judged for the cd target -> DENY.
+        pexpect("(pl-fr1-1) 'cd <remote-repo> && git commit' DENIES (the cd target has a remote)",
                 "cd {} && git commit --allow-empty -m qa".format(nr_remote), "deny", cwd=str(nr_none))
         # add a remote then commit: the pre-add no-remote state is stale -> DENY. Reverting reds it.
         pexpect("(pl-fr1-2) 'git remote add X <url> && git commit' DENIES (preceding remote mutation)",
@@ -10888,6 +10888,35 @@ def _main_isolated(monitor):
         pexpect("(pl-fr7c-0) lone commit on main in a genuinely no-remote repo ALLOWS (exemption intact)",
                 "git commit --allow-empty -m x", "allow", cwd=str(nr_ctl))
 
+        # The exemption is judged for the repository the commit targets (its -C operand, else the
+        # latest preceding cd/pushd operand, else cwd), never for an unrelated session cwd. Each allow
+        # runs from a remote-backed main cwd and each deny from a no-remote main cwd, so judging the
+        # cwd instead of the target flips every row. An unreadable target fails closed.
+        nr_q, nr_remote_q = shlex.quote(str(nr_ctl)), shlex.quote(str(nr_remote))
+        for _case, _command in (("C", "git -C {} commit -m x"), ("cd", "cd {} && git commit -m x"),
+                                ("pushd", "pushd {} && git commit -m x")):
+            pexpect("(pl-nrt-{}-allow) {} naming a no-remote repo on main from a remote-backed cwd ALLOWS"
+                    .format(_case, _case), _command.format(nr_q), "allow", cwd=str(nr_remote),
+                    certificate=("D", "refs/heads/main"))
+            pexpect("(pl-nrt-{}-deny) {} naming a remote-backed repo on main from a no-remote cwd DENIES"
+                    .format(_case, _case), _command.format(nr_remote_q), "deny", cwd=str(nr_ctl),
+                    detail="would commit on protected branch")
+        nr_badcfg = _init_repo(tmp / "pl-nr-badcfg")   # main HEAD, no remote, config git cannot parse
+        with open(nr_badcfg / ".git" / "config", "a", encoding="utf-8") as _badcfg:
+            _badcfg.write("[broken\n")
+        nr_plain = tmp / "pl-nr-plain-dir"             # an existing directory that is not a repository
+        nr_plain.mkdir()
+        for _case, _path in (("unparseable-config", nr_badcfg), ("not-a-repo", nr_plain),
+                             ("missing", tmp / "pl-nr-missing")):
+            for _form in ("git -C {} commit -m x", "cd {} && git commit -m x"):
+                pexpect("(pl-nrt-unreadable-{}) {!r} DENIES (target cannot be read)".format(_case, _form),
+                        _form.format(shlex.quote(str(_path))), "deny", cwd=str(nr_ctl))
+        pexpect("(pl-nrt-semicolon) 'cd <no-remote repo>; git commit' DENIES (outside the && grammar)",
+                "cd {} ; git commit -m x".format(nr_q), "deny", cwd=str(nr_remote))
+        pexpect("(pl-nrt-companion) a non-cd companion still withholds D from an explicit target",
+                "true && git -C {} commit -m x".format(nr_q), "deny", cwd=str(nr_remote),
+                detail="would commit on protected branch")
+
         # A-D positive registry. The consumer spy in pexpect observes the certificate the
         # public handler actually uses; an informational allow-note cannot satisfy these cases.
         _pl239_allows = (
@@ -10942,9 +10971,9 @@ def _main_isolated(monitor):
                     "git commit -m x", "allow", cwd=str(_unborn),
                     certificate=(_shape, "refs/heads/" + _branch))
             if _shape == "D":
-                pexpect("(pl239-unborn-{}-C) explicit target cannot obtain D".format(_branch),
+                pexpect("(pl239-unborn-{}-C) explicit no-remote target obtains D".format(_branch),
                         "git -C {} commit -m x".format(shlex.quote(str(_unborn))),
-                        "deny", cwd=plf, detail="would commit on protected branch")
+                        "allow", cwd=plf, certificate=("D", "refs/heads/" + _branch))
                 _git(_unborn, "remote", "add", "upstream", str(tmp / "pl239-unborn-remote.git"))
                 pexpect("(pl239-unborn-{}-remote) remote presence withholds D".format(_branch),
                         "git commit -m x", "deny", cwd=str(_unborn),
@@ -11188,8 +11217,13 @@ def _main_isolated(monitor):
             pexpect("(pl239-cwd-{})".format(_case), "git commit", "deny", cwd=_cwd)
         pexpect("(pl239-target-absent)", "git -C {} commit"
                 .format(shlex.quote(str(tmp / "pl239-missing"))), "deny", cwd=plf)
-        pexpect("(pl239-cd-loses-session)", "cd {} && git commit".format(_pl239_f),
-                "deny", cwd=plf, detail="session directory binding is unavailable after cd")
+        # A preceding cd names the directory of a later plain commit, never the session cwd.
+        pexpect("(pl239-cd-protected)", "cd {} && git commit".format(_pl239_m),
+                "deny", cwd=plf, detail="would commit on protected branch")
+        pexpect("(pl239-cd-feature)", "cd {} && git commit".format(_pl239_f),
+                "allow", cwd=plr, certificate=("A", "refs/heads/other"))
+        pexpect("(pl239-cd-dotted)", "cd {}/. && git commit".format(_pl239_f),
+                "deny", cwd=plf, detail="command directory is unavailable")
 
         # Unknown ambient GIT_* denies even with a resolvable explicit feature target.
         _pl239_envkey = "GIT_PL239_UNKNOWN_OVERRIDE"
