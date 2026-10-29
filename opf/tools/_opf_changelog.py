@@ -649,7 +649,8 @@ def self_test():
     read (the pre-open st.st_size ceiling), a non-UTF-8 CHANGELOG.md, an un-encodable
     (lone-surrogate) changelog, an unresolvable --root, run()'s exit-code mapping, and the two unreleased
     heading vectors (a heading with no summary row, and a misplaced not-first entry). The imported
-    release-row flag (spec 6.1, 14.3): run_gates passes a covered imported row."""
+    release-row flag (spec 6.1, 14.3): run_gates passes a covered imported row, and a ledger of imported
+    rows whose summaries carry the imported summary-row flag."""
     import tempfile
     import shutil
 
@@ -932,6 +933,17 @@ def self_test():
     v_imp["summary"].append({"covers": "0.9.0", "status": "published",
                              "digest": freeze_of(cl_imp, "0.9.0")})
     check("imported-row-pass", run_gates(v_imp, worklog, cl_imp).status == PASS)
+    # The imported summary-row flag (spec 6.1, 14.3): a ledger with two imported rows whose summaries carry
+    # the flag passes the gates end to end, so the flag is never read as a changelog finding.
+    cl_imps = cl_imp + "\n## 0.8.0 (2026-04-01)\n\n- older imported release\n"
+    v_imps = base_version(cl_imps)
+    imp_rows = [{"version": v, "date": d, "worklog_span": [],
+                 "coverage_digest": _opf_release.compute_span_digest(by_id, None), "imported": True}
+                for v, d in (("0.8.0", "2026-04-01T00:00:00Z"), ("0.9.0", "2026-05-01T00:00:00Z"))]
+    v_imps["release"] = imp_rows + v_imps["release"]
+    v_imps["summary"] += [{"covers": v, "status": "published", "digest": freeze_of(cl_imps, v),
+                           "imported": True} for v in ("0.9.0", "0.8.0")]
+    check("imported-summary-pass", run_gates(v_imps, worklog, cl_imps).status == PASS)
 
     # F7: the CLI arg parser is fail-closed. In-process (no subprocess): a missing --root value or an
     # unknown arg is a usage error, --root with a value is accepted, and --self-test is honoured only alone.
