@@ -8096,7 +8096,8 @@ def _self_test_vectors():
                 planted_rc = main([])
         check("main-default-entry-runs-no-homes1", lambda r=planted_rc, out=buf.getvalue():
               r == 1 and out == "check_opf_homes: reader.py:2: homes-1 arm `ctx.homes == 1` in arm is "
-              "reintroduced; homes 2 is the only generation and every other one refuses\n")
+              "reintroduced; homes 2 is the only generation and every other one refuses (only `== 2` may "
+              "test a generation)\n")
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
