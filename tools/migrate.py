@@ -7,7 +7,10 @@
   migrate.py status   --root DIR                          report journal / transaction state
   migrate.py --self-test                                  the MANDATORY crash-injection gate (9.3)
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything runs. One
+that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a compile
+failure, which reads as a finding, or 2 for an interpreter predating -I when run with it.
 
 The engine consumes two interfaces owed by the adopter-experience spec and refuses without their evidence
 (fail-closed, never a silent proceed): QUIESCENCE of the effective tree (a `quiescence.ok` marker the
@@ -24,23 +27,46 @@ Staged-unit contract (the off-path tree a verified, green step-2/3 build produce
                                 with op one of write|create|remove|mkdir|rmdir
   <staged>/payload/<path>       the exact new bytes for every write and create op
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: migrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import hashlib
 import json
 import os
 import stat
 import subprocess
-import sys
 import time
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 ships tomllib
+    if exc.name != "tomllib":
+        raise  # a dependency missing while tomllib loads keeps its own diagnostic
+    import os
+    try:
+        sys.stderr.write(
+            "error: migrate.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: migrate.py requires Python 3.11+ (tomllib).")
 
 JOURNAL_REL = ".aiqt/migration/journal"
 CROSSWALK_REL = ".aiqt/migration/crosswalk.toml"
@@ -97,7 +123,7 @@ def load_crosswalk(root):
         raise RefuseError("no crosswalk at {} (nothing to plan)".format(CROSSWALK_REL))
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
     # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
-    except (OSError, ValueError, RecursionError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError, tomllib.TOMLDecodeError) as exc:
         raise RefuseError("cannot read {} ({})".format(CROSSWALK_REL, exc))
 
 
@@ -501,7 +527,10 @@ def _txn_dirs(jr_fd, journal_root):
     _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed). F-R18-JTOCTOU:
     enumeration is bound to the TRUSTED already-open journal-root descriptor `jr_fd` (fd-relative), never a
     re-resolved journal path, so a swapped journal ancestor between open and enumerate cannot redirect the
-    listing onto a decoy and report false-clean."""
+    listing onto a decoy and report false-clean. F-JOURNAL-HELD-FD-LISTING: the delegate reads each
+    enumeration through a fresh "." descriptor opened beneath jr_fd, so a transaction directory created
+    after jr_fd was opened is still enumerated (a listing read through the held descriptor itself can
+    miss entries created since its open)."""
     return _journal._journal_txn_dirs(jr_fd, journal_root)
 
 
@@ -771,7 +800,84 @@ def _close_vectors(base):
             ("migrate site do_status: normal path", False, "BR", status(False), None))
 
 
+class FdCensusError(RuntimeError):
+    """A descriptor census that could not be read: the listing failed, or a listed descriptor failed
+    to read with anything other than EBADF. A leak check never passes on one."""
+
+
+class FdCensusUnavailable(FdCensusError):
+    """This host has no /proc/self/fd, so no census can be taken: a leak check built on one cannot
+    evaluate. It neither passes nor reports a leak; the self-test says it cannot evaluate."""
+
+
+def _fd_pair_census():
+    """The open descriptors as a frozenset of (number, identity) pairs, identity being (st_dev, st_ino,
+    the file type bits of st_mode, access mode). Each part stays fixed while a descriptor stays open:
+    the permission bits are left out because chmod or fchmod changes them under a kept descriptor, and
+    the access-mode bits are the F_GETFL bits F_SETFL cannot change. A number closed and reopened on
+    another file, or on the same file with another access mode, changes its pair; a count sees neither.
+
+    Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
+    an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
+    closed and re-created at the same number reads as unchanged; so does the same file closed and
+    reopened at the same number with the same access mode; and so does a deleted file closed at a
+    number and a new file of the same type opened there with the same access mode after taking the
+    deleted file's freed inode number on the same device (st_ino names a file only while it exists,
+    and a filesystem may give a freed number to the next file it creates). The census looks no
+    further: the offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines
+    change under a kept descriptor that is read, written or given F_SETFL, so comparing them would
+    report a kept descriptor as a leak. A descriptor gained at a number that was free before is
+    always seen.
+
+    Only EBADF reads as closed (the listing's own descriptor is gone by the time it is read); any other
+    listing, fstat or flag failure raises FdCensusError naming the listing or the descriptor. A listing
+    that does not exist (ENOENT, ENOTDIR) raises FdCensusUnavailable."""
+    import errno
+    import fcntl
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            raise FdCensusUnavailable("descriptor census: this host has no /proc/self/fd ({})".format(
+                exc)) from exc
+        raise FdCensusError("descriptor census: cannot list /proc/self/fd: {}".format(exc)) from exc
+    access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
+    pairs = set()
+    for name in names:
+        fd = int(name)
+        try:
+            st = os.fstat(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise FdCensusError("descriptor census: cannot read descriptor {}: {}".format(fd, exc)) from exc
+        pairs.add((fd, (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), flags & access)))
+    return frozenset(pairs)
+
+
+def _fd_leak_check(action):
+    """Run action() between two pair censuses and return (verdict, detail). The verdict is True when no
+    pair is present after that was absent before; False on a gained pair (a leak, including a number
+    reopened on another file or with another access mode) or on an unreadable census; None when the
+    host has no /proc/self/fd (cannot evaluate, never a pass). action() runs even when the first
+    census fails, so the caller still sees its outcome."""
+    try:
+        before = _fd_pair_census()
+    except FdCensusError as exc:
+        action()
+        return (None if isinstance(exc, FdCensusUnavailable) else False), str(exc)
+    action()
+    try:
+        after = _fd_pair_census()
+    except FdCensusError as exc:
+        return (None if isinstance(exc, FdCensusUnavailable) else False), str(exc)
+    gained = sorted(after - before)
+    return not gained, "gained {}".format(gained)
+
+
 def self_test():
+    import importlib.util
     import io
     import shutil
     import tempfile
@@ -789,7 +895,71 @@ def self_test():
         return 2
 
     failures = []
+    cannot_evaluate = []                    # checks this host cannot run (no /proc/self/fd)
     checked = 0
+    # A 3.14 interpreter that cannot import tomllib is an incomplete install, not an old one; the module
+    # refuses at exit 2 with one error line naming tomllib (never a traceback, never the version refusal)
+    # and an empty stdout. The guard ends its process through os._exit, which an in-process load would
+    # turn into the end of this self-test run itself, so the refusal is exercised in a REAL subprocess:
+    # the child loads the module afresh from this file with tomllib blocked (None in sys.modules makes
+    # the import fail); its trailing sentinel (one 'loaded' line, exit 86) is reached only if the guard
+    # does not refuse.
+    nt = subprocess.run(
+        [sys.executable, "-I", "-B", "-c",
+         'import importlib.util, sys\n'
+         'sys.modules["tomllib"] = None\n'
+         'spec = importlib.util.spec_from_file_location("_migrate_no_tomllib", sys.argv[1])\n'
+         'spec.loader.exec_module(importlib.util.module_from_spec(spec))\n'
+         'sys.stderr.write("loaded with tomllib blocked\\n")\n'
+         'sys.exit(86)\n', os.path.abspath(__file__)],
+        capture_output=True, text=True, timeout=600)
+    nt_lines = nt.stderr.splitlines()
+    if not (nt.returncode == 2 and nt.stdout == "" and len(nt_lines) == 1 and nt_lines[0].startswith(
+            "error: migrate.py cannot import tomllib, part of the Python standard library")
+            and "requires Python" not in nt_lines[0]):
+        failures.append("a missing tomllib on a 3.14 interpreter must be one exit-2 'cannot import' line "
+                        "with empty stdout, got {} with {!r} and stdout {!r}".format(
+                            nt.returncode, nt_lines, nt.stdout))
+    checked += 1
+    # A ModuleNotFoundError for a DIFFERENT module, raised while tomllib is being imported (a missing
+    # dependency of tomllib), is not a missing tomllib: it propagates unchanged (the same exception object, no
+    # error line, no exit). tomllib is taken out of sys.modules and a finder placed first on sys.meta_path
+    # fails its load with that error; both are put back afterwards.
+    nd_exc = ModuleNotFoundError("No module named '_aiqt_absent_dependency'", name="_aiqt_absent_dependency")
+
+    class _NestedMissingFinder:
+        def find_spec(self, name, path=None, target=None):
+            return importlib.util.spec_from_loader(name, self) if name == "tomllib" else None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            raise nd_exc
+
+    nd_err = io.StringIO()
+    nd_finder = _NestedMissingFinder()
+    nd_saved = sys.modules.pop("tomllib", None), list(sys.path)
+    sys.meta_path.insert(0, nd_finder)
+    try:
+        nd_spec = importlib.util.spec_from_file_location("_migrate_nested_missing", os.path.abspath(__file__))
+        with redirect_stderr(nd_err):
+            nd_spec.loader.exec_module(importlib.util.module_from_spec(nd_spec))
+        nd_outcome = "loaded"
+    except SystemExit as exc:
+        nd_outcome = "exit {}".format(exc.code)
+    except ModuleNotFoundError as exc:
+        nd_outcome = exc
+    finally:
+        sys.meta_path.remove(nd_finder)
+        sys.modules.pop("tomllib", None)
+        if nd_saved[0] is not None:
+            sys.modules["tomllib"] = nd_saved[0]
+        sys.path[:] = nd_saved[1]
+    if not (nd_outcome is nd_exc and nd_exc.name == "_aiqt_absent_dependency" and nd_err.getvalue() == ""):
+        failures.append("a missing dependency raised while tomllib loads must propagate unchanged, "
+                        "got {!r} with {!r}".format(nd_outcome, nd_err.getvalue()))
+    checked += 1
     # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
     # a ValueError); load_crosswalk must still refuse with RefuseError carrying the overflow.
     # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
@@ -1291,49 +1461,187 @@ def self_test():
         #     DEEP _open_parent walk (>=2 intermediate dirs => >=2 opened fds): post-fix _open_parent
         #     returns and the process fd count is unchanged; pre-fix the first raise aborts the loop, the
         #     second fd leaks, and the raw OSError escapes.
-        wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
-        (wroot / "a" / "b" / "dataA").write_bytes(b"x")
-        wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
-        _w_real_close = os.close
-        _w_state = {"n": 0}
+        def _w_case(label, after_walk=None):
+            """Run the P3 check on a fresh tree and return (failure text or None, leak verdict, census
+            detail); after_walk, when given, runs inside the censused action after the walk."""
+            wroot = tmp / "walkclose" / label / "root"; (wroot / "a" / "b").mkdir(parents=True)
+            (wroot / "a" / "b" / "dataA").write_bytes(b"x")
+            wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
+            _w_real_close = os.close
+            _w_state = {"n": 0}
 
-        def _w_boom_close(fd):
-            _w_state["n"] += 1
-            if _w_state["n"] == 1:
-                _w_real_close(fd)                                            # released first (close(2))
-                raise OSError(5, "EIO (self-test injected, after release)")
-            return _w_real_close(fd)
+            def _w_boom_close(fd):
+                _w_state["n"] += 1
+                if _w_state["n"] == 1:
+                    _w_real_close(fd)                                        # released first (close(2))
+                    raise OSError(5, "EIO (self-test injected, after release)")
+                return _w_real_close(fd)
 
-        def _fdcount():
+            _w = {"outcome": None}
+
+            def _w_walk():
+                _w_pfd = None
+                try:
+                    os.close = _w_boom_close
+                    try:
+                        _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
+                        _w["outcome"] = "returned"
+                    except OSError:
+                        _w["outcome"] = "raised"
+                finally:
+                    os.close = _w_real_close
+                if _w_pfd is not None:
+                    _w_real_close(_w_pfd)                    # real close so the test itself leaks nothing
+                if after_walk is not None:
+                    after_walk()
+
+            # A (number, identity) pair census: a leaked sibling fd is a pair gained, and an unreadable
+            # census FAILS this check (it once read as None and let the comparison be skipped).
             try:
-                return len(os.listdir("/proc/self/fd"))
-            except OSError:
-                return None
+                _w_leak_ok, _w_detail = _fd_leak_check(_w_walk)
+            finally:
+                os.close(wroot_fd)
+            if _w["outcome"] == "returned" and _w_leak_ok is not False:
+                return None, _w_leak_ok, _w_detail
+            return ("_open_parent contained-walk cleanup must GUARD each close so a raising close "
+                    "neither aborts the walk nor leaks a sibling fd (outcome={}, census {}; "
+                    "finding 8-2)".format(_w["outcome"], _w_detail)), _w_leak_ok, _w_detail
 
-        _w_before = _fdcount()
-        _w_outcome = None
-        _w_pfd = None
-        try:
-            os.close = _w_boom_close
-            try:
-                _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
-                _w_outcome = "returned"
-            except OSError:
-                _w_outcome = "raised"
-        finally:
-            os.close = _w_real_close
-        if _w_pfd is not None:
-            _w_real_close(_w_pfd)                            # real close so the test itself leaks nothing
-        os.close(wroot_fd)
-        _w_after = _fdcount()
-        _w_leak_ok = True
-        if _w_before is not None and _w_after is not None:
-            _w_leak_ok = (_w_after <= _w_before)            # a leaked sibling fd makes after > before
-        if not (_w_outcome == "returned" and _w_leak_ok):
-            failures.append("_open_parent contained-walk cleanup must GUARD each close so a raising close "
-                            "neither aborts the walk nor leaks a sibling fd (outcome={}, before={}, after={}; "
-                            "finding 8-2)".format(_w_outcome, _w_before, _w_after))
+        _w_failure, _w_verdict, _w_detail = _w_case("p3")
+        if _w_failure is not None:
+            failures.append(_w_failure)
+        elif _w_verdict is None:
+            cannot_evaluate.append("P3 walk-cleanup descriptor leak check (the walk itself returned): "
+                                   + _w_detail)
         checked += 1
+
+        # (P3b) THE LEAK CHECK ABOVE IS A PAIR CENSUS OF FIXED IDENTITIES THAT FAILS CLOSED: (i) a number
+        #     closed and reopened on a different file, or (ii) on the same file with another access mode,
+        #     between the censuses is a leak (a count is unchanged); (iii) a chmod of a kept descriptor is
+        #     not; (iv) an injected EIO on the listing, on one descriptor's fstat, or on its F_GETFL makes
+        #     the check fail naming the listing or the descriptor, never pass; (v) a missing listing
+        #     cannot evaluate, never passes; (vi) EBADF alone reads as closed. On a host with no
+        #     /proc/self/fd none of this can run: it is reported as cannot-evaluate, not as a failure.
+        import fcntl
+        if _fd_leak_check(lambda: None)[0] is None:
+            cannot_evaluate.append("P3b and P3c descriptor census checks: this host has no /proc/self/fd")
+        else:
+            _c_a = tmp / "fdcensus-a"; _c_a.write_bytes(b"a")
+            _c_b = tmp / "fdcensus-b"; _c_b.write_bytes(b"b")
+            for _c_label, _c_second, _c_mode in (("another file", _c_b, os.O_RDONLY),
+                                                 ("the same file with another access mode", _c_a, os.O_RDWR)):
+                _c_fd = os.open(str(_c_a), os.O_RDONLY)
+                _c_held = [_c_fd]
+
+                def _c_reuse():
+                    os.close(_c_held.pop())
+                    _c_held.append(os.open(str(_c_second), _c_mode))   # lowest free number: the one just closed
+
+                _c_ok, _c_detail = _fd_leak_check(_c_reuse)
+                _c_same = _c_held == [_c_fd]
+                for _c_value in _c_held:
+                    os.close(_c_value)
+                if not _c_same or _c_ok is not False:
+                    failures.append("the descriptor leak check must see a number closed and reopened on {} "
+                                    "(same number: {}, leak-free: {}, census {})".format(
+                                        _c_label, _c_same, _c_ok, _c_detail))
+                checked += 1
+
+            _c_kept = os.open(str(_c_a), os.O_RDONLY)
+            try:
+                os.fchmod(_c_kept, 0o644)   # an explicit starting mode: the chmod below then changes the
+                                            # permission bits whatever umask created the file
+                _c_ok, _c_detail = _fd_leak_check(lambda: os.fchmod(_c_kept, 0o600))
+                _c_changed = stat.S_IMODE(os.fstat(_c_kept).st_mode) == 0o600
+            finally:
+                os.close(_c_kept)
+            if not _c_changed or _c_ok is not True:
+                failures.append("a chmod of a kept descriptor changes no identity and must not read as a leak "
+                                "(mode changed from 0644 to 0600: {}, leak-free: {}, census {})".format(
+                                    _c_changed, _c_ok, _c_detail))
+            checked += 1
+
+            _c_real_listdir, _c_real_fstat, _c_real_fcntl = os.listdir, os.fstat, fcntl.fcntl
+            _c_probe = os.open(str(_c_a), os.O_RDONLY)
+
+            def _c_errno_listdir(code):
+                def _listdir(path=".", *args):
+                    if str(path) == "/proc/self/fd":
+                        raise OSError(code, "self-test injected on the descriptor listing")
+                    return _c_real_listdir(path, *args)
+                return _listdir
+
+            def _c_errno_fstat(code):
+                def _fstat(fd, *args):
+                    if fd == _c_probe:
+                        raise OSError(code, "self-test injected on descriptor {}".format(fd))
+                    return _c_real_fstat(fd, *args)
+                return _fstat
+
+            def _c_eio_fcntl(fd, cmd, *args):
+                if fd == _c_probe and cmd == fcntl.F_GETFL:
+                    raise OSError(5, "self-test injected on the F_GETFL of descriptor {}".format(fd))
+                return _c_real_fcntl(fd, cmd, *args)
+
+            _c_results = {}
+            for _c_label, _c_listdir, _c_fstat, _c_fcntl in (
+                    ("listing EIO", _c_errno_listdir(5), _c_real_fstat, _c_real_fcntl),
+                    ("listing ENOENT", _c_errno_listdir(2), _c_real_fstat, _c_real_fcntl),
+                    ("fstat EIO", _c_real_listdir, _c_errno_fstat(5), _c_real_fcntl),
+                    ("F_GETFL EIO", _c_real_listdir, _c_real_fstat, _c_eio_fcntl),
+                    ("fstat EBADF", _c_real_listdir, _c_errno_fstat(9), _c_real_fcntl)):
+                os.listdir, os.fstat, fcntl.fcntl = _c_listdir, _c_fstat, _c_fcntl
+                try:
+                    _c_results[_c_label] = _fd_leak_check(lambda: None)
+                finally:
+                    os.listdir, os.fstat, fcntl.fcntl = _c_real_listdir, _c_real_fstat, _c_real_fcntl
+            os.close(_c_probe)
+            _c_list_ok, _c_list_detail = _c_results["listing EIO"]
+            _c_gone_ok, _c_gone_detail = _c_results["listing ENOENT"]
+            _c_badf_ok, _c_badf_detail = _c_results["fstat EBADF"]
+            if _c_list_ok is not False or "/proc/self/fd" not in _c_list_detail:
+                failures.append("an unreadable descriptor listing must FAIL the leak check naming the listing, "
+                                "never pass it (leak-free: {}, detail: {})".format(_c_list_ok, _c_list_detail))
+            if _c_gone_ok is not None or "no /proc/self/fd" not in _c_gone_detail:
+                failures.append("a missing descriptor listing must leave the leak check unable to evaluate, "
+                                "never pass it (leak-free: {}, detail: {})".format(_c_gone_ok, _c_gone_detail))
+            for _c_label in ("fstat EIO", "F_GETFL EIO"):
+                _c_ok, _c_detail = _c_results[_c_label]
+                if _c_ok is not False or "descriptor {}:".format(_c_probe) not in _c_detail:
+                    failures.append("an injected {} must FAIL the leak check naming descriptor {} (leak-free: "
+                                    "{}, detail: {})".format(_c_label, _c_probe, _c_ok, _c_detail))
+            if _c_badf_ok is not True:
+                failures.append("an fstat EBADF reads as a closed descriptor and must not fail an unchanged "
+                                "census (detail: {})".format(_c_badf_detail))
+            checked += 1
+
+            # (P3c) THE P3 CHECK ITSELF FAILS CLOSED, not only the helper it calls: run P3's own code once
+            #     under an injected listing EIO and once with a number closed and reopened on another file
+            #     inside the censused walk; each must report P3's failure. Reverting P3 to a count that
+            #     skips an unreadable listing, or to any count, fails here.
+            os.listdir = _c_errno_listdir(5)
+            try:
+                _c_p3_failure, _c_p3_verdict, _c_p3_detail = _w_case("p3c-listing")
+            finally:
+                os.listdir = _c_real_listdir
+            if _c_p3_failure is None or "/proc/self/fd" not in _c_p3_failure:
+                failures.append("the P3 walk-cleanup check must FAIL under an unreadable descriptor listing, "
+                                "naming it (verdict: {}, detail: {})".format(_c_p3_verdict, _c_p3_detail))
+            checked += 1
+            _c_held = [os.open(str(_c_a), os.O_RDONLY)]
+
+            def _c_p3_reuse():
+                os.close(_c_held.pop())
+                _c_held.append(os.open(str(_c_b), os.O_RDONLY))
+
+            _c_p3_failure, _c_p3_verdict, _c_p3_detail = _w_case("p3c-reuse", _c_p3_reuse)
+            for _c_value in _c_held:
+                os.close(_c_value)
+            if _c_p3_failure is None:
+                failures.append("the P3 walk-cleanup check must FAIL when a number is closed and reopened on "
+                                "another file inside the walk (verdict: {}, detail: {})".format(
+                                    _c_p3_verdict, _c_p3_detail))
+            checked += 1
 
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
         jr2 = tmp / "foreignlock" / JOURNAL_REL
@@ -2199,6 +2507,140 @@ def self_test():
             os.close(_jt_rfd)
         checked += 1
 
+        # (F-JOURNAL-HELD-FD-LISTING, direct, native) a transaction directory created AFTER the
+        # journal-root descriptor was opened is enumerated by the FIRST _journal_txn_dirs call: the
+        # listing reads through a fresh "." descriptor opened beneath the held jr_fd, never through jr_fd
+        # itself. FILESYSTEM-DEPENDENT integration evidence: it discriminates only where a held
+        # descriptor's listing is stale (btrfs, which snapshots a readdir upper bound at open time; not
+        # tmpfs). The seam leg below discriminates on any filesystem.
+        _hl_root = tmp / "heldfd" / "root"
+        (_hl_root / JOURNAL_REL / "txnA").mkdir(parents=True)
+        _hl_rfd = os.open(str(_hl_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hl_jrfd = _journal.open_journal_root_fd(_hl_rfd, JOURNAL_REL)
+        try:
+            os.mkdir("txnB", dir_fd=_hl_jrfd)               # created AFTER _hl_jrfd was opened
+            _hl_names = sorted(d.name for d in _journal._journal_txn_dirs(
+                _hl_jrfd, _hl_root / JOURNAL_REL))
+            if _hl_names != ["txnA", "txnB"]:
+                failures.append("HELDFD: the first enumeration after a late mkdir must see the new "
+                                "transaction directory through a fresh listing descriptor (got "
+                                "{})".format(_hl_names))
+        finally:
+            os.close(_hl_jrfd)
+            os.close(_hl_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, direct, seam) the same late transaction directory under
+        # _journal._StStaleListing, which serves the STALE view (the entries at the held open) through
+        # jr_fd and every descriptor sharing its open file description (a dup), and the current view
+        # only through a "." descriptor opened relative to jr_fd: on ANY filesystem the enumeration
+        # must see txnB, and every listing of the journal root must be a fresh one.
+        _hs_root = tmp / "heldfd-seam" / "root"
+        (_hs_root / JOURNAL_REL / "txnA").mkdir(parents=True)
+        _hs_rfd = os.open(str(_hs_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hs_jrfd = _journal.open_journal_root_fd(_hs_rfd, JOURNAL_REL)
+        try:
+            with _journal._StStaleListing() as _hs_seam:
+                _hs_seam.hold(_hs_jrfd)
+                os.mkdir("txnB", dir_fd=_hs_jrfd)           # created AFTER _hs_jrfd was opened
+                _hs_names = sorted(d.name for d in _journal._journal_txn_dirs(
+                    _hs_jrfd, _hs_root / JOURNAL_REL))
+            if _hs_names != ["txnA", "txnB"] or not _hs_seam.views or "stale" in _hs_seam.views:
+                failures.append("HELDFD-SEAM: under the stale-listing seam the enumeration must read "
+                                "through a fresh descriptor and see the late transaction directory (got "
+                                "{}, listing views {})".format(_hs_names, _hs_seam.views))
+        finally:
+            os.close(_hs_jrfd)
+            os.close(_hs_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, reconcile, native) the stale-lock reconcile must enumerate an OPEN
+        # transaction created after jr_fd was opened: the late open transaction is recovered to terminal,
+        # and only then is the dead owner's stale lock broken. A reconcile whose first listing misses it
+        # leaves it unrecovered: when the validation listing then sees it, the reconcile refuses to break
+        # the lock (the parent's observed behaviour on btrfs: fail-closed, recovery unavailable); only
+        # when both listings miss it is the lock broken with the transaction still open. This native leg
+        # is FILESYSTEM-DEPENDENT integration evidence (it discriminates only where a held descriptor's
+        # listing is stale, e.g. btrfs); the seam leg after it discriminates on any filesystem.
+        _hr_root = _build_case_root(tmp / "heldfd-reconcile" / "root", "flat-files")
+        _hr_jr = _hr_root / JOURNAL_REL
+        _hr_jr.mkdir(parents=True, exist_ok=True)
+        _hr_rfd = os.open(str(_hr_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hr_jrfd = _journal.open_journal_root_from_path(_hr_root, JOURNAL_REL)
+        try:
+            _hr_dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            _hr_dead.wait()                                 # a pid that is confirmed dead once reaped
+            (_hr_jr / "lock").write_bytes(json.dumps(
+                {"uid": os.getuid(), "pid": _hr_dead.pid, "session": "dead", "pid-start": "",
+                 "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+            os.mkdir("late-open", dir_fd=_hr_jrfd)          # created AFTER _hr_jrfd was opened
+            _journal.publish(_hr_jrfd, _hr_jr / "late-open", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})   # INTENT, no terminal: OPEN
+            try:
+                _hr_res = _journal.reconcile_and_claim_stale(_hr_jr, _hr_jrfd, _hr_rfd,
+                                                             "heldfd-selftest")
+            except _journal.JournalError as exc:
+                _hr_res = "JournalError({})".format(exc)
+            try:
+                _hr_terminal = _journal.is_terminal(_hr_jrfd, _hr_jr / "late-open")
+            except _journal.JournalError:
+                _hr_terminal = "unreadable"
+            if _hr_res != "acquired" or _hr_terminal is not True:
+                failures.append("HELDFD-RECONCILE: an open transaction created after jr_fd was opened "
+                                "must be enumerated and recovered before the stale lock is broken, "
+                                "never read as 'all terminal' (result {}, late txn terminal "
+                                "{})".format(_hr_res, _hr_terminal))
+            _journal.release_lock(_hr_jr)
+        finally:
+            os.close(_hr_jrfd)
+            os.close(_hr_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, reconcile, seam) the same late open transaction under
+        # _journal._StStaleListing, held from the jr_fd open: on ANY filesystem both of the reconcile's
+        # listings must read through fresh descriptors, so the transaction is recovered before the stale
+        # lock is broken. A listing through jr_fd or a dup of it is served the stale view, under which
+        # both listings miss the transaction and the lock is broken with it still open.
+        _hq_root = _build_case_root(tmp / "heldfd-reconcile-seam" / "root", "flat-files")
+        _hq_jr = _hq_root / JOURNAL_REL
+        _hq_jr.mkdir(parents=True, exist_ok=True)
+        _hq_rfd = os.open(str(_hq_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hq_jrfd = _journal.open_journal_root_from_path(_hq_root, JOURNAL_REL)
+        try:
+            with _journal._StStaleListing() as _hq_seam:
+                _hq_seam.hold(_hq_jrfd)
+                _hq_dead = subprocess.Popen([sys.executable, "-c", "pass"])
+                _hq_dead.wait()                             # a pid that is confirmed dead once reaped
+                (_hq_jr / "lock").write_bytes(json.dumps(
+                    {"uid": os.getuid(), "pid": _hq_dead.pid, "session": "dead", "pid-start": "",
+                     "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+                os.mkdir("late-open", dir_fd=_hq_jrfd)      # created AFTER _hq_jrfd was opened
+                _journal.publish(_hq_jrfd, _hq_jr / "late-open", _journal.F_INTENT,
+                                 {"txn": "A", "header": {}, "ops": []})   # INTENT, no terminal: OPEN
+                try:
+                    _hq_res = _journal.reconcile_and_claim_stale(_hq_jr, _hq_jrfd, _hq_rfd,
+                                                                 "heldfd-seam-selftest")
+                except _journal.JournalError as exc:
+                    _hq_res = "JournalError({})".format(exc)
+            try:
+                _hq_terminal = _journal.is_terminal(_hq_jrfd, _hq_jr / "late-open")
+            except _journal.JournalError:
+                _hq_terminal = "unreadable"
+            if (_hq_res != "acquired" or _hq_terminal is not True or not _hq_seam.views
+                    or "stale" in _hq_seam.views):
+                failures.append("HELDFD-RECONCILE-SEAM: under the stale-listing seam the reconcile must list "
+                                "through fresh descriptors and recover the late open transaction before the "
+                                "stale lock is broken (result {}, late txn terminal {}, listing views "
+                                "{})".format(_hq_res, _hq_terminal, _hq_seam.views))
+            try:
+                _journal.release_lock(_hq_jr)
+            except (_journal.JournalError, OSError):
+                pass                                        # a failing leg may hold no lock to release
+        finally:
+            os.close(_hq_jrfd)
+            os.close(_hq_rfd)
+        checked += 1
+
         # (F-R18-OSESC) an enumeration OSError (e.g. EIO) escapes as a CONTEXTUAL JournalError, not a raw
         # OSError, so the CLI maps it to exit 2 and _all_terminal to False. Inject a scandir failure.
         _ose_root = tmp / "osesc" / "root"
@@ -2290,6 +2732,12 @@ def self_test():
         for f in failures:
             print("  - " + f)
         return 1
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT EVALUATE: these checks could not run on this host, so the self-test does not "
+              "pass (the rest passed; {} scenarios ran):".format(checked))
+        for c in cannot_evaluate:
+            print("  - " + c)
+        return 2
     print("SELF-TEST PASS: crash-injection recovery proven from the journal alone across {} scenarios "
           "over 4 synthetic off-path cases across 3 tree structures (flat files, nested create, nested "
           "remove, plus a umask-reduced-mode remove variant). Every cutover-"

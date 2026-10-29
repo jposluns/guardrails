@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check token-level parity between the local and CI quality-gate rosters.
 
-The gate reads tools/run_all_checks.sh and .github/workflows/quality.yml as data. It
-does not execute either file. Both paths are absolute and derived from this file's
+The gate reads tools/run_all_checks.sh and the two CI workflows (CI_WORKFLOWS:
+.github/workflows/quality.yml and .github/workflows/msg-leaks.yml) as data. It
+executes none of them. Every path is absolute and derived from this file's
 resolved repository root. The --self-test alone also runs a scratch copy of the runner
 under bash, with stub python3 and gitleaks commands, to prove a failing gate is named
 (GATE FAILED: <name> (exit <n>)) and listed (FAILED GATES: ...) before RESULT: FAIL.
@@ -12,22 +13,245 @@ launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s
 -P, and -u, including glued forms such as -IB, do not affect identity. The value of a
 runtime-derived flag (--base, --protected, --head) is masked as <ref:expression>,
 preserving which expression supplied it, only in the CI workflow and only when it
-carries a shell expansion that is byte-for-byte one of the reviewed
-MASKED_REF_EXPRESSIONS (any other expansion there is cannot-evaluate, never masked),
-so a change among runtime spellings (including one making two refs identical, a
-self-comparison) diverges; a literal value stays in identity, so two different
-literals diverge. In the local runner every run_gate word is held to a character
-allowlist that admits no expansion at all, so a runtime-derived flag value there is
-refused, never masked. A ${{ }} GitHub expression inside a
-gate command is cannot-evaluate, not masked. Every other argument remains
-order-preserving and identity-relevant. Duplicates collapse because comparison is
-set-based.
+is byte-for-byte one of the reviewed MASKED_REF_EXPRESSIONS AND its raw workflow
+spelling, before shell de-quoting, is byte-for-byte that expression's one
+reviewed spelling, its double-quoted form as quality.yml writes it; tokenization
+removes quotes and escaping backslashes, so any other spelling that de-quotes
+into a reviewed expression (a backslash-escaped, backslash-split,
+adjacent-quoted or single-quoted one) hands the gate different bytes at runtime
+and is cannot-evaluate (masked-spelling), never masked. A runtime-derived
+value is exactly one that carries $ or a backquote: any other such value is
+cannot-evaluate, never masked, a literal <ref:...> placeholder spelling included
+(the placeholder is the OUTPUT of this masking, accepted back only from the
+reviewed in-gate allowlist and its canonical identities, so a quoted <ref:...>
+literal in a workflow never collapses into a masked identity), and a change
+among the reviewed runtime spellings (including one making two refs identical,
+a self-comparison) diverges; a value carrying neither character stays in
+identity as a kept literal (a tilde, glob or brace word included), so two
+different literals diverge. In the local runner every run_gate word is held to
+a character allowlist that admits no expansion at all, so a runtime-derived
+flag value there is refused, never masked. A ${{ }} GitHub expression anywhere
+in a run: value is cannot-evaluate, not masked, read on the raw lines inside
+the block scalar before shell-comment stripping (GitHub substitutes
+expressions into the script text before the shell runs, comments included, so
+a substituted value carrying a newline leaves the comment), so a whole-line or
+trailing shell comment carrying one is refused too. The scalar extent is read
+by a conservative subset of the YAML block-scalar rules: the content
+indentation is the first non-empty line's; a leading blank line indented
+past it is refused (scalar-blank-indent) because YAML rejects that layout,
+while a later blank line stays inside the scalar wherever it falls; the
+first non-empty line below the content indentation ends the scalar, a
+comment line included, so a dedented YAML comment after the block is not
+script text, and a dedented line that re-enters the step is refused
+(step-structure); a tab on a scalar line is refused (yaml-tab) even where
+YAML accepts one in content; and a folded run: scalar is refused
+(folded-run), so the subset refuses, never passes, the layouts it does not
+read. Every other argument remains
+order-preserving and identity-relevant. Duplicates collapse because
+comparison is set-based.
+
+REQUIRED STATUS (multi-job shape). The CI member set is the union over every job,
+so a gate moved from one job to another is still one member, and a gate dropped
+from every job is still a local-only finding.
+Job set: the rule reads the job set the way YAML does or refuses. Under jobs:, a
+job id is read only from a plain key at indent 2 that GitHub accepts as a job id
+(JOB_HEADER_RE) and that no YAML version reads as a boolean or null, and every
+job's properties start at indent 4. A quoted, spaced, flow, complex or list key at
+indent 2, a line at indent 1 or 3, a job body that starts deeper than indent 4, a
+repeated top-level or job-level key, and a repeated job id are each cannot-evaluate
+(exit 2), never skipped. Any top-level line ends the jobs: mapping.
+Result masking: on any job, in a workflow of any size, each of continue-on-error,
+uses, defaults and container (RESULT_MASKING_JOB_KEYS) is a required-status finding
+(exit 1) whatever its value. The set is derived from GitHub's documented job-level
+syntax (jobs.<job_id>.*). continue-on-error is documented as letting the run pass
+when the job fails. uses hands the job's result to a reusable workflow this rule
+does not read. defaults (run.shell) and container replace the program or image every
+run: step executes in, so a gate command need not run at all. The other job keys
+cannot turn a failing gate into a success result: if:, needs:, timeout-minutes,
+concurrency and environment can only skip, cancel or fail a job, which Quality gates
+reads as not success (the LANES rule still holds a job-level if: to its pinned
+text and refuses a job-level concurrency:); a strategy matrix job's result is
+failure when any leg fails (GitHub behaviour, not observed here); name, runs-on,
+permissions, outputs, env, services,
+with and secrets do not decide a result (with and secrets apply only under uses).
+The step-level keys that could (continue-on-error, if:, timeout-minutes, and any
+shell: other than the exact line shell: bash) are outside the recognized step keys
+and stay cannot-evaluate, as does a gate command chained with || true.
+Step shell: every step with a run: key carries exactly one STEP_SHELL_LINE
+(shell: bash). GitHub's workflow syntax reference documents a step-level shell
+(jobs.<job_id>.steps[*].shell) as overriding the job's default, and a job's
+default as overriding a workflow default of the same name (the most specific
+default wins). That a step shell also overrides a workflow's defaults.run.shell
+is inferred from those two statements, not documented for that case. Without
+the line, a top-level defaults: run: shell: true {0} would make every run:
+step, this gate's own included, exit 0 without running its command (inferred
+from GitHub's custom-shell syntax, not observed on Actions). A run: step
+without the line is a required-status finding (exit 1); a second shell: line
+in one step and a shell: line on a step with no run: key are cannot-evaluate.
+A top-level defaults: key stays outside TOP_LEVEL_KEYS (cannot-evaluate) and a
+job-level one stays a result-masking finding.
+The line closes the defaults.run.shell route only. It does not close
+defaults.run.working-directory at workflow or job level: a step shell does not
+override it, and every gate is invoked by a relative path (python3 -I -B
+tools/...), so a defaults block can still choose the directory each gate's
+script is resolved in, and with it which file runs, this gate's own
+invocation included. That route stays refused only where the local runner
+runs this gate.
+Any step key at indent 8 before a job's first step item (run:, uses:, env:,
+with:, shell: or another) is cannot-evaluate (exit 2); YAML rejects that shape.
+Aggregator: a workflow with more than one job must route every job into the one
+aggregated status that workflow reports (each CI_WORKFLOWS file reports its own
+required status). Exactly one job is named "Quality gates"
+(REQUIRED_STATUS_NAME); its job-level if: is always() (GitHub reads a skipped
+required job as passing, so without always() a failed or cancelled needed job would
+skip it and the status would read green); its needs: lists every other job exactly
+once and nothing else; and the job, from the line after its id, matches
+REQUIRED_STATUS_JOB line for line, ignoring blank and whole-line comment lines and
+reading the needs: key with its nested lines as one slot. The pin is the logic
+check: the pinned step exits 0 only when every needed result is the word success,
+and the self-test runs the pinned run: body under bash with all-success, failure,
+cancelled, skipped, unknown, empty and unset results, and once with its exit 1
+deleted, so a pin that could pass a failure fails the self-test. An exact pin was
+chosen over a semantic reading because this gate does not model bash: any edit to
+that job, harmless or not, is a finding until the pin and the workflow change
+together under review. Each departure is a required-status finding (exit 1). A
+needs: entry outside the recognized spellings (a block list of plain job ids, a
+one-line flow list, or one plain scalar) is cannot-evaluate. A one-job workflow is
+its own status and carries no aggregator rule, only the result-masking rule.
+Not checked: the branch-protection setting itself (that Quality gates and
+Message/metadata leaks are both required checks, and that no other job reports
+either name through an expression in its name:); GitHub's evaluation of
+needs.*.result, if: always(), cancellation and matrix results, which is
+documented behaviour this gate does not observe;
+step-shell precedence over defaults.run.shell (documented over a job default,
+inferred over a workflow default), also not observed; defaults.run.working-directory
+(Step shell, above); and the
+runner image, runs-on labels, services and environment values (a job or step env:
+can set a variable such as BASH_ENV that changes what an accepted gate command
+does). Inside a run: block the exact line exit 1 is accepted, because it can only
+end a step red; every other exit spelling stays unclassified.
+TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
+quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
+so that only its one job re-runs on a PR title/body edit. A gate may run in
+either file and is still one member. Each named workflow is required: a missing
+or unreadable one is cannot-evaluate (exit 2), never an empty side. The
+job-set, step-shell, result-masking and aggregator rules above apply to each
+file on its own, so the one-job msg-leaks.yml is its own status; that branch
+protection requires it beside Quality gates is not checked here. msg-leaks.yml
+may run only that scan,
+its self-test and the child-status probe (CHILD_STATUS_PROBE, the first step of
+every job that runs Python) (MSG_LEAKS_WORKFLOW_MEMBERS): any other member there is a
+relocation finding (exit 1), because a gate moved from quality.yml into
+msg-leaks.yml leaves the aggregated Quality gates status silently and re-runs
+on every PR metadata edit.
+TRIGGER. The message/metadata leak scan (MSG_LEAKS_SCAN) reads the PR title and
+body, so the workflow that runs it must list opened, synchronize, reopened and
+edited (MSG_LEAKS_PULL_REQUEST_TYPES) in its pull_request types, and a workflow
+that does not run it must not carry edited on pull_request or
+pull_request_target (EDIT_EVENTS), because edited re-runs every job of that
+workflow on a metadata-only change. quality.yml must list exactly
+QUALITY_PULL_REQUEST_TYPES (labeled) on its pull_request event and carry no
+pull_request_target, because a pull request run of it is scheduled only by the
+label the merge lane applies to the train pull request, so a member head gets
+no Quality run; a quality.yml whose on: block names no pull_request event, and
+one with no top-level on: line at all, is a trigger finding too, because a
+train head then gets no Quality run either (tools/ci-status.sh reads that as
+missing, never as passing, but this rule names the cause). Each departure is a
+trigger finding (exit
+1). The rule reads the top-level on: block: an event key at indent 2 with no
+value reads as GitHub's default types (opened, synchronize, reopened); types:
+at indent 4 is a one-line flow list, one plain scalar, or a block list at
+indent 6; and a one-line on: value naming events gives each its default types.
+Every key this rule reads must be a PLAIN name whose colon is followed by a
+space or ends the line: a quoted key, a key with whitespace before its colon,
+a non-name spelling (an explicit '?' key, a tag such as !!str, or any other
+character outside a plain name), and a colon directly followed by its value
+(types:[...] or on:[...], which YAML reads as one plain scalar, never as a
+key) are each cannot-evaluate (exit 2), on the top-level on: line itself, at
+indent 2 and under an edit event alike (a bare on with no colon too; a plain
+on: followed by a scalar, a one-line flow list, or a block of events stays
+read), as are a
+line at indent 2 with no colon, a first line under on: at any indent other
+than 2, a line under an edit event before any indent-4 property (an event's
+properties are read only at indent 4), a line at indent 1 or 3 anywhere in
+on:, and under an EDIT_EVENTS key any other shape (a flow mapping, a repeated
+event or types: key, an item that is not a plain name, or a sequence item at
+indent 4, which YAML reads as an indentless sequence). NOT READ
+(disclosed): the push trigger, and every filter or condition that can keep a
+listed event from scheduling the workflow or a job: branches:,
+branches-ignore:, paths:, paths-ignore:, and a job- or step-level if: (a
+job-level if: is read for its text alone, never for reachability: the LANES
+rule below refuses one on any job outside the heavy jobs of quality.yml, the
+scan's job included, and the REQUIRED STATUS rule holds the quality.yml
+Quality gates job's to always()). Any of
+them can stop the scan workflow on an edited event; reachability is outside
+token-parity scope (the reachability residual below).
+LANES. quality.yml must carry one top-level concurrency: block, exactly
+CONCURRENCY_BLOCK line for line once blank and whole-line comment lines are
+dropped: a pull request run's group is keyed by its pull request number with
+cancel-in-progress on, so a newer run of that pull request cancels the
+superseded one, and every other run's group is keyed by its own run id with
+cancel-in-progress off, so a push-to-main run is never cancelled or queued
+behind another run (GitHub's documented concurrency behaviour, not observed
+here). Every HEAVY_JOBS job must be present in quality.yml (a missing or
+renamed one is a lane finding) and must carry the job-level
+if: HEAVY_JOB_IF_LINE, and a job-level if: on any job but the Quality gates
+job of quality.yml (whose always() the REQUIRED STATUS rule holds) is accepted
+only as that exact
+line with no continuation line, and only on a HEAVY_JOBS job of quality.yml:
+those jobs run on a push and on a pull request whose head is a merge-train-*
+branch of this repository, and are skipped on every other pull request, which
+Quality gates reads as not success, so such a pull request merges only by
+riding a train. The if: value is read whole: every non-blank, non-comment line
+deeper than the key before the job's next property is a continuation line,
+which YAML folds into the condition. Each HEAVY_COMMANDS member (the expensive
+suites, pinned by full identity) is bound to the conditioned jobs: found in
+any job of either file whose if:, read whole, is not exactly
+HEAVY_JOB_IF_LINE, it is a lane finding, so relocating a heavy command into an
+unconditioned job, the Quality gates job included, fails loud. A missing or
+departing concurrency: block
+in quality.yml, a concurrency: block in msg-leaks.yml, a job-level
+concurrency: key on any job of either file, a missing heavy job, a heavy job
+without the if:, a
+departing if: value on a heavy job, a heavy member in a job without the
+pinned if: and the if: on any other job are each a
+lane finding (exit 1). Not read: workflows outside CI_WORKFLOWS (the scheduled
+currency.yml among them, DISCLOSED RESIDUAL), so a heavy command added to a
+workflow outside them is caught only as a parity difference, not as a lane
+finding; heaviness beyond the pinned HEAVY_COMMANDS enumeration (a new
+expensive command outside it can land in an unconditioned job with no lane
+finding until it is added to the set; the check_byte_canon.py identities are
+outside it because the registry job runs them unconditioned, so for the
+byte-canon-matrix job only its presence, its pinned if: and its members'
+parity are held, not a relocation of its commands); whether GitHub
+evaluates the pinned expressions as their text says (this rule compares text);
+and a cancelled run left on a live head (a label added while its run is in
+progress, the merge-train label re-applied included, or a push back to an
+earlier head), which tools/ci-status.sh then refuses until a new head commit.
+OPF GROUPS. The local runner runs the OPF tooling self-test as one
+opf/tools/opf.py --self-test-group NAME line per group of SELF_TEST_GROUPS in
+that file; CI runs the whole opf.py --self-test once, in a heavy job (the
+host-patch job), and no group. Each side is an ALLOWLIST exception: the
+groups local-only, the whole self-test ci-only. The self-test reads
+SELF_TEST_GROUPS from the live file with ast (_opf_group_names, a literal; the
+file is never run) and requires each group's command in HEAVY_COMMANDS, on
+exactly one line of the live local runner and on no line of the live
+quality.yml, and the whole self-test (OPF_WHOLE_COMMAND) in HEAVY_COMMANDS and
+on exactly one line of the live quality.yml, inside a HEAVY_JOBS job, each
+line read back through this gate's own tokenizer and placed in its job by
+the nearest job id above it (_opf_group_lines), and no other group command in
+either file (_opf_group_wiring_faults). So a group removed from the local
+runner, a group run on a second line, a group opf.py adds without a line, a
+group step put back into quality.yml, and the whole self-test removed,
+repeated or moved out of the heavy jobs each turn the self-test red. The rule
+runs in the self-test, which reads the live files, not in the gate's own run.
+Not checked: which HEAVY_JOBS job runs the whole self-test.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
-     stale or reversed, and both mandatory self-members are present
-  1  an evaluated parity finding, stale or reversed exception, or missing mandatory
-     self-member
+     stale or reversed, and every mandatory member is present on both sides
+  1  an evaluated parity finding, stale or reversed exception, missing mandatory
+     member, required-status, trigger, relocation or lane finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, or shadow-scan discrepancy
@@ -36,17 +260,25 @@ DISCLOSED RESIDUAL. This is token-level set parity only. It does not compare
 environment values, operating systems, tool versions, execution order, multiplicity,
 step placement across jobs, labels, or whether the shell harness propagates a child
 failure. Interpreter-flag differences are intentionally removed from identity and are
-owned by check_python_launcher_isolation.py. Scope is exactly the two named files, so
-gates in other workflows are not enumerated. Argument order is identity-relevant,
+owned by check_python_launcher_isolation.py. Scope is exactly the three named files
+(the runner and CI_WORKFLOWS), so gates in other workflows, such as the scheduled
+currency.yml, are not enumerated. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
-invocations cannot be detected if nobody runs the remaining file manually. The
+invocations cannot be detected if nobody runs the remaining file manually. The repository
+contracts (REPO_GATES) and the cited-standards contract's --self-test are
+MANDATORY_MEMBERS, so removing one of them from both runners together is a
+missing-mandatory finding, not a silent pass. The
+child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
+the same reason: removing either from both runners together is a missing-mandatory
+finding. Where the probe sits in a roster (first) is held by
+tools/check_child_status_coverage.py, not here. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks or the top-level directory-binding line before the first gate, unbalanced
 if/fi nesting in the runner, a duplicate else or an empty then or else branch,
 any character outside printable ASCII (0x20-0x7E) plus tab and newline in
-either input file, job content without a job mapping, a run_gate()
+any input file, job content without a job mapping, a run_gate()
 dispatcher body outside its recognized shape, a run_gate() function definition
 inside an if branch, a run_gate word (label or argument)
 outside the gate-line character allowlist, a masked runtime-value flag in the
@@ -73,7 +305,8 @@ contain is unclassified even when its value looks inert: bash evaluates a value
 assigned to an integer special variable as arithmetic (RANDOM=failed=0 resets
 failed), a compound array subscript assigns (x=([failed=0]=1)), and notrun=0 is
 accepted only at top level before the first gate, where the real runner puts it,
-because a later notrun=0 would hide the NOT RUN disclaimer. Behind that membership,
+because a later notrun=0 would clear the NOT RUN state, so its failure could no
+longer fire. Behind that membership,
 each expansion must still be a plain $NAME, ${NAME} or $? of a name the runner
 itself sets or manages (failed, notrun, failed_names, name, rc, gitleaks_rc, HOME,
 PATH): under set -u, a plain expansion of any other, possibly unset, variable
@@ -97,8 +330,8 @@ outside the supported grammar could hide a tools/ string from comment stripping.
 The runner's failure-state rules are lexical and shape-based: the runner is
 validated as printable-ASCII lines against an exact line and word allowlist
 with branch-state checks; the rules see line shapes and branch positions, not
-reachability or runtime values. Before any line is trusted, BOTH input files
-are refused whole if any character falls outside printable ASCII (0x20-0x7E)
+reachability or runtime values. Before any line is trusted, EVERY input file
+is refused whole if any character falls outside printable ASCII (0x20-0x7E)
 plus tab and newline: Python's splitlines() also breaks a line at \v, \f,
 \x1c, \x1d, \x1e, \x85, U+2028 and U+2029, and its strip() also removes
 Unicode spaces such as U+00A0, while bash breaks lines only at \n and reads
@@ -110,14 +343,16 @@ time (splitlines(), the adapter's line split and newline rejoin, and
 Path.read_text()'s universal-newline translation, which turns \r into \n
 before any text screen can see it), so EVERY read of a runner or workflow
 file, in the live check (run_paths), in self-test vector 26, and in
-tools/selftest_git_fixture_env.py's roster and roster checks, goes through
+tools/selftest_git_fixture_env.py's roster and the core runner's
+roster checks, goes through
 the ONE byte-level reader (read_runner_text): the RAW BYTES are screened
 against this same alphabet before any decode, so no decode-layer newline
 translation or multi-byte spelling can erase a forbidden byte ahead of the
 screen, and the accepted bytes are decoded strictly as ASCII, which maps
 each byte to one character and translates no newline. A self-test vector
 pins every read_text or splitlines attribute and every text-mode open()
-call in this file and in tools/selftest_git_fixture_env.py, as spelled,
+call in this file, in tools/selftest_git_fixture_env.py and in its four
+registered suite runners, as spelled,
 against an exact per-function allowlist, so a new read path written
 through those APIs turns the self-test red for review against the reader;
 a read spelled another way (getattr, an alias) is outside that tripwire.
@@ -139,7 +374,9 @@ a runtime-derived --base, --protected or --head value is refused in the local
 runner outright; the reviewed MASKED_REF_EXPRESSIONS apply only to the CI
 workflow, where an assigning, aborting or otherwise unreviewed expression
 (${x=failed=0}, ${stub_log?}, $((1/0))) stays cannot-evaluate rather than
-masked. A reviewed workflow expression still resolves only at runtime: its
+masked, and a reviewed expression in any raw spelling other than its one
+reviewed double-quoted form is cannot-evaluate too (masked-spelling). A
+reviewed workflow expression still resolves only at runtime: its
 variable can be empty (the flag then receives an empty value) or unset (each
 reviewed step's run block sets -u, so the step then ends early with a non-zero
 status); token-level parity sees neither. The ${...:?...} abort-expansion rule
@@ -176,8 +413,9 @@ the runner inherits, which can change what an accepted literal line resolves
 to at runtime. Three: the runner-internal ORDER of the remaining accepted
 literal lines beyond the position-checked ones. No non-position-checked
 scaffold echo or assignment expands anything that can be unbound, so
-relocating one rewords the log (a stray RESULT: PASS echo or a notrun=1
-mid-roster) without touching an exit code; the recognized [ ] test lines do
+relocating one rewords the log (a stray RESULT: PASS echo) without touching
+an exit code, or (a notrun=1 mid-roster) can only turn a pass into the NOT
+RUN failure; the recognized [ ] test lines do
 expand failure state, so a copy relocated above its initializer still ends
 the runner loudly under set -u before any gate, the same bounded early-exit
 class as the closed HOME, gitleaks_rc and failed_names placements. A
@@ -207,10 +445,23 @@ stubs do not produce (including gitleaks absent and the NOT RUN branch), and unt
 combinations of failing gates. Harness detection can hide even a single-gate reset;
 it does not require a combination of failures or the gitleaks NOT RUN branch.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_ci_parity.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import argparse
 import re
 import shlex
-import sys
 from collections import namedtuple
 from pathlib import Path
 
@@ -220,6 +471,9 @@ LOCAL_PATH = ROOT / "tools" / "run_all_checks.sh"
 CI_PATH = ROOT / ".github" / "workflows" / "quality.yml"
 LOCAL_SOURCE = "tools/run_all_checks.sh"
 CI_SOURCE = ".github/workflows/quality.yml"
+MSG_LEAKS_CI_PATH = ROOT / ".github" / "workflows" / "msg-leaks.yml"
+MSG_LEAKS_CI_SOURCE = ".github/workflows/msg-leaks.yml"
+CI_WORKFLOWS = ((CI_SOURCE, CI_PATH), (MSG_LEAKS_CI_SOURCE, MSG_LEAKS_CI_PATH))
 
 # Runtime-derived values deliberately lose their concrete value while retaining the
 # flag in identity. A new runtime-valued flag is not masked automatically, so it
@@ -236,6 +490,9 @@ RUNTIME_VALUE_FLAGS = frozenset({"--base", "--protected", "--head"})
 # ${PATH:x:0} evaluates it as arithmetic) or abort there (${x?} without a colon,
 # $((1/0))), so an unreviewed expression is cannot-evaluate rather than masked, and a
 # new runtime spelling stays refused until this reviewed set is extended.
+# Membership is read on the de-quoted token; the RAW spelling screen in
+# _mask_value additionally requires each member's one reviewed workflow
+# spelling, its double-quoted form as quality.yml writes it.
 MASKED_REF_EXPRESSIONS = frozenset({
     "origin/${GITHUB_REF_NAME}",
     "origin/${GITHUB_BASE_REF}",
@@ -243,8 +500,168 @@ MASKED_REF_EXPRESSIONS = frozenset({
     "$PR_HEAD_SHA",
 })
 
-# One repository-local, non-shipped gate; no general .github executable allowance.
-REPO_GATE = ".github/check_newtab_contract.py"
+# The repository-local, non-shipped gates, each named; no general .github executable allowance.
+# Each is also a MANDATORY_MEMBERS entry (the cited-standards contract together with its
+# --self-test), so a both-runner removal is a missing-mandatory finding.
+REPO_GATES = frozenset({
+    ".github/check_cited_standards_contract.py",
+    ".github/check_newtab_contract.py",
+})
+
+# The one status branch protection requires. In a workflow with more than one job,
+# exactly one job carries this name, a job-level if: of always(), and a needs: list
+# naming every other job exactly once (module docstring, REQUIRED STATUS).
+REQUIRED_STATUS_NAME = "Quality gates"
+JOB_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# A line at the job-key indent under jobs: is read as a job only when it is a plain
+# key GitHub accepts as a job id (a letter or _ first, then letters, digits, _ or -)
+# that no YAML version reads as a boolean or null. Every other line there (a quoted,
+# spaced, flow, complex or list key) is cannot-evaluate, because YAML can read a job
+# from it that this rule would not enumerate.
+JOB_HEADER_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):")
+YAML_NON_STRING_KEYS = frozenset((
+    "null", "true", "false", "yes", "no", "on", "off", "y", "n"))
+
+# Job-level keys from GitHub's workflow syntax (jobs.<job_id>.*) that can let a job
+# whose gate failed conclude success, so that needs.<job>.result, which the Quality
+# gates step reads, need not carry the failure. Present on any job, each is a
+# required-status finding whatever its value (module docstring, REQUIRED STATUS).
+RESULT_MASKING_JOB_KEYS = dict((
+    ("continue-on-error",
+     "GitHub documents it as letting the run pass when the job fails, so "
+     "the failure need not reach needs.<job>.result"),
+    ("uses",
+     "a reusable-workflow call concludes from jobs in a file this rule "
+     "does not read, and any of them may carry continue-on-error"),
+    ("defaults",
+     "defaults.run.shell can replace the program every run: step executes, "
+     "so a gate command need not run or fail its step"),
+    ("container",
+     "the container image supplies the shell every run: step executes in, "
+     "so a gate command need not run or fail its step"),
+))
+
+# The one step-level shell: spelling accepted, required once on every step with a
+# run: key (module docstring, Step shell). GitHub documents a step's shell: as
+# overriding the job's default shell (over a workflow default it is inferred), so
+# a defaults.run.shell cannot choose the shell a gate command runs under. It does
+# not close defaults.run.working-directory (module docstring, Step shell).
+STEP_SHELL_LINE = "shell: bash"
+
+# The Quality gates job, pinned line for line after its job-id line. Blank and
+# whole-line comment lines are ignored, and the needs: key with its nested lines is
+# compared as the one slot line below, because needs: is checked against the job set
+# instead. Any other departure (a deleted exit 1, a removed shell: bash, a changed
+# success filter, an added key, step or continue-on-error) is a required-status
+# finding. The self-test runs the pinned run: body under bash for every
+# needed-result spelling it must refuse.
+REQUIRED_STATUS_NEEDS_SLOT = "    needs: <every other job>"
+REQUIRED_STATUS_JOB = (
+    "    name: Quality gates",
+    "    if: always()",
+    REQUIRED_STATUS_NEEDS_SLOT,
+    "    runs-on: ubuntu-latest",
+    "    steps:",
+    "      - name: Every quality job succeeded",
+    "        " + STEP_SHELL_LINE,
+    "        env:",
+    "          RESULTS: ${{ join(needs.*.result, ' ') }}",
+    "        run: |",
+    "          set -euo pipefail",
+    '          echo "Needed job results: ${RESULTS}"',
+    '          rest="${RESULTS:-none}"',
+    '          rest="${rest//success/}"',
+    '          rest="${rest// /}"',
+    '          if [ -n "$rest" ]; then',
+    '            echo "Quality gates: FAILED, every needed job must conclude '
+    'success"',
+    "            exit 1",
+    "          fi",
+    '          echo "Quality gates: PASS, every needed job concluded success"',
+)
+
+# The one top-level concurrency: block quality.yml must carry, compared line for line
+# once blank and whole-line comment lines are dropped (module docstring, LANES). A
+# pull request run's group is keyed by its number with cancel-in-progress on, so a
+# newer run of that pull request cancels the superseded one; every other run's group
+# is keyed by its own run id with cancel-in-progress off, so a push-to-main run is
+# never cancelled or queued behind another run.
+CONCURRENCY_BLOCK = (
+    "concurrency:",
+    "  group: quality-${{ github.event_name == 'pull_request' && "
+    "format('pr-{0}', github.event.pull_request.number) || "
+    "format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+)
+
+# The one job-level if: line a job other than Quality gates may carry, exactly as
+# written, and the quality.yml jobs that must carry it (module docstring, LANES): a
+# heavy job runs on a push and on a pull request whose head is a merge-train-*
+# branch of this repository, and is skipped on every other pull request, which
+# Quality gates reads as not success.
+HEAVY_JOB_IF_LINE = (
+    "    if: github.event_name == 'push' || "
+    "(startsWith(github.head_ref, 'merge-train-') && "
+    "github.event.pull_request.head.repo.full_name == github.repository)")
+HEAVY_JOBS = frozenset({
+    "opf-tooling", "selftest-execution", "git-fixture-env-core",
+    "opf-host-patch", "git-fixture-env-core-host-patch",
+    "git-fixture-env-config-combined-host-patch",
+    "git-fixture-env-config-malformed-host-patch",
+    "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
+})
+
+# The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
+# (module docstring, LANES): each is an expensive suite the lowered-spend lanes
+# keep off ordinary pull requests, named by its full identity so the rule holds
+# wherever the command lands, a renamed or new job included. Heaviness is this
+# pinned enumeration: the check_byte_canon.py identities are absent because the
+# registry job also runs them unconditioned (the byte-canon-matrix job is heavy
+# through its platform matrix, which the heavy-job presence rule holds instead).
+HEAVY_COMMANDS = frozenset({
+    "opf/tools/opf.py --self-test",
+    "opf/tools/opf.py --self-test-group core",
+    "opf/tools/opf.py --self-test-group adopt",
+    "opf/tools/opf.py --self-test-group watchdog",
+    "tools/check_selftest_execution.py --self-test",
+    "tools/check_selftest_execution.py --suite orch-behaviour-selftest",
+    "tools/check_selftest_execution.py --suite ci-status-behaviour-selftest",
+    "tools/check_selftest_execution.py --suite instruction-budget-selftest",
+    "tools/check_selftest_execution.py --suite brief-capability-selftest",
+    "tools/check_selftest_execution.py --suite hook-latency-selftest",
+    "tools/check_selftest_execution.py --suite entry-guard-selftest",
+    "tools/check_selftest_execution.py --suite git-fixture-env-core",
+    "tools/check_selftest_execution.py --suite git-fixture-env-config-combined",
+    "tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",
+    "tools/check_selftest_execution.py --suite git-fixture-env-config-system",
+})
+
+# The opf.py self-test groups (module docstring, OPF GROUPS): the file that names them in its
+# SELF_TEST_GROUPS, the command prefix each group runs as on the local runner, and the whole
+# self-test CI runs instead, once, in a heavy job.
+OPF_TOOL = ROOT / "opf" / "tools" / "opf.py"
+OPF_GROUP_COMMAND = "opf/tools/opf.py --self-test-group "
+OPF_WHOLE_COMMAND = "opf/tools/opf.py --self-test"
+
+MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
+# The child-status probe: the first step of every CI job that runs Python, msg-leaks.yml's one job
+# included, so that workflow admits it beside its own scan.
+CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
+CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+# The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
+# scan's self-test and the child-status probe. Any other member there is a relocation finding,
+# because that workflow's status is separate from the aggregated Quality gates and re-runs on every
+# PR metadata edit, so a gate moved into it would leave the aggregated required check silently.
+MSG_LEAKS_WORKFLOW_MEMBERS = frozenset(
+    (MSG_LEAKS_SCAN, MSG_LEAKS_SCAN + " --self-test", CHILD_STATUS_PROBE))
+EDIT_EVENTS = ("pull_request", "pull_request_target")
+DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
+MSG_LEAKS_PULL_REQUEST_TYPES = DEFAULT_PULL_REQUEST_TYPES + ("edited",)
+# The only pull_request types quality.yml may list (module docstring, TRIGGER): a pull request run is
+# scheduled by the label the merge lane applies to the train pull request, never by a member's open,
+# push or reopen.
+QUALITY_PULL_REQUEST_TYPES = ("labeled",)
 
 ALLOWLIST = (
     {
@@ -313,6 +730,70 @@ ALLOWLIST = (
         "backlog": "GD-123",
     },
     {
+        "side": "ci-only",
+        "identity": "opf/tools/opf.py --self-test",
+        "reason": (
+            "The host-patch job runs the whole OPF tooling self-test on the "
+            "host patch release, its one CI run; the local runner runs it as "
+            "its named groups (--self-test-group), which opf.py holds to "
+            "every registered self-test exactly once."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group core",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group adopt",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "opf/tools/opf.py --self-test-group watchdog",
+        "reason": (
+            "The local runner runs the OPF tooling self-test as its named "
+            "groups; CI runs the whole opf.py --self-test once, in the "
+            "host-patch job, and no group (module docstring, OPF GROUPS)."
+        ),
+        "backlog": (
+            "documented in the OPF GROUPS rule of tools/check_ci_parity.py "
+            "and the Gates and CI section of CLAUDE.md"
+        ),
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_gitleaks_pin.py",
+        "reason": (
+            "The local run requires the gitleaks version quality.yml pins on "
+            "PATH; the CI secrets job downloads that pinned binary and verifies "
+            "its checksum before it scans, so only the gate's self-test runs in CI."
+        ),
+        "backlog": (
+            "documented in the gitleaks-pin residue of "
+            ".aiqt/core/gates/manifest.toml and the Gates and CI section of "
+            "CLAUDE.md"
+        ),
+    },
+    {
         "side": "local-only",
         "identity": "tools/check_branch_root.py --max-lag 200",
         "reason": (
@@ -325,10 +806,20 @@ ALLOWLIST = (
 )
 
 MANDATORY_MEMBERS = frozenset({
+    # The repository contracts are mandatory, so removing
+    # one from BOTH runners together is a missing-mandatory finding (exit 1), never a
+    # silent pass; a one-sided removal is already a local-only or ci-only finding.
+    ".github/check_cited_standards_contract.py",
+    ".github/check_cited_standards_contract.py --self-test",
+    ".github/check_newtab_contract.py",
     "tools/check_ci_parity.py",
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
     "tools/check_git_option_table.py --self-test",
+    # The child-status probe and its coverage gate: removing either from both rosters together would
+    # leave every gate reading a lost child exit status as a pass, unseen.
+    CHILD_STATUS_PROBE,
+    CHILD_STATUS_COVERAGE,
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -353,7 +844,9 @@ EXPECTED_RUN_GATE_BODY = (
 # cannot-evaluate rather than silently ignored (honouring the fail-closed guarantee).
 # Deeper nested non-gate YAML (under on:, env:, with:, strategy:) is not exhaustively
 # schema-validated; the shadow scan still prevents any tools/* gate from hiding there.
-TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "jobs"})
+# A top-level concurrency: key is recognized only to be held to CONCURRENCY_BLOCK by
+# the lane rule (_lane_findings).
+TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "concurrency", "jobs"})
 JOB_PROPERTY_KEYS = frozenset({
     "name", "runs-on", "steps", "strategy", "needs", "env", "permissions",
     "if", "timeout-minutes", "continue-on-error", "defaults", "outputs",
@@ -381,7 +874,8 @@ JOB_PROPERTY_KEYS = frozenset({
 _TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
 TOOL_RE = re.compile(
     r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
-    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|" + re.escape(REPO_GATE) + r")\b"
+    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|"
+    + "|".join(re.escape(gate) for gate in sorted(REPO_GATES)) + r")\b"
 )
 PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -389,7 +883,8 @@ YAML_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*:\s*.*$")
 
 Result = namedtuple("Result", "ok value code message")
 Diagnostic = namedtuple("Diagnostic", "source line code message")
-Extraction = namedtuple("Extraction", "members origins diagnostics")
+Extraction = namedtuple(
+    "Extraction", "members origins diagnostics findings", defaults=((),))
 Finding = namedtuple("Finding", "kind identity message")
 ActiveException = namedtuple(
     "ActiveException", "side identity reason backlog")
@@ -447,6 +942,98 @@ def _tokenize(code):
         )
 
 
+def _raw_lexemes(code, tokens):
+    """Recover each token's RAW spelling (quotes and escaping backslashes
+    kept) from a command _tokenize already split, by walking the same shlex
+    grammar (posix, whitespace_split, punctuation_chars "|&;<>"). The walk
+    must reproduce the de-quoted token list byte-for-byte; where it cannot,
+    the result is None and normalize grants no masked identity (a
+    missing raw spelling fails closed), so a divergence between the two
+    readers can refuse a mask but never grant one."""
+    raws = []
+    values = []
+    raw = []
+    value = []
+    in_word = False
+    kind = None
+    quote = None
+    escaped = False
+
+    def emit():
+        nonlocal in_word, kind
+        if in_word:
+            raws.append("".join(raw))
+            values.append("".join(value))
+            raw.clear()
+            value.clear()
+        in_word = False
+        kind = None
+
+    for char in code:
+        if escaped:
+            # Outside quotes a backslash escapes any character; inside
+            # double quotes shlex (posix) unescapes only the quote and the
+            # backslash itself and keeps the backslash ahead of anything
+            # else.
+            raw.append(char)
+            if quote == '"' and char not in ('"', "\\"):
+                value.append("\\")
+            value.append(char)
+            escaped = False
+            continue
+        if quote is not None:
+            if char == "\\" and quote == '"':
+                raw.append(char)
+                escaped = True
+                continue
+            raw.append(char)
+            if char == quote:
+                quote = None
+            else:
+                value.append(char)
+            continue
+        if char == "\\":
+            if kind == "punct":
+                emit()
+            raw.append(char)
+            escaped = True
+            in_word = True
+            kind = "word"
+            continue
+        if char in ('"', "'"):
+            if kind == "punct":
+                emit()
+            raw.append(char)
+            quote = char
+            in_word = True
+            kind = "word"
+            continue
+        if char in " \t":
+            emit()
+            continue
+        if char in "|&;<>":
+            if kind == "word":
+                emit()
+            raw.append(char)
+            value.append(char)
+            in_word = True
+            kind = "punct"
+            continue
+        if kind == "punct":
+            emit()
+        raw.append(char)
+        value.append(char)
+        in_word = True
+        kind = "word"
+
+    if quote is not None or escaped:
+        return None
+    emit()
+    if values != list(tokens):
+        return None
+    return raws
+
+
 def _operator(token):
     return bool(token) and all(char in "|&;<>()`" for char in token)
 
@@ -457,30 +1044,44 @@ def _interpreter_flag(token):
 
 
 def _is_runtime_value(value):
-    """A runtime-derived flag value carries a shell expansion or a GitHub expression.
-    A literal value has neither and stays in identity, so two different literals diverge."""
+    """A runtime-derived flag value is exactly one carrying $ or a backquote
+    after tokenization. A tilde, glob or brace spelling carries neither, so it
+    is NOT runtime-derived here: it stays in identity as a kept literal and two
+    different literals diverge (bash would expand those spellings, which is why
+    the local runner's word allowlist refuses them outright)."""
     return "$" in value or "`" in value
 
 
-def _mask_value(value):
-    """Canonicalize a runtime-value-flag value as a Result. A runtime-derived value is
-    masked to <ref:expression>, preserving which expression supplied it so a change
-    among runtime spellings (including a self-comparison) diverges; a literal stays in
-    identity. The expression must be byte-for-byte one of MASKED_REF_EXPRESSIONS: bash
-    can assign or abort inside an expansion, so an unreviewed expression is refused,
-    never masked. An already-masked placeholder whose expression is reviewed passes
-    through unchanged so the form is idempotent, which the allowlist canonical-identity
-    check relies on."""
-    if value.startswith("<ref:") and value.endswith(">"):
-        expression = value[len("<ref:"):-1]
-        if expression not in MASKED_REF_EXPRESSIONS:
-            return Result(
-                False,
-                None,
-                "masked-value",
-                "masked expression {!r} is outside the reviewed "
-                "MASKED_REF_EXPRESSIONS allowlist".format(expression),
-            )
+def _mask_value(value, masked_ok=False, raw=None):
+    """Canonicalize a runtime-value-flag value as a Result. A runtime-derived value
+    (one carrying $ or a backquote) is masked to <ref:expression>, preserving which
+    expression supplied it so a change among runtime spellings (including a
+    self-comparison) diverges; a literal stays in identity. The expression must be
+    byte-for-byte one of MASKED_REF_EXPRESSIONS: bash can assign or abort inside an
+    expansion, so an unreviewed expression is refused, never masked. The value's
+    RAW workflow spelling, before shell de-quoting, must also be byte-for-byte
+    the one reviewed spelling of that expression, its double-quoted form as
+    quality.yml writes it. Tokenization removes quotes and escaping
+    backslashes, so a backslash-escaped, backslash-split, adjacent-quoted
+    ("$PUSH""_BEFORE") or single-quoted ('$PUSH_BEFORE') spelling de-quotes
+    into a reviewed value while bash hands the gate different bytes at runtime;
+    raw is that spelling (None where the caller recovered none, refused the same
+    way), and every spelling other than the reviewed one is cannot-evaluate
+    (masked-spelling), never masked. A <ref:...>
+    placeholder is the OUTPUT of this masking, accepted back only on the canonical
+    path (masked_ok=True: _validate_allowlist re-normalizing the reviewed in-gate
+    allowlist identities), where a placeholder of a reviewed expression passes
+    through unchanged so the form is idempotent there, which the allowlist
+    canonical-identity check relies on; no raw spelling exists or is read on that
+    path. A workflow value gets no placeholder
+    reading: a <ref:...> spelling carrying $ or a backquote is
+    screened like any other value and refused, because no whole placeholder is in
+    MASKED_REF_EXPRESSIONS, so a quoted <ref:...> literal never collapses into the
+    masked identity of the expression it names; one carrying neither character
+    stays a kept literal, which no masked identity can equal (every reviewed
+    expression carries $)."""
+    if (masked_ok and value.startswith("<ref:") and value.endswith(">")
+            and value[len("<ref:"):-1] in MASKED_REF_EXPRESSIONS):
         return Result(True, value, "", "")
     if _is_runtime_value(value):
         if value not in MASKED_REF_EXPRESSIONS:
@@ -491,13 +1092,33 @@ def _mask_value(value):
                 "runtime-derived flag value {!r} is outside the reviewed "
                 "MASKED_REF_EXPRESSIONS allowlist".format(value),
             )
+        if raw != '"' + value + '"':
+            return Result(
+                False,
+                None,
+                "masked-spelling",
+                "flag value spelled {!r} de-quotes into the reviewed "
+                "expression {!r} but is not its one reviewed raw spelling "
+                "{!r}; quote and backslash removal happens before this "
+                "screen, so only the byte-for-byte reviewed workflow "
+                "spelling earns the masked identity".format(
+                    raw, value, '"' + value + '"'),
+            )
         return Result(True, "<ref:" + value + ">", "", "")
     return Result(True, value, "", "")
 
 
-def normalize(tokens):
-    """Return a canonical gate identity or a cannot-evaluate Result."""
+def normalize(tokens, masked_ok=False, raws=None):
+    """Return a canonical gate identity or a cannot-evaluate Result. masked_ok=True
+    is the allowlist-identity path, the one place a <ref:...> placeholder of a
+    reviewed expression is accepted back (_mask_value). raws, where given, holds
+    each token's raw spelling as _raw_lexemes recovered it, consulted only to
+    grant a masked identity; with no raws a runtime-derived value
+    in the reviewed set is refused (masked-spelling), never masked, so the
+    grant fails closed."""
     tokens = list(tokens)
+    if raws is not None and len(raws) != len(tokens):
+        raws = None
     if not tokens:
         return Result(False, None, "empty-command", "gate command is empty")
 
@@ -544,18 +1165,20 @@ def normalize(tokens):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target != REPO_GATE and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
                 None,
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
-                "tools/*.py path, {} or gitleaks dir".format(target, REPO_GATE),
+                "tools/*.py path, {} or gitleaks dir".format(
+                    target, " or ".join(sorted(REPO_GATES))),
             )
         canonical = [target]
 
     args = tokens[index:]
+    raw_args = raws[index:] if raws is not None else None
     index = 0
     while index < len(args):
         token = args[index]
@@ -569,7 +1192,9 @@ def normalize(tokens):
                     "{} has no value".format(token),
                 )
             value = args[index + 1]
-            masked = _mask_value(value)
+            raw_value = (raw_args[index + 1]
+                         if raw_args is not None else None)
+            masked = _mask_value(value, masked_ok, raw_value)
             if not masked.ok:
                 return masked
             canonical.extend((token, masked.value))
@@ -590,7 +1215,17 @@ def normalize(tokens):
                     "{} has an empty value".format(matched_flag),
                 )
             value = token[len(matched_flag) + 1:]
-            masked = _mask_value(value)
+            raw_value = None
+            if raw_args is not None:
+                raw_token = raw_args[index]
+                prefix = matched_flag + "="
+                # The reviewed equals-form spelling writes the flag and =
+                # unquoted; quoting that reaches into them cannot be the
+                # reviewed spelling, so the whole raw token (which never
+                # matches a double-quoted expression) is passed instead.
+                raw_value = (raw_token[len(prefix):]
+                             if raw_token.startswith(prefix) else raw_token)
+            masked = _mask_value(value, masked_ok, raw_value)
             if not masked.ok:
                 return masked
             canonical.extend((matched_flag, masked.value))
@@ -622,10 +1257,12 @@ def normalize(tokens):
     return Result(True, " ".join(canonical), "", "")
 
 
-def _add_member(members, origins, line_number, normalized):
+def _add_member(members, origins, line_number, normalized, job_members=None):
     members.add(normalized)
     script = normalized.split(" ", 1)[0]
     origins.setdefault(line_number, set()).add(script)
+    if job_members is not None:
+        job_members.add(normalized)
 
 
 def _diagnostic(source, line, code, message):
@@ -764,7 +1401,7 @@ FAILED_GATES_ECHO = 'echo "FAILED GATES: ${failed_names}"'
 # HISTCMD as arithmetic (RANDOM=failed=0 resets failed), a compound array subscript
 # assigns (x=([failed=0]=1)), and an expansion of an unset variable aborts under
 # set -u (x=$BASH_ENV, echo "$stub_log"). notrun=0 is accepted only at top level
-# before the first gate, because a later reset would hide the NOT RUN disclaimer.
+# before the first gate, because a later reset would clear the NOT RUN failure.
 # The gitleaks-block lines (PATH_APPEND_LINE, GITLEAKS_RC_LINE and
 # GITLEAKS_FAILED_ECHO) and FAILED_GATES_ECHO are deliberately NOT members
 # here: extract_local accepts each of them only inside its real block and
@@ -776,11 +1413,11 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     "echo",
     'echo "--- secrets (gitleaks) ---"',
     'echo "PASS: gitleaks found no leaks"',
-    'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
-    'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
+    'echo "MISSING: gitleaks is not on PATH locally, so its scan cannot run here, and the"',
+    'echo "  gitleaks-pin gate below fails this run. Install the pinned version to fix it:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
     'echo "RESULT: FAIL"',
-    'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+    'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
     'echo "RESULT: PASS"',
     # opf/tools/run_all_checks.sh (adapted): its distinct summary echoes
     'echo "OPF STANDALONE SUBSET: FAILED"',
@@ -797,8 +1434,8 @@ TERMINAL_SUMMARIES = (
         "exit 1",
         "fi",
         'if [ "$notrun" -ne 0 ]; then',
-        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
-        "exit 0",
+        'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
+        "exit 1",
         "fi",
         'echo "RESULT: PASS"',
     ),
@@ -1376,7 +2013,7 @@ def extract_local(text):
             scaffold = not if_stack and not members
         elif stripped == "notrun=0":
             # Only where the real runner puts it: top level, before any gate. A
-            # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
+            # later notrun=0 would clear the NOT RUN state, so its failure could not fire.
             scaffold = not if_stack and not members
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
@@ -1524,7 +2161,8 @@ def _classify_ci_command(
         block,
         members,
         origins,
-        diagnostics):
+        diagnostics,
+        job_members=None):
     stripped = command.strip()
     if not stripped or stripped.startswith("#"):
         return
@@ -1563,10 +2201,12 @@ def _classify_ci_command(
             and (tokens[0] in INTERPRETERS
                  or tokens[0] in SHELLS
                  or tokens[0].lstrip("./") == "gitleaks")):
-        normalized = normalize(tokens)
+        normalized = normalize(
+            tokens, raws=_raw_lexemes(stripped, tokens))
         if normalized.ok:
             _add_member(
-                members, origins, line_number, normalized.value)
+                members, origins, line_number, normalized.value,
+                job_members)
         else:
             diagnostics.append(_diagnostic(
                 source,
@@ -1617,6 +2257,9 @@ def _classify_ci_command(
         benign = True
     elif block and stripped in ("else", "fi"):
         benign = True
+    elif block and stripped == "exit 1":
+        # Only a failing exit: it can end a step red, never green.
+        benign = True
     elif (block
             and tokens[:2] == ["git", "rev-parse"]
             and _safe_simple(tokens)):
@@ -1652,9 +2295,616 @@ def _classify_uses(value, source, line_number, diagnostics):
         ))
 
 
-def extract_ci(text):
-    """Extract normalized members from the supported quality.yml subset."""
-    source = CI_SOURCE
+def _unquote(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def _needs_ids(job, fields, source, diagnostics):
+    """Return the job ids a job's needs: names, in order, or None when absent."""
+    entry = fields.get("needs")
+    if entry is None:
+        return None
+    line_number, value = entry
+    items = fields.get("needs-items", [])
+    raw = []
+    if value:
+        if items:
+            diagnostics.append(_diagnostic(
+                source,
+                items[0][0],
+                "needs-shape",
+                "job {!r} needs: has both a value and list items".format(job),
+            ))
+        if value.startswith("[") and value.endswith("]"):
+            raw = [(line_number, part) for part in value[1:-1].split(",")]
+        else:
+            raw = [(line_number, value)]
+    else:
+        for item_number, item in items:
+            if not item.startswith("- "):
+                diagnostics.append(_diagnostic(
+                    source,
+                    item_number,
+                    "needs-shape",
+                    "job {!r} needs: line {!r} is not a list item".format(
+                        job, item),
+                ))
+                continue
+            raw.append((item_number, item[2:]))
+    ids = []
+    for item_number, part in raw:
+        name = _unquote(part.strip())
+        if not JOB_ID_RE.fullmatch(name):
+            diagnostics.append(_diagnostic(
+                source,
+                item_number,
+                "needs-shape",
+                "job {!r} needs: entry {!r} is not a plain job id".format(
+                    job, part.strip()),
+            ))
+            continue
+        ids.append(name)
+    return ids
+
+
+def _result_masking_findings(job_ids, job_fields):
+    """Return a finding for every RESULT_MASKING_JOB_KEYS key on any job."""
+    findings = []
+    for job in job_ids:
+        for line_number, key in job_fields[job].get("masking", ()):
+            findings.append(Finding(
+                "required-status",
+                job,
+                "job {!r} carries {}: at line {}; {}, so a failed gate can "
+                "leave the required status green".format(
+                    job, key, line_number, RESULT_MASKING_JOB_KEYS[key]),
+            ))
+    return findings
+
+
+def _step_shell_findings(steps):
+    """Return a finding for every step with a run: key and no STEP_SHELL_LINE;
+    the message names the workflow holding the step (module docstring, Step
+    shell)."""
+    findings = []
+    for step in steps:
+        if step["run"] and not step["shell"]:
+            findings.append(Finding(
+                "required-status",
+                step["job"],
+                "step {!r} at line {} in job {!r} of {} has a run: key "
+                "without {}; a workflow or job defaults.run.shell would then "
+                "choose the program its command runs under, so the gate need "
+                "not run or fail its step".format(
+                    step["name"], step["line"], step["job"], step["source"],
+                    STEP_SHELL_LINE),
+            ))
+    return findings
+
+
+def _aggregator_shape_findings(aggregator, lines, start):
+    """Compare the job whose id is on lines[start] with REQUIRED_STATUS_JOB.
+
+    Blank and whole-line comment lines are skipped, and a needs: key at the job
+    property indent, with every more-indented line under it, reads as
+    REQUIRED_STATUS_NEEDS_SLOT. Any other line is compared exactly."""
+    body = []
+    in_needs = False
+    for index in range(start + 1, len(lines)):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent <= 2:
+            break
+        if in_needs and indent > 4:
+            continue
+        in_needs = indent == 4 and stripped.startswith("needs:")
+        body.append(
+            (index + 1, REQUIRED_STATUS_NEEDS_SLOT if in_needs else raw))
+    for position in range(max(len(body), len(REQUIRED_STATUS_JOB))):
+        got = body[position] if position < len(body) else None
+        want = (REQUIRED_STATUS_JOB[position]
+                if position < len(REQUIRED_STATUS_JOB) else None)
+        if got is None or got[1] != want:
+            return [Finding(
+                "required-status",
+                aggregator,
+                "job {!r} departs from the pinned Quality gates job "
+                "(REQUIRED_STATUS_JOB) at {}: got {!r}, expected {!r}; only "
+                "the pinned step is known to fail unless every needed "
+                "result is success".format(
+                    aggregator,
+                    "the end of the job" if got is None
+                    else "line {}".format(got[0]),
+                    None if got is None else got[1].strip(),
+                    None if want is None else want.strip()),
+            )]
+    return []
+
+
+def _required_status_findings(
+        job_ids, job_fields, lines, source, diagnostics):
+    """Flag a result-masking key on any job; in a multi-job workflow, also
+    require one job named REQUIRED_STATUS_NAME, shaped exactly as
+    REQUIRED_STATUS_JOB, whose needs: lists every other job exactly once
+    (module docstring, REQUIRED STATUS)."""
+    findings = _result_masking_findings(job_ids, job_fields)
+    if len(job_ids) < 2:
+        return findings
+    named = [
+        job for job in job_ids
+        if _unquote(job_fields[job].get("name", (0, ""))[1])
+        == REQUIRED_STATUS_NAME
+    ]
+    if len(named) != 1:
+        findings.append(Finding(
+            "required-status",
+            REQUIRED_STATUS_NAME,
+            "a workflow with more than one job needs exactly one job named "
+            "{!r}, the one required status; found {}".format(
+                REQUIRED_STATUS_NAME, len(named)),
+        ))
+        return findings
+    aggregator = named[0]
+    if job_fields[aggregator].get("if", (0, ""))[1] != "always()":
+        findings.append(Finding(
+            "required-status",
+            aggregator,
+            "job {!r} must carry if: always(); otherwise a failed or "
+            "cancelled needed job skips it, and GitHub reads a skipped "
+            "required job as passing".format(aggregator),
+        ))
+    findings.extend(_aggregator_shape_findings(
+        aggregator, lines, job_fields[aggregator]["start"]))
+    needs = _needs_ids(aggregator, job_fields[aggregator], source, diagnostics)
+    needs = [] if needs is None else needs
+    others = [job for job in job_ids if job != aggregator]
+    for job in others:
+        if job not in needs:
+            findings.append(Finding(
+                "required-status",
+                job,
+                "job {!r} is not in the needs: of {!r}, so its failure "
+                "cannot turn the required status red".format(job, aggregator),
+            ))
+    for job in sorted(set(needs)):
+        if job not in others:
+            findings.append(Finding(
+                "required-status",
+                job,
+                "the needs: of {!r} names {!r}, which is not another job in "
+                "this workflow".format(aggregator, job),
+            ))
+        if needs.count(job) > 1:
+            findings.append(Finding(
+                "required-status",
+                job,
+                "the needs: of {!r} lists {!r} more than once".format(
+                    aggregator, job),
+            ))
+    return findings
+
+
+def _top_level_block(lines, key):
+    """Return the raw lines of the first top-level key block, from its key line to
+    the next top-level line, blank and whole-line comment lines dropped; None when
+    the workflow carries no such key."""
+    block = None
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if raw[:1] not in (" ", "\t"):
+            if block is not None:
+                break
+            code = _strip_comment(raw).strip()
+            if (code.split(":", 1)[0] if ":" in code else code) == key:
+                block = [raw]
+            continue
+        if block is not None:
+            block.append(raw)
+    return None if block is None else tuple(block)
+
+
+def _lane_findings(job_ids, job_fields, lines, source, job_members):
+    """Require the pinned concurrency: block in quality.yml, every HEAVY_JOBS
+    job present there with the pinned if: on it, every HEAVY_COMMANDS member in
+    a job carrying that pinned if:, and hold every job-level if: other than the
+    quality.yml Quality gates job's, continuation lines included, to the pinned
+    lane text (module docstring, LANES)."""
+    findings = []
+    block = _top_level_block(lines, "concurrency")
+    if source == CI_SOURCE:
+        for job in sorted(HEAVY_JOBS - set(job_fields)):
+            findings.append(Finding(
+                "lane",
+                job,
+                "heavy job {!r} is missing from {}; every HEAVY_JOBS job must "
+                "be present and carry the pinned HEAVY_JOB_IF_LINE, so no "
+                "removal or rename lets its lane run without the "
+                "if:".format(job, source),
+            ))
+    if block is None and source == CI_SOURCE:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "{} carries no top-level concurrency: block; the pinned "
+            "CONCURRENCY_BLOCK is required, so a newer run of a pull request "
+            "cancels its superseded run".format(source),
+        ))
+    elif block is not None and source != CI_SOURCE:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "{} carries a top-level concurrency: block; only {} carries one, "
+            "the pinned CONCURRENCY_BLOCK, so no other workflow's run is "
+            "cancelled on a live head".format(source, CI_SOURCE),
+        ))
+    elif block is not None and block != CONCURRENCY_BLOCK:
+        findings.append(Finding(
+            "lane",
+            "concurrency",
+            "the top-level concurrency: block of {} departs from the pinned "
+            "CONCURRENCY_BLOCK: got {!r}; only the pinned block is known to "
+            "cancel a pull request run alone and never a push-to-main "
+            "run".format(
+                source, list(block)),
+        ))
+    for job in job_ids:
+        fields = job_fields[job]
+        if "concurrency" in fields["keys"]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} carries a job-level concurrency: key, which can "
+                "cancel the job in a push-to-main run; only the pinned "
+                "top-level CONCURRENCY_BLOCK is accepted".format(job, source),
+            ))
+        if "if" in fields:
+            # The whole value: the key's own line and every continuation line.
+            value = [lines[fields["if"][0] - 1]] + [
+                text for _number, text in fields.get("if-continued", ())]
+        else:
+            value = None
+        heavy_members = sorted(
+            identity for identity in job_members.get(job, ())
+            if identity in HEAVY_COMMANDS)
+        if heavy_members and value != [HEAVY_JOB_IF_LINE]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} runs heavy member(s) {} without the pinned "
+                "job-level HEAVY_JOB_IF_LINE, so they would run on every "
+                "pull request".format(
+                    job, source, ", ".join(heavy_members)),
+            ))
+        if (source == CI_SOURCE
+                and _unquote(fields.get("name", (0, ""))[1])
+                == REQUIRED_STATUS_NAME):
+            continue
+        if value is None:
+            if source == CI_SOURCE and job in HEAVY_JOBS:
+                findings.append(Finding(
+                    "lane",
+                    job,
+                    "heavy job {!r} of {} carries no job-level if:; the pinned "
+                    "HEAVY_JOB_IF_LINE is required, so the job runs only on a "
+                    "push and on a merge-train-* pull request of this "
+                    "repository".format(job, source),
+                ))
+            continue
+        if source != CI_SOURCE or job not in HEAVY_JOBS:
+            findings.append(Finding(
+                "lane",
+                job,
+                "job {!r} of {} carries a job-level if: at line {}, but it is "
+                "not a heavy job of {} (HEAVY_JOBS), so it would be skipped "
+                "where it must run".format(
+                    job, source, fields["if"][0], CI_SOURCE),
+            ))
+        elif value != [HEAVY_JOB_IF_LINE]:
+            findings.append(Finding(
+                "lane",
+                job,
+                "the job-level if: of heavy job {!r} at line {} departs from "
+                "the pinned HEAVY_JOB_IF_LINE: got {!r}; only the pinned line, "
+                "with no continuation line, is known to run the job on a push "
+                "and on a merge-train-* pull request of this repository "
+                "alone".format(
+                    job, fields["if"][0],
+                    " ".join(text.strip() for text in value)),
+            ))
+    return findings
+
+
+def _edit_event_types(lines, source, diagnostics):
+    """Return {event: types} for each EDIT_EVENTS trigger of the top-level on:,
+    or None when the file has no top-level on: line at all.
+
+    The shapes read are those the module docstring lists (TRIGGER); any
+    other shape under an edit event appends a trigger-shape diagnostic."""
+    events = {}
+    typed = set()
+
+    def refuse(line_number, message):
+        diagnostics.append(_diagnostic(
+            source, line_number, "trigger-shape", message))
+
+    def names(line_number, value):
+        if value.startswith("[") and value.endswith("]"):
+            parts = [_unquote(part.strip()) for part in value[1:-1].split(",")]
+        else:
+            parts = [_unquote(value)]
+        if not all(JOB_ID_RE.fullmatch(part) for part in parts):
+            refuse(line_number, "{!r} is not a plain name or a one-line list "
+                   "of plain names".format(value))
+            return ()
+        return tuple(parts)
+
+    def is_on_spelling(key):
+        # The spellings THIS HELPER recognizes as naming the top-level on
+        # key: plain, quoted with plain quotes around the two literal
+        # characters, a one-line tag such as !!str before it, a one-line
+        # explicit '?' key, or one with whitespace around it. Each
+        # non-plain spelling among these is refused below, never read.
+        # Spellings YAML also reads as this key but that this
+        # helper does NOT recognize fall through here (a double-quoted
+        # escape spelling such as "o\x6e", an anchored key such as &a on,
+        # a verbatim-tag form, a multi-line explicit '?' key, and a BOM
+        # before on); the strict top-level parser refuses each of them
+        # (unknown-top-key, yaml-feature or text-format, exit 2), never
+        # reads them. The 35v vectors pin each end to end.
+        candidate = key.strip()
+        if candidate[:1] == "?" and candidate[1:2] in ("", " "):
+            candidate = candidate[1:].strip()
+        if candidate[:1] == "!":
+            candidate = candidate.partition(" ")[2].strip()
+        return _unquote(candidate) == "on"
+
+    start = None
+    for index, raw in enumerate(lines):
+        code = _strip_comment(raw)
+        if code[:1] in ("", " "):
+            continue
+        stripped = code.strip()
+        key, colon, raw_rest = stripped.partition(":")
+        if not is_on_spelling(key):
+            continue
+        # The top-level on: header is held to the same strict key
+        # rule as every key below it, BEFORE its value is read: a bare on (no
+        # colon anywhere on the line), a non-plain spelling, and a colon with
+        # no space after it each hide or change the trigger block YAML and
+        # GitHub read, so each is cannot-evaluate, never a pass and never an
+        # IndexError.
+        if not colon:
+            refuse(index + 1, "top-level line {!r} names on without a colon "
+                   "(a bare scalar or an explicit '?' key), so this rule "
+                   "cannot read the on: block".format(stripped))
+            return events
+        if key != "on":
+            refuse(index + 1, "top-level on: key {!r} is not the plain "
+                   "spelling on (a quoted key, a tag such as !!str, an "
+                   "explicit '?' key, and whitespace before the colon are "
+                   "refused)".format(key))
+            return events
+        if raw_rest and not raw_rest.startswith(" "):
+            refuse(index + 1, "on: has no space after its colon; YAML reads "
+                   "the line as one plain scalar, not a key")
+            return events
+        start = index
+        break
+    if start is None:
+        return None
+    value = _strip_comment(lines[start]).split(":", 1)[1].strip()
+    if value:
+        for event in names(start + 1, value):
+            if event in EDIT_EVENTS:
+                events[event] = DEFAULT_PULL_REQUEST_TYPES
+        return events
+    event = None
+    in_types = False
+    seen_child = False
+    property_seen = False
+    for index in range(start + 1, len(lines)):
+        code = _strip_comment(lines[index])
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        if indent == 0:
+            break
+        stripped = code.strip()
+        key, colon, raw_rest = stripped.partition(":")
+        # YAML reads a colon as a mapping indicator only when a space follows
+        # it or it ends the line; types:[...] is one plain scalar, not a key.
+        spaced = not raw_rest or raw_rest.startswith(" ")
+        rest = raw_rest.strip()
+        if not seen_child:
+            seen_child = True
+            if indent != 2:
+                refuse(index + 1, "the first line under on: is at indent "
+                       "{}; the on: block's events are read only at indent "
+                       "2".format(indent))
+        if indent in (1, 3):
+            refuse(index + 1, "line {!r} under on: is at indent {}; events "
+                   "are read only at indent 2".format(stripped, indent))
+        elif indent == 2:
+            in_types = False
+            property_seen = False
+            event = None
+            if not colon:
+                refuse(index + 1, "line {!r} at indent 2 under on: has no "
+                       "colon, so YAML does not read it as an event "
+                       "key".format(stripped))
+            elif _unquote(key) != key:
+                refuse(index + 1, "quoted on: key {!r}".format(key))
+            elif key != key.rstrip():
+                refuse(index + 1, "on: key {!r} holds whitespace before its "
+                       "colon".format(key))
+            elif not JOB_ID_RE.fullmatch(key):
+                refuse(index + 1, "on: key {!r} is not a plain name (an "
+                       "explicit '?' key, a tag such as !!str, and every "
+                       "other non-plain spelling are refused)".format(key))
+            elif not spaced:
+                refuse(index + 1, "on: key {!r} has no space after its "
+                       "colon; YAML reads the line as one plain scalar, not "
+                       "a key".format(key))
+            else:
+                event = key if key in EDIT_EVENTS else None
+                if event is not None:
+                    if event in events:
+                        refuse(index + 1, "on: declares {} more than "
+                               "once".format(event))
+                    elif rest:
+                        refuse(index + 1, "{}: value {!r} is outside the "
+                               "recognized trigger shapes".format(
+                                   event, rest))
+                    events[event] = DEFAULT_PULL_REQUEST_TYPES
+        elif event is None:
+            continue
+        elif indent == 4:
+            in_types = False
+            property_seen = True
+            if stripped.startswith("- "):
+                refuse(index + 1, "sequence item {!r} at indent 4 under {} "
+                       "(an indentless sequence); block-list items are read "
+                       "only at indent 6 under types:".format(stripped, event))
+            elif not colon:
+                refuse(index + 1, "line {!r} under {} has no key".format(
+                    stripped, event))
+            elif _unquote(key) != key:
+                refuse(index + 1, "quoted key {!r} under {}".format(
+                    key, event))
+            elif key != key.rstrip():
+                refuse(index + 1, "key {!r} under {} holds whitespace before "
+                       "its colon".format(key, event))
+            elif not JOB_ID_RE.fullmatch(key):
+                refuse(index + 1, "key {!r} under {} is not a plain name (an "
+                       "explicit '?' key, a tag such as !!str, and every "
+                       "other non-plain spelling are refused)".format(
+                           key, event))
+            elif not spaced:
+                refuse(index + 1, "key {!r} under {} has no space after its "
+                       "colon; YAML reads the line as one plain scalar, not "
+                       "a key".format(key, event))
+            else:
+                in_types = key == "types"
+                if in_types:
+                    if event in typed:
+                        refuse(index + 1, "{} declares types: more than "
+                               "once".format(event))
+                    typed.add(event)
+                    events[event] = names(index + 1, rest) if rest else ()
+                    in_types = not rest
+        elif indent == 6 and in_types and stripped.startswith("- "):
+            events[event] += names(index + 1, stripped[2:].strip())
+        elif not in_types and indent > 4 and property_seen:
+            continue
+        else:
+            refuse(index + 1, "line {!r} under {} is outside the recognized "
+                   "trigger shapes".format(stripped, event))
+    return events
+
+
+def _quality_trigger_findings(events, source):
+    """Hold quality.yml's pull_request types to QUALITY_PULL_REQUEST_TYPES
+    and refuse pull_request_target there (module docstring, TRIGGER). An
+    on: block with no pull_request event is a finding too, and so is a file
+    with no top-level on: line (events is None)."""
+    if source != CI_SOURCE:
+        return []
+    if events is None:
+        return [Finding(
+            "trigger",
+            source,
+            "{} has no top-level on: line: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none".format(source),
+        )]
+    findings = []
+    types = events.get("pull_request")
+    if types is None:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} has no pull_request event: the label the merge lane applies "
+            "to the train pull request then schedules no Quality run, so a "
+            "train head gets none either".format(source),
+        ))
+    elif types != QUALITY_PULL_REQUEST_TYPES:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} lists pull_request types [{}], not exactly [{}]: a pull "
+            "request run of it is scheduled only by the label the merge lane "
+            "applies to the train pull request, so a member head gets no "
+            "Quality run".format(source, ", ".join(types),
+                                 ", ".join(QUALITY_PULL_REQUEST_TYPES)),
+        ))
+    if "pull_request_target" in events:
+        findings.append(Finding(
+            "trigger",
+            source,
+            "{} carries pull_request_target, which schedules runs outside "
+            "its labeled pull_request trigger".format(source),
+        ))
+    return findings
+
+
+def _trigger_findings(lines, members, source, diagnostics):
+    """Require pull_request edited exactly where the message/metadata leak
+    scan runs, and quality.yml's labeled trigger (module docstring,
+    TRIGGER)."""
+    events = _edit_event_types(lines, source, diagnostics)
+    findings = _quality_trigger_findings(events, source)
+    if events is None:
+        events = {}
+    if MSG_LEAKS_SCAN in members:
+        types = events.get("pull_request", ())
+        missing = [kind for kind in MSG_LEAKS_PULL_REQUEST_TYPES
+                   if kind not in types]
+        if not missing:
+            return findings
+        return findings + [Finding(
+            "trigger",
+            source,
+            "{} runs {} but its pull_request types lack {}, so the scan does "
+            "not re-run on every pull request change it must see (edited is "
+            "a PR title/body change)".format(
+                source, MSG_LEAKS_SCAN, ", ".join(missing)),
+        )]
+    return findings + [Finding(
+        "trigger",
+        source,
+        "{} carries {} type edited but does not run {}, so a PR title/body "
+        "edit re-runs every job of this workflow; only the workflow that runs "
+        "that scan triggers on edited".format(source, event, MSG_LEAKS_SCAN),
+    ) for event in EDIT_EVENTS if "edited" in events.get(event, ())]
+
+
+def _relocation_findings(members, source):
+    """msg-leaks.yml may run only the message/metadata leak scan and its
+    self-test (module docstring, TWO WORKFLOWS): its status is separate from
+    the aggregated Quality gates, so any other member there is a gate the
+    aggregated required check silently lost."""
+    if source != MSG_LEAKS_CI_SOURCE:
+        return []
+    return [Finding(
+        "relocation",
+        identity,
+        "{} runs {!r}, which is not the message/metadata leak scan or its "
+        "self-test: a gate moved into this workflow leaves the aggregated "
+        "Quality gates status silently and re-runs on every PR metadata "
+        "edit".format(source, identity),
+    ) for identity in sorted(members - MSG_LEAKS_WORKFLOW_MEMBERS)]
+
+
+def extract_ci(text, source=CI_SOURCE):
+    """Extract normalized members from one CI_WORKFLOWS file in the supported
+    workflow subset; source labels its diagnostics and findings."""
     diagnostics = []
     members = set()
     origins = {}
@@ -1676,6 +2926,15 @@ def extract_ci(text):
     current_mapping = None
     current_job = None
     saw_jobs = False
+    job_ids = []
+    job_fields = {}
+    job_members = {}
+    last_job_key = None
+    top_keys = set()
+    refused_job = False
+    job_body_started = False
+    steps = []
+    current_step = None
     index = 0
 
     while index < len(lines):
@@ -1709,16 +2968,29 @@ def extract_ci(text):
                 feature_error,
             ))
 
-        if stripped == "jobs:" and indent == 0:
-            in_jobs = True
-            saw_jobs = True
-            in_steps = False
-            index += 1
-            continue
-
         if indent == 0:
+            # Any top-level line closes the jobs: mapping, as it does in YAML.
+            in_jobs = False
+            in_steps = False
+            current_mapping = None
+            current_job = None
+            refused_job = False
             top_key = stripped.split(":", 1)[0] if ":" in stripped else stripped
-            if top_key not in TOP_LEVEL_KEYS:
+            if top_key in top_keys:
+                # YAML keeps one value for a repeated key; this rule would
+                # read both, so the repeat is refused rather than merged.
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "duplicate-key",
+                    "top-level key {!r} is declared more than once".format(
+                        top_key),
+                ))
+            top_keys.add(top_key)
+            if stripped == "jobs:":
+                in_jobs = True
+                saw_jobs = True
+            elif top_key not in TOP_LEVEL_KEYS:
                 diagnostics.append(_diagnostic(
                     source,
                     line_number,
@@ -1733,13 +3005,57 @@ def extract_ci(text):
             in_steps = False
             current_mapping = None
 
-        if (in_jobs
-                and indent == 2
-                and re.fullmatch(
-                    r"[A-Za-z0-9_-]+:", stripped)):
+        if in_jobs and refused_job and indent > 2:
+            # The body of a refused job line: already cannot-evaluate.
+            index += 1
+            continue
+
+        if in_jobs and indent in (1, 3):
+            diagnostics.append(_diagnostic(
+                source,
+                line_number,
+                "job-key-indent",
+                "line {!r} under jobs: is at indent {}; job ids are read "
+                "only at indent 2 and job properties only at indent "
+                "4".format(stripped, indent),
+            ))
+            index += 1
+            continue
+
+        if in_jobs and indent == 2:
             in_steps = False
             current_mapping = None
+            last_job_key = None
+            job_body_started = False
+            header = JOB_HEADER_RE.fullmatch(stripped)
+            if (header is None
+                    or header.group(1).lower() in YAML_NON_STRING_KEYS):
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "job-key-shape",
+                    "line {!r} at the job-id indent under jobs: is not a "
+                    "plain job id key; YAML can read a job from it that this "
+                    "rule would not enumerate, so it is refused, not "
+                    "skipped".format(stripped),
+                ))
+                current_job = None
+                refused_job = True
+                index += 1
+                continue
+            refused_job = False
             current_job = stripped
+            if stripped[:-1] in job_fields:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "duplicate-job",
+                    "job id {!r} is declared more than once".format(
+                        stripped[:-1]),
+                ))
+            else:
+                job_ids.append(stripped[:-1])
+                job_fields[stripped[:-1]] = dict(start=index, keys=set())
             index += 1
             continue
 
@@ -1754,9 +3070,43 @@ def extract_ci(text):
             index += 1
             continue
 
+        if (in_jobs
+                and current_job is not None
+                and indent > 4
+                and not job_body_started):
+            diagnostics.append(_diagnostic(
+                source,
+                line_number,
+                "job-body-indent",
+                "the first line of job {!r} is at indent {}; job properties "
+                "are read only at indent 4".format(current_job[:-1], indent),
+            ))
+            refused_job = True
+            index += 1
+            continue
+
+        if in_jobs and indent == 4:
+            job_body_started = True
+            job_key = stripped.split(":", 1)[0] if ":" in stripped else stripped
+            seen = job_fields[current_job[:-1]]["keys"]
+            if job_key in seen:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "duplicate-key",
+                    "job {!r} declares {!r} more than once".format(
+                        current_job[:-1], job_key),
+                ))
+            seen.add(job_key)
+            if job_key in RESULT_MASKING_JOB_KEYS:
+                job_fields[current_job[:-1]].setdefault(
+                    "masking", []).append((line_number, job_key))
+
         if in_jobs and indent == 4 and stripped == "steps:":
             in_steps = True
             current_mapping = None
+            current_step = None
+            last_job_key = None
             index += 1
             continue
 
@@ -1770,10 +3120,25 @@ def extract_ci(text):
                     "job-level line {!r} is outside the recognized job "
                     "properties".format(stripped),
                 ))
+            last_job_key = job_key
+            if job_key in ("name", "if", "needs"):
+                job_fields[current_job[:-1]][job_key] = (
+                    line_number,
+                    stripped.split(":", 1)[1].strip()
+                    if ":" in stripped else "",
+                )
             index += 1
             continue
 
         if not in_steps:
+            if last_job_key == "needs" and indent == 6:
+                job_fields[current_job[:-1]].setdefault(
+                    "needs-items", []).append((line_number, stripped))
+            if in_jobs and last_job_key == "if":
+                # A deeper line under a job-level if: continues its value (YAML
+                # folds it into the condition), so the lane rule reads it too.
+                job_fields[current_job[:-1]].setdefault(
+                    "if-continued", []).append((line_number, stripped))
             if re.match(r"(?:-\s+)?run:", stripped):
                 diagnostics.append(_diagnostic(
                     source,
@@ -1794,6 +3159,11 @@ def extract_ci(text):
         if indent == 6 and stripped.startswith("- "):
             current_mapping = None
             item = stripped[2:]
+            current_step = dict(
+                source=source, job=current_job[:-1], line=line_number,
+                name=item[5:].strip() if item.startswith("name:") else item,
+                run=False, shell=[])
+            steps.append(current_step)
             if item.startswith("name:") and item[5:].strip():
                 index += 1
                 continue
@@ -1814,8 +3184,24 @@ def extract_ci(text):
         if indent == 8:
             current_mapping = None
 
+            if current_step is None:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "step-key",
+                    "step key {!r} appears before the job's first step "
+                    "item".format(stripped),
+                ))
+                index += 1
+                continue
+
             if stripped in ("env:", "with:"):
                 current_mapping = stripped[:-1]
+                index += 1
+                continue
+
+            if stripped == STEP_SHELL_LINE:
+                current_step["shell"].append(line_number)
                 index += 1
                 continue
 
@@ -1827,6 +3213,7 @@ def extract_ci(text):
 
             if stripped.startswith("run:"):
                 value = stripped[4:].strip()
+                current_step["run"] = True
 
                 if value in (">", ">-", ">+"):
                     diagnostics.append(_diagnostic(
@@ -1841,6 +3228,8 @@ def extract_ci(text):
 
                 if value in ("|", "|-", "|+"):
                     index += 1
+                    content_indent = None
+                    leading_blank = None
                     while index < len(lines):
                         body_raw = lines[index]
                         body_number = index + 1
@@ -1855,17 +3244,84 @@ def extract_ci(text):
                             index += 1
                             continue
 
-                        body_code = _strip_comment(body_raw)
-                        if not body_code.strip():
+                        if not body_raw.strip():
+                            # A whitespace-only line after the first
+                            # content line is inside the scalar wherever
+                            # it falls; ahead of it, YAML rejects one
+                            # indented past the content indentation the
+                            # first content line sets, so
+                            # the deepest leading blank is held and
+                            # judged there.
+                            if content_indent is None:
+                                blank_indent = (
+                                    len(body_raw)
+                                    - len(body_raw.lstrip(" ")))
+                                if (leading_blank is None
+                                        or blank_indent > leading_blank[0]):
+                                    leading_blank = (
+                                        blank_indent, body_number)
                             index += 1
                             continue
 
                         body_indent = (
-                            len(body_code)
-                            - len(body_code.lstrip(" "))
+                            len(body_raw)
+                            - len(body_raw.lstrip(" "))
                         )
-                        if body_indent <= 8:
+                        if content_indent is None:
+                            if body_indent <= 8:
+                                # No content line at all: the scalar is
+                                # empty and this line is outside it.
+                                break
+                            # YAML detects a literal scalar's content
+                            # indentation from its FIRST non-empty line;
+                            # every non-empty line at or
+                            # beyond it is scalar content, comment
+                            # spellings included.
+                            content_indent = body_indent
+                            if (leading_blank is not None
+                                    and leading_blank[0] > content_indent):
+                                # YAML rejects a leading blank line with
+                                # more spaces than the first content line
+                                # does, so the layout is refused,
+                                # never read as scalar content.
+                                diagnostics.append(_diagnostic(
+                                    source,
+                                    leading_blank[1],
+                                    "scalar-blank-indent",
+                                    "a leading blank line indented past "
+                                    "the scalar content indentation is a "
+                                    "layout YAML rejects",
+                                ))
+                        if body_indent < content_indent:
+                            # The first non-empty line below the content
+                            # indentation ends the scalar, a comment line
+                            # included, so a dedented YAML comment after
+                            # the block is outside the script text; the
+                            # outer loop re-reads this line, and a layout
+                            # YAML rejects is refused there
+                            # (step-structure), never passed.
                             break
+
+                        if "${{" in body_raw:
+                            # The RAW scalar line, before shell-comment
+                            # stripping: GitHub substitutes
+                            # ${{ }} into the script text before the shell
+                            # runs, comments included, so a substituted
+                            # value carrying a newline leaves the comment.
+                            diagnostics.append(_diagnostic(
+                                source,
+                                body_number,
+                                "workflow-expression",
+                                "a GitHub expression inside run: is not "
+                                "statically evaluable",
+                            ))
+                            index += 1
+                            continue
+
+                        body_code = _strip_comment(body_raw)
+                        if not body_code.strip():
+                            index += 1
+                            continue
 
                         _classify_ci_command(
                             body_code.strip(),
@@ -1875,6 +3331,8 @@ def extract_ci(text):
                             members,
                             origins,
                             diagnostics,
+                            job_members.setdefault(
+                                current_job[:-1], set()),
                         )
                         index += 1
                     continue
@@ -1895,6 +3353,8 @@ def extract_ci(text):
                         members,
                         origins,
                         diagnostics,
+                        job_members.setdefault(
+                            current_job[:-1], set()),
                     )
                 index += 1
                 continue
@@ -1954,11 +3414,36 @@ def extract_ci(text):
             "workflow has no top-level jobs: mapping",
         ))
 
+    for step in steps:
+        if step["shell"][1:]:
+            diagnostics.append(_diagnostic(
+                source,
+                step["shell"][1],
+                "duplicate-key",
+                "step {!r} declares shell: more than once".format(
+                    step["name"]),
+            ))
+        if step["shell"] and not step["run"]:
+            diagnostics.append(_diagnostic(
+                source,
+                step["shell"][0],
+                "step-key",
+                "shell: applies only to a step with a run: key",
+            ))
+
+    findings = _required_status_findings(
+        job_ids, job_fields, lines, source, diagnostics)
+    findings.extend(
+        _lane_findings(job_ids, job_fields, lines, source, job_members))
+    findings.extend(_trigger_findings(lines, members, source, diagnostics))
+    findings.extend(_relocation_findings(members, source))
+    findings.extend(_step_shell_findings(steps))
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
         origins,
         _dedupe_diagnostics(diagnostics),
+        tuple(findings),
     )
 
 
@@ -2019,7 +3504,7 @@ def _validate_allowlist(rows):
                         where, exc),
                 ))
             else:
-                normalized = normalize(identity_tokens)
+                normalized = normalize(identity_tokens, masked_ok=True)
                 if (not normalized.ok
                         or normalized.value != identity):
                     diagnostics.append(_diagnostic(
@@ -2070,6 +3555,127 @@ def _validate_allowlist(rows):
                 side, identity, reason, backlog))
 
     return tuple(entries), _dedupe_diagnostics(diagnostics)
+
+
+def _opf_group_names(source):
+    """Return the group names of the one top-level SELF_TEST_GROUPS assignment in `source`, the
+    text of opf/tools/opf.py (module docstring, OPF GROUPS), read with ast and never run. Raises
+    ValueError when there is no such assignment or more than one, or when its value is not a
+    literal tuple of (name, labels) pairs, and SyntaxError when `source` does not parse."""
+    import ast
+    values = [node.value for node in ast.parse(source).body
+              if isinstance(node, ast.Assign)
+              and [getattr(target, "id", None) for target in node.targets] == ["SELF_TEST_GROUPS"]]
+    if len(values) != 1:
+        raise ValueError("{} top-level SELF_TEST_GROUPS assignments, not 1".format(len(values)))
+    groups = ast.literal_eval(values[0])
+    if not (isinstance(groups, tuple)
+            and all(isinstance(group, tuple) and len(group) == 2 and isinstance(group[0], str)
+                    for group in groups)):
+        raise ValueError("SELF_TEST_GROUPS is not a tuple of (name, labels) pairs")
+    return tuple(name for name, _labels in groups)
+
+
+def _opf_group_lines(text, extraction, jobs=None):
+    """Map each opf.py group command (OPF_GROUP_COMMAND) and the whole self-test
+    (OPF_WHOLE_COMMAND) that `extraction`, the extraction of `text`, holds to the line numbers
+    that run it. Each line whose origin names opf/tools/opf.py is read back through
+    _strip_comment, _tokenize and normalize, as _registered_selftests in
+    tools/selftest_git_fixture_env.py recovers a member's line; one that does not read back maps
+    under None. The member set keeps no count; this does, so a command run twice is seen. When
+    `jobs` is a dict, each mapped line number is also entered there with the id of the workflow
+    job that holds it (_job_above), or None outside any job."""
+    script = OPF_GROUP_COMMAND.split(" ", 1)[0]
+    lines = text.splitlines()
+    found = {}
+    for number in sorted(extraction.origins):
+        if script not in extraction.origins[number]:
+            continue
+        code = _strip_comment(lines[number - 1]).strip()
+        if code.startswith("run:"):
+            code = code[4:].strip()
+        tokens = _tokenize(code)
+        member = None
+        if tokens.ok:
+            command = tokens.value[2:] if tokens.value[:1] == ["run_gate"] else tokens.value
+            normalized = normalize(command)
+            member = normalized.value if normalized.ok else None
+        if (member is None or member.startswith(OPF_GROUP_COMMAND)
+                or member == OPF_WHOLE_COMMAND):
+            found.setdefault(member, []).append(number)
+            if jobs is not None:
+                jobs[number] = _job_above(lines, number)
+    return found
+
+
+def _job_above(lines, number):
+    """The id of the workflow job whose block holds line `number` of `lines`: the nearest
+    non-blank, non-comment line above it at indent 2, when that is a plain job id key and the
+    top-level key above it is jobs:. None for any other shape, a run_all_checks.sh line among
+    them, so an unplaced line is never read as a heavy job's."""
+    job = None
+    for index in range(number - 2, -1, -1):
+        raw = lines[index]
+        code = _strip_comment(raw).rstrip()
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        if indent == 0:
+            return job if code == "jobs:" else None
+        if indent == 2 and job is None:
+            match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", code)
+            if match is None:
+                return None
+            job = match.group(1)
+    return None
+
+
+def _opf_group_wiring_faults(groups, local, ci, heavy=HEAVY_COMMANDS, ci_jobs=None,
+                             heavy_jobs=HEAVY_JOBS):
+    """Return the faults of the opf.py self-test wiring (module docstring, OPF GROUPS) against the
+    _opf_group_lines maps `local` and `ci` and the job of each `ci` line (`ci_jobs`): a group
+    named in `groups` whose command HEAVY_COMMANDS lacks, that the local runner runs on other than
+    exactly one line, or that quality.yml runs on any line; a group command in any of the three
+    for a group `groups` does not name; the whole self-test missing from HEAVY_COMMANDS, or run
+    in quality.yml on other than exactly one line or outside `heavy_jobs`; and an opf.py line
+    that does not read back. No fault means the local runner runs every group once, CI runs no
+    group and the whole self-test once, in a heavy job, and the LANES rule then holds that job to
+    the pinned if:."""
+    wanted = {OPF_GROUP_COMMAND + name for name in groups}
+    faults = [] if wanted else ["opf.py names no self-test group"]
+    faults += ["HEAVY_COMMANDS lacks " + command
+               for command in sorted((wanted | {OPF_WHOLE_COMMAND}) - set(heavy))]
+    faults += ["HEAVY_COMMANDS holds {}, a group opf.py does not name".format(member)
+               for member in sorted(set(heavy) - wanted) if member.startswith(OPF_GROUP_COMMAND)]
+    for where, found in ((LOCAL_SOURCE, local), (CI_SOURCE, ci)):
+        if None in found:
+            faults.append("{} line(s) {} run opf/tools/opf.py in a form that does not read back".format(
+                where, ", ".join(str(number) for number in found[None])))
+        commands = set(found) - {None, OPF_WHOLE_COMMAND}
+        faults += ["{} runs {}, a group opf.py does not name".format(where, member)
+                   for member in sorted(commands - wanted)]
+    local_commands = set(local) - {None, OPF_WHOLE_COMMAND}
+    faults += ["{} runs no {}".format(LOCAL_SOURCE, command)
+               for command in sorted(wanted - local_commands)]
+    faults += ["{} runs {} on {} lines ({}), not once".format(
+                   LOCAL_SOURCE, command, len(local[command]),
+                   ", ".join(str(n) for n in local[command]))
+               for command in sorted(wanted & local_commands) if len(local[command]) != 1]
+    faults += ["{} runs {} on {} line(s) ({}); no CI job runs a group, CI runs the whole {} "
+               "once".format(CI_SOURCE, command, len(ci[command]),
+                             ", ".join(str(n) for n in ci[command]), OPF_WHOLE_COMMAND)
+               for command in sorted(wanted & set(ci))]
+    whole = ci.get(OPF_WHOLE_COMMAND, [])
+    if not whole:
+        faults.append("{} runs no {}".format(CI_SOURCE, OPF_WHOLE_COMMAND))
+    elif len(whole) != 1:
+        faults.append("{} runs {} on {} lines ({}), not once".format(
+            CI_SOURCE, OPF_WHOLE_COMMAND, len(whole), ", ".join(str(n) for n in whole)))
+    jobs = {} if ci_jobs is None else ci_jobs
+    faults += ["{} runs {} at line {} in job {!r}, not a HEAVY_JOBS job".format(
+                   CI_SOURCE, OPF_WHOLE_COMMAND, number, jobs.get(number))
+               for number in whole if jobs.get(number) not in heavy_jobs]
+    return faults
 
 
 def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
@@ -2181,6 +3787,8 @@ def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
                 "mandatory member is absent from CI",
             ))
 
+    findings.extend(ci_extraction.findings)
+
     findings = tuple(sorted(
         findings,
         key=lambda finding: (
@@ -2205,10 +3813,35 @@ def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
     )
 
 
-def evaluate(local_text, ci_text, allowlist=ALLOWLIST):
+def merge_ci(extractions):
+    """Union (source, extraction) pairs into the one CI side (module
+    docstring, TWO WORKFLOWS). Origins are keyed (source, line), because
+    line numbers repeat across files."""
+    members = set()
+    origins = {}
+    diagnostics = []
+    findings = []
+    for source, extraction in extractions:
+        members.update(extraction.members)
+        for line_number, scripts in extraction.origins.items():
+            origins[(source, line_number)] = set(scripts)
+        diagnostics.extend(extraction.diagnostics)
+        findings.extend(extraction.findings)
+    return Extraction(
+        frozenset(members),
+        origins,
+        _dedupe_diagnostics(diagnostics),
+        tuple(findings),
+    )
+
+
+def evaluate(local_text, ci_text, allowlist=ALLOWLIST, extra_ci=()):
+    """Reconcile the runner with the CI side: ci_text is quality.yml, and
+    extra_ci holds a (source, text) pair for each further workflow."""
     return reconcile(
         extract_local(local_text),
-        extract_ci(ci_text),
+        merge_ci([(CI_SOURCE, extract_ci(ci_text))] + [
+            (source, extract_ci(text, source)) for source, text in extra_ci]),
         allowlist,
     )
 
@@ -2217,10 +3850,12 @@ def run_paths(
         local_path,
         ci_path,
         allowlist=ALLOWLIST,
-        reader=None):
-    """Read both required absolute paths and return a structured Report.
+        reader=None,
+        extra_ci_paths=CI_WORKFLOWS[1:]):
+    """Read every required absolute path (the runner, quality.yml and each
+    (source, path) in extra_ci_paths) and return a structured Report.
 
-    Both files go through read_runner_text, the ONE byte-level reader: the
+    Every file goes through read_runner_text, the ONE byte-level reader: the
     raw bytes are screened before any decode, and the accepted bytes are
     decoded strictly as ASCII with no newline translation."""
     diagnostics = []
@@ -2229,7 +3864,7 @@ def run_paths(
     for source, path in (
         (LOCAL_SOURCE, local_path),
         (CI_SOURCE, ci_path),
-    ):
+    ) + tuple(extra_ci_paths):
         if not isinstance(path, Path) or not path.is_absolute():
             diagnostics.append(_diagnostic(
                 source,
@@ -2265,7 +3900,9 @@ def run_paths(
     validated_allowlist = tuple(
         entry._asdict() for entry in entries)
     return evaluate(
-        texts[0], texts[1], validated_allowlist)
+        texts[0], texts[1], validated_allowlist,
+        tuple((source, text) for (source, _path), text
+              in zip(extra_ci_paths, texts[2:])))
 
 
 def render(report):
@@ -2717,6 +4354,14 @@ def self_test():
         "python3 -I -B tools/check_ci_parity.py",
         "python3 -I -B tools/check_git_option_table.py --self-test",
         "python3 -I -B tools/check_git_option_table.py",
+        # The mandatory repository contracts: every matched fixture roster carries them,
+        # as the two real runners do.
+        "python3 -I -B .github/check_cited_standards_contract.py --self-test",
+        "python3 -I -B .github/check_cited_standards_contract.py",
+        "python3 -I -B .github/check_newtab_contract.py",
+        # The child-status probe and its coverage gate, mandatory as the contracts are.
+        "python3 -I -B opf/tools/_child_status.py",
+        "python3 -I -B tools/check_child_status_coverage.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -2744,9 +4389,31 @@ def self_test():
         lines.extend(tail)
         return "\n".join(lines) + "\n"
 
-    def ci_fixture(commands=(), extra_steps=()):
-        lines = [
-            "name: Test",
+    # Every HEAVY_JOBS job, each carrying the pinned if:, which the LANES
+    # presence rule requires of every quality.yml fixture.
+    heavy_job_lines = tuple(
+        line
+        for job in sorted(HEAVY_JOBS)
+        for line in (
+            "  " + job + ":",
+            HEAVY_JOB_IF_LINE,
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - uses: actions/checkout@v4",
+        ))
+
+    # A quality.yml fixture carries the labeled pull_request trigger the
+    # TRIGGER rule requires there and the pinned concurrency: block, which the
+    # LANES rule requires there, plus the heavy jobs and the Quality gates
+    # aggregator the multi-job rules then require; a msg-leaks.yml fixture
+    # passes trigger=(), top=() and heavy=False.
+    labeled_trigger = ("on:", "  pull_request:", "    branches: [main]",
+                       "    types: [labeled]", "  push:",
+                       "    branches: [main]")
+
+    def ci_fixture(commands=(), extra_steps=(), top=CONCURRENCY_BLOCK,
+                   heavy=True, trigger=labeled_trigger):
+        lines = ["name: Test"] + list(trigger) + list(top) + [
             "jobs:",
             "  quality:",
             "    runs-on: ubuntu-latest",
@@ -2756,10 +4423,25 @@ def self_test():
         for number, command in enumerate(commands, 1):
             lines.extend((
                 "      - name: Gate {}".format(number),
+                "        shell: bash",
                 "        run: " + command,
             ))
         lines.extend(extra_steps)
+        if heavy:
+            lines.extend(heavy_job_lines)
+            lines.extend(("  gates:",) + REQUIRED_STATUS_JOB[:2])
+            lines.append("    needs:")
+            lines.extend("      - " + job
+                         for job in ["quality"] + sorted(HEAVY_JOBS))
+            lines.extend(REQUIRED_STATUS_JOB[3:])
         return "\n".join(lines) + "\n"
+
+    def without_trigger(text):
+        # A quality.yml fixture's labeled trigger removed, so the vector sets
+        # its own.
+        return text.replace(
+            "name: Test\n" + "\n".join(labeled_trigger) + "\n", "name: Test\n",
+            1)
 
     def case(
             name,
@@ -2826,19 +4508,49 @@ def self_test():
         0,
     )
 
-    repo_command = "python3 -I -B " + REPO_GATE
-    case("01b repository gate matched",
-         evaluate(local_fixture(common + (repo_command,)),
-                  ci_fixture(common + (repo_command,)), ()), 0)
-    case("01c repository gate local-only",
-         evaluate(local_fixture(common + (repo_command,)), ci_fixture(common), ()),
-         1, ("local-only",), (REPO_GATE,), ())
-    case("01d repository gate ci-only",
-         evaluate(local_fixture(common), ci_fixture(common + (repo_command,)), ()),
-         1, ("ci-only",), (), (REPO_GATE,))
-    case("01e repository gate shadow scan",
-         evaluate(local_fixture(common, ("echo " + REPO_GATE,)), ci_fixture(common), ()),
-         2)
+    def drop(member):
+        """The common roster without the one command whose identity is member."""
+        return tuple(c for c in common if c != "python3 -I -B " + member)
+
+    case("01b repository gates matched",
+         evaluate(local_fixture(common), ci_fixture(common), ()), 0)
+    for repo_gate in sorted(REPO_GATES):
+        case("01c repository gate local-only: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(drop(repo_gate)), ()),
+             1, ("local-only", "missing-mandatory"), (repo_gate,), ())
+        case("01d repository gate ci-only: " + repo_gate,
+             evaluate(local_fixture(drop(repo_gate)), ci_fixture(common), ()),
+             1, ("ci-only", "missing-mandatory"), (), (repo_gate,))
+        case("01e repository gate shadow scan: " + repo_gate,
+             evaluate(local_fixture(common, ("echo " + repo_gate,)), ci_fixture(common), ()),
+             2)
+        # The runner's echo line is refused by its own grammar too; a workflow step name is
+        # not, so only the shadow scan's match on this repository gate refuses it.
+        case("01g repository gate shadow scan in a step name: " + repo_gate,
+             evaluate(local_fixture(common), ci_fixture(common, (
+                 "      - name: Run " + repo_gate,
+                 "        run: python3 -I -B tools/check_ci_parity.py",
+             )), ()), 2)
+    # Each mandatory repository-contract member removed
+    # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
+    # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
+    # the contracts out of that set turns these vectors red instead of silently skipping.
+    # The child-status probe and its coverage gate are held the same way: either one
+    # removed from both runners together is a missing-mandatory finding.
+    for member in (
+            ".github/check_cited_standards_contract.py",
+            ".github/check_cited_standards_contract.py --self-test",
+            ".github/check_newtab_contract.py",
+            "opf/tools/_child_status.py",
+            "tools/check_child_status_coverage.py"):
+        count += 1
+        if member not in MANDATORY_MEMBERS:
+            failures.append(
+                "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
+                "mandatory member would be undetected again".format(member))
+        case("01h mandatory member removed from both runners: " + member,
+             evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
+             1, ("missing-mandatory",), (), ())
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
@@ -2979,9 +4691,9 @@ def self_test():
 
     local_version = local_fixture(common + (
         "python3 tools/check_version_monotonicity.py",))
-    ci_version_lines = ci_fixture(common).rstrip().splitlines()
-    ci_version_lines.extend((
+    ci_version = ci_fixture(common, (
         "      - name: Version",
+        "        shell: bash",
         "        run: |",
         "          set -euo pipefail",
         '          if [ "$EVENT_NAME" = "pull_request" ]; then',
@@ -3020,15 +4732,15 @@ def self_test():
         "10 runtime base masking",
         evaluate(
             local_version,
-            "\n".join(ci_version_lines) + "\n",
+            ci_version,
             base_waiver,
         ),
         0,
     )
 
-    protected_ci_lines = ci_fixture(common).rstrip().splitlines()
-    protected_ci_lines.extend((
+    protected_ci = ci_fixture(common, (
         "      - name: Branch root",
+        "        shell: bash",
         "        run: |",
         "          set -euo pipefail",
         '          if [ "$EVENT_NAME" = "pull_request" ]; then',
@@ -3072,7 +4784,7 @@ def self_test():
         "10b runtime protected/head masking",
         evaluate(
             protected_local,
-            "\n".join(protected_ci_lines) + "\n",
+            protected_ci,
             protected_waivers,
         ),
         0,
@@ -3245,6 +4957,7 @@ def self_test():
         "    steps:",
         "      - uses: actions/checkout@v4",
         "      - name: Branch root",
+        "        shell: bash",
         '        run: python3 tools/check_branch_root.py '
         '--protected "$PR_HEAD_SHA" --head "$PR_HEAD_SHA"',
     )) + "\n"
@@ -3397,8 +5110,9 @@ def self_test():
         ("missing-mandatory",),
     )
 
-    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair, so the only
-    # findings are missing-mandatory for those two (rosters are otherwise matched, no local/ci-only drift).
+    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair and the
+    # three repository-contract members, so the only findings are missing-mandatory for those five
+    # (rosters are otherwise matched, no local/ci-only drift).
     git_option_absent = (
         "python3 -I -B tools/check_ci_parity.py --self-test",
         "python3 -I -B tools/check_ci_parity.py",
@@ -3648,7 +5362,7 @@ def self_test():
                     failures.append(
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
-            # codex qa9 MAJOR-1: the adapter screens the RAW text, so a
+            # Raw-text screen: the adapter screens the RAW text, so a
             # forbidden character cannot vanish in its splitlines() and
             # newline rejoin before extract_local's own screen. A form feed
             # after a comment hides the next line from bash (the gate never
@@ -3753,7 +5467,13 @@ def self_test():
             ("summary copied before gates finish",
              mutate((gitleaks, live_runner[live_runner.index(summary):] + gitleaks))),
             ("wrong terminal exit",
-             mutate(("  exit 1\n", "  exit 0\n"))),
+             mutate(('  echo "RESULT: FAIL"\n  exit 1\n',
+                     '  echo "RESULT: FAIL"\n  exit 0\n'))),
+            # The NOT RUN branch fails the run, as the gitleaks-pin gate does:
+            # its earlier exit 0 passed a run whose gitleaks scan did not run.
+            ("NOT RUN branch passing",
+             mutate(('NOT RUN locally (see above)"\n  exit 1\n',
+                     'NOT RUN locally (see above)"\n  exit 0\n'))),
             ("gate after summary",
              live_runner + 'run_gate "late" python3 -I -B tools/check_leaks.py\n'),
         )
@@ -3763,7 +5483,7 @@ def self_test():
             elif not any(item.code == "unclassified-line"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 unexpected exit was not rejected: " + name)
-        # qa4/qa5 allowlist rejections: each spelling resets failure state, detects
+        # Allowlist rejections: each spelling resets failure state, detects
         # the harness, or ends the run early through a line no real runner contains;
         # the exact-line allowlist must refuse every one as unclassified. The
         # arithmetic assignments (bash evaluates a value assigned to RANDOM, SRANDOM
@@ -3855,8 +5575,8 @@ def self_test():
                 item.code == "unclassified-line"
                 for item in extract_local(indirect).diagnostics):
             failures.append("26 offset-carried indirect reset was not rejected")
-        # qa6 label rejections: each reported spelling smuggles an assignment or an
-        # abort into the run_gate label, the channel the round-6 review found open.
+        # Label rejections: each spelling smuggles an assignment or an
+        # abort into the run_gate label, a channel that was once open.
         # Each fails without the GATE_LABEL_RE character-allowlist fullmatch.
         label_fixtures = (
             ("assign-default label with arithmetic carrier",
@@ -3890,17 +5610,17 @@ def self_test():
             elif not any(item.code == "run-gate-label"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 expanded label was not rejected: " + name)
-        # qa7 label rejections: brace, glob and tilde labels expand with no $
-        # in them, so the previous two-character blocklist was not
+        # Expanding-label rejections: brace, glob and tilde labels expand with
+        # no $ in them, so the previous two-character blocklist was not
         # literal-only; the GATE_LABEL_RE fullmatch refuses each statically.
         # Each fails without the character-allowlist change.
-        qa7_labels = (
+        expanding_labels = (
             ("brace label resetting failed", '{d4,eval,"failed=0;"}'),
             ("brace label splitting into two gates", "{dashes3,true}"),
             ("brace label exiting mid-roster", "{x,exit}"),
             ("tilde label", "~"),
         )
-        for name, label in qa7_labels:
+        for name, label in expanding_labels:
             mutant = mutate((gitleaks,
                              "run_gate " + label + " python3 -I -B "
                              "tools/check_no_dashes.py\n" + gitleaks))
@@ -3918,16 +5638,16 @@ def self_test():
         elif not any(item.code == "run-gate-label"
                      for item in extract_local(glob_label).diagnostics):
             failures.append("26 glob label was not rejected")
-        # qa7 argument rejections: a brace or glob ARGUMENT expands the same
-        # way, so GATE_WORD_RE screens every non-label word too.
-        qa7_words = (
+        # Expanding-argument rejections: a brace or glob ARGUMENT expands the
+        # same way, so GATE_WORD_RE screens every non-label word too.
+        expanding_words = (
             ("brace argument",
              'run_gate "brace-args" python3 -I -B tools/check_secrets.py '
              "{--self-test,}\n"),
             ("glob argument",
              'run_gate "glob-args" python3 -I -B tools/check_secrets.py *\n'),
         )
-        for name, line in qa7_words:
+        for name, line in expanding_words:
             mutant = mutate((gitleaks, line + gitleaks))
             if mutant is None:
                 failures.append("26 word fixture drift: " + name)
@@ -3935,7 +5655,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 expanding argument was not rejected: " + name)
-        # qa7 placement rejections: the gitleaks-block lines are accepted
+        # Placement rejections: the gitleaks-block lines are accepted
         # only in their real blocks; each copy below sits mid-roster, or
         # ahead of the gitleaks_rc capture, and is refused as unclassified.
         placement_fixtures = (
@@ -3960,7 +5680,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 misplaced scaffold was not rejected: " + name)
-        # qa8 MAJOR-1 byte fixtures: Python's splitlines() and strip() see
+        # Byte fixtures: Python's splitlines() and strip() see
         # line and word boundaries bash does not (\v, \f, \x85, U+2028,
         # U+00A0 and friends), so the static grammar formerly judged lines
         # bash never ran; one such spelling hid the NOT RUN result line at
@@ -4002,7 +5722,7 @@ def self_test():
                 failures.append(
                     "26 non-ASCII workflow character was not refused: "
                     + name)
-        # qa8 MINOR-1, qa8 MINOR-2 and codex MINOR-3 branch fixtures:
+        # Branch fixtures:
         # if/else/fi state is tracked per block, so a duplicate else, an
         # empty then or else branch, the PATH append in the HOME guard's
         # else branch (where HOME is unproven) and a gitleaks_rc=$? that is
@@ -4033,7 +5753,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 branch structure was not rejected: " + name)
-        # codex qa9 MINOR-1: bash runs a function definition as one
+        # Function position: bash runs a function definition as one
         # ordinary, successfully-exiting statement, so a definition inside
         # an if branch both fills the branch and replaces $?; skipped
         # uncounted, a copy of the runner's own run_gate() definition ahead
@@ -4062,7 +5782,7 @@ def self_test():
                 failures.append(
                     "26 in-branch function definition was not refused: "
                     + name)
-        # codex qa10 MINOR-1: bash resolves a function name at invocation
+        # Function order: bash resolves a function name at invocation
         # time, so the unchanged run_gate() definition moved BELOW the
         # first gate line leaves that gate calling an undefined name; bash
         # reports the missing command and continues, recording no gate
@@ -4084,7 +5804,7 @@ def self_test():
                 failures.append(
                     "26 run_gate invocation before its definition was not "
                     "refused: " + name)
-        # claude qa9 MINOR-2 (D1): the FAILED GATES echo expands
+        # Echo position: the FAILED GATES echo expands
         # ${failed_names}, so it is position-checked like the
         # gitleaks-block lines: accepted only in the then branch of the
         # terminal failed check, after the top-level initializer. Relocated
@@ -4100,7 +5820,7 @@ def self_test():
         elif not any(item.code == "unclassified-line"
                      for item in extract_local(relocated_echo).diagnostics):
             failures.append("26 relocated FAILED GATES echo was not refused")
-        # claude qa10 MINOR-1: the FAILED GATES echo is bound to the
+        # Terminal frame: the FAILED GATES echo is bound to the
         # TERMINAL failed-check frame, the one whose header sits in the
         # terminal summary tail. A copied frame mid-roster and a frame
         # nested in the gitleaks failure branch spell the same header, are
@@ -4128,7 +5848,7 @@ def self_test():
                 failures.append(
                     "26 FAILED GATES echo in a non-terminal failed-check "
                     "frame was not refused: " + name)
-        # qa6 masked-value rejections, now behind two independent screens. In
+        # Masked-value rejections, behind two independent screens. In
         # the LOCAL runner the word allowlist refuses every $-carrying gate
         # word outright (run-gate-word), so a masked flag value never reaches
         # _mask_value there; those assertions fail without the character
@@ -4176,7 +5896,7 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 local masked flag word was not refused: " + name)
-        # MINOR-2 (qa7): neither real runner passes a runtime-derived flag
+        # Neither real runner passes a runtime-derived flag
         # value, so even a REVIEWED masked expression is refused in the
         # local runner by the word allowlist; the same spelling still masks
         # in the CI workflow, the only surface MASKED_REF_EXPRESSIONS
@@ -4295,7 +6015,7 @@ def self_test():
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
 
-    # codex qa10 MAJOR-1: Path.read_text() translates a carriage return
+    # Byte-level reader: Path.read_text() translates a carriage return
     # into a newline (universal newlines) BEFORE any text screen can run,
     # so a forbidden byte planted in a runner ON DISK formerly vanished on
     # its way into the grammar: a CR-hidden gate line read as a clean
@@ -4345,24 +6065,25 @@ def self_test():
                 "28 clean ASCII bytes did not round-trip unchanged "
                 "through the byte-level reader")
 
-    # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
+    # One reader for the whole class: every read of runner or workflow
     # text must go through read_runner_text, the ONE byte-level reader.
-    # This structural vector parses this file and
-    # tools/selftest_git_fixture_env.py and pins EVERY read_text or
-    # splitlines attribute and every text-mode open() call, as spelled, to
-    # an exact per-function site count, so a new, moved or removed read
-    # written through those APIs turns this vector red and forces review
-    # against the reader. Every pinned site reads no runner or workflow
-    # text under the parity guarantee: the sites parse Python sources for
-    # ast (the F-367 maintenance-pin scan included), read harness, stub
-    # call and Trace2 event logs (the F-367 maintenance probe), write the
-    # selftest report, or split text the reader or a screen has already
-    # validated. A read
-    # spelled another way (getattr, an alias) is outside this tripwire, as
-    # the module docstring discloses. This vector fails without the
-    # change: the former Path.read_text() calls on the runners and the
-    # workflow (vector 26, _registered_selftests, _roster_checks) are not
-    # in this allowlist.
+    # This structural vector parses this file,
+    # tools/selftest_git_fixture_env.py and its four registered suite runners
+    # and pins EVERY read_text or splitlines attribute and every text-mode
+    # open() call, as spelled, to an exact per-function site count, so a new,
+    # moved or removed read written through those APIs turns this vector red
+    # and forces review against the reader. Every pinned site reads no runner
+    # or workflow text under the parity guarantee: the sites parse Python
+    # sources for ast (the git auto-maintenance pin scan included), read
+    # harness and stub call logs, write the selftest report, read the
+    # config-member timeout control's pid file and /proc stat, split the
+    # timeout controls' captured diagnostics, split an in-memory citation
+    # string from an in-module table, or split text the reader or a screen
+    # has already validated. A read spelled another way (getattr, an alias)
+    # is outside this tripwire, as the module docstring discloses. This
+    # vector fails without the change: the former Path.read_text() calls on
+    # the runners and the workflow (vector 26, _registered_selftests,
+    # _roster_checks) are not in this allowlist.
     count += 1
     import ast
     def _read_api_sites(tree):
@@ -4404,6 +6125,9 @@ def self_test():
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
             ("_naming_scenarios", "splitlines"): 1,
+            # Splits runner or quality.yml text read_runner_text already
+            # returned, to read back the lines that run an opf.py group.
+            ("_opf_group_lines", "splitlines"): 1,
             ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
             ("_shadow_check", "splitlines"): 1,
@@ -4411,26 +6135,61 @@ def self_test():
             ("extract_ci", "splitlines"): 1,
             ("extract_local", "splitlines"): 2,
             ("runner_naming_problems", "splitlines"): 1,
-            ("self_test", "splitlines"): 3,
+            ("self_test", "splitlines"): 1,
         },
         "tools/selftest_git_fixture_env.py": {
             ("_archive_reads_use_caller_env", "read_text"): 1,
-            ("_auto_maintenance_children", "read_text"): 1,
-            ("_auto_maintenance_children", "splitlines"): 1,
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
+            # The suite's own source, parsed for ast to classify the
+            # registry-lock acquisitions in _close_members: no runner
+            # text. The path is _close_members.__code__.co_filename, the
+            # file that defined it, so no caller input reaches the read.
+            # Disclosed residual: this entry pins only the per-function
+            # count of text-mode open() calls, not the path the one call
+            # reads, so a reviewed count with a changed read target stays
+            # inside the allowlist.
+            ("_close_lock_sites", "open-text"): 1,
             ("_maintenance_pin_scan", "read_text"): 1,
-            ("_manifest_extra_setup_failures", "read_text"): 1,
-            ("_opf_home_lifecycles", "read_text"): 1,
+            # /proc/<pid>/stat, the timeout control's liveness probe.
+            ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
+            # Not a read at all: splits an in-memory string, a
+            # later-measurement citation from the in-module table (a
+            # mutable dict meant to grow, not a frozen constant) padded
+            # at both ends, to require exactly one nonblank line. No
+            # file, runner or workflow text is opened or read at this
+            # site.
+            ("_roster_figures", "splitlines"): 1,
             ("_scrub_scoped_first", "read_text"): 1,
-            ("_system_pin_checks", "read_text"): 1,
+            # The suite's own source again, parsed for ast to classify the
+            # kill-sweep call sites in _config_results (_sweep_call_sites,
+            # the same reviewed pattern as _close_lock_sites above): no
+            # runner text, and the path is _config_results' recorded
+            # co_filename, so no caller input reaches the read. The same
+            # disclosed residual applies: the pin is the per-function count
+            # of text-mode open() calls, not the read target.
+            ("_sweep_call_sites", "open-text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
-            ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
+        },
+        "tools/selftest_git_fixture_env_core.py": {
+            ("_manifest_extra_setup_failures", "read_text"): 1,
+            # The member-timeout control's fixture pid file: no runner text.
+            ("_member_timeout_controls", "read_text"): 1,
+            # The cleanup-failure control's captured diagnostic lines: no runner text.
+            ("_member_timeout_controls", "splitlines"): 1,
+            ("_system_pin_checks", "read_text"): 1,
+        },
+        # The two poison-only lanes spell no read_text, splitlines or text-mode open() site;
+        # a first one added there drifts from this empty allowlist and forces review.
+        "tools/selftest_git_fixture_env_config_combined.py": {},
+        "tools/selftest_git_fixture_env_config_malformed.py": {},
+        "tools/selftest_git_fixture_env_config_system.py": {
+            ("_opf_home_lifecycles", "read_text"): 1,
         },
     }
     for relative, allowed in sorted(allowed_read_sites.items()):
@@ -4445,6 +6204,1910 @@ def self_test():
                     relative,
                     sorted(got_sites.items()),
                     sorted(allowed.items())))
+
+    # 30 REQUIRED STATUS (multi-job shape): the member set is the union over
+    # every job, and a workflow with more than one job routes every job into
+    # one always() job named Quality gates. Each red fixture passes without
+    # the required-status rule (the member sets reconcile), so it fails
+    # without the change.
+    def multi_job_ci(aggregator, first=("python3 tools/a.py",),
+                     second=("python3 tools/b.py",), run_tail=()):
+        lines = (["name: Test"] + list(labeled_trigger)
+                 + list(CONCURRENCY_BLOCK) + ["jobs:"])
+        for job, commands in (("one", common + first), ("two", second)):
+            lines.extend((
+                "  " + job + ":",
+                "    name: Job " + job,
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - uses: actions/checkout@v4",
+            ))
+            for number, command in enumerate(commands, 1):
+                lines.extend((
+                    "      - name: Gate {}".format(number),
+                    "        shell: bash",
+                    "        run: " + command,
+                ))
+        lines.extend(heavy_job_lines)
+        lines.extend(aggregator)
+        lines.extend(REQUIRED_STATUS_JOB[
+            REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
+        lines.extend(run_tail)
+        return "\n".join(lines) + "\n"
+
+    aggregator_head = ("  quality:", "    name: Quality gates")
+    always = ("    if: always()",)
+    heavy_needs = tuple("      - " + job for job in sorted(HEAVY_JOBS))
+    needs_both = ("    needs:", "      - one", "      - two") + heavy_needs
+    multi_local = local_fixture(
+        common + ("python3 tools/a.py", "python3 tools/b.py"))
+    good_multi = multi_job_ci(aggregator_head + always + needs_both)
+    case("30a every job routed into an always() Quality gates job passes",
+         evaluate(multi_local, good_multi, ()), 0)
+    moved = evaluate(
+        multi_local,
+        multi_job_ci(aggregator_head + always + needs_both,
+                     first=("python3 tools/a.py", "python3 tools/b.py")),
+        ())
+    case("30b a member present in two jobs is counted once", moved, 0)
+    if ("tools/b.py" not in moved.ci_members
+            or len(moved.ci_members) != len(common) + 2):
+        failures.append(
+            "30b moved member was not counted exactly once: {!r}".format(
+                sorted(moved.ci_members)))
+    case("30c a member dropped from every job is a local-only finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both,
+                               second=("python3 tools/a.py --self-test",)),
+                  ()),
+         1, kinds=("local-only", "ci-only"))
+    case("30d a job missing from needs: is a required-status finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always
+                               + ("    needs:", "      - one")), ()),
+         1, kinds=("required-status",))
+    case("30e a Quality gates job without if: always() is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + needs_both), ()),
+         1, kinds=("required-status",))
+    case("30f if: !cancelled() is not always() and is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head
+                               + ("    if: ${{ !cancelled() }}",)
+                               + needs_both), ()),
+         1, kinds=("required-status",))
+    case("30g no job named Quality gates is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(("  quality:", "    name: Aggregate")
+                               + always + needs_both), ()),
+         1, kinds=("required-status",))
+    case("30h a needs: entry naming no other job is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both
+                               + ("      - quality",)), ()),
+         1, kinds=("required-status",))
+    case("30i a duplicate needs: entry is a finding",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both
+                               + ("      - two",)), ()),
+         1, kinds=("required-status",))
+    case("30j a one-line flow needs: list is recognized",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always
+                               + ("    needs: [" + ", ".join(
+                                   ["one", "two"] + sorted(HEAVY_JOBS))
+                                   + "]",)), ()),
+         0)
+    case("30k a needs: entry that is not a plain job id is cannot-evaluate",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both
+                               + ("      - ${{ matrix.job }}",)), ()),
+         2)
+    case("30l exit 0 in a run block stays unclassified",
+         evaluate(multi_local,
+                  multi_job_ci(aggregator_head + always + needs_both,
+                               run_tail=("          exit 0",)), ()),
+         2)
+    one_job = evaluate(
+        local_fixture(common), ci_fixture(common, heavy=False), ())
+    case("30m a one-job workflow carries no required-status rule (its "
+         "missing heavy jobs are lane findings)", one_job, 1, kinds=("lane",))
+    if any(finding.kind == "required-status" for finding in one_job.findings):
+        failures.append(
+            "30m one-job workflow: unexpected required-status finding: "
+            "{!r}".format(one_job.findings))
+
+    def diagnostic_case(name, report, want):
+        case(name, report, 2)
+        got = {diagnostic.code for diagnostic in report.diagnostics}
+        if want not in got:
+            failures.append("{}: diagnostics {}, expected {!r}".format(
+                name, sorted(got), want))
+
+    def finding_case(name, report, want_code, needle):
+        case(name, report, want_code, kinds=("required-status",))
+        if not any(needle in finding.message
+                   for finding in report.findings
+                   if finding.kind == "required-status"):
+            failures.append(
+                "{}: no required-status finding mentions {!r}".format(
+                    name, needle))
+
+    def mutated(text, old, new):
+        if text.count(old) != 1:
+            failures.append(
+                "fixture edit {!r} does not match once".format(old))
+        return text.replace(old, new)
+
+    two_block = (
+        "  two:\n"
+        "    name: Job two\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: Gate 1\n"
+        "        shell: bash\n"
+        "        run: python3 tools/b.py\n"
+    )
+    one_need = multi_job_ci(
+        aggregator_head + always + ("    needs:", "      - one"))
+
+    # 31 JOB ENUMERATION: the rule reads the job set the way YAML does or
+    # refuses. Before the change the quoted and spaced keys with job two left
+    # out of needs: (31a to 31c), the indent-1 line (31i) and the repeated
+    # steps: key (31l) passed with exit 0; the boolean, digit-led and flow keys
+    # were read as other jobs or not at all, and the shifted bodies were
+    # refused under unrelated diagnostics. Each vector names the diagnostic it
+    # expects, so removing any one of these rules fails its own vector. 31m
+    # was a false finding: a key under a later top-level on: read as a job.
+    for label, header in (
+            ("31a a double-quoted job key", '  "two":'),
+            ("31b a single-quoted job key", "  'two':"),
+            ("31c a spaced job key", "  two :"),
+            ("31d a job key YAML reads as a boolean", "  on:"),
+            ("31e a job key GitHub refuses as an id", "  2two:")):
+        diagnostic_case(
+            label + " is cannot-evaluate, never skipped",
+            evaluate(multi_local,
+                     mutated(one_need, "\n  two:\n",
+                             "\n" + header + "\n"),
+                     ()),
+            "job-key-shape")
+    diagnostic_case(
+        "31f a one-line flow job is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(one_need, two_block,
+                         "  two: {name: Job two, runs-on: ubuntu-latest}\n"),
+                 ()),
+        "job-key-shape")
+    finding_case(
+        "31g control: a plain job key with a comment is read as a job",
+        evaluate(multi_local,
+                 mutated(one_need, "\n  two:\n", "\n  two:  # gates\n"),
+                 ()),
+        1, "'two' is not in the needs:")
+    two_lines = two_block.split("\n")
+    diagnostic_case(
+        "31h a job body at indent 3 is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(one_need, two_block, "\n".join(
+                     [two_lines[0]] + [line[1:] for line in two_lines[1:]])),
+                 ()),
+        "job-key-indent")
+    diagnostic_case(
+        "31i a line at indent 1 under jobs: is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, "jobs:\n", "jobs:\n extra: x\n"),
+                 ()),
+        "job-key-indent")
+    diagnostic_case(
+        "31j a job body that starts deeper than indent 4 is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(one_need, two_block, "\n".join(
+                     [two_lines[0]]
+                     + ["  " + line if line else line
+                        for line in two_lines[1:]])),
+                 ()),
+        "job-body-indent")
+    diagnostic_case(
+        "31k a repeated jobs: key is cannot-evaluate",
+        evaluate(multi_local,
+                 good_multi + "jobs:\n" + two_block.replace("two", "three"),
+                 ()),
+        "duplicate-key")
+    diagnostic_case(
+        "31l a repeated job-level steps: key is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, two_block, two_block
+                         + "    steps:\n"
+                         + "      - uses: actions/checkout@v4\n"),
+                 ()),
+        "duplicate-key")
+    case("31m a key under a later top-level on: is not read as a job",
+         evaluate(multi_local, without_trigger(good_multi)
+                  + "on:\n  pull_request:\n    types: [labeled]\n  push:\n", ()), 0)
+
+    # 32 RESULT-MASKING KEYS: continue-on-error, uses, defaults and container
+    # on any job are each a required-status finding whatever their value,
+    # one-job workflows included. Each red fixture passed before the change.
+    # The step-level siblings (continue-on-error, if:, a shell: other than
+    # shell: bash, and a gate chained with || true) were already
+    # cannot-evaluate through the step-key allowlist and the shell grammar;
+    # 32j to 32m pin that.
+    for label, line, needle in (
+            ("32a continue-on-error: true", "    continue-on-error: true",
+             "continue-on-error"),
+            ("32b continue-on-error: false", "    continue-on-error: false",
+             "continue-on-error"),
+            ("32c an expression continue-on-error",
+             "    continue-on-error: ${{ matrix.experimental }}",
+             "continue-on-error"),
+            ("32d a one-line defaults: run shell",
+             "    defaults: {run: {shell: bash {0}}}", "defaults"),
+            ("32e a container:", "    container: node:20", "container")):
+        finding_case(
+            label + " on a work job is a finding",
+            evaluate(multi_local,
+                     mutated(good_multi, "    name: Job two\n",
+                             "    name: Job two\n" + line + "\n"),
+                     ()),
+            1, needle)
+    finding_case(
+        "32f continue-on-error on the Quality gates job is a finding",
+        evaluate(multi_local,
+                 multi_job_ci(aggregator_head + always
+                              + ("    continue-on-error: true",)
+                              + needs_both), ()),
+        1, "continue-on-error")
+    finding_case(
+        "32g a reusable-workflow uses: job is a finding",
+        evaluate(local_fixture(common + ("python3 tools/a.py",)),
+                 mutated(good_multi, two_block,
+                         "  two:\n"
+                         "    uses: ./.github/workflows/gates.yml\n"),
+                 ()),
+        1, "uses")
+    finding_case(
+        "32h continue-on-error in a one-job workflow is a finding",
+        evaluate(local_fixture(common),
+                 mutated(ci_fixture(common),
+                         "  quality:\n    runs-on: ubuntu-latest\n",
+                         "  quality:\n    continue-on-error: true\n"
+                         "    runs-on: ubuntu-latest\n"),
+                 ()),
+        1, "continue-on-error")
+    case("32i control: timeout-minutes and strategy on a work job pass",
+         evaluate(multi_local,
+                  mutated(good_multi, "    name: Job two\n",
+                          "    name: Job two\n"
+                          "    timeout-minutes: 30\n"
+                          "    strategy:\n"
+                          "      fail-fast: false\n"
+                          "      matrix:\n"
+                          "        os: [ubuntu-latest]\n"),
+                  ()),
+         0)
+    for label, line in (
+            ("32j step-level continue-on-error",
+             "        continue-on-error: true"),
+            ("32k a step-level if:", "        if: false"),
+            ("32l a step-level shell:", "        shell: bash {0}")):
+        diagnostic_case(
+            label + " is cannot-evaluate",
+            evaluate(multi_local,
+                     mutated(good_multi, "        run: python3 tools/b.py\n",
+                             "        run: python3 tools/b.py\n"
+                             + line + "\n"),
+                     ()),
+            "step-key")
+    case("32m a gate chained with || true is cannot-evaluate",
+         evaluate(multi_local,
+                  mutated(good_multi, "run: python3 tools/b.py\n",
+                          "run: python3 tools/b.py || true\n"),
+                  ()),
+         2)
+
+    # 33 QUALITY GATES LOGIC: the job is pinned line for line
+    # (REQUIRED_STATUS_JOB), so a change that could let it exit 0 while a
+    # needed result is not success is a finding. Each red fixture passed
+    # before the change.
+    for label, old, new in (
+            ("33a a deleted exit 1", "            exit 1\n", ""),
+            ("33b a success filter that strips every result",
+             'rest="${rest//success/}"', 'rest="${rest//[a-z]/}"'),
+            ("33c an empty result read as success",
+             'rest="${RESULTS:-none}"', 'rest="${RESULTS:-success}"'),
+            ("33d an inverted test", 'if [ -n "$rest" ]',
+             'if [ -z "$rest" ]'),
+            ("33e if: ${{ always() }}", "    if: always()\n",
+             "    if: ${{ always() }}\n"),
+            ("33f an added step",
+             "concluded success\"\n",
+             "concluded success\"\n"
+             "      - uses: actions/checkout@v4\n")):
+        finding_case(
+            label + " in Quality gates is a finding",
+            evaluate(multi_local, mutated(good_multi, old, new), ()),
+            1, "REQUIRED_STATUS_JOB")
+    diagnostic_case(
+        "33g a step-level continue-on-error in Quality gates is "
+        "cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi,
+                         "      - name: Every quality job succeeded\n",
+                         "      - name: Every quality job succeeded\n"
+                         "        continue-on-error: true\n"),
+                 ()),
+        "step-key")
+    case("33h control: comments and blank lines in Quality gates pass",
+         evaluate(multi_local,
+                  mutated(good_multi, "    name: Quality gates\n",
+                          "    name: Quality gates\n\n    # the status\n"),
+                  ()),
+         0)
+
+    # 33i The pinned run: body itself, run under bash with the options
+    # GitHub documents for shell: bash (bash --noprofile --norc -eo pipefail
+    # {0}; here through -c, not a script file), exits 0 only when every
+    # needed result is success. A body without its exit 1 passes a failure,
+    # so this vector fails if the pin loses the line. The pinned body sets
+    # -euo pipefail itself, so it cannot show that the launch supplies them;
+    # the options vector after it runs a failing pipeline with no set line.
+    import os
+    import shutil
+    import subprocess
+    body_at = REQUIRED_STATUS_JOB.index("        run: |") + 1
+    pinned_body = tuple(line[10:] for line in REQUIRED_STATUS_JOB[body_at:])
+    if any(not line.startswith(" " * 10)
+           for line in REQUIRED_STATUS_JOB[body_at:]):
+        failures.append("33i the pinned run: body is not indented 10")
+    bash = shutil.which("bash", path=os.defpath)
+
+    def aggregate(body, results):
+        env = dict(PATH=os.defpath, LC_ALL="C")
+        if results is not None:
+            env["RESULTS"] = results
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+             "\n".join(body) + "\n"],
+            env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=60).returncode
+
+    if bash is None:
+        failures.append("33i bash not found on " + os.defpath)
+    else:
+        for results, want in (
+                (" ".join(("success",) * 10), 0),
+                ("success", 0),
+                ("failure", 1),
+                ("cancelled", 1),
+                ("skipped", 1),
+                ("success failure", 1),
+                ("success cancelled success", 1),
+                ("success skipped", 1),
+                ("neutral", 1),
+                ("", 1),
+                (None, 1)):
+            count += 1
+            got = aggregate(pinned_body, results)
+            if got != want:
+                failures.append(
+                    "33i pinned body with RESULTS={!r}: exit {}, "
+                    "expected {}".format(results, got, want))
+        count += 1
+        if aggregate(tuple(line for line in pinned_body
+                           if line.strip() != "exit 1"),
+                     "success failure") != 0:
+            failures.append(
+                "33i the deleted-exit-1 body did not pass a failure, so the "
+                "scenarios above do not discriminate")
+        # 33i options: a failing pipeline followed by a succeeding command,
+        # with no set line of its own, exits nonzero only when the launch
+        # carries both -e and -o pipefail, so dropping either option from
+        # aggregate() fails this vector. The control runs the same body with
+        # neither option and requires exit 0, so the body itself is not what
+        # fails.
+        options_body = ("false | true", "true")
+        count += 1
+        if aggregate(options_body, None) == 0:
+            failures.append(
+                "33i a failing pipeline with no set line exited 0, so the "
+                "launch does not apply -e and -o pipefail")
+        count += 1
+        if subprocess.run(
+                ["bash", "--noprofile", "--norc", "-c",
+                 "\n".join(options_body) + "\n"],
+                env=dict(PATH=os.defpath, LC_ALL="C"),
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=60).returncode != 0:
+            failures.append(
+                "33i the options body failed with neither -e nor -o "
+                "pipefail, so the options vector does not discriminate")
+
+    # 34 STEP SHELL: every run: step carries exactly one shell: bash, so a
+    # workflow or job defaults.run.shell cannot choose the program a gate runs
+    # under. Before the change any step-level shell: was cannot-evaluate, so a
+    # pinned line could not be held at all; 34a to 34c are findings only
+    # through STEP_SHELL_LINE and REQUIRED_STATUS_JOB, and 34e, 34f and 34h
+    # only through the step-shell diagnostics. 34d and 34g pin refusals that
+    # held before the change, so a looser shell or top-level grammar fails them.
+    work_shell = "        shell: bash\n        run: python3 tools/b.py\n"
+    finding_case(
+        "34a a work step without shell: bash is a finding",
+        evaluate(multi_local,
+                 mutated(good_multi, work_shell,
+                         "        run: python3 tools/b.py\n"),
+                 ()),
+        1, "without shell: bash")
+    gates_step = "      - name: Every quality job succeeded\n"
+    for needle in ("REQUIRED_STATUS_JOB", "without shell: bash"):
+        finding_case(
+            "34b the Quality gates step without shell: bash is a finding "
+            "({})".format(needle),
+            evaluate(multi_local,
+                     mutated(good_multi, gates_step + "        shell: bash\n",
+                             gates_step),
+                     ()),
+            1, needle)
+    finding_case(
+        "34c a block run: step without shell: bash in a one-job workflow is "
+        "a finding",
+        evaluate(local_fixture(common + ("python3 tools/a.py",)),
+                 ci_fixture(common, ("      - name: Block",
+                                     "        run: |",
+                                     "          python3 tools/a.py")),
+                 ()),
+        1, "without shell: bash")
+    for label, line in (
+            ("34d1 shell: sh", "        shell: sh"),
+            ("34d2 a custom shell true {0}", "        shell: true {0}"),
+            ("34d3 a quoted shell: 'bash'", "        shell: 'bash'"),
+            ("34d4 shell: bash -e {0}", "        shell: bash -e {0}"),
+            ("34d5 shell: pwsh", "        shell: pwsh")):
+        diagnostic_case(
+            label + " in place of shell: bash is cannot-evaluate",
+            evaluate(multi_local,
+                     mutated(good_multi, work_shell,
+                             line + "\n        run: python3 tools/b.py\n"),
+                     ()),
+            "step-key")
+    diagnostic_case(
+        "34e a repeated shell: bash in one step is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, work_shell,
+                         "        shell: bash\n" + work_shell),
+                 ()),
+        "duplicate-key")
+    diagnostic_case(
+        "34f shell: bash on a step with no run: key is cannot-evaluate",
+        evaluate(local_fixture(common),
+                 ci_fixture(common, ("      - uses: actions/checkout@v4",
+                                     "        shell: bash")),
+                 ()),
+        "step-key")
+    diagnostic_case(
+        "34g a top-level defaults: run: shell: true {0} is cannot-evaluate",
+        evaluate(multi_local,
+                 mutated(good_multi, "jobs:\n",
+                         "defaults:\n  run:\n    shell: true {0}\n"
+                         "jobs:\n"),
+                 ()),
+        "unknown-top-key")
+    two_steps = "    name: Job two\n    runs-on: ubuntu-latest\n    steps:\n"
+    diagnostic_case(
+        "34h a shell: bash line before the first step of a job is "
+        "cannot-evaluate, not read into the previous job's last step",
+        evaluate(multi_local,
+                 mutated(good_multi, two_steps,
+                         two_steps + "        shell: bash\n"),
+                 ()),
+        "step-key")
+    case("34i control: a comment after shell: bash passes",
+         evaluate(multi_local,
+                  mutated(good_multi, work_shell,
+                          "        shell: bash  # pinned\n"
+                          "        run: python3 tools/b.py\n"),
+                  ()),
+         0)
+    # 34j A step key before a job's first step item is cannot-evaluate (YAML
+    # rejects that shape). Before the change each case passed with exit 0: a
+    # run: there added its members and drew no shell: finding.
+    for label, lines_in in (
+            ("34j1 a run: line", "        run: python3 tools/b.py\n"),
+            ("34j2 a block run: |",
+             "        run: |\n          python3 tools/b.py\n"),
+            ("34j3 a uses: line", "        uses: actions/checkout@v4\n"),
+            ("34j4 an env: mapping", "        env:\n          A: b\n")):
+        diagnostic_case(
+            label + " before the first step of a job is cannot-evaluate",
+            evaluate(multi_local,
+                     mutated(good_multi, two_steps, two_steps + lines_in),
+                     ()),
+            "step-key")
+
+    # 35 TWO WORKFLOWS: the msg-leaks.yml split (module docstring, TWO
+    # WORKFLOWS and TRIGGER). Relabelled from a second 34 series so 34 above
+    # names only the step-shell vectors.
+    msg_scan = "python3 -I -B " + MSG_LEAKS_SCAN
+    msg_selftest = msg_scan + " --self-test"
+    msg_waiver = ({
+        "side": "ci-only",
+        "identity": MSG_LEAKS_SCAN,
+        "reason": "the live scan needs the CI event",
+        "backlog": "T-34",
+    },)
+    local_msg = local_fixture(common + (msg_selftest,))
+
+    def with_on(text, on_block):
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\non:\n" + on_block, 1)
+
+    def with_on_header(text, header):
+        # Insert a raw top-level header (no on: line is added), for vectors
+        # that exercise the on: header spelling itself.
+        return without_trigger(text).replace(
+            "name: Test\n", "name: Test\n" + header, 1)
+
+    def pr_types(types):
+        return ("  pull_request:\n    branches: [main]\n    types: " + types
+                + "\n  push:\n    branches: [main]\n")
+
+    defaults = pr_types("[opened, synchronize, reopened]")
+    edited = pr_types("[opened, synchronize, reopened, edited]")
+    # quality.yml lists the labeled type alone (module docstring, TRIGGER).
+    labeled = pr_types("[labeled]")
+    quality_side = with_on(ci_fixture(common), labeled)
+    scan_text = ci_fixture((msg_selftest, msg_scan), top=(), heavy=False,
+                           trigger=())
+    msg_side = ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited)),)
+
+    def scan_case(name, quality, scan, want_code, kinds=(), local_only=None,
+                  diagnostic=None):
+        # diagnostic pins the refusal BRANCH, not just the exit code: a shape
+        # two branches can refuse stays red when its own branch is disabled.
+        report = evaluate(local_msg, quality, msg_waiver, scan)
+        case(name, report, want_code, kinds, local_only)
+        if diagnostic is not None and not any(
+                item.code == "trigger-shape" and diagnostic in item.message
+                for item in report.diagnostics):
+            failures.append(
+                "{}: no trigger-shape diagnostic holds {!r}: {!r}".format(
+                    name, diagnostic, report.diagnostics))
+
+    case("35a two workflows: the scan alone in msg-leaks.yml, with edited",
+         evaluate(local_msg, quality_side, msg_waiver, msg_side), 0,
+         active={("ci-only", MSG_LEAKS_SCAN)})
+    scan_case("35b msg-leaks.yml dropped: the scan self-test is local-only",
+              quality_side, (), 1, ("local-only", "stale-allowlist"),
+              (MSG_LEAKS_SCAN + " --self-test",))
+    scan_case("35c edited back on quality.yml is a trigger finding",
+              with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
+    scan_case("35d msg-leaks.yml without edited is a trigger finding",
+              quality_side, ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, defaults)),),
+              1, ("trigger",))
+    scan_case("35e msg-leaks.yml with no pull_request trigger is a trigger "
+              "finding", quality_side, ((MSG_LEAKS_CI_SOURCE, scan_text),),
+              1, ("trigger",))
+    block_list = "  pull_request:\n    types:\n      - opened\n      - synchronize\n"
+    scan_case("35f a block-list edited item on quality.yml is a trigger finding",
+              with_on(ci_fixture(common),
+                      block_list + "      - reopened\n      - edited\n"),
+              msg_side, 1, ("trigger",))
+    scan_case("35g a block list without edited on quality.yml passes",
+              with_on(ci_fixture(common),
+                      "  pull_request:\n    types:\n      - labeled\n"),
+              msg_side, 0)
+    scan_case("35h a block list with all four types on msg-leaks.yml passes",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE, with_on(
+                  scan_text, block_list + "      - reopened\n      - edited\n")),),
+              0)
+    scan_case("35i edited on pull_request_target of quality.yml is a trigger "
+              "finding",
+              with_on(ci_fixture(common), "  pull_request_target:\n    types: [edited]\n"),
+              msg_side, 1, ("trigger",))
+    scan_case("35j a one-line on: list gives msg-leaks.yml default types only",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE, scan_text.replace(
+                  "name: Test\n", "name: Test\non: [push, pull_request]\n", 1)),),
+              1, ("trigger",))
+    # 35k: a one-line on: list on quality.yml is read: it lists no edited, so
+    # it draws no edited finding, and it lists no pull_request, so its one
+    # finding is the missing-trigger finding (41i holds that on the block form).
+    one_line_quality = with_on_header(
+        ci_fixture(common), "on: [push, workflow_dispatch]\n")
+    scan_case("35k a one-line on: list on quality.yml with no pull_request draws "
+              "only the missing-trigger finding",
+              one_line_quality, msg_side, 1, ("trigger",))
+    one_line = evaluate(local_msg, one_line_quality, msg_waiver, msg_side)
+    count += 1
+    if [finding.message for finding in one_line.findings
+            if "has no pull_request event" not in finding.message]:
+        failures.append("35k a finding other than the missing trigger: {!r}".format(
+            one_line.findings))
+    # 35l: the edited rule follows the scan, not a file name, so the scan with
+    # edited in quality.yml draws no edited finding; the labeled pin on
+    # quality.yml's own types is then the one finding.
+    together = evaluate(
+        local_msg, with_on(ci_fixture(common + (msg_selftest, msg_scan)), edited),
+        msg_waiver, ())
+    case("35l the scan and edited in one workflow draw only the labeled pin "
+         "(the edited rule follows the scan, not a file name)",
+         together, 1, ("trigger",))
+    count += 1
+    if [finding.message for finding in together.findings
+            if "not exactly [labeled]" not in finding.message]:
+        failures.append("35l a finding other than the labeled pin: {!r}".format(
+            together.findings))
+    for label, shape in (
+            ("a flow mapping", "  pull_request: {types: [edited]}\n"),
+            ("a quoted event key", "  \"pull_request\":\n    types: [edited]\n"),
+            ("an indent-3 line", "  pull_request:\n   types: [edited]\n"),
+            ("a repeated types: key",
+             "  pull_request:\n    types: [opened]\n    types: [edited]\n"),
+            ("a repeated event",
+             "  pull_request:\n  pull_request:\n    types: [edited]\n"),
+            ("a non-name list item",
+             "  pull_request:\n    types: [opened, {x: edited}]\n"),
+            ("an indent-5 item under types:",
+             "  pull_request:\n    types:\n     - edited\n")):
+        scan_case("35m a trigger shape outside the subset is cannot-evaluate: "
+                  + label, with_on(ci_fixture(common), shape), msg_side, 2)
+
+    def without_msg_workflow(path):
+        if path == MSG_LEAKS_CI_PATH:
+            raise FileNotFoundError(str(path))
+        return path.read_bytes()
+
+    missing_msg = run_paths(LOCAL_PATH, CI_PATH, ALLOWLIST, without_msg_workflow)
+    case("35n a missing msg-leaks.yml is cannot-evaluate, never an empty side",
+         missing_msg, 2)
+    count += 1
+    if not any(item.source == MSG_LEAKS_CI_SOURCE and item.code == "read-error"
+               for item in missing_msg.diagnostics):
+        failures.append("35n the missing workflow is not named: {!r}".format(
+            missing_msg.diagnostics))
+    labelled = evaluate(local_msg, quality_side, msg_waiver, (
+        (MSG_LEAKS_CI_SOURCE, with_on(scan_text, edited) + "bogus: 1\n"),))
+    count += 1
+    if not any(item.source == MSG_LEAKS_CI_SOURCE
+               and item.code == "unknown-top-key"
+               for item in labelled.diagnostics):
+        failures.append("35o a msg-leaks.yml diagnostic does not carry its own "
+                        "source: {!r}".format(labelled.diagnostics))
+
+    # Quoted keys, whitespace before a colon, indentless sequences
+    # and keyless lines under an edit event are refused (exit 2), on the
+    # workflow that runs the scan and on the one that does not alike. The
+    # first three spellings formerly read as a key they are not, so GitHub
+    # saw a types: list this rule did not; a keyless line is refused because
+    # YAML reads it as a scalar, as an explicit '?' key entry (the one
+    # keyless form YAML does read as a key, exercised under 35r), or as a
+    # document error, never as a plain key this rule could follow, so this
+    # rule cannot know what GitHub would run there.
+    edited_flow = "[opened, synchronize, reopened, edited]"
+    for label, shape in (
+            ("a quoted types: key",
+             '  pull_request:\n    "types": ' + edited_flow + "\n"),
+            ("whitespace before the types: colon",
+             "  pull_request:\n    types : " + edited_flow + "\n"),
+            ("whitespace before the event colon",
+             "  pull_request :\n    types: " + edited_flow + "\n"),
+            ("an indentless sequence under types:",
+             "  pull_request:\n    types:\n    - opened\n    - synchronize\n"
+             "    - reopened\n    - edited\n"),
+            ("a keyless line under the event",
+             "  pull_request:\n    frobnicate\n")):
+        scan_case("35p quality.yml trigger shape is cannot-evaluate: " + label,
+                  with_on(ci_fixture(common), shape), msg_side, 2)
+        scan_case("35p msg-leaks.yml trigger shape is cannot-evaluate: "
+                  + label, quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2)
+
+    # Shapes an earlier strict parser still read permissively,
+    # each hiding or inventing a types: list. A colon-less event key and an
+    # explicit '?' key are not read as keys by this rule while YAML reads the
+    # block differently; a tagged key and a colon with no space after it are
+    # read by YAML as a key and a plain scalar this rule formerly classified
+    # the other way around; and a non-standard indent for the on: block or an
+    # event's properties hid the whole block from this rule while GitHub
+    # still reads it. Each is now cannot-evaluate on both workflows.
+    # Each 35r vector also requires its OWN branch's diagnostic,
+    # as 35s does: the exit code alone cannot tell two refusal branches
+    # apart, so a branch whose removal re-routes its shape to another refusal
+    # formerly stayed green.
+    for label, shape, named in (
+            ("a colon-less event key at indent 2",
+             "  pull_request\n    types: " + edited_flow + "\n",
+             "has no colon"),
+            ("the on: block's children at indent 4",
+             "    pull_request:\n      types: " + edited_flow + "\n",
+             "the first line under on: is at indent 4"),
+            ("event properties at indent 6",
+             "  pull_request:\n      branches: [main]\n      types: "
+             + edited_flow + "\n",
+             "outside the recognized trigger shapes"),
+            ("an explicit '?' key",
+             "  ? pull_request\n  : types: " + edited_flow + "\n",
+             "has no colon"),
+            ("a !!str tag on the types: key",
+             "  pull_request:\n    !!str types: " + edited_flow + "\n",
+             "key '!!str types' under pull_request is not a plain name"),
+            ("types: with no space after its colon",
+             "  pull_request:\n    types:" + edited_flow + "\n",
+             "key 'types' under pull_request has no space after its colon")):
+        scan_case("35r quality.yml trigger shape is cannot-evaluate: " + label,
+                  with_on(ci_fixture(common), shape), msg_side, 2,
+                  diagnostic=named)
+        scan_case("35r msg-leaks.yml trigger shape is cannot-evaluate: "
+                  + label, quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
+                  diagnostic=named)
+
+    # The indent-4 sequence branch is pinned on its own named
+    # diagnostic. Dropping the branch still refuses the line (it has no
+    # colon), so the 35p exit code alone cannot tell the two refusals apart;
+    # the message can.
+    indentless = evaluate(
+        local_msg,
+        with_on(ci_fixture(common),
+                "  pull_request:\n    types:\n    - edited\n"),
+        msg_waiver, msg_side)
+    count += 1
+    if not any(item.code == "trigger-shape"
+               and "indentless sequence" in item.message
+               for item in indentless.diagnostics):
+        failures.append(
+            "35s the indent-4 sequence item is not refused by the named "
+            "indentless-sequence branch: {!r}".format(indentless.diagnostics))
+
+    # The top-level on: header itself is
+    # held to the strict key rule BEFORE its value is read: on:[...] with no
+    # space after the colon formerly passed clean (YAML reads that line as
+    # one plain scalar, so GitHub sees no such trigger block), and a bare on
+    # raised an IndexError. Each is a trigger-shape cannot-evaluate on both
+    # workflows, pinned to the header branch's own diagnostic.
+    # EXACTLY SIX compatibility controls follow, three per
+    # workflow. A refusal of a read spelling would turn each control's exit
+    # to 2. Only the msg-leaks.yml block-spelling control ALSO pins that the
+    # value stays read: a silently skipped on: header flips its exit 0 to 1
+    # (its edited goes unread), while every other control reads the same
+    # under a skipped header (on quality.yml the scalar and flow list read
+    # exit 1 either way: read, through their missing-trigger finding, and
+    # skipped, through the msg-leaks.yml side's own missing-edited finding,
+    # which also keeps the block control at exit 1; on msg-leaks.yml the
+    # scalar and flow list lack edited either way). So the six controls
+    # establish NOT REFUSED each, and the skip discrimination rests on the
+    # msg-leaks.yml block control (shown red under a skipped-header mutant).
+    for label, header, named in (
+            ("a flow list with no space after on:",
+             "on:[pull_request]\n",
+             "on: has no space after its colon"),
+            ("a bare on with no colon",
+             "on\n",
+             "names on without a colon"),
+            ("a !!str tag on the on: key",
+             "!!str on:\n" + edited,
+             "is not the plain spelling on"),
+            ("a quoted on: key",
+             '"on":\n' + edited,
+             "is not the plain spelling on"),
+            ("whitespace before the on: colon",
+             "on :\n" + edited,
+             "is not the plain spelling on"),
+            ("an explicit '?' on key",
+             "? on\n: [pull_request]\n",
+             "names on without a colon")):
+        scan_case("35t quality.yml on: header is cannot-evaluate: " + label,
+                  with_on_header(ci_fixture(common), header), msg_side, 2,
+                  diagnostic=named)
+        scan_case("35t msg-leaks.yml on: header is cannot-evaluate: " + label,
+                  quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, header)),),
+                  2, diagnostic=named)
+    scan_case("35t a plain scalar on: value on quality.yml is not refused "
+              "(no pull_request: the missing-trigger finding)",
+              with_on_header(ci_fixture(common), "on: push\n"), msg_side, 1,
+              ("trigger",))
+    scan_case("35t a one-line flow list after on: on quality.yml is not "
+              "refused (no pull_request: the missing-trigger finding)",
+              with_on_header(ci_fixture(common), "on: [push, workflow_dispatch]\n"),
+              msg_side, 1, ("trigger",))
+    scan_case("35t a block on: value on quality.yml stays read (edited there "
+              "is still a trigger finding)",
+              with_on(ci_fixture(common), edited), msg_side, 1, ("trigger",))
+    scan_case("35t a plain scalar on: value on msg-leaks.yml is not refused "
+              "(missing edited: a trigger finding)",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE, with_on_header(scan_text, "on: push\n")),),
+              1, ("trigger",))
+    scan_case("35t a one-line flow list after on: on msg-leaks.yml is not "
+              "refused (default types lack edited: a trigger finding)",
+              quality_side,
+              ((MSG_LEAKS_CI_SOURCE,
+                with_on_header(scan_text, "on: [push, pull_request]\n")),),
+              1, ("trigger",))
+    scan_case("35t a block on: value with edited on msg-leaks.yml stays read "
+              "(pass)", quality_side, msg_side, 0)
+
+    # Spellings YAML also reads as the
+    # top-level on key but that the trigger rule's is_on_spelling does not
+    # recognize are refused by the strict top-level parser, never read: each
+    # is exit 2 END TO END with the refusing layer's own diagnostic
+    # (unknown-top-key, yaml-feature or text-format) and no trigger-shape
+    # diagnostic, so the trigger rule's narrower recognition opens no route
+    # around the gate.
+    for label, header, named_code in (
+            ("a double-quoted escape spelling of on",
+             "\"o\\x6e\":\n" + edited, "unknown-top-key"),
+            ("an anchored on: key", "&a on:\n" + edited, "yaml-feature"),
+            ("a verbatim-tag on: key",
+             "!<tag:yaml.org,2002:str> on:\n" + edited, "unknown-top-key"),
+            ("a multi-line explicit '?' on key",
+             "?\n  on\n: [pull_request]\n", "unknown-top-key"),
+            ("a byte-order mark before on:",
+             "\ufeffon:\n" + edited, "text-format")):
+        outer = evaluate(local_msg, with_on_header(ci_fixture(common), header),
+                         msg_waiver, msg_side)
+        case("35v quality.yml unrecognized on: spelling refused by the outer "
+             "parser: " + label, outer, 2)
+        count += 1
+        if not any(item.code == named_code for item in outer.diagnostics):
+            failures.append("35v {}: no {} diagnostic: {!r}".format(
+                label, named_code, outer.diagnostics))
+        if any(item.code == "trigger-shape" for item in outer.diagnostics):
+            failures.append("35v {}: refused by the trigger rule instead of "
+                            "the outer parser: {!r}".format(
+                                label, outer.diagnostics))
+
+    # The indent-2 on-key refusal branches are discriminated by
+    # their own diagnostics (dropping one re-routes its shape to another
+    # refusal branch, so the exit code alone stayed green).
+    for label, shape, named in (
+            ("a !!str tag on the event key",
+             "  !!str pull_request:\n    types: " + edited_flow + "\n",
+             "on: key '!!str pull_request' is not a plain name"),
+            ("an event key with no space after its colon",
+             "  pull_request:{types: [edited]}\n",
+             "on: key 'pull_request' has no space after its colon"),
+            ("a quoted event key",
+             '  "pull_request":\n    types: ' + edited_flow + "\n",
+             "quoted on: key"),
+            ("whitespace before the event colon",
+             "  pull_request :\n    types: " + edited_flow + "\n",
+             "on: key 'pull_request ' holds whitespace before its colon")):
+        scan_case("35u quality.yml indent-2 on: key is cannot-evaluate: "
+                  + label, with_on(ci_fixture(common), shape), msg_side, 2,
+                  diagnostic=named)
+        scan_case("35u msg-leaks.yml indent-2 on: key is cannot-evaluate: "
+                  + label, quality_side,
+                  ((MSG_LEAKS_CI_SOURCE, with_on(scan_text, shape)),), 2,
+                  diagnostic=named)
+
+    # A gate moved from quality.yml into
+    # msg-leaks.yml is a relocation finding (the CI side is the union of both
+    # files, so set parity alone would stay green while the aggregated
+    # Quality gates status silently lost the gate); the scan itself and its
+    # self-test are the allowed members, which 35a already holds green.
+    moved = "python3 -I -B tools/check_git_option_table.py"
+    scan_case("35q a gate moved from quality.yml into msg-leaks.yml is a "
+              "relocation finding",
+              with_on(ci_fixture(tuple(
+                  item for item in common if item != moved)), labeled),
+              ((MSG_LEAKS_CI_SOURCE, with_on(
+                  ci_fixture((msg_selftest, msg_scan, moved), top=(),
+                             heavy=False, trigger=()),
+                  edited)),),
+              1, ("relocation",))
+
+    # The step-shell rule is pinned on msg-leaks.yml by its own
+    # vector. ci_fixture writes shell: bash into every generated command
+    # step (not its checkout step or appended extra_steps), so before this
+    # vector no case removed the line on the msg-leaks.yml side, and a
+    # mutant applying _step_shell_findings to quality.yml alone passed every
+    # vector. The findings must be exactly the one step-shell finding naming
+    # msg-leaks.yml, so an extra finding of another kind cannot satisfy this
+    # vector either.
+    shell_dropped = evaluate(
+        local_msg, quality_side, msg_waiver,
+        ((MSG_LEAKS_CI_SOURCE, with_on(
+            scan_text.replace("        " + STEP_SHELL_LINE + "\n", "", 1),
+            edited)),))
+    case("35w a msg-leaks.yml run step without shell: bash is a finding",
+         shell_dropped, 1, ("required-status",))
+    count += 1
+    expected_shell = [
+        finding for finding in shell_dropped.findings
+        if finding.kind == "required-status"
+        and MSG_LEAKS_CI_SOURCE in finding.message
+        and "without " + STEP_SHELL_LINE in finding.message]
+    if len(shell_dropped.findings) != 1 or len(expected_shell) != 1:
+        failures.append(
+            "35w expected exactly one step-shell finding naming {}: "
+            "{!r}".format(MSG_LEAKS_CI_SOURCE, shell_dropped.findings))
+
+    # A ${{ }} GitHub expression
+    # anywhere in the RAW run: value is cannot-evaluate (workflow-expression),
+    # read before shell-comment stripping: GitHub substitutes expressions
+    # into the script text before the shell runs, comments included, so a
+    # substituted value carrying a newline leaves the comment. Before the
+    # change the three comment shapes below each passed with exit 0.
+    pr_title = "${{ github.event.pull_request.title }}"
+    for label, block_lines, on_quality in (
+            ("a whole-line comment in a run: block",
+             ("          # " + pr_title, "          echo ok"), True),
+            ("a trailing comment on a run: block line",
+             ("          echo ok # " + pr_title,), True),
+            ("a comment-only run: block on msg-leaks.yml",
+             ("          # " + pr_title,), False)):
+        expr_step = ("      - name: Expression carrier",
+                     "        " + STEP_SHELL_LINE,
+                     "        run: |") + block_lines
+        if on_quality:
+            expr_report = evaluate(
+                local_msg, with_on(ci_fixture(common, expr_step), labeled),
+                msg_waiver, msg_side)
+            expr_source = CI_SOURCE
+        else:
+            expr_report = evaluate(
+                local_msg, quality_side, msg_waiver,
+                ((MSG_LEAKS_CI_SOURCE, with_on(
+                    ci_fixture((msg_selftest, msg_scan), expr_step, top=(),
+                               heavy=False, trigger=()),
+                    edited)),))
+            expr_source = MSG_LEAKS_CI_SOURCE
+        case("35x a GitHub expression in a run: shell comment is "
+             "cannot-evaluate: " + label, expr_report, 2)
+        count += 1
+        if not any(item.source == expr_source
+                   and item.code == "workflow-expression"
+                   for item in expr_report.diagnostics):
+            failures.append(
+                "35x {}: no workflow-expression diagnostic from {}: "
+                "{!r}".format(label, expr_source, expr_report.diagnostics))
+    inline_expr = evaluate(
+        local_msg,
+        with_on(ci_fixture(common + ("echo " + pr_title,)), labeled),
+        msg_waiver, msg_side)
+    case("35x control: an inline run: expression stays refused", inline_expr,
+         2)
+    count += 1
+    if not any(item.code == "workflow-expression"
+               for item in inline_expr.diagnostics):
+        failures.append(
+            "35x control: no workflow-expression diagnostic: {!r}".format(
+                inline_expr.diagnostics))
+
+    # A <ref:...> placeholder is
+    # the OUTPUT of the masking; a workflow value is screened like any other,
+    # so a placeholder spelling carrying $ is cannot-evaluate (masked-value),
+    # never masked, and a quoted <ref:...> literal never collapses into the
+    # masked identity of the reviewed expression it names. Before the change
+    # both spellings below reconciled with exit 0 against the waiver,
+    # byte-identical to the identity the reviewed "$PUSH_BEFORE" masks to,
+    # while handing the gate a different byte string at runtime. The reviewed
+    # allowlist identities are the one place a placeholder is still accepted
+    # back (_validate_allowlist normalizes with masked_ok=True); the control
+    # pins that path together with the reviewed CI spelling.
+    leak_waiver = ({
+        "side": "ci-only",
+        "identity": "tools/check_leaks.py --base <ref:$PUSH_BEFORE>",
+        "reason": "fixture baseline: the scan reads the push base in CI",
+        "backlog": "T-34",
+    },)
+    for label, spelling in (
+            ("a double-quoted placeholder literal",
+             "--base \"<ref:$PUSH_BEFORE>\""),
+            ("a single-quoted placeholder literal",
+             "--base '<ref:$PUSH_BEFORE>'")):
+        spoofed = evaluate(
+            local_fixture(common),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_leaks.py " + spelling,)),
+            leak_waiver)
+        case("35y a literal placeholder flag value is cannot-evaluate: "
+             + label, spoofed, 2)
+        count += 1
+        if not any(item.code == "masked-value"
+                   for item in spoofed.diagnostics):
+            failures.append(
+                "35y {}: no masked-value diagnostic: {!r}".format(
+                    label, spoofed.diagnostics))
+    case("35y control: the reviewed expression still masks and reconciles "
+         "with the placeholder waiver",
+         evaluate(
+             local_fixture(common),
+             ci_fixture(common + (
+                 "python3 -I -B tools/check_leaks.py "
+                 "--base \"$PUSH_BEFORE\"",)),
+             leak_waiver),
+         0, active={(
+             "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
+
+    # The equals form
+    # --flag=value runs through its own branch of normalize, which the
+    # space-form 35y vectors never reach; a mutant passing masked_ok=True
+    # there accepted a placeholder literal while the whole 35 series stayed
+    # green. The two negatives and the reviewed-expression positive pin that
+    # branch.
+    for label, spelling in (
+            ("a double-quoted equals-form placeholder literal",
+             "--base=\"<ref:$PUSH_BEFORE>\""),
+            ("a single-quoted equals-form placeholder literal",
+             "--base='<ref:$PUSH_BEFORE>'")):
+        spoofed = evaluate(
+            local_fixture(common),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_leaks.py " + spelling,)),
+            leak_waiver)
+        case("35y an equals-form literal placeholder flag value is "
+             "cannot-evaluate: " + label, spoofed, 2)
+        count += 1
+        if not any(item.code == "masked-value"
+                   for item in spoofed.diagnostics):
+            failures.append(
+                "35y {}: no masked-value diagnostic: {!r}".format(
+                    label, spoofed.diagnostics))
+    case("35y control: the reviewed expression in equals form masks and "
+         "reconciles with the placeholder waiver",
+         evaluate(
+             local_fixture(common),
+             ci_fixture(common + (
+                 "python3 -I -B tools/check_leaks.py "
+                 "--base=\"$PUSH_BEFORE\"",)),
+             leak_waiver),
+         0, active={(
+             "ci-only", "tools/check_leaks.py --base <ref:$PUSH_BEFORE>")})
+
+    # A masked identity is
+    # granted only when the value's RAW workflow spelling, before shell
+    # de-quoting, is byte-for-byte the reviewed double-quoted spelling. shlex
+    # removes quotes and escaping backslashes, so before the change every
+    # spelling below de-quoted into the reviewed $PUSH_BEFORE, collapsed into
+    # the waived masked identity and reconciled with exit 0, while bash hands
+    # the gate different bytes at runtime (a literal $PUSH_BEFORE for the
+    # escaped and single-quoted spellings, an expansion of $PUSH_ for the
+    # backslash-split name, and an expansion of $PUSH for the other split
+    # ones). Each is now cannot-evaluate (masked-spelling), in space
+    # and equals form; the 35y controls keep the reviewed spelling passing
+    # in both forms.
+    for label, spelling in (
+            ("an escaped dollar", "\\$PUSH_BEFORE"),
+            ("a backslash-split name", "$PUSH_\\BEFORE"),
+            ("adjacent double-quoted parts", "\"$PUSH\"\"_BEFORE\""),
+            ("a double-quoted part with a bare tail", "\"$PUSH\"_BEFORE"),
+            ("an escaped underscore", "$PUSH\\_BEFORE"),
+            ("a single-quoted dollar with a bare tail", "'$'PUSH_BEFORE"),
+            ("a single-quoted spelling", "'$PUSH_BEFORE'")):
+        for form, flag_arg in (("space", "--base " + spelling),
+                               ("equals", "--base=" + spelling)):
+            unreviewed = evaluate(
+                local_fixture(common),
+                ci_fixture(common + (
+                    "python3 -I -B tools/check_leaks.py " + flag_arg,)),
+                leak_waiver)
+            case("35z an unreviewed raw spelling of a reviewed expression "
+                 "is cannot-evaluate ({} form): {}".format(form, label),
+                 unreviewed, 2)
+            count += 1
+            if not any(item.code == "masked-spelling"
+                       for item in unreviewed.diagnostics):
+                failures.append(
+                    "35z {} ({} form): no masked-spelling diagnostic: "
+                    "{!r}".format(label, form, unreviewed.diagnostics))
+
+    # The raw-spelling screen
+    # fails closed where no raw spelling reached it: normalize drops a
+    # raws list whose length disagrees with the token list, and
+    # _mask_value refuses a reviewed runtime value whose raw spelling is
+    # None. The 35z vectors above always hand normalize a recovered raw
+    # spelling, so a mutant granting the mask when raw is None (raw is
+    # not None and raw != ...) kept the whole suite green; these
+    # negatives pin the missing-raws and mismatched-raws refusals in
+    # both flag forms, and the disagreeing-walk vector pins that
+    # _raw_lexemes returns None rather than raws another tokenization
+    # produced.
+    # The shorter list alone
+    # caught a removed length guard only through an IndexError, so a
+    # longer list carrying the reviewed spelling at the index of the flag
+    # now pins the guard through its assertion; the reviewed list of the
+    # same length is the control that earns the mask, and an IndexError
+    # is recorded as a failure instead of ending the run.
+    for form, raw_tokens in (
+            ("space", ["python3", "tools/check_leaks.py", "--base",
+                       "$PUSH_BEFORE"]),
+            ("equals", ["python3", "tools/check_leaks.py",
+                        "--base=$PUSH_BEFORE"])):
+        # The reviewed workflow spelling double-quotes the flag value.
+        flag, equals, value = raw_tokens[-1].rpartition("=")
+        reviewed = raw_tokens[:-1] + [flag + equals + "\"" + value + "\""]
+        granted = normalize(raw_tokens, raws=reviewed)
+        count += 1
+        if (not granted.ok or granted.value
+                != "tools/check_leaks.py --base <ref:" + value + ">"):
+            failures.append(
+                "35z normalize control ({} form): the reviewed raw "
+                "spelling must earn the masked identity, got ok={} "
+                "code={!r}".format(form, granted.ok, granted.code))
+        for label, raws in (
+                ("no raws given", None),
+                ("a shorter raws list", []),
+                ("a longer raws list carrying the reviewed spelling",
+                 reviewed + ["--self-test"])):
+            count += 1
+            try:
+                refused = normalize(raw_tokens, raws=raws)
+            except IndexError as exc:
+                failures.append(
+                    "35z normalize ({} form, {}): indexed past the raws "
+                    "list ({}); the length guard must drop a mismatched "
+                    "list".format(form, label, exc))
+                continue
+            if refused.ok or refused.code != "masked-spelling":
+                failures.append(
+                    "35z normalize without raw evidence ({} form, {}): "
+                    "expected a masked-spelling refusal, got ok={} "
+                    "code={!r}".format(form, label, refused.ok,
+                                       refused.code))
+    count += 1
+    if _raw_lexemes("--base $PUSH_BEFORE",
+                    ["--base", "DIVERGENT"]) is not None:
+        failures.append(
+            "35z _raw_lexemes: a walk that cannot reproduce the de-quoted "
+            "token list must return None, never raws from another "
+            "tokenization")
+
+    # The raw ${{ }} screen
+    # reads the run: block scalar as YAML does, from its content indentation
+    # (the first non-empty line) to its end (the first non-empty line below
+    # that indentation), not from a fixed threshold of 8. A dedented YAML
+    # comment after the block is outside the scalar (before the change it
+    # was refused at any indent above 8); a comment inside the scalar is
+    # script text wherever the content indentation sits; and a dedented line
+    # that re-enters the step is a layout YAML rejects, refused by the outer
+    # loop, never passed.
+    def block_step(block_lines, indicator="|"):
+        return (("      - name: Block carrier",
+                 "        " + STEP_SHELL_LINE,
+                 "        run: " + indicator) + block_lines)
+
+    dedented_comment = evaluate(
+        local_msg,
+        with_on(ci_fixture(common, block_step(
+            ("            echo ok", "          # " + pr_title))), labeled),
+        msg_waiver, msg_side)
+    case("36 a YAML comment dedented below the run: block content is "
+         "outside the scalar (pass)", dedented_comment, 0)
+    count += 1
+    if any(item.code == "workflow-expression"
+           for item in dedented_comment.diagnostics):
+        failures.append(
+            "36 dedented comment: unexpected workflow-expression "
+            "diagnostic: {!r}".format(dedented_comment.diagnostics))
+    for label, block_lines in (
+            ("a comment at the content indentation of 12",
+             ("            echo ok", "            # " + pr_title)),
+            ("a comment at the content indentation of 9",
+             ("         echo ok", "         # " + pr_title))):
+        inside = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(block_lines)), labeled),
+            msg_waiver, msg_side)
+        case("36 a comment inside the scalar carries the expression: "
+             + label, inside, 2)
+        count += 1
+        if not any(item.code == "workflow-expression"
+                   for item in inside.diagnostics):
+            failures.append(
+                "36 {}: no workflow-expression diagnostic: {!r}".format(
+                    label, inside.diagnostics))
+    reentry = evaluate(
+        local_msg,
+        with_on(ci_fixture(common, block_step(
+            ("            echo ok", "          # a dedented comment",
+             "            echo again"))), labeled),
+        msg_waiver, msg_side)
+    case("36 content after a dedented comment is a layout YAML rejects, "
+         "refused", reentry, 2)
+    count += 1
+    if not any(item.code == "step-structure"
+               for item in reentry.diagnostics):
+        failures.append(
+            "36 dedented re-entry: no step-structure diagnostic: "
+            "{!r}".format(reentry.diagnostics))
+
+    # YAML rejects a leading
+    # blank line in a literal block scalar carrying more spaces than the
+    # first content line (the auto-detected content indentation), so the
+    # reader refuses that layout (scalar-blank-indent) instead of
+    # skipping the blank and passing text YAML does not parse; before
+    # the change each refused vector below passed with exit 0. A leading
+    # blank at or below the content indentation, and every blank after
+    # the first content line, stays inside the scalar unchanged.
+    for label, indicator, blank in (
+            ("a | scalar, blank one space past the content indentation",
+             "|", " " * 13),
+            ("a |- scalar, blank two spaces past the content "
+             "indentation", "|-", " " * 14),
+            ("a |+ scalar, blank far past the content indentation",
+             "|+", " " * 20)):
+        over = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(
+                (blank, "            echo ok"), indicator)), labeled),
+            msg_waiver, msg_side)
+        case("37 an over-indented leading blank in a run: block is a "
+             "layout YAML rejects, refused: " + label, over, 2)
+        count += 1
+        if not any(item.code == "scalar-blank-indent"
+                   for item in over.diagnostics):
+            failures.append(
+                "37 {}: no scalar-blank-indent diagnostic: {!r}".format(
+                    label, over.diagnostics))
+    for label, indicator, blank in (
+            ("a | scalar, blank exactly at the content indentation",
+             "|", " " * 12),
+            ("a |- scalar, blank one space below the content "
+             "indentation", "|-", " " * 11),
+            ("a |+ scalar, an empty leading line", "|+", "")):
+        at_or_below = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(
+                (blank, "            echo ok"), indicator)), labeled),
+            msg_waiver, msg_side)
+        case("37 control: a leading blank at or below the content "
+             "indentation stays inside the scalar: " + label,
+             at_or_below, 0)
+        count += 1
+        if any(item.code == "scalar-blank-indent"
+               for item in at_or_below.diagnostics):
+            failures.append(
+                "37 control {}: unexpected scalar-blank-indent "
+                "diagnostic: {!r}".format(
+                    label, at_or_below.diagnostics))
+
+    # The reader holds the
+    # deepest leading blank, so the order of the leading blanks never
+    # decides the outcome. Each vector below puts a blank past the content
+    # indentation and a blank at column 0 ahead of the first content line,
+    # one order each; before these vectors a mutant keeping only the first
+    # leading blank passed the second order, and one keeping only the last
+    # passed the first, each with the suite green.
+    for label, blanks in (
+            ("the deeper blank first", (" " * 13, "")),
+            ("the deeper blank last", ("", " " * 13))):
+        two_blanks = evaluate(
+            local_msg,
+            with_on(ci_fixture(common, block_step(
+                blanks + ("            echo ok",))), labeled),
+            msg_waiver, msg_side)
+        case("37 two leading blanks, one past the content indentation, are "
+             "refused in either order: " + label, two_blanks, 2)
+        count += 1
+        if not any(item.code == "scalar-blank-indent"
+                   for item in two_blanks.diagnostics):
+            failures.append(
+                "37 two leading blanks ({}): no scalar-blank-indent "
+                "diagnostic: {!r}".format(label, two_blanks.diagnostics))
+
+    # YAML keeps a blank after
+    # the first content line inside the scalar however deep it is, so the
+    # reader judges leading blanks only; this control holds a later blank
+    # indented past the content indentation accepted.
+    later_blank = evaluate(
+        local_msg,
+        with_on(ci_fixture(common, block_step(
+            ("            echo ok", " " * 20, "            echo again"))),
+            labeled),
+        msg_waiver, msg_side)
+    case("37 control: a blank after the first content line, indented past "
+         "the content indentation, stays inside the scalar", later_blank, 0)
+    count += 1
+    if any(item.code == "scalar-blank-indent"
+           for item in later_blank.diagnostics):
+        failures.append(
+            "37 control later blank: unexpected scalar-blank-indent "
+            "diagnostic: {!r}".format(later_blank.diagnostics))
+
+    # The YAML feature screen
+    # reads an anchor or alias spelling only after whitespace, a colon
+    # or a hyphen, so it refuses the space-separated inline *name and
+    # &name flag spellings, while the equals form bypasses it:
+    # --base=*main survives extraction as a kept literal that diverges
+    # (exit 1, no extraction diagnostic), and --base=&main splits on the
+    # shell control character into an empty flag value, refused
+    # (exit 2). The residue states each outcome; these vectors pin them.
+    for label, flag_arg, wanted in (
+            ("a space-separated alias spelling", "--base *main",
+             "yaml-feature"),
+            ("a space-separated anchor spelling", "--base &main",
+             "yaml-feature"),
+            ("an equals-form anchor spelling", "--base=&main",
+             "runtime-value")):
+        screened = evaluate(
+            local_fixture(common),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_leaks.py " + flag_arg,)),
+            leak_waiver)
+        case("38 an inline anchor or alias flag spelling is refused: "
+             + label, screened, 2)
+        count += 1
+        if not any(item.code == wanted
+                   for item in screened.diagnostics):
+            failures.append(
+                "38 {}: no {} diagnostic: {!r}".format(
+                    label, wanted, screened.diagnostics))
+    glob_literal = evaluate(
+        local_fixture(common),
+        ci_fixture(common + (
+            "python3 -I -B tools/check_leaks.py --base=*main",)),
+        ())
+    case("38 an equals-form glob flag value stays a kept literal that "
+         "diverges", glob_literal, 1, kinds=("ci-only",),
+         ci_only={"tools/check_leaks.py --base *main"})
+    count += 1
+    if glob_literal.diagnostics:
+        failures.append(
+            "38 equals-form glob literal: unexpected diagnostics: "
+            "{!r}".format(glob_literal.diagnostics))
+
+    # 39 LANES: the pinned concurrency: block and the pinned heavy-job if:
+    # line pass; a missing block, a heavy job without the if:, any other
+    # concurrency: spelling, a concurrency: block outside quality.yml, a
+    # job-level concurrency: key, a widened if: (a continuation line included)
+    # and the if: on a job outside HEAVY_JOBS are each a lane finding. Without
+    # the rule the pinned block was an unknown top-level key (exit 2) and every
+    # if: passed, so each vector below fails on revert; each red vector names
+    # its finding.
+    def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
+                top=CONCURRENCY_BLOCK, job_tail=(),
+                light_commands=None, opf_id="opf-tooling",
+                opf_commands=("python3 tools/b.py",), drop_heavy=()):
+        other_heavy = sorted(HEAVY_JOBS - {"opf-tooling"} - set(drop_heavy))
+        lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
+        for job, commands, condition in (
+                ("secrets",
+                 common + ("python3 tools/a.py",)
+                 if light_commands is None else light_commands,
+                 light_if),
+                (opf_id, opf_commands, heavy_if)):
+            lines.extend(("  " + job + ":", "    name: Job " + job))
+            if condition is not None:
+                lines.append(condition)
+            lines.extend(job_tail)
+            lines.extend(("    runs-on: ubuntu-latest", "    steps:",
+                          "      - uses: actions/checkout@v4"))
+            for number, command in enumerate(commands, 1):
+                lines.extend((
+                    "      - name: Gate {}".format(number),
+                    "        shell: bash",
+                    "        run: " + command,
+                ))
+        for job in other_heavy:
+            lines.extend((
+                "  " + job + ":",
+                HEAVY_JOB_IF_LINE,
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - uses: actions/checkout@v4",
+            ))
+        lines.extend(aggregator_head + always
+                     + ("    needs:", "      - secrets", "      - " + opf_id)
+                     + tuple("      - " + job for job in other_heavy))
+        lines.extend(REQUIRED_STATUS_JOB[
+            REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
+        return "\n".join(lines) + "\n"
+
+    def lane_case(name, report, want_code, needle=None):
+        case(name, report, want_code,
+             kinds=("lane",) if needle is not None else ())
+        if needle is not None and not any(
+                needle in finding.message for finding in report.findings
+                if finding.kind == "lane"):
+            failures.append("{}: no lane finding mentions {!r}: {!r}".format(
+                name, needle, report.findings))
+        if needle is None and any(
+                finding.kind == "lane" for finding in report.findings):
+            failures.append("{}: unexpected lane finding: {!r}".format(
+                name, report.findings))
+
+    pinned_top = CONCURRENCY_BLOCK
+    group_line, cancel_line = CONCURRENCY_BLOCK[1], CONCURRENCY_BLOCK[2]
+    lane_case("39a the pinned concurrency: block and heavy-job if: pass",
+              evaluate(multi_local, lane_ci(), ()), 0)
+    # Both are required: quality.yml as it was before the lane change (no
+    # block, no if: on a heavy job) is red, and so is each removal alone.
+    for label, report, needles in (
+            ("the concurrency: block removed",
+             evaluate(multi_local, lane_ci(top=()), ()),
+             ("carries no top-level concurrency: block",)),
+            ("the pinned if: removed from a heavy job",
+             evaluate(multi_local, lane_ci(heavy_if=None), ()),
+             ("heavy job 'opf-tooling' of {} carries no job-level if:".format(
+                 CI_SOURCE),)),
+            ("both removed, the workflow before the lane change",
+             evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
+             ("carries no top-level concurrency: block",
+              "carries no job-level if:"))):
+        for needle in needles:
+            lane_case("39b a missing lane setting is a lane finding: "
+                      + label + " (" + needle + ")", report, 1, needle)
+    lane_case("39c control: a whole-line comment and a blank line inside the "
+              "block are dropped",
+              evaluate(multi_local, lane_ci(top=(
+                  pinned_top[0], "  # superseded pull request runs", "",
+                  group_line, cancel_line)), ()), 0)
+    for label, block in (
+            ("a group keyed by the ref for every event",
+             (pinned_top[0], "  group: quality-${{ github.ref }}",
+              cancel_line)),
+            ("a group keyed by the pull request number for every event",
+             (pinned_top[0],
+              "  group: quality-${{ github.event.pull_request.number }}",
+              cancel_line)),
+            ("the push branch of the group keyed by the ref",
+             (pinned_top[0],
+              group_line.replace("github.run_id", "github.ref"),
+              cancel_line)),
+            ("cancel-in-progress: true",
+             (pinned_top[0], group_line, "  cancel-in-progress: true")),
+            ("cancel-in-progress on for every event",
+             (pinned_top[0], group_line,
+              "  cancel-in-progress: ${{ github.event_name != '' }}")),
+            ("cancel-in-progress dropped", (pinned_top[0], group_line)),
+            ("an extra key", pinned_top + ("  queue: max",)),
+            ("a one-line group name", ("concurrency: quality",)),
+            ("a trailing comment on the group line",
+             (pinned_top[0], group_line + "  # pr or run", cancel_line))):
+        lane_case("39d a departing concurrency: block is a lane finding: "
+                  + label,
+                  evaluate(multi_local, lane_ci(top=block), ()), 1,
+                  "departs from the pinned CONCURRENCY_BLOCK")
+    for label, line in (
+            ("the same-repository check dropped",
+             "    if: github.event_name == 'push' || "
+             "startsWith(github.head_ref, 'merge-train-')"),
+            ("the train prefix dropped",
+             HEAVY_JOB_IF_LINE.replace("'merge-train-'", "''")),
+            ("an appended || true", HEAVY_JOB_IF_LINE + " || true"),
+            ("always()", "    if: always()"),
+            ("the line wrapped in ${{ }}",
+             "    if: ${{ " + HEAVY_JOB_IF_LINE[8:] + " }}"),
+            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy")):
+        lane_case("39e a widened or respelled heavy-job if: is a lane "
+                  "finding: " + label,
+                  evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
+                  "departs from the pinned HEAVY_JOB_IF_LINE")
+    # A deeper line under the pinned if: continues its value (YAML folds it
+    # into the condition), so the pinned first line with any continuation line
+    # is a departure; a whole-line comment under it is not part of the value.
+    for label, tail in (
+            ("|| true", ("      || true",)),
+            ("== false", ("      == false",)),
+            ("&& false", ("      && false",)),
+            ("a bare trailing operator", ("      ||",)),
+            ("|| true at indent 8", ("        || true",)),
+            ("|| true after a blank line", ("", "      || true")),
+            ("|| true after a whole-line comment",
+             ("      # widened", "      || true"))):
+        lane_case("39e a continuation line under the pinned heavy-job if: is a "
+                  "lane finding: " + label,
+                  evaluate(multi_local, lane_ci(
+                      heavy_if="\n".join((HEAVY_JOB_IF_LINE,) + tail)), ()),
+                  1, "departs from the pinned HEAVY_JOB_IF_LINE")
+    lane_case("39e control: a whole-line comment under the pinned heavy-job if: "
+              "passes",
+              evaluate(multi_local, lane_ci(
+                  heavy_if=HEAVY_JOB_IF_LINE + "\n      # heavy jobs"), ()), 0)
+    # The Quality gates job's if: always() is held by the REQUIRED STATUS pin,
+    # which reads a continuation line under it as a departure.
+    case("39e a continuation line under the Quality gates if: always() is a "
+         "required-status finding",
+         evaluate(multi_local, lane_ci().replace(
+             "\n".join(always) + "\n",
+             "\n".join(always) + "\n      && false\n", 1), ()),
+         1, kinds=("required-status",))
+    lane_case("39f the pinned if: on a job outside HEAVY_JOBS is a lane "
+              "finding",
+              evaluate(multi_local, lane_ci(light_if=HEAVY_JOB_IF_LINE), ()),
+              1, "job 'secrets' of {} carries a job-level if:".format(
+                  CI_SOURCE))
+    lane_case("39g a job-level concurrency: key is a lane finding",
+              evaluate(multi_local, lane_ci(
+                  job_tail=("    concurrency: lane",)), ()),
+              1, "carries a job-level concurrency: key")
+    concurrent_scan = with_on(scan_text, edited).replace(
+        "jobs:\n", "\n".join(pinned_top) + "\njobs:\n", 1)
+    lane_case("39h the pinned concurrency: block in msg-leaks.yml is a lane "
+              "finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, concurrent_scan),)),
+              1, "{} carries a top-level concurrency: block".format(
+                  MSG_LEAKS_CI_SOURCE))
+    conditional_scan = with_on(scan_text, edited).replace(
+        "    runs-on:", HEAVY_JOB_IF_LINE + "\n    runs-on:", 1)
+    lane_case("39i the pinned if: in msg-leaks.yml is a lane finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, conditional_scan),)),
+              1, "job 'quality' of {} carries a job-level if:".format(
+                  MSG_LEAKS_CI_SOURCE))
+
+    # 39j HEAVY PRESENCE and HEAVY COMMANDS: every HEAVY_JOBS job must be
+    # present in quality.yml, and a HEAVY_COMMANDS member may run only in a
+    # job whose if: is exactly the pinned line. Before the change a heavy job
+    # removed, one renamed with its needs: entry updated and its if: dropped,
+    # and a heavy command relocated into an unconditioned job each passed
+    # with exit 0, so each red vector below fails on revert.
+    heavy_member = "python3 -I -B opf/tools/opf.py --self-test"
+    lane_case("39j control: a heavy member in a heavy job carrying the "
+              "pinned if: passes",
+              evaluate(local_fixture(common + (
+                  "python3 tools/a.py", "python3 tools/b.py", heavy_member)),
+                  lane_ci(opf_commands=("python3 tools/b.py", heavy_member)),
+                  ()), 0)
+    lane_case("39j a removed heavy job is a lane finding",
+              evaluate(multi_local,
+                       lane_ci(drop_heavy=("byte-canon-matrix",)), ()),
+              1, "heavy job 'byte-canon-matrix' is missing")
+    # Each git-fixture-env lane's host-patch job is a heavy job of its own
+    # (the four run as parallel jobs): removing any one of them is a lane
+    # finding. While HEAVY_JOBS named one serial host-patch job for the four
+    # suites, none of these ids was heavy, so each fixture passed with exit 0.
+    for lane_job in ("git-fixture-env-core-host-patch",
+                     "git-fixture-env-config-combined-host-patch",
+                     "git-fixture-env-config-malformed-host-patch",
+                     "git-fixture-env-config-system-host-patch"):
+        lane_case("39j a removed git-fixture-env host-patch job is a lane "
+                  "finding: " + lane_job,
+                  evaluate(multi_local, lane_ci(drop_heavy=(lane_job,)), ()),
+                  1, "heavy job {!r} is missing".format(lane_job))
+    renamed = evaluate(
+        local_fixture(common + ("python3 tools/a.py", heavy_member)),
+        lane_ci(opf_id="opf-renamed", heavy_if=None,
+                opf_commands=(heavy_member,)), ())
+    lane_case("39j a renamed heavy job (needs: updated, if: removed) is a "
+              "missing-heavy-job lane finding",
+              renamed, 1, "heavy job 'opf-tooling' is missing")
+    lane_case("39j the renamed job's heavy member runs without the pinned "
+              "if: and is a lane finding",
+              renamed, 1,
+              "job 'opf-renamed' of {} runs heavy member(s) "
+              "opf/tools/opf.py --self-test without the pinned".format(
+                  CI_SOURCE))
+    lane_case("39j a heavy member relocated into an unconditioned job is a "
+              "lane finding",
+              evaluate(local_fixture(common + (
+                  "python3 tools/a.py", "python3 tools/b.py", heavy_member)),
+                  lane_ci(light_commands=common + (
+                      "python3 tools/a.py", heavy_member)), ()),
+              1, "job 'secrets' of {} runs heavy member(s)".format(CI_SOURCE))
+    # The combined, malformed and system git-fixture-env suites run in CI only
+    # in their host-patch jobs, and the core suite also in the '3.14' canary
+    # job: each stays a heavy command, so a '3.14' copy put back into an
+    # unconditioned job is a lane finding, and in a job carrying the pinned
+    # if: it passes. The suite names are written out here, not read from
+    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors.
+    for suite in ("git-fixture-env-core", "git-fixture-env-config-combined",
+                  "git-fixture-env-config-malformed",
+                  "git-fixture-env-config-system"):
+        suite_member = ("python3 -I -B tools/check_selftest_execution.py "
+                        "--suite " + suite)
+        suite_local = local_fixture(common + (
+            "python3 tools/a.py", "python3 tools/b.py", suite_member))
+        lane_case("39j control: a git-fixture-env suite in a heavy job "
+                  "carrying the pinned if: passes: " + suite,
+                  evaluate(suite_local, lane_ci(opf_commands=(
+                      "python3 tools/b.py", suite_member)), ()), 0)
+        lane_case("39j a git-fixture-env suite in an unconditioned job is a "
+                  "lane finding: " + suite,
+                  evaluate(suite_local, lane_ci(light_commands=common + (
+                      "python3 tools/a.py", suite_member)), ()),
+                  1, "job 'secrets' of {} runs heavy member(s) "
+                  "tools/check_selftest_execution.py --suite {}".format(
+                      CI_SOURCE, suite))
+    # The jobs the reduction removed are no longer heavy: each id put back
+    # with the pinned if: is a lane finding, so a '3.14' copy of the OPF
+    # tooling shards or of a git-fixture-env config lane cannot return under
+    # its former id without a reviewed change to HEAVY_JOBS. With HEAVY_JOBS
+    # reverted to hold these ids, each fixture declares the id twice (the
+    # renamed job and lane_ci's own heavy job), so each row stays red through
+    # the duplicate-job cannot-evaluate (exit 2) rather than passing.
+    for removed_job in ("opf", "opf-adopt", "opf-init",
+                        "git-fixture-env-config-combined",
+                        "git-fixture-env-config-malformed",
+                        "git-fixture-env-config-system"):
+        lane_case("39j a removed heavy job id carrying the pinned if: is a "
+                  "lane finding: " + removed_job,
+                  evaluate(multi_local, lane_ci(
+                      light_if=HEAVY_JOB_IF_LINE).replace(
+                          "  secrets:\n", "  " + removed_job + ":\n", 1).replace(
+                          "      - secrets\n", "      - " + removed_job + "\n", 1),
+                      ()),
+                  1, "job {!r} of {} carries a job-level if:".format(
+                      removed_job, CI_SOURCE))
+    # 39k the Quality gates exemption is the quality.yml job's alone: the
+    # same job name in another workflow exempts nothing, so an if: on the
+    # scan job stays a lane finding whatever the job is named. Before the
+    # change the name alone exempted the job and this fixture passed.
+    named_scan = with_on(scan_text, edited).replace(
+        "  quality:\n", "  quality:\n    name: Quality gates\n", 1).replace(
+        "    runs-on:", HEAVY_JOB_IF_LINE + "\n    runs-on:", 1)
+    lane_case("39k an if: on a job named Quality gates outside quality.yml "
+              "is a lane finding",
+              evaluate(local_msg, quality_side, msg_waiver,
+                       ((MSG_LEAKS_CI_SOURCE, named_scan),)),
+              1, "job 'quality' of {} carries a job-level if:".format(
+                  MSG_LEAKS_CI_SOURCE))
+
+    # 40 OPF GROUPS: the local runner runs the OPF tooling self-test as its
+    # named groups, and CI runs the whole self-test once, in a heavy job, and
+    # no group. Each opf.py --self-test-group command stays a heavy command, so
+    # a group step moved into an unconditioned job is a lane finding. The
+    # group names are written out here, not read from HEAVY_COMMANDS, so a
+    # revert of that set cannot empty these vectors.
+    for name in ("core", "adopt", "watchdog"):
+        group_member = "python3 -I -B " + OPF_GROUP_COMMAND + name
+        lane_case("40 an opf.py group step moved into an unconditioned job "
+                  "is a lane finding: " + name,
+                  evaluate(local_fixture(common + (
+                      "python3 tools/a.py", "python3 tools/b.py",
+                      group_member)),
+                      lane_ci(light_commands=common + (
+                          "python3 tools/a.py", group_member)), ()),
+                  1, "job 'secrets' of {} runs heavy member(s)".format(
+                      CI_SOURCE))
+    # Every group of SELF_TEST_GROUPS, read from the live opf/tools/opf.py
+    # with ast, runs as its --self-test-group command on exactly one line of
+    # the live runner and on no line of the live quality.yml, HEAVY_COMMANDS
+    # holds it, and the whole self-test runs on exactly one line of the live
+    # quality.yml, inside a HEAVY_JOBS job; no other group command is wired.
+    # Before the change each group had to run on exactly one quality.yml
+    # line, so a group step put back there passed and a group missing from
+    # quality.yml failed, and the whole self-test was not held at all; each
+    # flip below drops, adds, repeats or moves one command and must be named.
+    count += 1
+    try:
+        opf_groups = _opf_group_names(OPF_TOOL.read_bytes().decode("utf-8"))
+    except (OSError, SyntaxError, TypeError, ValueError) as exc:
+        opf_groups = None
+        failures.append("40 cannot read SELF_TEST_GROUPS from {}: {!r}".format(
+            OPF_TOOL, exc))
+    if opf_groups is not None:
+        group_sides = []
+        live_ci_text = None
+        ci_jobs = {}
+        for path, source, extract, jobs in (
+                (LOCAL_PATH, LOCAL_SOURCE, extract_local, None),
+                (CI_PATH, CI_SOURCE, extract_ci, ci_jobs)):
+            text, diagnostic = read_runner_text(path, source)
+            if diagnostic is not None:
+                failures.append("40 cannot read {}: {!r}".format(source, diagnostic))
+                group_sides.append({})
+            else:
+                if source == CI_SOURCE:
+                    live_ci_text = text
+                group_sides.append(_opf_group_lines(text, extract(text), jobs))
+        live = _opf_group_wiring_faults(opf_groups, *group_sides, ci_jobs=ci_jobs)
+        if live:
+            failures.append("40 the opf.py self-test is not wired: "
+                            + "; ".join(live))
+        local_lines, ci_lines = group_sides
+        first = OPF_GROUP_COMMAND + (opf_groups[0] if opf_groups else "core")
+        whole_lines = ci_lines.get(OPF_WHOLE_COMMAND, [])
+        flips = (
+            ("a group removed from the local runner",
+             (opf_groups, {key: value for key, value in local_lines.items() if key != first},
+              ci_lines), {},
+             LOCAL_SOURCE + " runs no " + first),
+            ("a group step put back into quality.yml",
+             (opf_groups, local_lines, {**ci_lines, first: [0]}), {},
+             CI_SOURCE + " runs {} on 1 line(s)".format(first)),
+            ("a group removed from HEAVY_COMMANDS",
+             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {first}), {},
+             "HEAVY_COMMANDS lacks " + first),
+            ("the whole self-test removed from HEAVY_COMMANDS",
+             (opf_groups, local_lines, ci_lines, HEAVY_COMMANDS - {OPF_WHOLE_COMMAND}), {},
+             "HEAVY_COMMANDS lacks " + OPF_WHOLE_COMMAND),
+            ("a group opf.py adds with no line",
+             (opf_groups + ("synthetic",), local_lines, ci_lines), {},
+             LOCAL_SOURCE + " runs no " + OPF_GROUP_COMMAND + "synthetic"),
+            ("a group opf.py drops while its line stays",
+             (opf_groups[1:], local_lines, ci_lines), {},
+             "runs {}, a group opf.py does not name".format(first)),
+            ("a group run on a second line of the local runner",
+             (opf_groups, {**local_lines, first: local_lines.get(first, []) + [0]},
+              ci_lines), {},
+             LOCAL_SOURCE + " runs {} on {} lines".format(
+                 first, len(local_lines.get(first, [])) + 1)),
+            ("an opf.py line that does not read back",
+             (opf_groups, {**local_lines, None: [0]}, ci_lines), {},
+             LOCAL_SOURCE + " line(s) 0 run opf/tools/opf.py in a form"),
+            ("the whole self-test removed from quality.yml",
+             (opf_groups, local_lines,
+              {key: value for key, value in ci_lines.items() if key != OPF_WHOLE_COMMAND}),
+             {}, CI_SOURCE + " runs no " + OPF_WHOLE_COMMAND),
+            ("the whole self-test on a second line of quality.yml",
+             (opf_groups, local_lines, {**ci_lines, OPF_WHOLE_COMMAND: whole_lines + [0]}),
+             {}, CI_SOURCE + " runs {} on {} lines".format(
+                 OPF_WHOLE_COMMAND, len(whole_lines) + 1)),
+            ("the whole self-test in a job outside HEAVY_JOBS",
+             (opf_groups, local_lines, ci_lines),
+             {"ci_jobs": {number: "registry" for number in whole_lines}},
+             "in job 'registry', not a HEAVY_JOBS job"),
+            ("no group at all", ((), local_lines, ci_lines), {},
+             "opf.py names no self-test group"))
+        for label, args, options, want in flips:
+            count += 1
+            options = dict({"ci_jobs": ci_jobs}, **options)
+            if not any(want in fault for fault in _opf_group_wiring_faults(*args, **options)):
+                failures.append("40 {} not named".format(label))
+        # The live quality.yml edited in memory and read back through the
+        # extractor, the line reader and the job placement, not a hand-built
+        # map: a --self-test-group step put back into the OPF tooling job, the
+        # whole self-test moved from the host-patch job into the registry job,
+        # and the whole self-test run a second time in the heavy OPF tooling
+        # job are each a wiring fault.
+        homes = "        run: python3 -I -B opf/tools/check_opf_homes.py --self-test\n"
+        whole_run = "        run: python3 -I -B " + OPF_WHOLE_COMMAND + "\n"
+        host_step = ("      - name: OPF tooling self-test (host patch)\n"
+                     "        shell: bash\n" + whole_run)
+        parity_step = "        run: python3 -I -B tools/check_ci_parity.py --self-test\n"
+        for label, edits, want in (
+                ("a group step put back into the live quality.yml",
+                 ((homes, homes + "\n      - name: OPF tooling self-test (core group)\n"
+                   "        shell: bash\n        run: python3 -I -B " + first + "\n"),),
+                 CI_SOURCE + " runs {} on 1 line(s)".format(first)),
+                ("the whole self-test moved into the live registry job",
+                 ((host_step, ""),
+                  (parity_step, parity_step + "\n      - name: Moved\n        shell: bash\n"
+                   + whole_run)),
+                 "in job 'registry', not a HEAVY_JOBS job"),
+                ("the whole self-test added to the live OPF tooling job",
+                 ((homes, homes + "\n      - name: Twice\n        shell: bash\n" + whole_run),),
+                 CI_SOURCE + " runs {} on 2 lines".format(OPF_WHOLE_COMMAND))):
+            count += 1
+            if live_ci_text is None:
+                failures.append("40 {}: the live quality.yml was not read".format(label))
+                continue
+            edited = live_ci_text
+            for old, new in edits:
+                if edited.count(old) != 1:
+                    failures.append("40 {}: {!r} occurs {} times in the live quality.yml".format(
+                        label, old, edited.count(old)))
+                edited = edited.replace(old, new, 1)
+            edited_jobs = {}
+            faults = _opf_group_wiring_faults(
+                opf_groups, local_lines,
+                _opf_group_lines(edited, extract_ci(edited), edited_jobs),
+                ci_jobs=edited_jobs)
+            if not any(want in fault for fault in faults):
+                failures.append("40 {} not named: {!r}".format(label, faults))
+    # A fixture quality.yml: the whole self-test in the heavy OPF tooling job
+    # with no group step passes; the same fixture with a --self-test-group
+    # core step put back beside it is a wiring fault, and so is the whole
+    # self-test in an unconditioned job.
+    fixture_groups = ("core", "adopt", "watchdog")
+    group_core = "python3 -I -B " + OPF_GROUP_COMMAND + "core"
+    whole_member = "python3 -I -B " + OPF_WHOLE_COMMAND
+    fixture_local = local_fixture(common + ("python3 tools/a.py",) + tuple(
+        "python3 -I -B " + OPF_GROUP_COMMAND + name for name in fixture_groups))
+    fixture_local_lines = _opf_group_lines(fixture_local, extract_local(fixture_local))
+    for label, ci_text, want in (
+            ("control: the whole self-test in the heavy job and no group step passes",
+             lane_ci(opf_commands=(whole_member,)), None),
+            ("a --self-test-group core step put back is a wiring fault",
+             lane_ci(opf_commands=(whole_member, group_core)),
+             CI_SOURCE + " runs " + OPF_GROUP_COMMAND + "core on 1 line(s)"),
+            ("the whole self-test in an unconditioned job is a wiring fault",
+             lane_ci(light_commands=common + ("python3 tools/a.py", whole_member)),
+             "in job 'secrets', not a HEAVY_JOBS job")):
+        count += 1
+        fixture_jobs = {}
+        faults = _opf_group_wiring_faults(
+            fixture_groups, fixture_local_lines,
+            _opf_group_lines(ci_text, extract_ci(ci_text), fixture_jobs),
+            ci_jobs=fixture_jobs)
+        if want is None and faults:
+            failures.append("40 fixture {}: unexpected fault(s) {!r}".format(label, faults))
+        if want is not None and not any(want in fault for fault in faults):
+            failures.append("40 fixture {} not named: {!r}".format(label, faults))
+    # A job id under a top-level key other than jobs: is no job: the passing
+    # fixture with its jobs: line renamed in place (the line numbers kept)
+    # places the whole self-test in job None, not in the heavy OPF tooling
+    # job above it. The extractor already refuses that file (unknown-top-key),
+    # so the placement is read over the unedited fixture's extraction.
+    count += 1
+    placed_text = lane_ci(opf_commands=(whole_member,))
+    unplaced_text = placed_text.replace("\njobs:\n", "\nworkflow-jobs:\n", 1)
+    unplaced_jobs = {}
+    faults = _opf_group_wiring_faults(
+        fixture_groups, fixture_local_lines,
+        _opf_group_lines(unplaced_text, extract_ci(placed_text), unplaced_jobs),
+        ci_jobs=unplaced_jobs)
+    if (unplaced_text == placed_text
+            or not any("in job None, not a HEAVY_JOBS job" in fault for fault in faults)):
+        failures.append("40 a job under a top-level key other than jobs: was placed: {!r}".format(
+            faults))
+    # The line read-back counts repeats: a group on two lines of a runner
+    # and of quality.yml maps to two line numbers on each side, which the
+    # member set alone cannot show.
+    count += 1
+    twice = "python3 -I -B " + OPF_GROUP_COMMAND + "core"
+    repeat_local = local_fixture(common + (twice, "python3 tools/a.py", twice))
+    repeat_ci = lane_ci(opf_commands=(twice, "python3 tools/b.py", twice))
+    counted = [len(_opf_group_lines(text, extract(text)).get(OPF_GROUP_COMMAND + "core", ()))
+               for text, extract in ((repeat_local, extract_local), (repeat_ci, extract_ci))]
+    if counted != [2, 2]:
+        failures.append("40 a group run on two lines is not counted twice: {!r}".format(counted))
+    # SELF_TEST_GROUPS is read as a literal: a source without the one
+    # top-level assignment, with two, or with a computed value is refused.
+    for label, source in (
+            ("no assignment", "GROUPS = ()\n"),
+            ("two assignments", "SELF_TEST_GROUPS = ()\nSELF_TEST_GROUPS = ()\n"),
+            ("a computed value", "SELF_TEST_GROUPS = tuple(())\n"),
+            ("a value that is not pairs", "SELF_TEST_GROUPS = ('core',)\n")):
+        count += 1
+        try:
+            _opf_group_names(source)
+        except ValueError:
+            pass
+        else:
+            failures.append("40 SELF_TEST_GROUPS read from {} was accepted".format(label))
+    count += 1
+    if _opf_group_names("SELF_TEST_GROUPS = (('a', ('x',)), ('b', ()))\n") != ("a", "b"):
+        failures.append("40 SELF_TEST_GROUPS names are not read in order")
+
+    # 41 LABELED TRIGGER (module docstring, TRIGGER): quality.yml's pull_request
+    # types are exactly [labeled], so a member's open, push or reopen schedules
+    # no Quality run. The first departure is the trigger quality.yml carried
+    # before the change; each departure names the pin, and msg-leaks.yml, which
+    # runs the scan on its four types, draws no pin finding (35a).
+    def labeled_case(name, on_block, want_code, needle=None, header=False):
+        nonlocal count
+        quality = (with_on_header if header else with_on)(ci_fixture(common), on_block)
+        report = evaluate(local_msg, quality, msg_waiver, msg_side)
+        case(name, report, want_code, ("trigger",) if needle else ())
+        if needle is not None:
+            count += 1
+            if not any(finding.kind == "trigger" and needle in finding.message
+                       for finding in report.findings):
+                failures.append("{}: no trigger finding holds {!r}: {!r}".format(
+                    name, needle, report.findings))
+
+    pinned = "not exactly [labeled]"
+    labeled_case("41a the member-head trigger [opened, synchronize, reopened] "
+                 "is a trigger finding", defaults, 1, pinned)
+    labeled_case("41b labeled beside synchronize is a trigger finding",
+                 pr_types("[labeled, synchronize]"), 1, pinned)
+    labeled_case("41c labeled listed twice is a trigger finding",
+                 pr_types("[labeled, labeled]"), 1, pinned)
+    labeled_case("41d a pull_request event with no types (GitHub's default "
+                 "types) is a trigger finding",
+                 "  pull_request:\n    branches: [main]\n  push:\n", 1, pinned)
+    labeled_case("41e a one-line on: list naming pull_request is a trigger "
+                 "finding", "on: [push, pull_request]\n", 1, pinned,
+                 header=True)
+    labeled_case("41f a block list of other types is a trigger finding",
+                 "  pull_request:\n    types:\n      - opened\n      - labeled\n",
+                 1, pinned)
+    labeled_case("41g pull_request_target beside the labeled pull_request is a "
+                 "trigger finding",
+                 labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
+                 "pull_request_target")
+    labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a plain scalar types: labeled passes",
+                 pr_types("labeled"), 0)
+    # A quality.yml with no top-level on: line schedules no Quality run for the
+    # train pull request either; this vector passed clean before the missing
+    # on: finding.
+    labeled_case("41h a quality.yml with no top-level on: line is a trigger "
+                 "finding", "", 1, "has no top-level on: line", header=True)
+    # A quality.yml whose on: block names no pull_request event schedules no
+    # Quality run for the train pull request either; this vector passed clean
+    # before the missing-trigger finding.
+    labeled_case("41i an on: block with no pull_request event is a trigger "
+                 "finding", "  push:\n    branches: [main]\n", 1,
+                 "has no pull_request event")
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -4479,7 +8142,7 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
-    report = run_paths(LOCAL_PATH, CI_PATH)
+    report = run_paths(LOCAL_PATH, CI_PATH, extra_ci_paths=CI_WORKFLOWS[1:])
     print(render(report))
     return report.code
 

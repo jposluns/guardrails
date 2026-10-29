@@ -10,6 +10,19 @@ gate checks the VALUES.
   check_mappings.py    exit 0 clean, 1 mapping finding, 2 malformed manifest or corpus (fail-closed)
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_mappings.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,7 +34,7 @@ import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus 
 def main():
     root = repo_root()
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
     except (ManifestError, OSError) as exc:
         # OSError too: an unreadable manifest file, or an existing-but-unlistable standards dir
         # (load_manifests raises rather than reading it as empty), is a read error, not a clean skip.

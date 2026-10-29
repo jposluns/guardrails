@@ -45,7 +45,10 @@ byte-canon for an arbitrary captured body (a CRLF, a line with trailing whitespa
 codepoint would land in the bytes verbatim). The subset supports strings of any content, including
 newlines; the canonical FORM of that support is escaping. _byte_canon is the authority for the
 byte rules; the self-test reconciles this module's forbidden-codepoint set against it and runs every
-emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The en dash (U+2013) and em
+emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The line and paragraph separators
+U+2028 and U+2029 (_byte_canon.LINE_SEPARATORS, outside the forbidden set) are escaped too and reconciled
+the same way; an earlier emitter wrote them literally, and matches_store_bytes and prior_separator_spelling
+let a caller accept a store file or a recorded digest in that spelling. The en dash (U+2013) and em
 dash (U+2014) escaping is a SEPARATE house-style no-dash guarantee, not part of the byte_canon forbidden
 set, so the emitted bytes are dash-free by construction independent of what byte_canon covers.
 
@@ -69,11 +72,16 @@ Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 mi
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_emit.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_emit.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import datetime
 import math
@@ -100,6 +108,13 @@ _ZERO_WIDTH = frozenset(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)
 _BIDI = frozenset(chr(c) for c in (0x061C, 0x200E, 0x200F)
                   + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
 _FORBIDDEN_CODEPOINTS = _ZERO_WIDTH | _BIDI
+
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR (_byte_canon.LINE_SEPARATORS, kept apart from the
+# forbidden set so render and record do not refuse a store that holds one): str.splitlines() splits on both,
+# so they are escaped too and never reach the emitted bytes literally. The self-test asserts this constant
+# equals _byte_canon.LINE_SEPARATORS, as it does for the forbidden set. An emitter before this escape wrote
+# them literally; matches_store_bytes and prior_separator_spelling accept that earlier spelling.
+_LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
 
 # House-style no-dash guarantee, separate from byte_canon (which does not cover dashes): the en dash
 # (U+2013) and em dash (U+2014) are escaped so they never reach the emitted bytes literally, whatever
@@ -141,13 +156,14 @@ _MAX_EMIT_BYTES = 64 * 1024 * 1024
 def _escape_basic(s):
     """Render `s` as a TOML basic string (with surrounding quotes), escaping every character that must
     not appear literally: the two structural characters (\\ and \"), the C0 controls and DEL and the C1
-    controls, and the byte-canon forbidden codepoints. The en dash (U+2013) and em dash (U+2014) are also
-    escaped, so the emitted bytes are dash-free whatever the input carries; that is a house-style no-dash
-    guarantee, separate from byte_canon (which does not cover dashes). Everything else, including ordinary
-    printable unicode, is left literal. A lone surrogate has no UTF-8 encoding, so it is rejected
-    fail-closed (EmitError) rather than returned in a document whose bytes cannot be encoded. The result
-    contains no raw CR, no forbidden codepoint, no dash byte, and (because the closing quote follows the
-    content) never leaves a line with trailing whitespace."""
+    controls, the byte-canon forbidden codepoints, and the line and paragraph separators U+2028 and U+2029.
+    The en dash (U+2013) and em dash (U+2014) are also escaped, so the emitted bytes are dash-free whatever
+    the input carries; that is a house-style no-dash guarantee, separate from byte_canon (which does not
+    cover dashes). Everything else, including ordinary printable unicode, is left literal. A lone surrogate
+    has no UTF-8 encoding, so it is rejected fail-closed (EmitError) rather than returned in a document
+    whose bytes cannot be encoded. The result contains no raw CR, no forbidden codepoint, no line or
+    paragraph separator, no dash byte, and (because the closing quote follows the content) never leaves a
+    line with trailing whitespace."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -155,7 +171,8 @@ def _escape_basic(s):
             raise EmitError("string contains a lone surrogate (U+{:04X}) with no UTF-8 encoding".format(o))
         if ch in _NAMED_ESCAPES:
             out.append(_NAMED_ESCAPES[ch])
-        elif o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _HOUSE_STYLE_DASHES:
+        elif (o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _LINE_SEPARATORS
+              or ch in _HOUSE_STYLE_DASHES):
             out.append("\\u{:04X}".format(o))
         else:
             out.append(ch)
@@ -550,13 +567,47 @@ def emit_checked(document):
     except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
         raise EmitError("emitted document did not reparse as TOML; fail-closed")
     except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
-        # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
+        # reparse or comparison failure (a RecursionError from deep nesting or, from CPython 3.14.8, a
+        # >1000-part dotted key, or a
         # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
         # emit_checked honours the same no-uncontrolled-exception contract as emit() and U7's `except
         # EmitError` fail-closed path is never bypassed by a leaked exception.
         raise EmitError("emitted document could not be reparsed or compared for the round-trip proof; "
                         "fail-closed")
     return text
+
+
+# Each separator's UTF-8 bytes paired with the escape text the emitter now writes for it inside a basic string.
+_SEPARATOR_ESCAPES = tuple(sorted((ch.encode("utf-8"), "\\u{:04X}".format(ord(ch)).encode("ascii"))
+                                  for ch in _LINE_SEPARATORS))
+# One escape of an emitted basic string that the earlier spelling depends on: an escaped backslash (matched
+# whole, so the text after it is never read as an escape) or the escape of a separator.
+_SEPARATOR_ESCAPE_RE = re.compile(r"\\(?:\\|u({}))".format(
+    "|".join("{:04X}".format(ord(ch)) for ch in sorted(_LINE_SEPARATORS))))
+
+
+def matches_store_bytes(raw, fresh):
+    """True iff `raw`, the bytes read from a store file, reproduce `fresh`, the canonical emission (UTF-8
+    bytes) of raw's own parsed model: exactly, or as an emitter before the U+2028/U+2029 escape wrote them,
+    meaning that replacing every literal U+2028 and U+2029 in `raw` with its escape text gives exactly
+    `fresh`. Accepting that earlier spelling is sound because TOML admits either character only inside a
+    string or a comment, a canonical document carries no comment and only basic strings, and inside a basic
+    string the literal character and its escape read back as the same value. A literal one in a comment or
+    in a literal string, and any other byte difference, still fail. The caller's next write re-spells the
+    file with the escapes."""
+    if raw == fresh:
+        return True
+    for literal, escape in _SEPARATOR_ESCAPES:
+        raw = raw.replace(literal, escape)
+    return raw == fresh
+
+
+def prior_separator_spelling(text):
+    """`text`, a canonical emission, as an emitter before the U+2028/U+2029 escape spelled it: each
+    `\\u2028` and `\\u2029` escape written as the literal character. Every backslash in emitted text opens
+    an escape inside a basic string, so an escaped backslash is consumed whole and the text after it is never
+    read as a separator escape. A digest recorded over a body before that escape is the digest of this text."""
+    return _SEPARATOR_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(0), text)
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -610,32 +661,15 @@ def _fixture_wait(pid, flags):
         raise ChildStatusUnavailable("cannot collect fixture status: " + str(exc)) from exc
 
 
-def _fixture_signal(pid, signum, pidfd=None, *, group=True, forked=False):
+def _fixture_signal(pid, signum, pidfd=None, *, group=True):
     """The sole numeric signal boundary. ECHILD never licenses a signal.
 
-    Every caller passes ONLY the pid its own os.fork() just returned,
-    with the pidfd the forking parent opened on it (_launch_fork's child,
-    and the guardian's own subject in _fixture_drain): under
-    D-385-PIDFD-HANDOFF, as read by the D-385-CURRENT-CHILD ruling, a
-    process the caller did NOT fork is never signalled -- an adopted
-    CURRENT child included. The retired drain signalled /proc-discovered
-    adopted descendants here as proved current children; that license is
-    gone: such a descendant is now reaped if it exits on its own, or
-    NAMED, not signalled, in the drain refusal -- the disclosed
-    orphan-escape residual. The waitid ownership check proves only
-    CURRENT waitability, which an ADOPTED child also has (QA15 codex
-    blocker: waitid(P_PID) selects the current child matching the
-    number, not its historical identity), so it can never license a
-    numeric send by itself. The numeric os.kill fallback (a pidfd-less
-    host) therefore REQUIRES `forked=True`, the call site's same-call
-    declaration that `pid` is this process's OWN direct, un-reaped fork
-    -- fork-bound at the site, the _kill_proved_child review boundary,
-    now enforced HERE instead of resting on call-site review alone:
-    without it the numeric send is refused (False) and nothing is
-    signalled. Never a numeric killpg (QA21 codex F3). `group` is
-    retained for call-site
-    symmetry and licenses nothing; concurrent foreign waiters remain
-    outside this trusted test contract.
+    pidfds pin individual targets. Group members are addressed one by one
+    through verified per-member pidfds, never a numeric killpg (QA21 codex
+    F3), and the members go BEFORE the leader: the census excludes the
+    leader, whose own signal follows below, so no member is stranded by its
+    leader dying mid-census (fix 2y, codex F2); concurrent foreign waiters
+    remain outside this trusted test contract.
     """
     import os
     import signal
@@ -649,16 +683,20 @@ def _fixture_signal(pid, signum, pidfd=None, *, group=True, forked=False):
 
     if not owned():
         return False
+    if group and os.getpgid(pid) == pid:
+        # Never a numeric os.killpg (QA21 codex F3: a freed pgid can name an
+        # unrelated group): the members are signalled through their own
+        # pidfds, each re-verified against /proc after its open. `pid` is
+        # owned-unreaped (above) and this process is an ancestor of every
+        # tree member, so both anchor the census.
+        _fixture_kill_group_members(pid, signum, {os.getpid(), pid}, leader=pid)
+    if not owned():  # a hook/foreign reaper may have run during the member kills
+        return False
     try:
         if pidfd is not None:
             signal.pidfd_send_signal(pidfd, signum)
-        elif forked:
-            os.kill(pid, signum)
         else:
-            # D-385-CURRENT-CHILD: waitability without the caller's own-fork
-            # declaration licenses NO numeric send (an adopted current child,
-            # or an adopted reuse of a reaped number, would pass owned()).
-            return False
+            os.kill(pid, signum)
     except ProcessLookupError:
         pass
     return True
@@ -776,15 +814,19 @@ def _fixture_send_subject(peer, subject, subject_fd):
 
 def _fixture_ack_subject(fd):
     """Release the subject, strictly AFTER the receipt send returned: an acknowledged
-    subject is always addressable through its delivered receipt (QA18 codex F2). A
-    subject that already died is tolerated (its wait status is authoritative), and the
-    write end closes either way, so a guardian that dies before acknowledging always
-    hands the blocked subject an EOF."""
+    subject is always addressable through its delivered receipt (QA18 codex F2). The
+    write is reported, observed: True only when os.write wrote the one ack byte, and
+    False when it failed with OSError -- a subject that already died is tolerated (its
+    wait status is authoritative). The write end closes either way, so a guardian that
+    dies before acknowledging always hands the blocked subject an EOF. The guardian
+    ignores the report (supervision reads the subject's status); a caller certifying
+    the release to a third party publishes only on True, never on a swallowed
+    failure."""
     import os
     try:
-        os.write(fd, b"A")
+        return os.write(fd, b"A") == 1
     except OSError:
-        pass  # the subject is already gone: supervision reads its status
+        return False  # the subject is already gone: supervision reads its status
     finally:
         os.close(fd)
 
@@ -909,49 +951,64 @@ def _fixture_group_pinned(group, guardian_pid):
     return False
 
 
-def _fixture_kill_group_members(group, signum, handoffs, leader=None):
-    """Signal every live CURRENT member of process group `group` whose pidfd
-    its FORKING PARENT handed off (D-385-PIDFD-HANDOFF): `handoffs` maps a
-    member pid to the pidfd that member's forking parent opened immediately
-    after fork -- while the un-reaped child pinned the number -- and passed
-    over SCM_RIGHTS. That descriptor is the ONLY delivery license. /proc is
-    read here to OBSERVE which members are live, NEVER to license a signal:
-    the retired ancestry route (the `anchored` parent-chain walk) opened a
-    pidfd LOCALLY on each /proc-discovered number and licensed its kill by a
-    chain of /proc reads reaching a caller anchor; D-385 retires that whole
-    proof class, so NO pidfd is opened here at all, and a live member with
-    no handoff is SKIPPED -- reported, never signalled -- the fail-closed
-    outcome. At runtime a subject's own forks arrive with no handoff, so the
-    census is report-only there and those descendants join the disclosed
-    orphan-escape residual. Handoff descriptors stay OWNED BY THE CALLER:
-    none is closed here. NEVER a numeric os.killpg (QA21 codex F3: once a
-    group's leader is reaped the numeric pgid is free for reuse, so a
-    numeric group kill can address an unrelated group). `leader` -- the
-    group leader the caller addresses through its own ALREADY-HELD pidfd --
-    is excluded here and signalled by the caller strictly AFTER the members,
-    so no member is stranded by its leader dying mid-census (fix 2y, codex
-    F2). Exited (zombie) members hold their pgid but take no signal and are
-    no longer addressable members; a /proc entry that EXISTS but cannot be
-    READ is never proof of exit: it is accounted too, so no caller can claim
-    a killed tree past it (fix 2z, codex BLOCKER 2 / gemini F2) -- but it is
-    accounted SEPARATELY, as a POSSIBLE member, because its group membership
-    was never established (round 24, claude F1), and it is accounted BEFORE
-    any handoff lookup: an unverifiable entry is never signalled, handoff or
-    not. TimeoutError/InterruptedError (deadline/cancellation semantics) and
-    non-I/O failures always PROPAGATE (fix 2y, codex F3); with no descriptor
-    opened here there is no cleanup step that could displace them. Returns
-    (delivered, skipped, unverifiable): the pids signalled through their
-    handed-off descriptors; every pid OBSERVED as a live group member but
-    not signalled (no forking-parent handoff, a descriptor-less handoff
-    entry, or a non-exit send failure), with skipped None when the /proc
-    census itself was unreadable (membership unknown); and every /proc entry
-    that exists but could not be read -- possible members, never established
-    ones. Callers account all three and never claim the tree was killed past
-    this census. Hosts without pidfd have no handoffs and address no members
-    (the degraded-escalation disclosures cover them)."""
+def _fixture_kill_group_members(group, signum, anchors, leader=None):
+    """Signal every verified CURRENT member of process group `group`, each
+    through its own pidfd -- NEVER a numeric os.killpg (QA21 codex F3: once a
+    group's leader is reaped, and SIGSTOP delivery to a ZOMBIE leader cannot
+    prevent its parent reaping it, the numeric pgid is free for reuse, so a
+    numeric group kill can address an unrelated process group). A member is
+    signalled only when, with its pidfd ALREADY HELD, /proc still shows the
+    group AND a live parent chain reaching one of `anchors` (pids the caller
+    proved unreaped: an unreaped owned guardian, or the calling process
+    itself -- never a bare numeric pid, fix 2y codex F1). That order makes
+    recycling harmless: a live process the held pidfd references is exactly
+    the process /proc describes, so a pid recycled after the census either
+    fails the re-check (a foreign process is never parented under an anchor)
+    or has exited and ESRCHes on the held pidfd -- no signal can reach a
+    foreign process. `leader` -- the group leader the caller addresses
+    through its own ALREADY-HELD pidfd -- is excluded here and signalled by
+    the caller strictly AFTER the members, so no member is stranded by its
+    leader dying mid-census (fix 2y, codex F2). Exited (zombie) members hold
+    their pgid but take no signal and are no longer addressable members;
+    members that cannot be verified are SKIPPED, never guessed at, and a
+    /proc entry that EXISTS but cannot be READ is never proof of exit: it is
+    accounted too, so no caller can claim a killed tree past it (fix 2z,
+    codex BLOCKER 2 / gemini F2) -- but it is accounted SEPARATELY, as a
+    POSSIBLE member, because its group membership was never established
+    (round 24, claude F1: reading an unreadable foreign entry as a group
+    "member" overstates what the census observed).
+    TimeoutError/InterruptedError (deadline/cancellation semantics) and
+    non-I/O failures always PROPAGATE (fix 2y, codex F3). Returns
+    (delivered, skipped, unverifiable): the pids signalled; every pid
+    VERIFIED as a live group member but not signalled (no pidfd, unanchored,
+    or a non-exit send failure), with skipped None when the /proc census
+    itself was unreadable (membership unknown); and every /proc entry that
+    exists but could not be read (before or after its pidfd pinned it) --
+    possible members, never established ones. Callers account all three and
+    never claim the tree was killed past this census. Hosts without pidfd
+    address no members (the degraded-escalation disclosures cover them)."""
     import os
     import signal
-    targets = {int(pid): handoffs[pid] for pid in handoffs}
+    anchors = {int(anchor) for anchor in anchors}
+
+    def anchored(member):
+        # Follow the CURRENT parent chain (each hop is kernel-truthful for a
+        # live process); only a chain reaching an anchor verifies. A hop that
+        # disappears or cannot be read mid-walk refuses: skipping is always
+        # the safe outcome.
+        hop, depth = member, 0
+        while depth < 128:
+            if hop in anchors:
+                return True
+            fields = _fixture_stat_fields(hop)
+            if fields is None or fields is _FIXTURE_UNREADABLE:
+                return False
+            parent = int(fields[1])
+            if parent <= 1:
+                return False
+            hop, depth = parent, depth + 1
+        return False
+
     delivered, skipped, unverifiable = [], [], []
     try:
         entries = os.listdir("/proc")
@@ -971,27 +1028,48 @@ def _fixture_kill_group_members(group, signum, handoffs, leader=None):
             # and an unreadable record is never proof of exit. Account it as
             # a POSSIBLE member -- its membership was never established
             # (round 24, claude F1) -- so no caller may claim the tree past
-            # this census (fix 2z, codex BLOCKER 2 / gemini F2). The handoff
-            # map is never consulted for it: unverifiable, not delivered.
+            # this census (fix 2z, codex BLOCKER 2 / gemini F2).
             unverifiable.append(member)
             continue
         if fields is None or int(fields[2]) != group or fields[0] == b"Z":
             continue
-        if member not in targets or targets[member] is None:
-            # FAIL CLOSED (D-385-PIDFD-HANDOFF): a live member whose forking
-            # parent supplied no descriptor is reported, never signalled --
-            # no local pidfd open, no ancestry walk, no numeric kill.
-            skipped.append(member)
+        fd = _fixture_pidfd(member)
+        if fd is None:
+            skipped.append(member)  # a live member this host cannot address
             continue
+        pending = None
+
+        def close_fd(fd=fd):
+            os.close(fd)
+
         try:
-            signal.pidfd_send_signal(targets[member], signum)
-        except (ProcessLookupError, OSError) as exc:
-            if isinstance(exc, (TimeoutError, InterruptedError)):
-                raise
-            if not isinstance(exc, ProcessLookupError):
-                skipped.append(member)  # handed-off member, delivery failed
-            continue
-        delivered.append(member)
+            fields = _fixture_stat_fields(member)  # re-verify AFTER the pidfd pinned it
+            if fields is _FIXTURE_UNREADABLE:
+                unverifiable.append(member)  # unverifiable entry: never read as exited
+                continue
+            if fields is None or int(fields[2]) != group or fields[0] == b"Z":
+                continue  # exited or left the group: no longer a member
+            if not anchored(member):
+                skipped.append(member)  # live in the group, ownership unverified
+                continue
+            try:
+                signal.pidfd_send_signal(fd, signum)
+            except (ProcessLookupError, OSError) as exc:
+                if isinstance(exc, (TimeoutError, InterruptedError)):
+                    raise
+                if not isinstance(exc, ProcessLookupError):
+                    skipped.append(member)  # verified member, delivery failed
+                continue
+            delivered.append(member)
+        except BaseException as exc:
+            # Capture the exception already propagating into the close
+            # below (fix 7, QA28 codex BLOCKER 2): a member-send
+            # cancellation must stay the outward exception even when the
+            # per-member pidfd close itself fails.
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, close_fd, "member pidfd close")
     return delivered, skipped, unverifiable
 
 
@@ -1225,8 +1303,7 @@ def _cleanup_boundary(pending, step, site):
     raise pending
 
 
-def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
-                              member_handoffs=None):
+def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     """Kill a receipt-identified subject, addressing OWNERSHIP-VERIFIED
     targets only, each through its own pidfd -- NEVER a numeric group kill,
     and NEVER a member census anchored on the subject's bare NUMERIC pid
@@ -1236,20 +1313,16 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
     fork or reap mid-sequence; the freeze runs INSIDE the exception-safe
     kill protection (round 24, codex boundary), so a raising freeze -- a
     re-raised cancellation or a non-OSError delivery fault -- never skips
-    the held-pidfd SIGKILL. Guardian ownership licenses only RUNNING the
-    member census: `guardian_pid` -- the caller's own unreaped child,
-    certified frozen -- is the tree's subreaper, and _fixture_group_pinned
-    confirms it stopped-or-zombie and still parenting a group member, which
-    pins the pgid NUMBER against reuse while the census reads /proc. Member
-    DELIVERY is licensed per member and ONLY by `member_handoffs` -- a map
-    of member pid to the pidfd that member's FORKING PARENT opened and
-    handed off over SCM_RIGHTS (D-385-PIDFD-HANDOFF; the retired ancestry
-    walk licensed delivery by /proc parent chains and is gone) -- so a live
-    member with no handoff is SKIPPED and NAMED, never signalled: with the
-    runtime's empty map the census is report-only and the subject's own
-    forks join the disclosed orphan-escape residual. Handed-off members die
-    BEFORE the leader (the census excludes the leader; its held-pidfd
-    SIGKILL runs last, fix 2y codex F2), and the subject SIGKILL is EXCEPTION-SAFE (fix
+    the held-pidfd SIGKILL. Member addressing is licensed ONLY by
+    guardian ownership: `guardian_pid` -- the caller's own unreaped child,
+    certified frozen -- is the tree's subreaper, so every orphaned
+    same-group descendant is its child and every live member's CURRENT
+    parent chain reaches it; _fixture_group_pinned confirms the guardian
+    stopped-or-zombie and still parenting a group member, and
+    _fixture_kill_group_members then verifies each member against that
+    single guardian anchor AFTER its pidfd is held. Members die BEFORE the
+    leader (the census excludes the leader; its held-pidfd SIGKILL runs
+    last, fix 2y codex F2), and the subject SIGKILL is EXCEPTION-SAFE (fix
     2z, codex BLOCKER 3): a raising census never strands the frozen leader,
     and the census exception still propagates after the kill -- through the
     shared _cleanup_boundary (fix 6, QA27 codex BLOCKER 1), so a
@@ -1259,11 +1332,11 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
     the leader already exited and is no failure to keep -- re-raised into
     the boundary and kept reachable beneath it (fix 14, QA35 codex MAJOR:
     the EPERM-class faults the send can raise were recorded in the
-    survivor flag only and dropped from that chain); the member census
-    opens and closes NO descriptors of its own -- handoff descriptors stay
-    caller-owned (D-385-PIDFD-HANDOFF) -- so a member-send cancellation
-    propagates outward directly (fix 7's per-pidfd close boundary was
-    retired with the census's local opens). The "tree"
+    survivor flag only and dropped from that chain); the member census's
+    per-pidfd
+    close routes through the same boundary (fix 7, QA28 codex BLOCKER 2),
+    so a member-send cancellation crossing that close stays outward even
+    when the close itself fails. The "tree"
     outcome rests on OBSERVATION, never on the kill sends alone (fix 2z,
     premise change; maintainer ruling PD-335-TREE-CLAIM-STALL): while the
     guardian stays frozen, a bounded verification census
@@ -1356,9 +1429,7 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
                 raise
         if guardian_pid is not None and _fixture_group_pinned(subject, guardian_pid):
             delivered, skipped, unverifiable = _fixture_kill_group_members(
-                subject, signal.SIGKILL,
-                member_handoffs if member_handoffs is not None else {},
-                leader=subject)
+                subject, signal.SIGKILL, {guardian_pid}, leader=subject)
             if skipped is None:
                 outcome = ("partial", None)
             elif skipped or unverifiable:
@@ -1388,9 +1459,6 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
 
 def _fixture_children():
     """Census by PPID; task/children can transiently omit adopted children.
-    OBSERVATION only (D-385-CURRENT-CHILD): the drain names these pids in
-    its refusal and reaps the exited ones; no census pid is ever a signal
-    target.
     The per-entry stat read goes through os.open/os.read with the descriptor
     close as a _cleanup_boundary step (fix 9, QA30 claude MINOR 2: this
     guardian-side census still read /proc via Path.read_bytes, so the fix-8
@@ -1456,51 +1524,16 @@ def _fixture_cleanup_deadline(execution_deadline=None):
     return floor if execution_deadline is None else max(floor, execution_deadline)
 
 
-def _fixture_drain(subject, subject_fd=None, *, deadline=None, subject_ref=None):
+def _fixture_drain(subject, subject_fd=None, *, deadline=None):
     """Dedicated single-threaded subreaper: every child belongs to this fixture.
 
-    Kill ONLY the owned subject -- this guardian's own direct fork, through
-    the descriptor the fork opened -- then COLLECT: adopted descendants that
-    reparent here (nested guardians and descendants in other sessions
-    included) are reaped as they exit, NEVER signalled (D-385-PIDFD-HANDOFF
-    as read by the D-385-CURRENT-CHILD ruling: a process this guardian did
-    not fork is never a signal target, an adopted CURRENT child included;
-    the retired drain SIGKILLed every /proc-census pid here as a proved
-    current child). Only kernel ECHILD proves completion. /proc read
-    failures refuse; an empty snapshot is retried, never treated as
-    completion or an immediate contradiction. The caller supplies one
-    cleanup deadline, shared by normal and failure paths; absent one, the
-    named minimum grace applies. Expiry yields cannot-evaluate, never
-    success: the refusal NAMES every still-live adopted descendant, by pid,
-    as NOT signalled -- the disclosed orphan-escape residual, left running
-    (such a descendant may therefore OUTLIVE the refusing case and its
-    fixture process, bounded only by the fixture's own self-limit -- a
-    bounded sleep or gate deadline -- until its release gate or EOF ends
-    it). When the PPID census transiently names nothing while kernel
-    waitid still answers for a child, the refusal says exactly that -- a
-    waitable child remains whose identity the census missed -- never an
-    empty name list presented as the full survivor set (QA15 claude M2);
-    while the subject is still bound and unreaped, the refusal names the
-    SUBJECT as that waitable child and any further unnamed child as
-    possible but unproven (QA16 claude m2).
-    `subject_ref`, a single-element list owned by the caller, BINDS the
-    subject's identity across retries (QA15 codex blocker): the drain
-    reads the subject number from it and CLEARS it the moment the subject
-    is reaped, so a second drain call with the same holder -- the
-    guardian's failure-path retry -- can never signal that number again
-    after the reap freed it for reuse by an adopted process. The reap and
-    the clear run with SIGINT and SIGTERM blocked on the calling thread
-    (_fixture_mask_cancellation, prior mask restored exactly in a finally;
-    QA16 claude m1), so a cancellation landing between them stays
-    kernel-pending and is raised only at the restore, after the holder is
-    cleared; outside that guarantee, as for close()/poll(), are a signal
-    whose interpreter-level flag tripped before the block landed, other
-    signals with raising handlers, and non-signal asynchronous exceptions.
-    Absent a holder, a fresh one is bound to this one call. The entry kill carries
-    the drain contract's own-fork declaration (forked=True): `subject` is
-    the calling guardian's own direct fork, and once the holder is
-    cleared no numeric retry can reach its number. Syscalls still require
-    kernel progress. Subjects attacking their guardian are outside this
+    Kill groups BEFORE reaping leaders, then collect adopted descendants, including
+    nested guardians and descendants in other sessions. Only kernel ECHILD proves
+    completion. /proc read failures refuse; an empty snapshot is retried, never
+    treated as completion or an immediate contradiction. The caller supplies one
+    cleanup deadline, shared by normal and failure paths; absent one, the named
+    minimum grace applies. Expiry yields cannot-evaluate, never success. Syscalls still
+    require kernel progress. Subjects attacking their guardian are outside this
     trusted harness's contract.
     """
     import os
@@ -1509,76 +1542,37 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None, subject_ref=None)
     status = None
     if deadline is None:
         deadline = _fixture_cleanup_deadline()
-    if subject_ref is None:
-        subject_ref = [subject]
-    subject = subject_ref[0]
-    # Cancel the owned subject immediately, even while a census is empty --
-    # but ONLY while the holder still binds it: once the subject was reaped
-    # (by this call or an earlier one sharing the holder), its number may
-    # already identify an ADOPTED process, and no retry may signal it
-    # (QA15 codex blocker; D-385-CURRENT-CHILD).
-    if subject is not None:
-        _fixture_signal(subject, signal.SIGKILL, subject_fd, forked=True)
+    # Cancel the owned subject immediately, even while a census is empty. The
+    # ownership check makes this safe on a retry after the subject was reaped.
+    _fixture_signal(subject, signal.SIGKILL, subject_fd)
     while True:
         try:
             os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return status
-        # Reap every child already dead; an adopted live one is never signalled.
-        while True:
-            # The reap and the holder clear are ONE step with respect to the
-            # caller's cancellation signals (QA16 claude m1): a SIGINT/SIGTERM
-            # landing between them stays pending until the restore below, so
-            # the holder is never left bound to an already-reaped number.
-            prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
-            try:
-                _fixture_mask_cancellation()
-                try:
-                    waited, raw = os.waitpid(-1, os.WNOHANG)
-                except ChildProcessError:
-                    return status
-                if waited == 0:
-                    break
-                if subject is not None and waited == subject:
-                    status = raw
-                    subject = subject_ref[0] = None  # the number is now reusable
-            finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, prior)
         if time.monotonic() >= deadline:
-            residual = sorted(pid for pid in _fixture_children()
-                              if subject is None or pid != subject)
-            if residual:
-                raise ChildStatusUnavailable(
-                    "descendant cleanup deadline: ECHILD not observed; adopted "
-                    "descendants {} NOT signalled (D-385-CURRENT-CHILD: no "
-                    "forking-parent handoff reaches this guardian), left as "
-                    "the disclosed orphan-escape residual".format(residual))
-            # QA15 claude M2: the deadline is reached only after waitid
-            # answered for a child, so an empty census names the census's
-            # own transient miss, never a completed drain or a full list.
-            # QA16 claude m2: the census excludes the subject, so while the
-            # subject is still bound and unreaped it alone explains the
-            # answer; a further unnamed child is then possible, not proven.
-            if subject is not None:
-                raise ChildStatusUnavailable(
-                    "descendant cleanup deadline: ECHILD not observed and the "
-                    "/proc census named no adopted descendant: the subject {} "
-                    "is still unreaped and is itself the waitable child; a "
-                    "further waitable child the census missed is possible but "
-                    "unproven, and any such child is NOT signalled "
-                    "(D-385-CURRENT-CHILD), left as the disclosed "
-                    "orphan-escape residual".format(subject))
-            raise ChildStatusUnavailable(
-                "descendant cleanup deadline: ECHILD not observed and the "
-                "/proc census named no adopted descendant: a waitable child "
-                "remains whose identity the census missed; it is NOT "
-                "signalled (D-385-CURRENT-CHILD), left as the disclosed "
-                "orphan-escape residual")
+            raise ChildStatusUnavailable("descendant cleanup deadline: ECHILD not observed")
+        pids = _fixture_children()
+        for pid in pids:
+            fd = subject_fd if pid == subject else _fixture_pidfd(pid)
+            try:
+                if not _fixture_signal(pid, signal.SIGKILL, fd):
+                    raise ChildStatusUnavailable("lost descendant ownership")
+                waited, raw = os.waitpid(pid, os.WNOHANG)
+                if waited == 0:
+                    continue
+                if waited != pid:
+                    raise ChildStatusUnavailable("unexpected descendant wait PID")
+                if pid == subject:
+                    status = raw
+            finally:
+                if fd is not None and fd != subject_fd:
+                    os.close(fd)
         time.sleep(0.005)
 
 
 # array is required: socket.send_fds/recv_fds cold-import it inside their own
-# bodies, so importing socket alone does not load it (QA19 F4).
+# bodies, so importing socket alone does not load it.
 _FIXTURE_GUARDIAN_MODULES = (
     "array", "ctypes", "errno", "gc", "json", "pathlib", "resource", "select",
     "signal", "socket", "time", "traceback")
@@ -1683,7 +1677,7 @@ class _FixtureProcess:
     fork; construction resources are never disposed while the launcher can still
     use them. A failed construction (e.g. thread exhaustion) aborts the launch,
     releases every resource, and surfaces the original error. Cancellation
-    masking (fix 2w/2x): close() runs its ENTIRE ownership decision, transfer,
+    masking: close() runs its ENTIRE ownership decision, transfer,
     collection and cleanup sequence -- and poll() its collection-to-recording
     step -- with SIGINT and SIGTERM masked on the calling thread
     (pthread_sigmask), and the LAUNCHER is created with the same pair blocked
@@ -1692,15 +1686,15 @@ class _FixtureProcess:
     single-threaded caller EVERY thread blocks the pair during the sequence
     and even a PROCESS-directed cancellation -- the real Ctrl-C delivery
     shape, which the kernel may hand to ANY thread with it unblocked -- stays
-    kernel-pending (QA19 F2, QA20, QA21 claude F1). The prior mask is
+    kernel-pending. The prior mask is
     captured by QUERY before the restoring try and the block is the try's
-    FIRST statement, restored exactly in the finally (QA21 claude F3): a
+    FIRST statement, restored exactly in the finally: a
     cancellation landing before the block installs disposes NOTHING, not
     even the thread's signal state, and close() can simply run again. The
     pending cancellation is delivered AT the restore, inside close()/poll()'s
-    own finally (QA21 claude F4): close() then raises the KeyboardInterrupt
+    own finally: close() then raises the KeyboardInterrupt
     itself, with any in-flight refusal preserved on the exception chain
-    (callers walk __context__). The deferral is BOUNDED (QA21 gemini F3, an
+    (callers walk __context__). The deferral is BOUNDED (an
     accepted trade-off: guaranteed ownership and cleanup over immediate
     termination): every masked wait carries its own deadline, so a pending
     cancellation -- including a job supervisor's SIGTERM -- is delayed at
@@ -1716,11 +1710,8 @@ class _FixtureProcess:
     which no mask can stop. The funnels leave the same owner: an
     unrecorded launch is abandoned to the launcher UNDER THE LAUNCH LOCK, a
     recorded one keeps close(), which finishes collecting before re-raising;
-    one landing inside the collection sends the licensed signals -- the
-    receipt-identified subject through its held pidfd and the guardian this
-    layer forked -- and bounded-reaps the guardian before propagating; the
-    subject's own descendants hold no handoff, so they are NOT signalled but
-    named and left (D-385-CURRENT-CHILD).
+    one landing inside the collection kills the tree and bounded-reaps the
+    guardian before propagating.
 
     Locks: only the launcher thread survives into the guardian, whose
     dependencies are preloaded at construction, so guardian-side imports take no
@@ -1738,28 +1729,23 @@ class _FixtureProcess:
     buffered receipt before closing that socket. A guardian that cannot be
     collected within the bounded cleanup budget is frozen (SIGSTOP via its
     pidfd, so a live guardian's pid/pgid cannot be recycled), then the
-    receipt-identified subject's group is CENSUSED under guardian ownership
-    (fix 2y): while the frozen guardian lives it is the tree's subreaper,
-    which pins the pgid number while /proc is read. The census OBSERVES;
-    delivery is licensed per member and ONLY by a pidfd the member's
-    FORKING PARENT opened and handed off over SCM_RIGHTS
-    (D-385-PIDFD-HANDOFF; the retired ancestry walk licensed delivery by
-    /proc parent chains and is gone) -- NEVER a locally opened pidfd, NEVER
-    a numeric killpg and NEVER a census anchored on the subject's bare
-    numeric pid (QA20 claude F1, QA21 codex F3, fix 2y codex F1: only
-    unreapability pins a pid or pgid NUMBER against reuse). The runtime
-    escalation holds NO member handoffs -- the subject's forks are its own
-    -- so every observed live member is SKIPPED and NAMED in the refusal,
-    the fail-closed disclosure, and those descendants join the documented
-    orphan-escape residual. Handed-off members (self-test fixtures thread
-    them) die BEFORE the leader (the census excludes the leader; its
+    receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP:
+    while the frozen guardian lives it is the tree's subreaper, so
+    every observed member is verified through its OWN pidfd against /proc
+    -- group membership AND a CURRENT parent chain reaching the guardian
+    anchor,
+    re-checked AFTER the pidfd is opened -- NEVER a numeric killpg and NEVER
+    a census anchored on the subject's bare numeric pid (only unreapability
+    pins a pid or pgid NUMBER against reuse; neither a held pidfd nor
+    SIGSTOP delivery does).
+    Members die BEFORE the leader (the census excludes the leader; its
     held-pidfd SIGKILL runs last), so no member is stranded by its leader's
     death, and every observed member the census could not address is
-    accounted (fix 2y codex F2; a member no census observed -- the
+    accounted (a member no census observed -- the
     disclosed fork-race and pid-wraparound residual -- can be neither
-    addressed nor accounted, per the ruling PD-335-TREE-CLAIM-STALL). The
-    "tree" claim then rests on OBSERVATION, never on the kill sends alone
-    (fix 2z; maintainer ruling PD-335-TREE-CLAIM-STALL):
+    addressed nor accounted, so the refusal discloses it rather than
+    claiming past it). The
+    "tree" claim then rests on OBSERVATION, never on the kill sends alone:
     while the guardian stays frozen, a bounded verification census must
     observe NO live, signalable group member in TWO CONSECUTIVE clean
     passes -- an observation, never a proof (a continuously forking chain
@@ -1771,19 +1757,17 @@ class _FixtureProcess:
     the named partial accounting. Then the guardian itself is SIGKILLed. On ANY guardian
     failure, escalated or not -- including a failure FIRST collected by
     poll(), which kills the subject AT COLLECTION TIME and records the
-    failure for close() to prove and re-raise (QA19 F1), an UNRESOLVED
+    failure for close() to prove and re-raise, an UNRESOLVED
     collection (guardian reaped, status never validated, no failure
-    recorded: treated as a failure of close()'s own, QA20 codex F1), and a
+    recorded: treated as a failure of close()'s own), and a
     LOST-OWNERSHIP collection (the guardian disappeared without this
-    close()'s reap, fix 2y claude Finding 2) -- a receipt-identified subject
+    close()'s reap) -- a receipt-identified subject
     is killed and its disappearance proven on its pidfd or refused loudly;
     on every one of those guardian-DEAD paths the kill is SUBJECT-ONLY: the
     dead guardian owns no orphans, so NO member census runs, NO new pidfds
-    are opened, and only the already-held subject pidfd is signalled (fix
-    2y, D2).
+    are opened, and only the already-held subject pidfd is signalled.
 
-    Refusal wording, class-wide (each names ONLY the steps actually taken,
-    QA19 F3 / QA20 claude F3 / fix 2y codex F2):
+    Refusal wording, class-wide (each names ONLY the steps actually taken):
 
       kill state ran               refusal names
       ---------------------------  ------------------------------------------
@@ -1806,19 +1790,14 @@ class _FixtureProcess:
       consecutively)               pid wraparound can evade the censuses),
                                    never a proof
 
-    Documented residuals (D-385-PIDFD-HANDOFF, D-385-CURRENT-CHILD): every
-    descendant without a forking-parent handoff survives. Same-group
-    members of a WEDGED-guardian escalation are observed, SKIPPED and
-    NAMED (the runtime holds no member handoffs); descendants that leave
-    the subject's group/session are not even observed; ALL descendants of
-    a subject whose guardian is DEAD survive the subject-only kill (no
-    process owns the orphans after the subreaper guardian's death, so a
-    census there could only trust recyclable numbers and unverifiable
-    reparented chains; fix 2y, D2); and the honest guardian's drain kills
-    ONLY the subject it forked -- an adopted descendant is reaped if it
-    exits within the drain's deadline and otherwise NAMED, not signalled,
-    in the drain refusal -- each disclosed where it arises, never claimed
-    killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
+    Documented residuals: descendants that leave the subject's group/session
+    survive a WEDGED-guardian escalation (only the subreaper census can find
+    them; the honest-guardian drain still covers them), and ALL descendants
+    of a subject whose guardian is DEAD survive the subject-only
+    kill (no process owns the orphans after the subreaper guardian's death,
+    so a census there could only trust recyclable numbers and unverifiable
+    reparented chains) -- both disclosed in the refusal, never
+    claimed killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
     extra coverage, failing closed to these residuals where unavailable.
     Hosts without pidfd degrade escalation to guardian-only with the same
     residuals.
@@ -1867,7 +1846,7 @@ class _FixtureProcess:
         self._launcher = None
         self._launch_error = None
         # The recorded guardian failure, set at COLLECTION time by whichever
-        # collector reads the failed report first (QA19 F1); close() re-raises
+        # collector reads the failed report first; close() re-raises
         # it after addressing the receipt-identified subject.
         self._failure = None
         self._launch_lock = threading.Lock()
@@ -1955,8 +1934,7 @@ class _FixtureProcess:
         import time
         try:
             if self.pid is not None and not self.collected:
-                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
-                                forked=True)
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
                 # A bounded reap (QA22), never a blocking waitpid: a guardian
                 # the kill did not reach (or that will not die) is left
                 # uncollected after the cleanup grace instead of holding
@@ -1984,15 +1962,20 @@ class _FixtureProcess:
     def _await_exit(self, until):
         """Wait, WITHOUT reaping, until this launch's own guardian has exited or
         the monotonic `until` has passed (QA22): a WNOHANG poll, never a blocking
-        waitid. True when it has exited; an OSError propagates."""
+        waitid, paced by an empty select.poll, never time.sleep, which opf.py's
+        watchdog ledger charges (a bounded wait here charges nothing, as the
+        blocking waitpid it replaced charged nothing). True when it has exited;
+        an OSError propagates."""
         import os
+        import select
         import time
         pause = 0.001
+        poller = select.poll()
         while os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
             left = until - time.monotonic()
             if left <= 0.0:
                 return False
-            time.sleep(min(pause, left, 0.05))
+            poller.poll(min(pause, left, 0.05) * 1000.0)
             pause = min(pause * 2.0, 0.05)
         return True
 
@@ -2028,22 +2011,20 @@ class _FixtureProcess:
                 if os.read(self.control.fileno(), 1) != b"R":
                     # The reap of the failed guardian and its `collected` mark
                     # are ONE step with respect to the caller's cancellation
-                    # signals (QA17 claude m1), as in _fixture_drain: a
-                    # SIGINT/SIGTERM landing between them stays pending until
-                    # the restore below, so close() never treats a reaped
-                    # number as an uncollected guardian. The exit itself is
-                    # awaited first WITHOUT reaping and unmasked, so a
-                    # cancellation can still interrupt that wait. The reap is a
-                    # WNOHANG poll (QA18 claude m2): a 0 result is an unexpected PID.
-                    # The exit wait is bounded by the fixture deadline (QA22): a
-                    # failed guardian that never exits (stopped, wedged) is this
-                    # launch's OWN pre-GO fork, with no subject yet, so it is
-                    # SIGKILLed and must then exit within the cleanup grace; its
-                    # receipt then reports the kill.
+                    # signals (QA17 claude m1): a SIGINT/SIGTERM landing between
+                    # them stays pending until the restore below, so close()
+                    # never treats a reaped number as an uncollected guardian.
+                    # The exit itself is awaited first WITHOUT reaping and
+                    # unmasked, so a cancellation can still interrupt that wait.
+                    # The reap is a WNOHANG poll (QA18 claude m2): a 0 result is
+                    # an unexpected PID. The exit wait is bounded by the fixture
+                    # deadline (QA22): a failed guardian that never exits
+                    # (stopped, wedged) is this launch's OWN pre-GO fork, with no
+                    # subject yet, so it is SIGKILLed and must then exit within
+                    # the cleanup grace; its receipt then reports the kill.
                     try:
                         if not self._await_exit(self.deadline):
-                            _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
-                                            forked=True)
+                            _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
                             if not self._await_exit(time.monotonic() + _FIXTURE_CLEANUP_GRACE):
                                 raise ChildStatusUnavailable(
                                     "guardian failed before READY and did not exit "
@@ -2079,7 +2060,6 @@ class _FixtureProcess:
         import signal
         import time
         subject = subject_fd = cleanup_deadline = None
-        subject_ref = None
         stage = "startup"
         try:
             # The launcher forked this guardian with the cancellation signals
@@ -2129,10 +2109,6 @@ class _FixtureProcess:
                     finally:
                         os._exit(125)
             os.close(ack_r)
-            # One holder for the subject's whole life: the failure-path
-            # retry below shares it, so a subject reaped by the first drain
-            # is never signalled by number again (QA15 codex blocker).
-            subject_ref = [subject]
             stage = "subject-receipt"
             subject_fd = _fixture_pidfd(subject)
             _fixture_send_subject(self.peer, subject, subject_fd)
@@ -2162,8 +2138,7 @@ class _FixtureProcess:
                 time.sleep(0.005)
             stage = "drain"
             cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
-            status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline,
-                                    subject_ref=subject_ref)
+            status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
             subject = None
             if subject_fd is not None:
                 fd, subject_fd = subject_fd, None         # ownership first: a failed close is never
@@ -2205,8 +2180,7 @@ class _FixtureProcess:
                 if subject is not None:
                     if cleanup_deadline is None:
                         cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
-                    _fixture_drain(subject, subject_fd, deadline=cleanup_deadline,
-                                   subject_ref=subject_ref)
+                    _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
                 failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
             except BaseException as cleanup_exc:
                 failure["cleanup"] = detail(cleanup_exc)
@@ -2268,7 +2242,7 @@ class _FixtureProcess:
         """Record a supervision failure at COLLECTION time, whichever collector
         observed it first: close() must address the receipt-identified subject
         and re-raise the recorded failure even when poll() or start() was the
-        collector that read the failed report (QA19 F1). A recorded failure
+        collector that read the failed report. A recorded failure
         is a RESOLVED collection; the subject-cleanup obligation it creates is
         tracked by `cleaned`, never by `unresolved`."""
         self._failure = failure
@@ -2353,12 +2327,10 @@ class _FixtureProcess:
 
     def _escalate(self):
         """Freeze first, then kill: SIGSTOP the guardian via its pidfd (a
-        frozen guardian exists unreaped and cannot reap, so the group it
-        subreaper-owns stays pinned for the census), kill the
-        receipt-identified subject under that guardian ownership (the census
-        OBSERVES the group; member delivery needs a forking-parent pidfd
-        handoff, which the runtime has none of, so observed live members are
-        skipped and NAMED -- D-385-PIDFD-HANDOFF fail-closed -- never a
+        frozen guardian exists unreaped and cannot reap, so the members it
+        subreaper-owns stay anchored for the census), kill the
+        receipt-identified subject's tree under that guardian ownership
+        (verified per-member pidfds, members before the leader, never a
         numeric killpg, and the "tree" claim licensed only by the bounded
         post-kill verification census's two consecutive clean passes -- an
         observation, never a proof -- fix 2z / round 24), then SIGKILL the guardian
@@ -2412,8 +2384,7 @@ class _FixtureProcess:
             # guardian; _cleanup_boundary spans this WHOLE step, direct
             # backstop included (QA26 codex; fix 6).
             try:
-                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
-                                forked=True)
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
             except BaseException as helper_exc:
                 # Even the ownership-checked helper failing (e.g. the
                 # same census fault reaching its own group census) must
@@ -2524,8 +2495,8 @@ class _FixtureProcess:
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
         launcher has not recorded its result yet, ABANDON the launch to it (the
-        launcher is then the fork's last owner and collects its own fork,
-        QA19 F2) and report True; a result recorded in the meantime keeps this
+        launcher is then the fork's last owner and collects its own fork)
+        and report True; a result recorded in the meantime keeps this
         close() the owner."""
         with self._launch_lock:
             if self._launched.is_set():
@@ -2589,8 +2560,8 @@ class _FixtureProcess:
         # path, because the launcher and its guardian can still use it all. An
         # exception raised INSIDE this coordination -- normally impossible for a
         # masked cancellation, but reachable by a pre-mask interpreter flag or a
-        # non-signal asynchronous exception -- must leave the same owner
-        # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
+        # non-signal asynchronous exception -- must leave the same owner:
+        # the launcher for an unrecorded launch (abandoned under the
         # launch lock before re-raising), or this close(), which finishes
         # collecting before re-raising.
         def release_launcher():
@@ -2708,14 +2679,10 @@ class _FixtureProcess:
     def _interrupt_collect(self):
         """Last-resort owner for a cancellation landing INSIDE the collection
         itself (the receipt read, the bounded reap wait, or the exit proof):
-        read the receipt if it is still pending, escalate NOW through the
-        licensed signals only (guardian freeze, the receipt-identified
-        subject's SIGKILL through its held pidfd, guardian SIGKILL), and
-        bounded-reap the guardian, so the re-raised cancellation never strands
-        a live, owner-less guardian or subject. The subject's descendants
-        hold no forking-parent handoff: the escalation names them and leaves
-        them, NOT signalled (D-385-CURRENT-CHILD), the disclosed orphan-escape
-        residual. A guardian already collected can still
+        read the receipt if it is still pending, kill the whole tree NOW
+        (freeze, receipt kill, guardian SIGKILL), and bounded-reap the
+        guardian, so the re-raised cancellation never strands a live,
+        owner-less guardian or subject. A guardian already collected can still
         owe its subject cleanup (`collected` and `cleaned` are SEPARATE
         states, QA20 codex F1): the subject-only receipt kill runs here too
         (the collected guardian is dead: no census, fix 2y, D2). The
@@ -2749,31 +2716,30 @@ class _FixtureProcess:
 
     def _escalation_refusal(self, failure):
         """Annotate an escalated refusal with ONLY what the escalation
-        actually did (QA19 F3), accounting every observed member (fix 2y,
-        codex F2; a member no census observed -- the disclosed fork-race
+        actually did, accounting every observed member (a member no
+        census observed -- the disclosed fork-race
         and pid-wraparound residual -- can be neither addressed nor
-        accounted, per the ruling PD-335-TREE-CLAIM-STALL):
+        accounted, so the refusal discloses it rather than claiming past it):
         "subject tree killed" is claimed ONLY when the guardian-anchored
         census addressed every OBSERVED member (a census can only address
         members it observed) AND the bounded post-kill verification
         census then OBSERVED no live, signalable member left in two
-        consecutive clean passes (fix 2z: the claim rests on observation,
-        never on the kill sends alone; the maintainer ruling
-        PD-335-TREE-CLAIM-STALL words even that claim as an observation with
+        consecutive clean passes (the claim rests on observation,
+        never on the kill sends alone; even that claim
+        is worded as an observation with
         its residual, never a proof); a census with skipped or unknown
         members names them, and unverifiable entries -- possible members,
-        never established ones (round 24, claude F1) -- are named apart; a
+        never established ones -- are named apart; a
         subject-only kill (no guardian ownership) disclosed its unaddressed
-        descendants (the orphan-escape residual, pdeathsig-backed, D2). A
+        descendants (the orphan-escape residual, pdeathsig-backed). A
         census kill recorded by a PRIOR interrupted close ("tree"/"partial")
         is disclosed with the same accounting, claiming the pidfd exit proof
-        only when this close actually ran it (fix 2z, claude F4). The freeze
+        only when this close actually ran it. The freeze
         needs the guardian's pidfd, and the subject kill with its exit proof
         needs the receipt's subject pidfd, so a pid-only receipt
         (pidfd-absent host) is a guardian-only escalation whose subject
         cleanup is UNVERIFIED, and a missing receipt is INCOMPLETE cleanup
-        -- never a claimed kill this close() could not address (QA18 codex
-        F2)."""
+        -- never a claimed kill this close() could not address."""
         frozen = ("guardian frozen" if self.pidfd is not None
                   else "guardian not frozen: no pidfd")
         if self._subject_kill == "tree":
@@ -2945,8 +2911,7 @@ class _FixtureProcess:
                 self.peer.close()
                 if self.pid is not None and not self.collected:
                     if not self.armed:
-                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
-                                        forked=True)
+                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
                     # A cancelled call no longer needs the subject's execution time:
                     # wait within a bounded cleanup budget (twice the grace, so an
                     # honest guardian's own grace-bounded drain fits), then escalate
@@ -2979,13 +2944,13 @@ class _FixtureProcess:
                             self._read_report(raw)
                         except ChildStatusUnavailable:
                             pass  # recorded by _read_report; addressed below
-                # HOISTED out of the not-collected gate (QA19 F1): the subject
+                # HOISTED out of the not-collected gate: the subject
                 # kill and exit proof run on ANY guardian failure, including one
                 # FIRST collected by poll() -- the layer's primary collection
                 # path, which killed the subject pin-first at collection time
                 # and recorded the failure for this close(). An armed guardian
                 # collected WITHOUT a validated status or recorded failure is
-                # UNRESOLVED (QA20 codex F1): the subject's fate is unknown, so
+                # UNRESOLVED: the subject's fate is unknown, so
                 # close() treats it as a failure of its own. A startup failure
                 # start() already surfaced (never armed) has no subject and
                 # nothing to re-raise.
@@ -3405,7 +3370,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
                 child.close()
             except ChildStatusUnavailable as exc:
                 # close() re-raises a recorded failure the poll above already
-                # reported (QA19 F1) AFTER addressing the receipt-identified
+                # reported AFTER addressing the receipt-identified
                 # subject, possibly ANNOTATED (subject-only kill disclosure,
                 # pid-only receipt): report each refusal once, keeping the
                 # annotated form when one extends the other.
@@ -3464,7 +3429,9 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
     one) releases the ones already opened and is this check's own named failure, never an escaping
     exception. The stack's release closes a number only while fstat still returns the identity recorded at
     its open, so a number this check expected released, and another lane reopened onto any other file, is
-    never closed by this check's cleanup either (#378 P1). `reuse`, when a leg passes one, is called with
+    never closed by this check's cleanup either (#378 P1). Only EBADF reads as released there: any other
+    fstat error is a failure naming the number, which is left open (its file is unknown), never read as
+    released. `reuse`, when a leg passes one, is called with
     the descriptors after gc.collect() and before they are checked, so the leg can put another file on one.
     Returns the failures."""
     import contextlib
@@ -3493,8 +3460,11 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
         """Close fd only while it still names the file recorded at its open, this check's own."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return                                        # released already: never closed again
+        except OSError as exc:
+            if exc.errno != errno.EBADF:                  # unreadable, never read as released: named, left open
+                failures.append("guardian-close-reuse setup failure: cleanup cannot evaluate descriptor {}: "
+                                "{!r}".format(fd, exc))
+            return                                        # EBADF: released already, never closed again
         if (st.st_dev, st.st_ino) != ident:
             return                                        # another file holds the number now: not ours
         try:
@@ -3555,8 +3525,9 @@ def _st_guardian_close_reuse():
     private directory, so a number it expected released is closed only while fstat shows that file's
     identity, by the leg and by the setup check's own cleanup alike: an identity leg shows a number another
     lane reopened onto another file is never closed and is no failure, a reuse leg shows the setup check
-    reports a number replaced after gc.collect() and its cleanup leaves that number open, and a genuine leak
-    is still reported and closed.
+    reports a number replaced after gc.collect() and its cleanup leaves that number open, a genuine leak
+    is still reported and closed, and a cleanup leg shows an fstat EIO in the setup check's own release is
+    its failure naming that number, left open, never read as released.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
@@ -3609,7 +3580,7 @@ def _st_guardian_close_reuse():
                              "_fixture_send_subject": lambda peer, subject, fd: None,
                              "_fixture_ack_subject": os.close,
                              "_fixture_cleanup_deadline": lambda deadline=None: deadline,
-                             "_fixture_drain": lambda subject, fd=None, deadline=None, subject_ref=None: 0}
+                             "_fixture_drain": lambda subject, fd=None, deadline=None: 0}
                     calls = {(os, "setpgid"): lambda pid, pgrp: None, (os, "fork"): lambda: 1 << 22,
                              (os, "waitid"): lambda *args: (), (os, "_exit"): _exit,
                              (signal, "pthread_sigmask"): lambda how, mask: set()}   # the caller's mask untouched
@@ -3668,15 +3639,27 @@ def _st_guardian_close_reuse():
         ident, a file this leg created in its private directory, which no other lane opens and whose inode
         stays taken while the directory exists. The number may since belong to another thread's open, so a
         number naming any other file (another lane's /dev/null included) is never closed (#378 P1). Returns
-        whether it closed fd."""
+        True when it closed fd, False when fd is released (EBADF, the only error read as released) or names
+        another file, and for any other fstat error a cannot-evaluate string naming fd: that number is never
+        closed (its file is unknown) and never read as released."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return False
+            return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
         if (st.st_dev, st.st_ino) != ident:
             return False
         os.close(fd)
         return True
+
+    def left_open(fd, ident, what):
+        """The leak verdict on a number this leg expected released: [] when it is released or names another
+        file, else the named failure: `what` left open (and closed here), or a number fstat cannot read."""
+        closed = close_if_left_open(fd, ident)
+        if closed is True:
+            return [what + " was left open"]
+        return [what + ": " + closed] if closed else []
 
     def own_file(name):
         """A descriptor on a new file in the private directory, with its (st_dev, st_ino) taken at open."""
@@ -3689,10 +3672,14 @@ def _st_guardian_close_reuse():
         return fd, (st.st_dev, st.st_ino)
 
     def identity(fd):
+        """fd's (st_dev, st_ino); None once fd is closed (EBADF only); any other fstat error returns a
+        cannot-evaluate string naming fd, which matches no identity and is never read as released."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return None
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return None
+            return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
         return st.st_dev, st.st_ino
     with tempfile.TemporaryDirectory(prefix="opf-emit-setup-") as private:   # kept until every number is checked
         got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails, private)
@@ -3700,9 +3687,29 @@ def _st_guardian_close_reuse():
             failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
                             "named failure alone, got {}".format(got or "green"))
         for fd, ident in opened:
-            if close_if_left_open(fd, ident):
-                failures.append("guardian-close-reuse setup failure with its second open failing: the "
-                                "descriptor opened first was left open")
+            failures += left_open(fd, ident, "guardian-close-reuse setup failure with its second open failing: "
+                                             "the descriptor opened first")
+        # The leak verdict fails closed: a number left open on this leg's own file whose fstat fails EIO is
+        # reported naming it, never read as released. An independent fstat must still see it open, else the
+        # case proves nothing; the leg then closes it, its own file.
+        held, ident = own_file("unreadable")
+        import os as _os_census                   # patched through an alias: `os` itself is never rebound here
+        real_fstat = _os_census.fstat
+
+        def unreadable(number, *args, **kwargs):
+            if number == held:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = unreadable
+        try:
+            got = left_open(held, ident, "held")
+        finally:
+            _os_census.fstat = real_fstat
+        if len(got) != 1 or "cannot evaluate descriptor {}:".format(held) not in got[0] or identity(held) != ident:
+            failures.append("guardian-close-reuse leak verdict under a census EIO: expected the held descriptor "
+                            "named cannot-evaluate and left open, got {}".format(got or "released"))
+        if identity(held) == ident:
+            os.close(held)
         # Another lane opening a file onto the released number: dup2 puts a descriptor on this leg's own
         # "other-lane" file onto a number this leg still owns, so the number is never free for a real lane to
         # take meanwhile. It must not be closed and must not be reported; the leg then closes it only while
@@ -3715,9 +3722,12 @@ def _st_guardian_close_reuse():
             except BaseException:
                 os.close(reused)                          # dup2 failed: still this leg's own file
                 raise
-            if close_if_left_open(reused, ident):
+            closed = close_if_left_open(reused, ident)
+            if closed is True:
                 failures.append("guardian-close-reuse identity check: closed a number another lane reopened "
                                 "onto another file")
+            elif closed:
+                failures.append("guardian-close-reuse identity check: " + closed)
             elif identity(reused) != other_ident:
                 failures.append("guardian-close-reuse identity check: the number another lane reopened no "
                                 "longer names that lane's file")
@@ -3744,11 +3754,42 @@ def _st_guardian_close_reuse():
             os.close(other)
         # A genuine leak: a number still naming this leg's own file is reported and closed.
         leaked, ident = own_file("leaked")
-        if not close_if_left_open(leaked, ident) or identity(leaked) == ident:
+        after = identity(leaked) if close_if_left_open(leaked, ident) is True else ident
+        if after == ident or isinstance(after, str):
             failures.append("guardian-close-reuse identity check: a descriptor left open on this leg's own "
                             "file was not reported and closed")
             if identity(leaked) == ident:
                 os.close(leaked)
+        # The setup check's cleanup fails closed: fstat of the second descriptor it opened fails EIO in its
+        # ExitStack release alone (the check's own reads before it succeed), so that descriptor must be named
+        # cannot-evaluate and left open, never read as released; every other one is released. The check's
+        # own private directory is removed on return, but the open descriptor keeps its inode, so its
+        # identity stays unique; the leg then closes it while it still names the check's file.
+        seen = []
+
+        def capture(fresh):
+            seen.extend((fd, identity(fd)) for fd in fresh)
+        real_fstat = _os_census.fstat
+
+        def cleanup_unreadable(number, *args, **kwargs):
+            if len(seen) == 4 and number == seen[1][0] and sys._getframe(1).f_code.co_name == "release":
+                raise OSError(errno.EIO, "injected cleanup read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = cleanup_unreadable
+        try:
+            got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, reuse=capture)
+        finally:
+            _os_census.fstat = real_fstat
+        if len(seen) != 4 or len(got) != 1 or "cleanup cannot evaluate descriptor {}:".format(seen[1][0]) \
+                not in got[0] or identity(seen[1][0]) != seen[1][1]:
+            failures.append("guardian-close-reuse setup failure with its cleanup fstat failing EIO: expected "
+                            "the unreadable descriptor named cannot-evaluate and left open, got "
+                            "{}".format(got or "green"))
+        for number, recorded_ident in seen[:1] + seen[2:]:
+            failures += left_open(number, recorded_ident, "guardian-close-reuse setup failure with its cleanup "
+                                                          "fstat failing EIO: descriptor {}".format(number))
+        if len(seen) == 4 and identity(seen[1][0]) == seen[1][1]:
+            os.close(seen[1][0])                          # the check's own file, left open by design
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
@@ -3783,9 +3824,10 @@ def self_test():
               file=sys.stderr)
         return 2
     if not (isinstance(getattr(byte_canon, "FORBIDDEN", None), dict)
+            and isinstance(getattr(byte_canon, "LINE_SEPARATORS", None), dict)
             and callable(getattr(byte_canon, "scan_bytes", None))):
-        print("error: the byte-canon authority lacks the expected FORBIDDEN/scan_bytes interface; "
-              "fail-closed", file=sys.stderr)
+        print("error: the byte-canon authority lacks the expected FORBIDDEN/LINE_SEPARATORS/scan_bytes "
+              "interface; fail-closed", file=sys.stderr)
         return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
@@ -3794,6 +3836,13 @@ def self_test():
         failures.append("forbidden-codepoint set disagrees with _byte_canon.FORBIDDEN "
                         "(missing {}, extra {})".format(sorted(authority - set(_FORBIDDEN_CODEPOINTS)),
                                                         sorted(set(_FORBIDDEN_CODEPOINTS) - authority)))
+    # The line and paragraph separators are escaped too; that set MUST match the authority's separate
+    # LINE_SEPARATORS constant the same way (it is kept out of FORBIDDEN, so the check above cannot see it).
+    separator_authority = set(byte_canon.LINE_SEPARATORS.values())
+    if set(_LINE_SEPARATORS) != separator_authority:
+        failures.append("line-separator set disagrees with _byte_canon.LINE_SEPARATORS "
+                        "(missing {}, extra {})".format(sorted(separator_authority - set(_LINE_SEPARATORS)),
+                                                        sorted(set(_LINE_SEPARATORS) - separator_authority)))
 
     # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
     # sys.modules cache, so a poisoned _byte_canon entry cannot substitute an always-clean scanner
@@ -3828,6 +3877,11 @@ def self_test():
         findings = byte_canon.scan_bytes(text.encode("utf-8"))
         if findings:
             failures.append("{}: emitted bytes are not byte-canonical: {}".format(label, findings))
+        # scan_bytes leaves the separators to the repository gate, so check the authority's set directly.
+        literal = sorted(ch for b, ch in byte_canon.LINE_SEPARATORS.items() if b in text.encode("utf-8"))
+        if literal:
+            failures.append("{}: emitted bytes carry a literal line or paragraph separator: {}".format(
+                label, ["U+{:04X}".format(ord(ch)) for ch in literal]))
 
     def _round_trips(document, label):
         try:
@@ -3860,6 +3914,7 @@ def self_test():
                            "    boom()\r\nRuntimeError: boom\t(with a tab)"),
         "empty-string": "",
         "quotes-and-equals": 'a = "b" # not a comment, just a body',
+        "line-separators": "one" + chr(0x2028) + "two" + chr(0x2029) + "three \\u2028 text",
     }
     for name, body in fuzz.items():
         # As a top-level leaf, nested in a table, and as a field inside an array of tables, so the body
@@ -3873,7 +3928,8 @@ def self_test():
             failures.append("fuzz/{}: body did not round-trip faithfully".format(name))
 
     # A forbidden / awkward codepoint in a KEY is quoted and escaped, and still round-trips.
-    _round_trips({"a" + chr(0x200B) + "b": "x", "BACKLOG.md": "y", "with space": "z", "": "empty-key"},
+    _round_trips({"a" + chr(0x200B) + "b": "x", "BACKLOG.md": "y", "with space": "z", "": "empty-key",
+                  "c" + chr(0x2028) + "d" + chr(0x2029): "w"},
                  "fuzz/keys")
 
     # --- constrained-subset coverage: every accepted shape --------------------------------------------
@@ -3922,6 +3978,53 @@ def self_test():
         failures.append("house-style/dashes: an en/em dash reached the emitted bytes literally")
     if tomllib.loads(dash_text)["body"] != dashes:
         failures.append("house-style/dashes: the dash body did not round-trip faithfully")
+
+    # Line and paragraph separators: U+2028 and U+2029 are written with TOML's own \u2028 and \u2029 escapes,
+    # in a value and in a quoted key, and read back unchanged. Their neighbours U+2027 and U+2030 stay
+    # literal, so the escape covers exactly the two.
+    ls, ps = chr(0x2028), chr(0x2029)
+    seps = "a{}b{}c".format(ls, ps)
+    sep_model = {"body": seps, "k" + ls: "v"}
+    sep_text = emit(sep_model)
+    if sep_text != 'body = "a\\u2028b\\u2029c"\n"k\\u2028" = "v"\n':
+        failures.append("line-separators: the separators are not written as the \\u2028 and \\u2029 "
+                        "escapes ({!r})".format(sep_text))
+    if tomllib.loads(sep_text) != sep_model:
+        failures.append("line-separators: a separator value or key did not round-trip faithfully")
+    _round_trips(sep_model, "line-separators/round-trip")
+    neighbours = chr(0x2027) + chr(0x2030)
+    if emit({"body": neighbours}) != 'body = "{}"\n'.format(neighbours):
+        failures.append("line-separators: U+2027 or U+2030 was escaped; only U+2028 and U+2029 are")
+
+    # The earlier spelling: an emitter before that escape wrote the separators literally. matches_store_bytes
+    # accepts stored bytes only when replacing each literal separator with its escape gives exactly the fresh
+    # emission; a literal separator in a comment or a literal string, and any other byte difference, fail.
+    fresh = emit({"body": seps}).encode("utf-8")
+    prior = 'body = "{}"\n'.format(seps).encode("utf-8")
+    slash = emit({"body": "\\" + ls}).encode("utf-8")
+    for label, raw, canonical, want in (
+            ("exact", fresh, fresh, True),
+            ("prior-spelling", prior, fresh, True),
+            ("prior-backslash-then-separator", 'body = "\\\\{}"\n'.format(ls).encode("utf-8"), slash, True),
+            ("comment-separator", "# n{}\n".format(ls).encode("utf-8") + prior, fresh, False),
+            ("comment-separator-only", "# n{}\n".format(ls).encode("utf-8") + fresh, fresh, False),
+            ("literal-string", "body = 'a{}b{}c'\n".format(ls, ps).encode("utf-8"), fresh, False),
+            ("other-byte", prior.replace(b"body = ", b"body  = "), fresh, False),
+            ("extra-newline", prior + b"\n", fresh, False)):
+        if matches_store_bytes(raw, canonical) is not want:
+            failures.append("store-bytes/{}: matches_store_bytes returned {}; expected {}".format(
+                label, not want, want))
+    # prior_separator_spelling turns each separator escape back into the literal character, never the text
+    # after an escaped backslash, and its result reads back as the same model.
+    for label, model, want in (
+            ("separators", {"body": seps}, 'body = "{}"\n'.format(seps)),
+            ("escaped-backslash-then-text", {"body": "x\\u2028y"}, 'body = "x\\\\u2028y"\n'),
+            ("backslash-then-separator", {"body": "\\" + ps}, 'body = "\\\\{}"\n'.format(ps)),
+            ("separator-key", {"k" + ls: "v"}, '"k{}" = "v"\n'.format(ls)),
+            ("no-separator", {"body": "plain"}, 'body = "plain"\n')):
+        got = prior_separator_spelling(emit(model))
+        if got != want or tomllib.loads(got) != model:
+            failures.append("prior-spelling/{}: got {!r}; expected {!r}".format(label, got, want))
 
     # Signed-zero canonicalization: the two model-equal float inputs 0.0 and -0.0 emit byte-identically
     # (-0.0 normalizes to 0.0), and -0.0 still round-trips (it is model-equal to its 0.0 reparse).
@@ -4036,6 +4139,7 @@ def self_test():
 
     # ===== ROUND-6 codex: run_bounded watchdog hardening (this is the shared implementation imported by
     # _opf_check and _opf_release, so proving it here holds for all three self-tests) ====================
+    import errno
     import os as _os6
     import signal as _sig6
     import resource as _res6
@@ -4140,10 +4244,14 @@ def self_test():
         _close_real6 = _os6.close
 
         def _st_ident6(fd):
+            """fd's (st_dev, st_ino); None once fd is closed (EBADF, the only error read as closed). Any other
+            fstat error returns a cannot-evaluate string naming fd, never None that a caller reads as released."""
             try:
                 _st = _os6.fstat(fd)
-            except OSError:
-                return None
+            except OSError as _exc:
+                if _exc.errno == errno.EBADF:
+                    return None
+                return "cannot evaluate descriptor {}: {!r}".format(fd, _exc)
             return _st.st_dev, _st.st_ino
 
         def _cap_pipe_into(cap):
@@ -4173,13 +4281,18 @@ def self_test():
             return True
 
         def _cap_left_open6(cap):
-            """Whether the captured rfd is left open: no close released it and fstat still shows its identity."""
-            return cap.get("released") is False and _st_ident6(cap["rfd"]) == cap["ident"]
+            """True when the captured rfd is left open (no close released it and fstat still shows its identity),
+            False when released, and the cannot-evaluate string naming it when its fstat fails other than
+            EBADF: never read as released, and never closed (its file is unknown)."""
+            if cap.get("released") is not False:
+                return False
+            _got = _st_ident6(cap["rfd"])
+            return _got if isinstance(_got, str) else _got == cap["ident"]
 
         def _cap_reuse_kept6(cap, label, key="rfd"):
             """After a reuse run the captured number (cap[key]) must still name the other-lane pipe; the leg then
             closes it, its own descriptor. Returns the failures."""
-            if cap.get(key) is None or _st_ident6(cap[key]) != _oth6:
+            if cap.get(key) is None or isinstance(_oth6, str) or _st_ident6(cap[key]) != _oth6:
                 return ["run_bounded/{}-reused-number: a number another lane reused was closed or replaced "
                         "({})".format(label, cap.get(key))]
             _close_real6(cap[key])
@@ -4187,6 +4300,29 @@ def self_test():
         _oth_r6, _oth_w6 = _pipe_real6()                   # the other-lane file: this leg's own pipe
         _oth6 = _st_ident6(_oth_r6)
         _cap6 = dict()
+
+        # The left-open check fails closed: a captured, unreleased rfd still open whose fstat fails EIO is the
+        # cannot-evaluate string naming it, never read as released. An independent fstat must still see it
+        # open, else the case proves nothing.
+        _eio_r6, _eio_w6 = _pipe_real6()
+        _eio_cap6 = dict(rfd=_eio_r6, ident=_st_ident6(_eio_r6), released=False)
+        _eio_real6 = _os6.fstat
+
+        def _eio_fstat6(fd, *args, **kwargs):
+            if fd == _eio_r6:
+                raise OSError(errno.EIO, "injected census read failure")
+            return _eio_real6(fd, *args, **kwargs)
+        _os6.fstat = _eio_fstat6
+        try:
+            _eio_got6 = _cap_left_open6(_eio_cap6)
+        finally:
+            _os6.fstat = _eio_real6
+        if not (isinstance(_eio_got6, str) and "descriptor {}:".format(_eio_r6) in _eio_got6) \
+                or _st_ident6(_eio_r6) != _eio_cap6["ident"]:
+            failures.append("run_bounded/left-open-census-eio: an EIO fstat of a held captured rfd read as "
+                            "{!r}, not cannot-evaluate naming it".format(_eio_got6))
+        _close_real6(_eio_r6)
+        _close_real6(_eio_w6)
 
         def _cap_close6(fd):
             if not _cap_release6(_cap6, fd, _close_real6):
@@ -4203,14 +4339,16 @@ def self_test():
                 _os6.pipe = _pipe_real6
                 _os6.close = _close_real6
             _leaked6 = _cap_left_open6(_cap6)
-            if _leaked6:
+            if _leaked6 is True:
                 _close_real6(_cap6["rfd"])                 # still this leg's own pipe: close the leak it detected
             if _leak_res != "LEAKCHK":
                 failures.append("run_bounded/leak-check-setup{}: the capture run did not return its "
                                 "token".format(_tag6))
-            if _leaked6:
+            if _leaked6 is True:
                 failures.append("run_bounded/parent-rfd-leak{}: the parent did not close the pipe read fd "
                                 "(a descriptor leaks per call)".format(_tag6))
+            elif _leaked6:
+                failures.append("run_bounded/parent-rfd-census{}: {}".format(_tag6, _leaked6))
             elif _reuse6:
                 failures += _cap_reuse_kept6(_cap6, "parent-rfd")
 
@@ -4263,10 +4401,13 @@ def self_test():
                 _os6.pipe = _pipe_real6
                 _os6.fork = _fork_real7
                 _os6.close = _close_real7
-            if _cap7.get("rfd") is not None and _cap_left_open6(_cap7):
+            _left7 = _cap7.get("rfd") is not None and _cap_left_open6(_cap7)
+            if _left7 is True:
                 _close_real7(_cap7["rfd"])                 # still this leg's own pipe: close the leak it detected
                 failures.append("run_bounded/wfd-close-raise-rfd-leak{}: a raising parent wfd close skipped the "
                                 "rfd cleanup (read fd leaked; finding 7)".format(_tag7))
+            elif _left7:
+                failures.append("run_bounded/wfd-close-raise-rfd-census{}: {}".format(_tag7, _left7))
             elif _reuse7:
                 failures += _cap_reuse_kept6(_cap7, "wfd-close-raise-rfd")
             if _reuse7:
@@ -4537,8 +4678,8 @@ def self_test():
         failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
     # --- emit_checked reparse/compare backstop: ANY non-control-flow failure fails closed to EmitError --
-    # A >1000-part dotted key makes tomllib raise RecursionError (NOT TOMLDecodeError) on 3.12/3.13, and
-    # either the reparse or the comparison can raise MemoryError on a large store-derived model; the
+    # Deep nesting, and from CPython 3.14.8 a >1000-part dotted key, make tomllib raise RecursionError (NOT
+    # TOMLDecodeError), a many-part key can raise MemoryError under a memory limit, and either the reparse or the comparison can raise MemoryError on a large store-derived model; the
     # contract (docstring) and U7's `except EmitError` fail-closed path require these to become EmitError,
     # never escape uncontrolled. Swap the module tomllib for a stub whose loads() raises a
     # non-TOMLDecodeError and assert the conversion; a mutant catching only TOMLDecodeError, or dropping

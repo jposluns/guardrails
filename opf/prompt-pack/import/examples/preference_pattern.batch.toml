@@ -1,0 +1,13 @@
+schema = "opf.record.import-batch/v1"
+
+[source]
+path = "notes/legacy-conventions.md"
+
+[[record]]
+key = "small-reviewable-changes"
+type = "preference_pattern"
+context = "Report pipeline changes before the 2020 rewrite."
+rationale = "Large changes to the pipeline hid regressions in the totals."
+status = "retired"
+title = "Prefer small changes that can be reviewed in one sitting"
+unrecorded = [{field = "created_at", reason = "not_recorded_in_source"}, {field = "updated_at", reason = "not_recorded_in_source"}]

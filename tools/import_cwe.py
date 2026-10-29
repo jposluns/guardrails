@@ -26,6 +26,20 @@ artefact and MITRE's published figure at first acquisition (recorded in the priv
 so a re-run is deterministic and a changed pinned artefact halts and surfaces rather than shipping
 silently.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: import_cwe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import argparse
 import hashlib
 import http.client
@@ -33,7 +47,6 @@ import io
 import json
 import os
 import re
-import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -45,8 +58,16 @@ from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: import_cwe requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    import os
+    try:
+        sys.stderr.write(
+            "error: import_cwe cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 # --- Pinned provenance and expectations for CWE List Version 4.20 (observed, not recalled) ----------
 SOURCE_URL = "https://cwe.mitre.org/data/xml/cwec_v4.20.xml.zip"
@@ -433,9 +454,12 @@ def _verify_with_loader(toml_path):
     import shutil
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-cwe-loadcheck-"))
     try:
-        shutil.copy(toml_path, tmp / "cwe.toml")
+        # The loader reads a directory strictly beneath its root, so the copy sits one level down.
+        std = tmp / "standards"
+        std.mkdir()
+        shutil.copy(toml_path, std / "cwe.toml")
         try:
-            manifests = load_manifests(tmp)
+            manifests = load_manifests(std, root=tmp)
         except ManifestError as exc:
             raise ImportError_("load_manifests rejected the rendered manifest: {}".format(exc))
         man = manifests.get("map-cwe")
@@ -679,8 +703,12 @@ def self_test():
     # touched again, each vector red under RECLOSE (the pre-P1 body) by REUSE alone.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import _close_selftest
-    _close_failures, _close_runs = _close_selftest._st_close_check(
-        globals(), _close_selftest._st_helper_vectors(globals()))
+    try:
+        _close_failures, _close_runs = _close_selftest._st_close_check(
+            globals(), _close_selftest._st_helper_vectors(globals()))
+    except _close_selftest._StCensusError as exc:     # the descriptor census cannot read one: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        raise SystemExit(2)
     if _close_failures:
         raise SystemExit("SELF-TEST FAIL: #378 close vectors: {}".format("; ".join(_close_failures)))
     print("  ok: {} #378 close-vector runs".format(_close_runs))

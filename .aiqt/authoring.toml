@@ -1,0 +1,8 @@
+# .aiqt/authoring.toml: marks this tree as the AIQT Guardrails pack AUTHORING repository, not an adopter
+# install. Tracked here and never shipped: an exact [[exclusion]] in .aiqt/core/ownership.toml keeps it out
+# of the release manifest, and tools/gen_manifest.py refuses it a release class. tools/gen_hooks.py renders
+# the repository-local .claude/settings.json only in a tree carrying exactly this marker, so an adopter run
+# never creates, overwrites or deletes an adopter's own .claude/settings.json. Do not copy this file into
+# an adopter repository.
+format-version = 1
+role = "pack-authoring-repository"

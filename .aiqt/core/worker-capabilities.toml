@@ -1,0 +1,45 @@
+# .aiqt/core/worker-capabilities.toml: what each worker family can do, read by tools/check_brief_capability.py.
+#
+# Hand-authored SOURCE: one [[family]] row per worker family a brief can be addressed to. A tool that asks
+# whether a family can carry out a request reads this file, never a second copy of it. The lint fails
+# closed (exit 2) when a row has a missing, extra, or unknown key or a value outside its vocabulary, so a
+# typo can never read as a capability.
+#
+#   name        the family name a brief or a scope line uses (lower case).
+#   execute     "yes"; "read-only-sandbox" (runs commands in a sandbox that cannot write the
+#               repository); or "no" (cannot run a command, a test, or a build at all).
+#   network     "yes" or "no": whether the family can fetch a URL.
+#   repo-read   "path": reads files under a directory it is given.
+#   git-read    "yes", "no", or "undeclared": whether it can read a pinned revision through git. Undeclared
+#               means nobody has shown it either way, so no rule may rely on it.
+#   scratch     "persistent" (a writable directory that lasts the whole run); "per-command" (empty at the
+#               start of each command and discarded at its end); or "none".
+#   handback    "yes" or "no": whether it can write a file the requester can read afterwards.
+format-version = 1
+
+[[family]]
+name = "claude"
+execute = "yes"
+network = "yes"
+repo-read = "path"
+git-read = "yes"
+scratch = "persistent"
+handback = "yes"
+
+[[family]]
+name = "codex"
+execute = "read-only-sandbox"
+network = "no"
+repo-read = "path"
+git-read = "yes"
+scratch = "per-command"
+handback = "no"
+
+[[family]]
+name = "gemini"
+execute = "no"
+network = "no"
+repo-read = "path"
+git-read = "undeclared"
+scratch = "none"
+handback = "no"

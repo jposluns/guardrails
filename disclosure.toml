@@ -5,7 +5,16 @@
 # The generator fails closed (exit 2) on a row missing any of these, on an unknown key, on a bad href,
 # on a duplicate id, or on an en/em dash, so a claim can never ship without its paired limitation and
 # its pointer. Rows LINK to the values on /evidence and /mappings; they never restate a value, so there
-# is no second copy to drift. All wording below is DRAFT, owed to the Architect's review (D7).
+# is no second copy to drift. All wording below is DRAFT, owed to the maintainer's review (D7).
+#
+# The [[code]] and [[noncode]] tables at the end declare, by path prefix, every file the 1.0.5
+# release manifest ships (a prefix ending in / declares a tree; one without declares exactly that
+# file). gen_disclosure.py renders the shipped-code list in the what-it-is-made-of claim from the
+# [[code]] labels (the [[CODE-PATHS]] marker), and tools/check_reference_facts.py requires every
+# release-manifest path to fall under a declared prefix (the longest declared prefix classifies a
+# path) and runs an independent code detector (executable suffixes, script-holding HTML, shebang
+# files) that refuses a detected code path under a [[noncode]] prefix, so the public list cannot
+# read complete while the release ships code it does not name.
 
 title = "AIQT disclosure: what we claim, and what we do not"
 note = "For each thing AIQT does, the claim and its limitation stand side by side, each pointing to the evidence. Where a fact is not yet published, the matrix points to where it will appear rather than implying it."
@@ -24,8 +33,8 @@ evidence = [
 [[row]]
 id = "what-it-is-made-of"
 topic = "What the product is made of"
-claim = "The 1.0.5 artefacts are prose instructions and reference material only, with no executable code and no network calls."
-limitation = "Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds local tooling whose exact behaviour is documented before it ships."
+claim = "The 1.0.5 chat artefacts, the Claude Skill and the portable instruction files, are prose instructions and reference material only, with no executable code and no network calls. The repository that ships them also carries code, each file listed in the 1.0.5 release manifest: [[CODE-PATHS]]. This repository's own CI code under .github/, outside that manifest, runs the quality gates on GitHub on each push to main and on a pull request targeting main when a label is added to it, which the maintainer's merge process does only for the merge-train pull request that carries a batch of changes (a process rule the workflow does not enforce), so the gates run on each batch before it merges rather than on each change in it; a message-leak scan runs on every pull request targeting main and each push to main, and a separate scheduled workflow runs the offline standards-currency audit monthly and on manual dispatch. On your machine none of it runs on its own: each piece runs only when you run a tool or check, install the plugin or an enforcement hook, or open the site in a browser."
+limitation = "Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds a guided install and a setup doctor around that tooling, each documented before it ships."
 evidence = [
   { text = "What the files are", href = "/install#pick" },
   { text = "The 1.1.0 directory", href = "/tech-details#directory" },
@@ -35,7 +44,7 @@ evidence = [
 id = "what-it-enforces"
 topic = "What it can enforce"
 claim = "AIQT is a behavioural standard your assistant is required to follow: it announces what its guardrails catch, surfaces issues instead of hiding them, and backs its claims with evidence."
-limitation = "It does not technically prevent a model from erring. Results still depend on the model, the platform, competing instructions, and the tools in the conversation. AIQT does not make an AI infallible, and it does not sandbox, monitor, or block anything at runtime."
+limitation = "It does not technically prevent a model from erring. Results still depend on the model, the platform, competing instructions, and the tools in the conversation. AIQT does not make an AI infallible, and the chat skill does not sandbox, monitor, or block anything at runtime; the repository's CI gates and the opt-in Claude Code hooks plugin block or warn only on the specific actions they are built to catch, within each control's stated residuals."
 evidence = [
   { text = "What AIQT does not do", href = "/evidence#limits" },
 ]
@@ -73,8 +82,8 @@ evidence = [
 [[row]]
 id = "data-handling"
 topic = "Data handling"
-claim = "The 1.0.5 pack sends nothing anywhere: it is instructions your assistant reads, with no code and no network calls. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model."
-limitation = "The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends."
+claim = "The 1.0.5 chat artefacts send nothing anywhere: they are instructions your assistant reads, with no code and no network calls. The 1.0.5 release is wider than those artefacts: its repository ships code, each file listed in the release manifest and named under What the product is made of, and on your machine none of it runs on its own. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model."
+limitation = "The shipped repository code is not network-free when run: some of the checks and tools make network requests when run. Among them: the link-liveness check that verifies published framework URLs, the CWE importer (tools/import_cwe.py), which fetches the catalogue it vendors, and tools/ci-status.sh, which reads CI results through the GitHub CLI. The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends."
 evidence = [
   { text = "What the 1.0.5 files are", href = "/install#pick" },
   { text = "The data flow, by tier", href = "/tech-details#qa-where" },
@@ -107,3 +116,123 @@ limitation = "It is not legal advice, not a compliance certification, and no sub
 evidence = [
   { text = "What AIQT does not do", href = "/evidence#limits" },
 ]
+
+# Shipped-path declaration: every path in the 1.0.5 release manifest falls under one of these
+# prefixes (the longest declared prefix classifies a path; a prefix ending in / declares a tree, one
+# without declares exactly that file). [[code]] rows carry the public label the what-it-is-made-of
+# claim renders; [[noncode]] rows account for the prose, data, and configuration the release also
+# ships, and the gate's code detector refuses executable content classified under them.
+
+[[code]]
+prefix = "tools/"
+label = "the Python and shell tooling under tools/ and opf/tools/"
+
+[[code]]
+prefix = "opf/tools/"
+label = "the Python and shell tooling under tools/ and opf/tools/"
+
+[[code]]
+prefix = "opf/enforcement/"
+label = "the opf enforcement hooks (the pre-commit hook and the Claude Code deny hook), the pre-commit installer, and the CI template and script under opf/enforcement/"
+
+[[code]]
+prefix = "site/"
+label = "the site HTML pages (inline scripts included) and JavaScript under site/ and opf/site/"
+
+[[code]]
+prefix = "opf/site/"
+label = "the site HTML pages (inline scripts included) and JavaScript under site/ and opf/site/"
+
+[[code]]
+prefix = "docs/_shell.html"
+label = "docs/_shell.html, an HTML shell page with an inline script"
+
+[[code]]
+prefix = ".preview/"
+label = "the preview hook scripts under .preview/"
+
+[[code]]
+prefix = "plugin/"
+label = "the generated Claude Code hooks plugin under plugin/ and its source under .aiqt/core/hooks/"
+
+[[code]]
+prefix = ".aiqt/core/hooks/"
+label = "the generated Claude Code hooks plugin under plugin/ and its source under .aiqt/core/hooks/"
+
+[[noncode]]
+prefix = ".aiqt/"
+
+[[noncode]]
+prefix = ".claude/"
+
+[[noncode]]
+prefix = ".cursor/"
+
+[[noncode]]
+prefix = ".github/"
+
+[[noncode]]
+prefix = "docs/"
+
+[[noncode]]
+prefix = "opf/"
+
+[[noncode]]
+prefix = ".gitattributes"
+
+[[noncode]]
+prefix = "AGENTS.md"
+
+[[noncode]]
+prefix = "CHANGELOG.md"
+
+[[noncode]]
+prefix = "DISCLOSURE.md"
+
+[[noncode]]
+prefix = "ENFORCEMENT.md"
+
+[[noncode]]
+prefix = "GEMINI.md"
+
+[[noncode]]
+prefix = "INSTRUCTION-BUDGET.md"
+
+[[noncode]]
+prefix = "LICENSE"
+
+[[noncode]]
+prefix = "NOTICE"
+
+[[noncode]]
+prefix = "README.md"
+
+[[noncode]]
+prefix = "RELEASING.md"
+
+[[noncode]]
+prefix = "ROADMAP.md"
+
+[[noncode]]
+prefix = "SCOPE.md"
+
+[[noncode]]
+prefix = "SYSTEM-HARDENING.md"
+
+[[noncode]]
+prefix = "TODO.md"
+
+[[noncode]]
+prefix = "VERSION"
+
+[[noncode]]
+prefix = "aiqt-barebones.md"
+
+[[noncode]]
+prefix = "changelog.toml"
+
+[[noncode]]
+prefix = "disclosure.toml"
+
+[[noncode]]
+prefix = "roadmap.toml"

@@ -12,9 +12,17 @@ read-only renderer planner (_opf_views.plan_views), and publishes them through t
 journal (PR3b). It is a LIBRARY milestone: it adds no CLI verb, stages nothing in the git index
 (PR5; the views remain untracked), and never reports coupled-init success (PR7). The opf init CLI
 retains the shipped base exit-0 store scaffolding; wiring it to init_operation and exposing
-coupled-init CLI milestones are deferred to PR7.
+coupled-init CLI milestones are deferred to PR7. The adoption apply engine composes this layer
+through the ADMITTED-INVENTORY seam (`run_init_operation(admitted=...)`): a coupled adoption may
+enumerate, digest-bound, the pre-existing `.working` files its approved plan froze in place or
+published into its control-area homes; this layer re-verifies that exact inventory under its own
+mutex, records it in the immutable plan's E set (so every later check and resume re-verifies it),
+and preserves it byte-exact — while the PLAIN default (no admitted argument) keeps refusing ANY
+existing `.working` exactly as before, pinned by the seam self-tests. A resume is BOUND to its
+recorded plan: the adoption kind, the ancestral evidence commit, the admitted inventory and a
+caller-named operation id must each match, else it refuses (_resume_binding_or_refuse).
 
-The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
+The maintainer's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
 
   1. Bootstrap capability. The shared mutex is taken first (_opf_oplock.acquire_init_operation, a
      pre-store InitHolder: no control record, no lease); the plan and the directory journal are
@@ -39,8 +47,8 @@ The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), b
   5. Plan and provenance. The provenance source_digest is sha256 over the canonical JSON of the
      sorted (path, content-digest) roster EXCLUDING init.toml; init.toml is TOML through
      _opf_emit.emit_checked; the plan_digest is sha256 over the canonical JSON of the plan WITHOUT
-     its plan_digest member. The base spec_version bump, init.toml's C-CONTAINMENT membership, and the
-     `opf upgrade` route live in _opf_store, _opf_check, and opf.py. A completed adoption is
+     its plan_digest member. The base spec_version bump and init.toml's C-CONTAINMENT membership live
+     in _opf_store and _opf_check; this tooling defines no store upgrade. A completed adoption is
      re-validated for HEALTH (it may carry legitimate later edits); a partial operation is held to
      BYTE-EXACT dedupe against its immutable plan.
   6. Newest ancestral counters. The reader consumes ONE pinned evidence commit, which must lie on
@@ -82,9 +90,15 @@ ALREADY-INITIALIZED are library milestones and never map to coupled-init exit 0;
 for a fully evaluated, NON-mutating assessment that reports findings; every REFUSED, FAILED, or
 CANNOT-EVALUATE result maps to exit 2.
 
-DISCLOSED RESIDUALS: the git ignore-eligibility preflight D2a runs is not repeated here (it is a
-staging precondition, PR5); the adoption observer that distinguishes a first adoption from a
-committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
+DISCLOSED RESIDUALS: the git ignore-eligibility preflight is the one shared check plain `opf init` runs
+(_opf_write_guard.init_ignore_refusal), applied here by _refuse_ignored_destinations under the held
+mutex on both the fresh path (before the plan is persisted) and the resume path (once the recorded plan
+validates), so its own disclosed residual holds here too (an ignore input git cannot read is read as
+no rule, as git add reads it, and is not refused); the adoption observer that distinguishes a first
+adoption from a committed deletion is not part of this layer, so this layer refuses an existing store it did
+not itself record, and refuses a first adoption whenever plain `opf init`'s history scan (HEAD's
+first-parent line, the root's current path, the committed pointer or a store manifest) shows a prior
+store, but seeds a re-adoption only from an evidence commit its caller supplies; a
 same-uid writer racing the held mutex can still change a destination between the final check and a
 later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
 foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly
@@ -111,11 +125,16 @@ primitive), never a clean skip.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: _opf_init_operation.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: _opf_init_operation.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import base64
 import binascii
@@ -142,6 +161,7 @@ import _opf_observe        # noqa: E402
 import _opf_oplock         # noqa: E402
 import _opf_store          # noqa: E402
 import _opf_views          # noqa: E402
+import _opf_write_guard    # noqa: E402
 from _opf_schema import SUPPORTED_SCHEMA, validate_counters, high_water  # noqa: E402
 
 import tomllib  # noqa: E402
@@ -176,6 +196,49 @@ BOOTSTRAP_SOURCE_ROSTER = tuple(sorted(
     + tuple("{}/{}.index.toml".format(_MACHINE_HOME, t) for t in _INDEX_TYPES)))
 COUNTERS_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_check.COUNTERS_NAME)
 _MANIFEST_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_store.MANIFEST_NAME)
+# The homes-2 managed-block carrier (spec 4.2), a bootstrap source only of a generation-2 plan.
+GITIGNORE_RELPATH = "{}/.gitignore".format(_opf_store.WORKING_DIRNAME)
+
+
+def bootstrap_source_roster(manifest_model):
+    """The bootstrap SOURCE roster (store-relative, sorted, init.toml excluded) a plan built from
+    `manifest_model` creates: BOOTSTRAP_SOURCE_ROSTER, plus one empty imported leaf per enabled type
+    while the model's imported series is active, plus .working/.gitignore when the model grades at
+    homes generation 2 (spec 4.2). The default model adds nothing, so its roster is the constant."""
+    extra = {"{}/{}".format(_MACHINE_HOME, name)
+             for name in _opf_init.imported_leaf_documents(manifest_model)}
+    if _opf_store.homes_generation(manifest_model) == 2:
+        extra.add(GITIGNORE_RELPATH)
+    return tuple(sorted(set(BOOTSTRAP_SOURCE_ROSTER) | extra))
+
+
+def _bootstrap_manifest(homes2):
+    """The plan's manifest text: the default builder call, or the explicit homes-2 declaration."""
+    return _opf_init.build_manifest(homes2=True) if homes2 else _opf_init.build_manifest()
+
+
+def plan_generation(sources):
+    """The homes generation a plan's S list was built for: 2 only while this tooling supports homes
+    2 and the manifest entry's payload is byte for byte the homes-2 bootstrap manifest, else 1. Byte
+    equality with the builder parses nothing; a missing or malformed entry reads as generation 1,
+    whose roster and payload checks then refuse it exactly as before."""
+    if _opf_store.SUPPORTED_HOMES < 2 or type(sources) is not list:
+        return 1
+    entry = next((s for s in sources if type(s) is dict and s.get("path") == _MANIFEST_RELPATH), None)
+    if entry is None or type(entry.get("payload")) is not str:
+        return 1
+    try:
+        data = base64.b64decode(entry["payload"].encode("ascii"), validate=True)
+        homes2 = _bootstrap_manifest(True).encode("utf-8")
+    except (binascii.Error, UnicodeEncodeError, ValueError, _opf_init.InitError):
+        return 1
+    return 2 if data == homes2 else 1
+
+
+def _plan_manifest_model(plan):
+    """The manifest model of a plan's own generation, for its roster and counters namespaces."""
+    return _opf_init._manifest_model(homes2=plan_generation(plan["sets"]["S"]) == 2)
+
 
 _OP_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -207,6 +270,12 @@ REQUIRED_CHECKS = _SOURCE_CHECKS + ("view-poststate", "view-correspondence", "vi
 PUBLICATION_BOUNDARIES = {"milestone": "VIEWS-READY", "views": "unstaged",
                           "index": "deferred-pr5", "commit": "never"}
 RECOVERY_POLICY = "resume-forward-preserve"
+# A COUPLED operation (its id caller-minted and bound into a coupled adoption's own durable
+# intent) records THIS policy instead: it is never resumed by ANY later call, named or plain --
+# its adoption transaction reverses a partial operation and a changed run takes a fresh plan
+# (spec 14.1, 14.2) -- so a plain `opf init` after an interrupted coupled adoption can never
+# finish, publish or adopt the coupled operation's scaffold outside that adoption transaction.
+COUPLED_RECOVERY_POLICY = "resume-forward-preserve-coupled"
 ACCEPTANCE_NONE = {"present": False}
 MAX_SOURCE_BYTES = 1 << 20  # Also the intentional per-view ceiling; see DISCLOSED RESIDUALS.
 _STAGE_MARKER = ".opf-init-stage-"
@@ -432,7 +501,7 @@ def validate_bootstrap_provenance(raw, *, expected_basis=None, expected_source_d
         model = tomllib.loads(raw.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         return _pv(INVALID, "ENCODING", "raw", "invalid UTF-8")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         return _pv(INVALID, "PARSE", "raw", "not TOML ({})".format(exc))
     if type(model) is not dict:
         return _pv(INVALID, "TYPE", "root", "must be a table")
@@ -574,7 +643,7 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
         parsed = tomllib.loads(blob.decode("utf-8", errors="strict"))
     except UnicodeDecodeError:
         raise InitOperationError("ancestral counters blob is not decodable UTF-8; refusing")
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise InitOperationError("ancestral counters blob is not valid TOML ({}); refusing".format(exc))
 
     baseline, importer, module = _roster_namespaces()
@@ -885,6 +954,91 @@ def inventory_digest(model):
     return _opf_init_contract._digest(_opf_init_contract.canonical_json_bytes(model))
 
 
+# --- the admitted inventory (the coupled-adoption seam): plan-enumerated pre-existing .working files --
+
+_ADMITTED_KEYS = frozenset(("path", "mode", "size", "digest"))
+
+
+def _bad_admitted(admitted):
+    """Why `admitted` is not a well-formed admitted inventory, or None. The admitted inventory is
+    the coupled-adoption seam (spec 14, 14.2): the plan-enumerated, digest-bound FILES a coupled
+    adoption run allows to pre-exist beneath `.working/` (its control-area homes' contents and its
+    frozen non-occupying sources), each {path, mode, size, digest}. Directories are never
+    enumerated: every ancestor directory of an admitted file is implied and nothing else is
+    admitted. No admitted path may lie at or beneath the machine-store home the operation creates,
+    or be init.toml."""
+    if type(admitted) not in (list, tuple):
+        return "admitted must be a list of file entries"
+    if len(admitted) > _opf_init_contract.MAX_INVENTORY_ENTRIES:
+        return "admitted exceeds the inventory entry bound"
+    seen = set()
+    for e in admitted:
+        if type(e) is not dict or set(e) != _ADMITTED_KEYS:
+            return "admitted entries carry exactly {}".format(sorted(_ADMITTED_KEYS))
+        path = e["path"]
+        if type(path) is not str or _opf_init_contract._bad_relpath(path) is not None:
+            return "admitted path {!r} is not canonical".format(path)
+        if not path.startswith(_opf_store.WORKING_DIRNAME + "/"):
+            return "admitted path {!r} lies outside .working".format(path)
+        if path == _MACHINE_HOME or path.startswith(_MACHINE_HOME + "/"):
+            return "admitted path {!r} lies inside the machine store home".format(path)
+        if path in seen:
+            return "admitted path {!r} is duplicated".format(path)
+        seen.add(path)
+        if type(e["mode"]) is not int or not 0 <= e["mode"] <= 0o777:
+            return "admitted entry {} mode is malformed".format(path)
+        if type(e["size"]) is not int or e["size"] < 0:
+            return "admitted entry {} size is malformed".format(path)
+        if type(e["digest"]) is not str or not _opf_init_contract._DIGEST_RE.match(e["digest"]):
+            return "admitted entry {} digest grammar is malformed".format(path)
+    return None
+
+
+def _admitted_dirs(paths):
+    """The implied directory closure of admitted file paths: every ancestor strictly beneath
+    `.working` (never `.working` itself, which the inventory observer carries separately)."""
+    dirs = set()
+    for path in paths:
+        parts = path.split("/")
+        for i in range(2, len(parts)):
+            dirs.add("/".join(parts[:i]))
+    return dirs
+
+
+def _bad_admitted_dirs(admitted_dirs):
+    """Why `admitted_dirs` is not a well-formed admitted pre-existing-directory inventory, or
+    None. The coupled-adoption seam's SECOND leg (spec 14.2): after the shell archives an
+    occupying machine-store file, the file's now-EMPTY parent directory legitimately survives
+    (the apply shell never removes a pre-existing directory), so a coupled adoption may admit the
+    PLANNED directories that pre-exist: each entry names a planned directory
+    (PERMITTED_DIRECTORIES), closed under ancestors (an admitted machine home implies an admitted
+    `.working`). Plain init passes none and refuses any existing `.working` exactly as before."""
+    if type(admitted_dirs) not in (list, tuple):
+        return "admitted_dirs must be a list of planned directory paths"
+    seen = set()
+    for path in admitted_dirs:
+        if type(path) is not str or path not in PERMITTED_DIRECTORIES:
+            return "admitted_dirs entry {!r} is not a planned directory".format(path)
+        if path in seen:
+            return "admitted_dirs entry {!r} is duplicated".format(path)
+        seen.add(path)
+    if _MACHINE_HOME in seen and _opf_store.WORKING_DIRNAME not in seen:
+        return "admitted_dirs admits the machine home without its .working ancestor"
+    return None
+
+
+def _plan_e_working(plan):
+    """A VALIDATED plan's admitted pre-existing `.working` entries (its E set minus the preserved
+    CHANGELOG.md)."""
+    return [e for e in plan["sets"]["E"] if e["path"] != CHANGELOG_RELPATH]
+
+
+def _plan_admits_working(plan):
+    """Whether a VALIDATED plan admits pre-existing `.working` entries (the coupled-adoption seam),
+    so its `.working` directory pre-exists rather than being created by this operation."""
+    return bool(_plan_e_working(plan))
+
+
 def _tracked_destinations(git, root, paths):
     """The planned destinations the git index already tracks (ls-files over literal pathspecs,
     beneath the explicit product root); an unanswerable index read is CANNOT-EVALUATE."""
@@ -909,20 +1063,29 @@ def staging_name(relpath, operation_id):
 
 
 def _effect_order(paths):
-    """The canonical creation order: the machine-store sources (sorted, init.toml last among them,
-    so the provenance names a complete source set on disk before itself), then CHANGELOG.md, then
-    the store pointer LAST (the pointer promises a store, so it appears only once the store exists)."""
+    """The canonical creation order: .working/.gitignore FIRST when a generation-2 plan creates it
+    (its ignore rules stand before any store file exists), then the machine-store sources (sorted,
+    init.toml last among them, so the provenance names a complete source set on disk before itself),
+    then CHANGELOG.md, then the store pointer LAST (the pointer promises a store, so it appears only
+    once the store exists). A path it cannot place raises, never silently dropped; every caller
+    refuses a path outside its roster before ordering."""
+    head = [p for p in (GITIGNORE_RELPATH,) if p in paths]
     store = sorted(p for p in paths if p.startswith(_MACHINE_HOME + "/") and p != PROVENANCE_RELPATH)
     tail = [p for p in (PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL) if p in paths]
-    return store + tail
+    unplaced = sorted(set(paths) - set(head + store + tail))
+    if unplaced:
+        raise InitOperationError("the canonical creation order cannot place {}".format(unplaced))
+    return head + store + tail
 
 
 def build_source_payloads(*, operation_id, binding, head, first_adoption, inventory_digest_value,
-                          create_changelog, seed=None):
+                          create_changelog, seed=None, homes2=False):
     """The exact bytes of every planned source {store-relative path: bytes}, init.toml included:
     the D1 builders' documents (counters seeded from a validated ancestral seed when one is given),
     the `dir:.` store pointer, CHANGELOG.md when the plan creates it, and the provenance computed
-    over all of them EXCLUDING itself."""
+    over all of them EXCLUDING itself. `homes2` (explicit, never a default) builds the homes-2
+    manifest; its plan also creates .working/.gitignore with the rendered managed block and, while
+    the imported series is active, the empty imported leaves and their zero counter rows (spec 4.2)."""
     counters_seed = None
     if seed is not None:
         reason = seed_permanence_refusal(seed)
@@ -930,17 +1093,13 @@ def build_source_payloads(*, operation_id, binding, head, first_adoption, invent
             raise InitOperationError(reason)
         counters_seed = dict(seed.counters)
     try:
-        documents = {
-            "manifest.toml": _opf_init.build_manifest(),
-            "counters.toml": _opf_init.build_counters(seed=counters_seed),
-            "version.toml": _opf_init.build_version(),
-            "worklog.toml": _opf_init.build_worklog(),
-        }
-        for tname in _opf_init.INDEX_TYPES:
-            documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
+        model = _opf_init._manifest_model(homes2=homes2)
+        documents = _opf_init.bootstrap_documents(model, seed=counters_seed)
     except _opf_init.InitError as exc:
         raise InitOperationError("a bootstrap builder refused: {}".format(exc))
     payloads = {"{}/{}".format(_MACHINE_HOME, n): t.encode("utf-8") for n, t in documents.items()}
+    if _opf_store.homes_generation(model) == 2:
+        payloads[GITIGNORE_RELPATH] = _opf_store.render_homes_gitignore().encode("utf-8")
     payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
         {"store": {"target": "dir:."}}).encode("utf-8")
     if create_changelog:
@@ -983,7 +1142,10 @@ def build_view_roster(operation_id, manifest_payload, source_paths):
     InitOperationError."""
     try:
         manifest = tomllib.loads(manifest_payload.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError, RecursionError,
+            MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         raise InitOperationError("the planned manifest payload is not TOML; the view roster cannot "
                                  "be derived")
     views = manifest.get("views")
@@ -1024,17 +1186,26 @@ def compute_plan_digest(plan):
 
 
 def build_init_plan(*, operation_id, binding, head, inventory_digest_value, application_time,
-                    existing_changelog=None, seed=None):
+                    existing_changelog=None, seed=None, admitted=(), working_mode=None,
+                    coupled=False, homes2=False):
     """Produce the immutable opf.init.plan/v1 envelope (a pure producer): returns (plan model, exact
     canonical bytes). `existing_changelog` is None when CHANGELOG.md is absent (the plan creates it)
     or its observed {path, mode, size, digest} entry, preserved in E. `seed` is a validated
     AncestralSeed for a re-adoption (first_adoption false), recorded as the counters source's basis
-    so a retry never searches history again. The result is re-validated by validate_init_plan."""
+    so a retry never searches history again. `admitted` (the coupled-adoption seam) is the verified
+    admitted .working inventory, recorded in E beside the changelog so every later check and a
+    resume re-verify it; `working_mode` is the admitted `.working` directory's observed mode (the
+    operation preserves it rather than planning its own); `coupled` records that the operation id
+    was caller-minted and bound into a coupled adoption's own durable intent, so the plan carries
+    the coupled recovery policy and is NEVER resumed (its adoption transaction reverses a partial
+    operation instead; spec 14.2). `homes2` builds the generation-2 plan (build_source_payloads);
+    the default builds generation 1 exactly as before. The result is re-validated by
+    validate_init_plan."""
     first_adoption = seed is None
     payloads = build_source_payloads(
         operation_id=operation_id, binding=binding, head=head, first_adoption=first_adoption,
         inventory_digest_value=inventory_digest_value,
-        create_changelog=existing_changelog is None, seed=seed)
+        create_changelog=existing_changelog is None, seed=seed, homes2=homes2)
     sources = []
     for path in _effect_order(payloads):
         data = payloads[path]
@@ -1061,13 +1232,18 @@ def build_init_plan(*, operation_id, binding, head, inventory_digest_value, appl
         "sets": {"S": sources,
                  "V": build_view_roster(operation_id, payloads[_MANIFEST_RELPATH], set(payloads)),
                  "K": [],
-                 "E": [] if existing_changelog is None else [dict(existing_changelog)],
+                 "E": sorted(([] if existing_changelog is None else [dict(existing_changelog)])
+                             + [{"path": e["path"], "mode": e["mode"], "size": e["size"],
+                                 "digest": e["digest"]} for e in admitted],
+                             key=lambda e: e["path"]),
                  "C": [{"path": LEASE_RELPATH, "kind": "lease"}]},
-        "permitted_directories": [{"path": p, "mode": DIR_MODE} for p in PERMITTED_DIRECTORIES],
+        "permitted_directories": [
+            {"path": p, "mode": working_mode if working_mode is not None
+             and p == _opf_store.WORKING_DIRNAME else DIR_MODE} for p in PERMITTED_DIRECTORIES],
         "staging_set": [],
         "required_checks": list(REQUIRED_CHECKS),
         "publication_boundaries": dict(PUBLICATION_BOUNDARIES),
-        "recovery_policy": RECOVERY_POLICY,
+        "recovery_policy": COUPLED_RECOVERY_POLICY if coupled else RECOVERY_POLICY,
     }
     plan["plan_digest"] = compute_plan_digest(plan)
     raw = _opf_init_contract.canonical_json_bytes(plan)
@@ -1149,20 +1325,35 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
     if sets["C"] != [{"path": LEASE_RELPATH, "kind": "lease"}]:
         _plan_bad("C must be exactly the lease control record")
     existing = sets["E"]
-    if type(existing) is not list or len(existing) > 1:
-        _plan_bad("E must be a list of at most the one preserved CHANGELOG.md")
+    if type(existing) is not list or len(existing) > _opf_init_contract.MAX_INVENTORY_ENTRIES + 1:
+        _plan_bad("E must be a bounded list of preserved-existing entries")
+    e_paths = []
     for e in existing:
-        if type(e) is not dict or set(e) != _E_KEYS or e["path"] != CHANGELOG_RELPATH \
+        if type(e) is not dict or set(e) != _E_KEYS \
+                or type(e["path"]) is not str \
                 or type(e["mode"]) is not int or not 0 <= e["mode"] <= 0o777 \
                 or type(e["size"]) is not int or e["size"] < 0 \
                 or type(e["digest"]) is not str or not _opf_init_contract._DIGEST_RE.match(
                     e["digest"]):
             _plan_bad("E entry malformed")
+        path = e["path"]
+        if path != CHANGELOG_RELPATH:
+            # An admitted pre-existing `.working` file (the coupled-adoption seam): contained,
+            # beneath .working, never at or beneath the machine-store home the operation creates.
+            if _opf_init_contract._bad_relpath(path) is not None \
+                    or not path.startswith(_opf_store.WORKING_DIRNAME + "/") \
+                    or path == _MACHINE_HOME or path.startswith(_MACHINE_HOME + "/"):
+                _plan_bad("E entry {} is neither the preserved CHANGELOG.md nor an admitted "
+                          ".working file outside the machine store home".format(path))
+        e_paths.append(path)
+    if e_paths != sorted(set(e_paths)):
+        _plan_bad("E entries must be sorted by path with no duplicate")
     sources = sets["S"]
     if type(sources) is not list:
         _plan_bad("S must be a list")
-    roster = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH}
-    if not existing:
+    # The roster of the plan's own generation (plan_generation: byte equality with a builder).
+    roster = set(bootstrap_source_roster(_plan_manifest_model(plan))) | {PROVENANCE_RELPATH}
+    if CHANGELOG_RELPATH not in e_paths:
         roster.add(CHANGELOG_RELPATH)
     paths = [s.get("path") if type(s) is dict else None for s in sources]
     if set(paths) != roster or len(paths) != len(roster):
@@ -1194,8 +1385,16 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
         payloads[s["path"]] = data
         if s["path"] == COUNTERS_RELPATH:
             counters_basis = s["basis"]
-    if plan["permitted_directories"] != [{"path": p, "mode": DIR_MODE}
-                                         for p in PERMITTED_DIRECTORIES]:
+    want_dirs = [{"path": p, "mode": DIR_MODE} for p in PERMITTED_DIRECTORIES]
+    dirs = plan["permitted_directories"]
+    if any(path != CHANGELOG_RELPATH for path in e_paths) and type(dirs) is list and dirs \
+            and type(dirs[0]) is dict and set(dirs[0]) == {"path", "mode"} \
+            and dirs[0]["path"] == _opf_store.WORKING_DIRNAME \
+            and type(dirs[0]["mode"]) is int and 0 <= dirs[0]["mode"] <= 0o777 \
+            and not dirs[0]["mode"] & 0o022:
+        want_dirs[0] = dict(dirs[0])   # an admitted .working keeps its observed mode, never one
+        # writable by group or world (a store is never published beneath a home others can write)
+    if dirs != want_dirs:
         _plan_bad("permitted_directories must be exactly .working and its machine store")
     if plan["staging_set"] != []:
         _plan_bad("staging_set must be empty (tool git staging is PR5)")
@@ -1203,8 +1402,9 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
         _plan_bad("required_checks is not this generator's roster")
     if plan["publication_boundaries"] != PUBLICATION_BOUNDARIES:
         _plan_bad("publication_boundaries is not the VIEWS-READY boundary")
-    if plan["recovery_policy"] != RECOVERY_POLICY:
-        _plan_bad("recovery_policy must be {!r}".format(RECOVERY_POLICY))
+    if plan["recovery_policy"] not in (RECOVERY_POLICY, COUPLED_RECOVERY_POLICY):
+        _plan_bad("recovery_policy must be {!r}, or {!r} for a coupled operation".format(
+            RECOVERY_POLICY, COUPLED_RECOVERY_POLICY))
     if plan["plan_digest"] != compute_plan_digest(plan):
         _plan_bad("plan_digest does not match the recomputed digest")
     _validate_plan_payloads(plan, payloads, counters_basis)
@@ -1226,9 +1426,17 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
 
 def _validate_plan_payloads(plan, payloads, counters_basis):
     """Each payload equals what the D1 builders produce (the counters from its recorded basis), and
-    the provenance validates against the plan's own basis and the recomputed source digest."""
+    the provenance validates against the plan's own basis and the recomputed source digest. A
+    generation-2 plan is held to its own builders' bytes: the homes-2 manifest, the rendered
+    .working/.gitignore block, each empty imported leaf, and counters carrying its imported rows."""
+    homes2 = plan_generation(plan["sets"]["S"]) == 2
+    try:
+        model = _opf_init._manifest_model(homes2=homes2)
+        leaves = _opf_init.imported_leaf_documents(model)
+    except _opf_init.InitError as exc:
+        _plan_bad("the plan's generation has no bootstrap builder ({})".format(exc))
     fixed = {
-        "{}/manifest.toml".format(_MACHINE_HOME): _opf_init.build_manifest(),
+        "{}/manifest.toml".format(_MACHINE_HOME): _bootstrap_manifest(homes2),
         "{}/version.toml".format(_MACHINE_HOME): _opf_init.build_version(),
         "{}/worklog.toml".format(_MACHINE_HOME): _opf_init.build_worklog(),
         _opf_store.POINTER_REL: _opf_emit.emit_checked({"store": {"target": "dir:."}}),
@@ -1236,6 +1444,10 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
     for tname in _opf_init.INDEX_TYPES:
         fixed["{}/{}{}".format(_MACHINE_HOME, tname, _opf_check.INDEX_SUFFIX)] = \
             _opf_init.build_index(tname)
+    for name, text in leaves.items():
+        fixed["{}/{}".format(_MACHINE_HOME, name)] = text
+    if _opf_store.homes_generation(model) == 2:
+        fixed[GITIGNORE_RELPATH] = _opf_store.render_homes_gitignore()
     if CHANGELOG_RELPATH in payloads:
         fixed[CHANGELOG_RELPATH] = _CHANGELOG_PAYLOAD.decode("ascii")
     for path, text in fixed.items():
@@ -1243,7 +1455,9 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
             _plan_bad("S entry {} is not this generator's exact bytes".format(path))
     try:
         counters = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: deep nesting and (CPython 3.14.8 on) a 1001-part key; MemoryError: a many-part key
+        # under a memory limit; ValueError: an over-long integer literal too.
         _plan_bad("the counters payload is not TOML")
     if type(counters_basis) is not dict:
         _plan_bad("the counters basis must be a table")
@@ -1251,7 +1465,7 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
     if kind == "zero":
         if counters_basis != {"kind": "zero"} or not plan["first_adoption"]:
             _plan_bad("a zero counters basis belongs to a first adoption only")
-        expected = _opf_init.build_counters()
+        expected = _opf_init.build_counters(manifest=model)
     elif kind == "ancestral":
         if set(counters_basis) != {"kind", "module_counters", "commit", "blob", "path",
                                    "content_digest"} or plan["first_adoption"]:
@@ -1267,7 +1481,7 @@ def _validate_plan_payloads(plan, payloads, counters_basis):
                 and all(v == 0 for v in counters_basis["module_counters"].values())):
             _plan_bad("the ancestral counters evidence is malformed")
         try:
-            expected = _opf_init.build_counters(seed=counters.get("counters"))
+            expected = _opf_init.build_counters(seed=counters.get("counters"), manifest=model)
         except _opf_init.InitError as exc:
             _plan_bad("the counters payload is not a complete seeded ledger ({})".format(exc))
     else:
@@ -1437,25 +1651,49 @@ def _fsync_dir_at(pfd, name, label):
         raise InitOperationError("cannot fsync {} and its parent ({})".format(label, exc), FAILED)
 
 
-def _preclassify_dirs(root_fd, plan):
-    """Before directory intent, every planned directory must be absent, including on retry."""
+def _preclassify_dirs(root_fd, plan, admitted_dirs=()):
+    """Before directory intent, every planned directory must be absent, including on retry; the
+    exceptions are an admitted `.working` (the plan preserves pre-existing entries beneath it, the
+    coupled-adoption seam) and a runtime-admitted pre-existing planned directory (`admitted_dirs`,
+    the seam's second leg: the empty machine home an archived occupying file left behind), each of
+    which must instead already be a plain directory owned by this operation's uid -- an
+    admitted_dirs entry additionally at EXACTLY its planned mode, because a pre-existing directory
+    is preserved as found through the whole operation AND its reversal, never rewritten."""
+    admits = _plan_admits_working(plan)
     for d in plan["permitted_directories"]:
         path = d["path"]
         try:
-            present = _journal._lstat_contained(root_fd, path) is not None
+            st = _journal._lstat_contained(root_fd, path)
         except (_journal.JournalError, OSError) as exc:
             raise InitOperationError("cannot observe {} ({})".format(path, exc), CANNOT_EVALUATE)
-        if present:
+        if path in admitted_dirs or (admits and path == _opf_store.WORKING_DIRNAME):
+            if st is None or not stat.S_ISDIR(st.st_mode):
+                raise InitOperationError("the admitted pre-existing directory {} is no longer a "
+                                         "plain directory; preserved and refused".format(path))
+            if st.st_uid != os.getuid():
+                raise InitOperationError("the admitted pre-existing directory {} is owned by uid "
+                                         "{}, not this operation's; preserved and "
+                                         "refused".format(path, st.st_uid))
+            if path in admitted_dirs and stat.S_IMODE(st.st_mode) != d["mode"]:
+                raise InitOperationError("the admitted pre-existing directory {} holds mode {:o}, "
+                                         "not the planned {:o}; it is preserved as found, never "
+                                         "rewritten; refused".format(
+                                             path, stat.S_IMODE(st.st_mode), d["mode"]))
+            continue
+        if st is not None:
             raise InitOperationError("{} appeared before this operation recorded its intent; "
                                      "preserved and refused".format(path))
 
 
-def _apply_dirs(root_fd, plan, resuming):
+def _apply_dirs(root_fd, plan, resuming, admitted_dirs=()):
     """Create each permitted directory parent-first, at its EXACT planned mode whatever the umask,
     each fsynced with its parent. An existing directory is accepted only on RESUME (a prior attempt
-    recorded this group's intent): at its exact mode, or, when it is ours and its mode lies within
-    the planned one (all an interrupted mkdir-then-chmod can leave), after its mode is completed. A
-    symlink, a non-directory, a foreign owner, or any other mode refuses and is preserved. Returns
+    recorded this group's intent), for an admitted `.working` (whose plan records its observed
+    mode, preserved rather than rewritten), or for a runtime-admitted pre-existing planned
+    directory (`admitted_dirs`, required at EXACTLY its planned mode so it is preserved as found):
+    at its exact mode, or, when it is ours and its mode lies within the planned one (all an
+    interrupted mkdir-then-chmod can leave), after its mode is completed. A symlink, a
+    non-directory, a foreign owner, or any other mode refuses and is preserved. Returns
     {path: created | verified}."""
     out = {}
     for d in plan["permitted_directories"]:
@@ -1479,7 +1717,9 @@ def _apply_dirs(root_fd, plan, resuming):
                 if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
                     raise InitOperationError("{} exists and is not a plain directory; preserved "
                                              "and refused".format(path))
-                if not resuming:
+                if not (resuming or path in admitted_dirs
+                        or (path == _opf_store.WORKING_DIRNAME
+                            and _plan_admits_working(plan))):
                     raise InitOperationError("{} appeared before this operation created it; "
                                              "preserved and refused".format(path))
                 if st.st_uid != os.getuid():
@@ -1487,6 +1727,11 @@ def _apply_dirs(root_fd, plan, resuming):
                                              "refused".format(path, st.st_uid))
                 modes = _dir_modes(pfd, st, mode)
                 current = stat.S_IMODE(st.st_mode)
+                if not resuming and path in admitted_dirs and current != mode:
+                    raise InitOperationError("admitted pre-existing directory {} holds mode {:o}, "
+                                             "not the planned {:o}; it is preserved as found, "
+                                             "never rewritten; refused".format(
+                                                 path, current, mode))
                 if current not in modes:
                     if current & ~max(modes):
                         raise InitOperationError("{} has mode {:o}, outside the planned {:o}; "
@@ -1785,8 +2030,9 @@ def _verify_files(root_fd, files):
 def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
     """A fresh observation of the planned state. Without `views` it is the source-state check behind
     `sources-ready`: every planned directory and source exact; the .working inventory EXACTLY the
-    planned source tree (plus the lease while it is held); the local pointer absent; a preserved
-    CHANGELOG.md unchanged; the provenance valid against the plan's basis and the source digest
+    planned source tree plus the plan's admitted pre-existing entries and their implied directories
+    (plus the lease while it is held); the local pointer absent; every preserved E entry (the
+    CHANGELOG.md and each admitted .working file) unchanged byte-exact; the provenance valid against the plan's basis and the source digest
     recomputed from the ON-DISK sources; the store RESOLVING at the product root to the planned
     machine store with a VALID manifest; and the counters valid. With `views` (the published
     [(entry, bytes)], the observation behind VIEWS-READY) it also requires every view exact, the
@@ -1803,6 +2049,9 @@ def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
     expect |= {s["path"] for s in plan["sets"]["S"]
                if s["path"].startswith(_opf_store.WORKING_DIRNAME + "/")}
     expect |= {entry["path"] for entry, _data in views or ()}
+    admitted_e = _plan_e_working(plan)
+    expect |= {e["path"] for e in admitted_e}
+    expect |= _admitted_dirs([e["path"] for e in admitted_e])
     if lease_held:
         expect.add(LEASE_RELPATH)
     got = {e["path"] for e in model["entries"]}
@@ -1814,7 +2063,11 @@ def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
         raise InitOperationError("a local store pointer {} appeared; it would override the "
                                  "store".format(_opf_store.LOCAL_POINTER_REL))
     for e in plan["sets"]["E"]:
-        data, fst = _read_regular(root_fd, e["path"], e["path"], _opf_init_contract.MAX_RAW_BYTES)
+        efd, ename = _open_parent(root_fd, e["path"])
+        try:
+            data, fst = _read_regular(efd, ename, e["path"], _opf_init_contract.MAX_RAW_BYTES)
+        finally:
+            os.close(efd)
         if (stat.S_IMODE(fst.st_mode), len(data), _opf_init_contract._digest(data)) \
                 != (e["mode"], e["size"], e["digest"]):
             raise InitOperationError("the preserved {} changed during the operation".format(
@@ -1849,8 +2102,9 @@ def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
             manifest.findings))
     baseline, importer, _module = _roster_namespaces()
     counters = tomllib.loads(on_disk[COUNTERS_RELPATH].decode("utf-8"))
-    _hw, findings = validate_counters(counters, known_namespaces=baseline,
-                                      optional_namespaces=importer)
+    _hw, findings = validate_counters(
+        counters, known_namespaces=baseline, optional_namespaces=importer,
+        imported_namespaces=_opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
     if findings:
         raise InitOperationError("the published counters are not valid ({})".format(findings))
     if views is None:
@@ -1909,10 +2163,13 @@ def _health_check(root, root_fd, plan, binding):
     baseline, importer, _module = _roster_namespaces()
     try:
         counters = tomllib.loads(raw.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: tomllib's refusal of deep nesting and (CPython 3.14.8 on) a 1001-part key;
+        # MemoryError: a many-part key under a memory limit.
         raise InitOperationError("the completed adoption's counters are not TOML")
-    _hw, findings = validate_counters(counters, known_namespaces=baseline,
-                                      optional_namespaces=importer)
+    _hw, findings = validate_counters(
+        counters, known_namespaces=baseline, optional_namespaces=importer,
+        imported_namespaces=_opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
     if findings:
         raise InitOperationError("the completed adoption's counters are invalid ({})".format(
             findings))
@@ -1939,6 +2196,9 @@ def _health_check(root, root_fd, plan, binding):
         raise InitOperationError("the completed adoption's current sources are unhealthy "
                                  "(checks {}; details {}; unattributed {}; triage {})".format(
                                      bad, details, health.unattributed, health.triage))
+    # A generation-2 adoption's managed block is current health too: a removed or drifted block
+    # refuses here rather than reporting ALREADY-INITIALIZED (containment never reads the file).
+    _verify_homes_gitignore(root, plan)
 
 
 # --- the operation: select, plan or resume, journal, attach, verify, finalize (plan steps 1-10) ----
@@ -2179,30 +2439,132 @@ def _select(run, binding):
     return "fresh", None
 
 
-def _fresh_plan(run, binding, head, ancestral, git):
+def _planned_view_targets():
+    """The default manifest declares the initial view destinations; its re-parse here disposes of
+    RecursionError, MemoryError and the ValueError family itself (the tomllib parse-site floor,
+    tools/check_python_floor.py), refusing as InitOperationError, never an escaping parse error."""
+    try:
+        return {v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values()}
+    except (ValueError, RecursionError, MemoryError) as exc:   # TOMLDecodeError included
+        raise InitOperationError("the default manifest does not parse as TOML ({}); refused".format(exc))
+
+
+def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None,
+                admitted_dirs=(), homes2=False):
     """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
-    resolvable or partial store, no .working at all, every destination and staging name absent, no
-    destination already tracked, and CHANGELOG.md either absent (created) or a plain file (preserved
-    in E). With `ancestral` (a pinned evidence commit, PR4's selection) the counters are seeded
-    from the validated snapshot and the plan records it."""
+    resolvable or partial store, every destination and staging name absent, no destination already
+    tracked, and CHANGELOG.md either absent (created) or a plain file (preserved in E). Without
+    `admitted` (plain init, the unweakened default) no .working may exist at all; with it (the
+    coupled-adoption seam) `.working` must hold EXACTLY the admitted files (path, mode, size and
+    digest each re-verified here, under the mutex) plus their implied ancestor directories, recorded
+    in the plan's E set so every later check and resume re-verifies them. With `ancestral` (a pinned
+    evidence commit, PR4's selection) the counters are seeded from the validated snapshot and the
+    plan records it; without it, a first adoption whose HEAD's first-parent history already shows
+    a store refuses (_refuse_prior_store). `operation_id` is a caller-minted id (the coupled
+    adoption binds it into its own durable intent BEFORE this operation runs); None mints a fresh
+    one. `homes2` plans generation 2 (build_init_plan), whose .working/.gitignore installation the
+    read-only inspection must admit before the plan is persisted (_inspect_homes_gitignore)."""
     import uuid
     root, root_fd = run.root, run.root_fd
     for pointer in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL):
         if _lstat(root_fd, pointer, pointer) is not None:
             raise InitOperationError("an existing store pointer {} is present".format(pointer))
     model, present = observe_inventory(root_fd)
-    if present:
-        raise InitOperationError("a .working directory already exists ({} entries); foreign content "
-                                 "is never adopted by a fresh init".format(len(model["entries"])))
+    working_mode = None
+    if not admitted and not admitted_dirs:
+        if present:
+            raise InitOperationError("a .working directory already exists ({} entries); foreign "
+                                     "content is never adopted by a fresh init".format(
+                                         len(model["entries"])))
+    else:
+        if not present:
+            raise InitOperationError("the plan admits {} pre-existing .working file(s) and {} "
+                                     "pre-existing planned directory(ies), and .working is "
+                                     "absent; the admitted inventory must hold exactly".format(
+                                         len(admitted), len(admitted_dirs)))
+        want_files = {e["path"]: e for e in admitted}
+        want_dirs = _admitted_dirs(want_files) | {
+            d for d in admitted_dirs if d != _opf_store.WORKING_DIRNAME}
+        for dpath in admitted_dirs:
+            # re-proved HERE, before the plan is even built, so a wrong pre-existing directory
+            # refuses with nothing written and no operation recorded; _preclassify_dirs re-checks
+            # the same facts under the dirs group before its intent.
+            try:
+                dst = _journal._lstat_contained(root_fd, dpath)
+            except (_journal.JournalError, OSError) as exc:
+                raise InitOperationError("cannot observe admitted pre-existing directory {} "
+                                         "({})".format(dpath, exc), CANNOT_EVALUATE)
+            if dst is None or not stat.S_ISDIR(dst.st_mode):
+                raise InitOperationError("admitted pre-existing directory {} is not a plain "
+                                         "directory; preserved and refused".format(dpath))
+            if dst.st_uid != os.getuid():
+                raise InitOperationError("admitted pre-existing directory {} is owned by uid {}, "
+                                         "not this operation's; preserved and refused".format(
+                                             dpath, dst.st_uid))
+            if dpath == _opf_store.WORKING_DIRNAME and admitted:
+                continue   # its observed mode is recorded in the plan (checked for write bits below)
+            if stat.S_IMODE(dst.st_mode) != DIR_MODE:
+                raise InitOperationError("admitted pre-existing directory {} holds mode {:o}, not "
+                                         "the planned {:o}; it is preserved as found, never "
+                                         "rewritten; refused".format(
+                                             dpath, stat.S_IMODE(dst.st_mode), DIR_MODE))
+        got_files = {e["path"]: e for e in model["entries"] if e["kind"] == "file"}
+        got_dirs = {e["path"] for e in model["entries"] if e["kind"] == "directory"}
+        unexpected = sorted((set(got_files) - set(want_files)) | (got_dirs - want_dirs))
+        missing = sorted((set(want_files) - set(got_files)) | (want_dirs - got_dirs))
+        if unexpected or missing:
+            raise InitOperationError("the .working tree is not exactly the admitted inventory "
+                                     "(unexpected: {}; missing: {}); foreign content is never "
+                                     "adopted by init".format(unexpected, missing))
+        for path in sorted(want_files):
+            got, want = got_files[path], want_files[path]
+            if (got["mode"], got["size"], got["digest"]) \
+                    != (want["mode"], want["size"], want["digest"]):
+                raise InitOperationError("admitted .working file {} does not match its plan-bound "
+                                         "mode, size and digest; foreign content is never adopted "
+                                         "by init".format(path))
+        try:
+            roster = bootstrap_source_roster(_opf_init._manifest_model(homes2=homes2))
+        except _opf_init.InitError as exc:
+            raise InitOperationError("a bootstrap builder refused: {}".format(exc))
+        planned = set(roster) | {PROVENANCE_RELPATH, CHANGELOG_RELPATH}
+        planned |= _planned_view_targets()
+        clash = sorted(set(want_files) & planned)
+        if clash:
+            raise InitOperationError("admitted .working file(s) {} occupy planned destinations; an "
+                                     "occupied destination is dispositioned and removed before "
+                                     "init, never admitted".format(clash))
+        if admitted:
+            try:
+                wst = os.stat(_opf_store.WORKING_DIRNAME, dir_fd=root_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise InitOperationError("cannot stat .working ({})".format(exc), CANNOT_EVALUATE)
+            working_mode = stat.S_IMODE(wst.st_mode) & 0o777
+            if working_mode & 0o022:
+                raise InitOperationError("the admitted .working directory mode {:o} is group- or "
+                                         "world-writable; a store is never published beneath a "
+                                         "home writable by others; preserved and "
+                                         "refused".format(working_mode))
     res = _opf_store.resolve_store(root)
     if res.status == _opf_store.RESOLVED:
         raise InitOperationError("an existing store resolves at {} ({}); this layer adopts only an "
                                  "unadopted root (completed-adoption and committed-deletion "
                                  "classification is PR4)".format(root, res.detail))
     if res.status != _opf_store.NOT_ADOPTED:
-        raise InitOperationError("store resolution refused: {}".format(res.detail),
-                                 CANNOT_EVALUATE)
-    op_id = str(uuid.uuid4())
+        # The admitted inventory's .working is PRESENT with no machine store: the one
+        # non-NOT-ADOPTED posture the coupled-adoption seam exists for, re-proved by a fresh
+        # discovery at the held root descriptor (never inferred from the resolver's detail text).
+        admitted_posture = False
+        if admitted or admitted_dirs:
+            try:
+                status, _machine, _detail = _opf_store.discover_machine_store(root_fd, Path(root))
+            except (_opf_store.StoreError, OSError):
+                status = None
+            admitted_posture = status == "present"
+        if not admitted_posture:
+            raise InitOperationError("store resolution refused: {}".format(res.detail),
+                                     CANNOT_EVALUATE)
+    op_id = str(uuid.uuid4()) if operation_id is None else operation_id
     changelog = None
     st = _lstat(root_fd, CHANGELOG_RELPATH, CHANGELOG_RELPATH)
     if st is not None:
@@ -2220,8 +2582,16 @@ def _fresh_plan(run, binding, head, ancestral, git):
     plan, raw = build_init_plan(operation_id=op_id, binding=binding, head=head,
                                 inventory_digest_value=inventory_digest(model),
                                 application_time=_utc_now(), existing_changelog=changelog,
-                                seed=seed)
-    destinations = [s["path"] for s in plan["sets"]["S"]] + list(PERMITTED_DIRECTORIES)
+                                seed=seed, admitted=admitted, working_mode=working_mode,
+                                coupled=operation_id is not None, homes2=homes2)
+    if admitted:
+        # Admitted frozen sources may legitimately be git-tracked, so the tracked-destination
+        # pathspec never sweeps the whole .working: the planned destinations are enumerated exactly
+        # (the admitted/planned clash was refused above, before the plan was even built).
+        destinations = [s["path"] for s in plan["sets"]["S"]] + [_MACHINE_HOME] \
+            + [v["path"] for v in plan["sets"]["V"]]
+    else:
+        destinations = [s["path"] for s in plan["sets"]["S"]] + list(PERMITTED_DIRECTORIES)
     for s in plan["sets"]["S"]:
         for rel in (s["path"], "{}/{}".format(s["path"].rsplit("/", 1)[0], s["staging"])
                     if "/" in s["path"] else s["staging"]):
@@ -2236,7 +2606,94 @@ def _fresh_plan(run, binding, head, ancestral, git):
         raise InitOperationError("planned destination(s) already tracked by git: {}; a deletion "
                                  "present only in the worktree or index is never re-initialized "
                                  "over".format(tracked))
+    _refuse_ignored_destinations(git, binding, plan)
+    if plan_generation(plan["sets"]["S"]) == 2:
+        _inspect_homes_gitignore(root, plan)
+    if ancestral is None and head["kind"] == "commit":
+        _refuse_prior_store(git, binding, head)
     return plan, raw
+
+
+def _refuse_prior_store(git, binding, head):
+    """Refuse a FIRST adoption over a store in git history (spec 8.2: only a genuinely first
+    adoption may start its counters at zero; re-adoption seeds them from a pinned ancestral
+    snapshot). The detector is _opf_init_observe.prior_store_holder, which applies plain `opf
+    init`'s markers, first-parent walk and fail-closed boundaries to the HEAD observed under the
+    mutex (an unborn HEAD has no history and is never scanned). It runs last in _fresh_plan, the
+    position plain init's scan takes after its index and ignore checks, before the plan is
+    persisted, so a refusal records no operation and writes nothing. A found holder is REFUSED,
+    naming the commit; a scan that cannot evaluate (a shallow repository, a grafts entry, an
+    unreadable answer) is CANNOT-EVALUATE, never a pass. A re-adoption (an ancestral commit
+    supplied) and a resume are not scanned: the seed is pinned, and a resume's plan pins its
+    HEAD."""
+    try:
+        holder = _opf_init_observe.prior_store_holder(
+            git, binding["repository_root"]["path"], pinned_head=head["oid"],
+            prefix=binding["product_prefix"], object_format=binding["object_format"])
+    except _opf_init_observe.ObservationError as exc:
+        code = CANNOT_EVALUATE if exc.code == _opf_init_observe.CANNOT_EVALUATE else REFUSED
+        raise InitOperationError("cannot evaluate prior-store ancestry ({}: {}); a first "
+                                 "adoption never starts its counters at zero over history it "
+                                 "cannot read".format(exc.input_name, exc.detail), code) from exc
+    if holder is not None:
+        raise InitOperationError("a prior store exists on HEAD's first-parent line at commit {}; "
+                                 "spec 8.2 forbids zero-seeding prior ancestry, so this is a "
+                                 "re-adoption: re-adopt with its ancestral evidence "
+                                 "commit".format(holder), REFUSED)
+
+
+def _inspect_homes_gitignore(root, plan):
+    """Generation 2, fresh path only: the read-only .working/.gitignore installation inspection
+    (spec 4.2: effective ignore rules and the index are inspected first), under the held mutex
+    before the plan is persisted, so a refusal records no operation and writes nothing. Init is
+    create-only: the inspector must plan exactly the plan's payload from an absent file. Any hold
+    is REFUSED, naming each; a state the inspection cannot evaluate is CANNOT-EVALUATE."""
+    try:
+        planned, holds, prestate = _opf_write_guard.inspect_homes_gitignore(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise InitOperationError(str(exc), CANNOT_EVALUATE)
+    if holds:
+        raise InitOperationError("the {} installation is held: {}".format(
+            GITIGNORE_RELPATH, "; ".join(holds)))
+    if prestate is not None or planned != plan_payloads(plan)[GITIGNORE_RELPATH]:
+        raise InitOperationError("the {} inspection did not plan the bootstrap block for an absent "
+                                 "file; init is create-only".format(GITIGNORE_RELPATH))
+
+
+def _verify_homes_gitignore(root, plan):
+    """Generation 2, every attempt once the sources are verified and the completed rerun's health
+    check (_health_check): the post-write effectiveness re-check of the installed managed block
+    (spec 4.2). A finding is REFUSED, naming each; a state the check cannot evaluate is
+    CANNOT-EVALUATE. A generation-1 plan has no such file."""
+    if plan_generation(plan["sets"]["S"]) != 2:
+        return
+    try:
+        findings = _opf_write_guard.verify_homes_gitignore_effective(root, "init")
+    except _opf_write_guard.WriteGuardError as exc:
+        raise InitOperationError(str(exc), CANNOT_EVALUATE)
+    if findings:
+        raise InitOperationError("the installed {} is not effective: {}".format(
+            GITIGNORE_RELPATH, "; ".join(findings)))
+
+
+def _refuse_ignored_destinations(git, binding, plan):
+    """Refuse a plan whose creations git would ignore (OPF spec 5.1: an untracked or ignored store is a
+    hard failure in scaffolding, with no gitignore fallback). The planned creations, the permitted
+    directories and the S and V sets (an admitted pre-existing file is the adopter's and is never created
+    here), go to the ONE shared ignore preflight, _opf_write_guard.init_ignore_refusal, which the plain
+    `opf init` calls too. It runs under the held mutex before this attempt's first worktree write: for a
+    fresh adoption at the end of _fresh_plan, before the plan is persisted, so a refusal records no operation
+    and writes nothing; for a resume once the recorded plan is validated, before any effect group runs. An
+    ignored destination is REFUSED; a check that cannot evaluate is CANNOT-EVALUATE, never a pass."""
+    paths = sorted({d["path"] for d in plan["permitted_directories"]}
+                   | {s["path"] for s in plan["sets"]["S"]}
+                   | {v["path"] for v in plan["sets"]["V"]})
+    refusal = _opf_write_guard.init_ignore_refusal(
+        git, binding["repository_root"]["path"], Path(binding["product_prefix"]), paths)
+    if refusal is not None:
+        kind, message = refusal
+        raise InitOperationError(message, REFUSED if kind == _opf_write_guard.INIT_IGNORED
+                                 else CANNOT_EVALUATE)
 
 
 def _outcome(run, primary):
@@ -2308,7 +2765,74 @@ def _release_all(run):
         run.root_fd = None
 
 
-def run_init_operation(product_root, *, ancestral=None, recover=False):
+def _resume_binding_or_refuse(plan, op_id, ancestral, admitted, operation_id, admitted_dirs=()):
+    """A resume continues only the SAME requested operation: the recorded plan's adoption kind and
+    counters seed, its admitted .working inventory, and (when the caller names one) its operation id
+    must each equal this call's, else the resume refuses with nothing written. A partial operation
+    seeded from one ancestor is never finished under a request naming another (or none): counters
+    are seeded from the pinned high-water, never from zero, and a zero-seeded partial is never
+    finished under a re-adoption request (decision 6). A COUPLED partial (its plan records the
+    coupled recovery policy: the id was caller-minted and bound into a coupled adoption's own
+    durable intent) is never resumed AT ALL, named or unnamed: its adoption transaction reverses
+    it and a changed run takes a fresh plan (spec 14.1, 14.2), so a plain `opf init` can never
+    finish or publish a coupled operation's scaffold outside that adoption transaction. A request
+    admitting pre-existing directories never resumes either: the recorded plan enumerates no
+    admitted pre-existing directories, so the admitted content cannot be proven unchanged."""
+    if plan["recovery_policy"] == COUPLED_RECOVERY_POLICY:
+        raise InitOperationError("the one partial operation {} was begun by a coupled adoption "
+                                 "(its id was caller-minted and bound into that adoption's "
+                                 "durable intent); it is never resumed or published outside its "
+                                 "adoption transaction, which reverses it (spec 14.2); a retried "
+                                 "or changed run takes a fresh plan with its own run id".format(
+                                     op_id))
+    if admitted_dirs:
+        raise InitOperationError("a resume never changes what pre-existing content is admitted, "
+                                 "and the recorded plan enumerates no admitted pre-existing "
+                                 "directories")
+    if operation_id is not None and op_id != operation_id:
+        raise InitOperationError("the one partial operation is {} and this call names operation {}; "
+                                 "a resume never adopts another operation's history".format(
+                                     op_id, operation_id))
+    if plan["first_adoption"] != (ancestral is None):
+        raise InitOperationError("the partial operation records {} and this call requests {}; a "
+                                 "resume never changes the counters seed (counters are seeded from "
+                                 "the pinned high-water, never from zero)".format(
+                                     "a first adoption" if plan["first_adoption"]
+                                     else "a re-adoption",
+                                     "a first adoption" if ancestral is None else "a re-adoption"))
+    if ancestral is not None:
+        basis = next(e["basis"] for e in plan["sets"]["S"] if e["path"] == COUNTERS_RELPATH)
+        if basis.get("commit") != ancestral:
+            raise InitOperationError("the partial operation's counters were seeded from evidence "
+                                     "commit {} and this call pins {}; a resume never "
+                                     "re-seeds".format(basis.get("commit"), ancestral))
+    recorded = sorted((e["path"], e["mode"], e["size"], e["digest"])
+                      for e in _plan_e_working(plan))
+    requested = sorted((e["path"], e["mode"], e["size"], e["digest"]) for e in admitted)
+    if recorded != requested:
+        raise InitOperationError("the partial operation's admitted .working inventory does not "
+                                 "equal this call's; a resume never changes what pre-existing "
+                                 "content is admitted")
+
+
+def _generation_or_refuse(plan, homes2):
+    """A resume or a completed rerun keeps its recorded plan's homes generation (plan_generation):
+    `homes2` must name exactly that generation, else the call refuses before any group runs or any
+    health is checked, so neither a homes-2 request against a generation-1 operation nor a default
+    request against a generation-2 one reports a generation it did not carry out. The completed
+    path's plan is not yet re-validated here, so a malformed S reads as generation 1 (its health
+    check then refuses it exactly as before)."""
+    sets = plan.get("sets") if type(plan) is dict else None
+    recorded = plan_generation(sets.get("S") if type(sets) is dict else None)
+    requested = 2 if homes2 else 1
+    if recorded != requested:
+        raise InitOperationError("the recorded operation is at homes generation {} and this call "
+                                 "requests generation {}; a resume or rerun never changes its "
+                                 "plan's generation".format(recorded, requested))
+
+
+def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
+                       operation_id=None, admitted_dirs=None, homes2=False):
     """Run (or resume) the PR3a/PR3b init operation on the EXPLICIT absolute product root and return
     an InitResult; never raises for an expected outcome. Takes the shared mutex before any write
     (pre-store holder), re-observes the binding and HEAD under it (a pre-lock observation never
@@ -2322,10 +2846,49 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
     (durable completion) recorded, the attempt outcome recorded, and the mutex released. Any failure
     preserves the worktree and the evidence and is reported with its code; release failures are
     reported separately. `ancestral` is a pinned evidence commit for a re-adoption's counters seed
-    (PR4 selects it); `recover` is passed to the lock's explicit, confirmed-dead recovery."""
+    (PR4 selects it); `recover` is passed to the lock's explicit, confirmed-dead recovery;
+    `admitted` is the coupled-adoption seam's verified admitted .working inventory (empty or None,
+    the unweakened default, refuses ANY existing .working exactly as before); `admitted_dirs` is
+    the seam's second leg, the planned directories a coupled adoption admits as pre-existing (the
+    empty machine home an archived occupying file leaves; empty or None for a plain init);
+    `operation_id` is a caller-minted operation id, bound by the coupled adoption's durable
+    intent, and its plan records the coupled recovery policy, so such an operation is NEVER
+    resumed (its adoption transaction reverses a partial one); `admitted` and `admitted_dirs`
+    are REFUSED without it (they are the coupled seam's bindings, never a plain init's). A plain RESUME must carry the SAME
+    ancestral, admitted and operation_id bindings its recorded plan carries, else it refuses
+    (_resume_binding_or_refuse). `homes2` (explicit, never a default) plans a FRESH operation at
+    homes generation 2 (_fresh_plan) and is REFUSED up front, before the mutex and any branch, while
+    this tooling does not support homes 2; a resume or a completed rerun must name its recorded
+    plan's own generation, else it refuses (_generation_or_refuse); and every attempt of a
+    generation-2 plan, the completed rerun's health check included, re-checks the installed managed
+    block (_verify_homes_gitignore)."""
     result = InitResult()
     try:
+        if homes2 is not False and homes2 is not True:
+            raise InitOperationError("homes2 must be a boolean")
+        if homes2 and _opf_store.SUPPORTED_HOMES < 2:
+            # Before the mutex and before any branch: a fresh, resumed or completed operation alike
+            # never reports success for a homes-2 request this tooling cannot carry out.
+            raise InitOperationError("homes2 needs tooling that supports homes generation 2; "
+                                     "nothing is planned, resumed or checked")
         root = _abs_root(product_root)
+        admitted = tuple(admitted) if admitted else ()
+        reason = _bad_admitted(admitted)
+        if reason is not None:
+            raise InitOperationError(reason)
+        admitted_dirs = tuple(admitted_dirs) if admitted_dirs else ()
+        reason = _bad_admitted_dirs(admitted_dirs)
+        if reason is not None:
+            raise InitOperationError(reason)
+        if operation_id is not None and (type(operation_id) is not str
+                                         or not _OP_ID_RE.match(operation_id)):
+            raise InitOperationError("operation_id {!r} is not a well-formed operation "
+                                     "id".format(operation_id))
+        if (admitted or admitted_dirs) and operation_id is None:
+            raise InitOperationError("admitted and admitted_dirs are the coupled-adoption "
+                                     "seam's bindings; they are accepted only with the coupled "
+                                     "adoption's caller-minted operation_id, never by a plain "
+                                     "init (nothing written)")
         _journal.require_containment()
         if not _containment.probe():
             raise InitOperationError("race-free containment primitive absent", CANNOT_EVALUATE)
@@ -2359,6 +2922,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
             raise InitOperationError("the product root changed identity after it was observed")
         kind, rep = _select(run, binding)
         if kind == "completed":
+            _generation_or_refuse(rep.plan, homes2)
             _health_check(root, run.root_fd, rep.plan, binding)
             result.status = ALREADY_INITIALIZED
             result.operation_id = rep.op_id
@@ -2366,7 +2930,8 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
             result.phases = tuple(p for _s, p in rep.phases)
             return result
         if kind == "fresh":
-            plan, raw = _fresh_plan(run, binding, head, ancestral, git)
+            plan, raw = _fresh_plan(run, binding, head, ancestral, git, admitted, operation_id,
+                                    admitted_dirs, homes2)
             try:
                 run.sub = _opf_init_substrate.begin_operation(run.holder, raw)
             except _opf_init_substrate.InitSubstrateError as exc:
@@ -2382,6 +2947,10 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
                                          CANNOT_EVALUATE)
             run.plan = validate_init_plan(run.sub._plan_bytes, expected_binding=binding,
                                           expected_head=head)
+            _resume_binding_or_refuse(run.plan, rep.op_id, ancestral, admitted, operation_id,
+                                      admitted_dirs)
+            _generation_or_refuse(run.plan, homes2)
+            _refuse_ignored_destinations(git, binding, run.plan)
             run.phases = _phase_names(run.sub)
             if not run.phases:
                 run.record("plan-recorded")
@@ -2390,9 +2959,9 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         result.operation_id = run.plan["operation_id"]
         result.plan_digest = run.plan["plan_digest"]
         _run_group(run, "dirs", _dir_effects(run.plan),
-                   lambda resuming: _apply_dirs(run.root_fd, run.plan, resuming),
+                   lambda resuming: _apply_dirs(run.root_fd, run.plan, resuming, admitted_dirs),
                    lambda: _verify_dirs(run.root_fd, run.plan),
-                   pre_intent=lambda: _preclassify_dirs(run.root_fd, run.plan))
+                   pre_intent=lambda: _preclassify_dirs(run.root_fd, run.plan, admitted_dirs))
         try:
             run.cap = _opf_oplock.attach_init_lease(run.holder, run.plan["operation_id"])
         except _opf_oplock.OpLockError as exc:
@@ -2409,6 +2978,7 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         if "sources-ready" not in run.phases:
             _final_check(root, run.root_fd, run.plan, lease_held=True)
             run.record("sources-ready")
+        _verify_homes_gitignore(root, run.plan)
         views = plan_init_views(root, run.root_fd, run.plan, git)
         apply_init_views(run, views)
         try:
@@ -2426,7 +2996,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         if "preserved and refused" in str(exc):
             result.conflicts.append(str(exc).split(" ", 1)[0])
     except (_opf_oplock.OpLockError, _opf_init_substrate.InitSubstrateError,
-            _journal.JournalError, OSError, ValueError) as exc:
+            _journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
+        # RecursionError and MemoryError: this maps ANY unmapped one raised inside this protected region (from
+        # the mutex acquisition to the views-ready record), a tomllib parse refusal (deep nesting, a 1001-part
+        # key, a many-part key under a memory limit) at a site with no local mapping included, to
+        # CANNOT-EVALUATE. The preflight before this try and the cleanup in its finally are outside it.
         primary = {"code": CANNOT_EVALUATE, "detail": "{}: {}".format(type(exc).__name__, exc)}
     finally:
         if primary is not None:
@@ -2440,15 +3014,18 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
     return result
 
 
-def init_operation(product_root, *, ancestral=None, recover=False):
+def init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
+                   operation_id=None, admitted_dirs=None):
     """Public CLI seam; preserve the library result and decision-7 milestone boundary."""
-    return run_init_operation(product_root, ancestral=ancestral, recover=recover)
+    return run_init_operation(product_root, ancestral=ancestral, recover=recover,
+                              admitted=admitted, operation_id=operation_id,
+                              admitted_dirs=admitted_dirs)
 
 
 # --- self-test ------------------------------------------------------------------------------------
 #
 # The physical tests drive the REAL operation in child processes: _CHILD_STUB imports this module and calls
-# _child_main(ROOT KILL SEED RECOVER UMASK), which runs run_init_operation in a fresh interpreter, optionally SIGKILLing itself at a named point through
+# _child_main(ROOT KILL SEED RECOVER UMASK OPID), which runs run_init_operation in a fresh interpreter, optionally SIGKILLing itself at a named point through
 # hooks the child entry installs (production code carries no kill hooks), and prints the result as
 # JSON. Each retry is a fresh process, as a real restart would be. Process-kill tests establish
 # process-crash behaviour only; power-loss durability is NOT verified here.
@@ -2501,6 +3078,19 @@ def _mk_plan(**over):
     return build_init_plan(**args)
 
 
+def _st_gates(thunk, spec=_opf_store.IMPORTED_SPEC_VERSION):
+    """Run `thunk` with homes 2 supported (and, unless `spec` is None, the imported series too),
+    restoring the shipped constants in finally: generation 2 is reached only inside a vector."""
+    saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+    _opf_store.SUPPORTED_HOMES = 2
+    if spec is not None:
+        _opf_store.SUPPORTED_SPEC_VERSION = spec
+    try:
+        return thunk()
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
+
+
 def _st_git_env(base):
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["HOME"] = base
@@ -2532,9 +3122,29 @@ def _git(args, cwd, env, allow_fail=False, input_bytes=None):
 
 
 def _write(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Fixture bytes at path, hermetic against ANY ambient process umask: every missing
+    directory is created one level at a time, parent-first, and pinned to DIR_MODE before
+    the next level is created beneath it (a bare makedirs under an owner-restrictive umask
+    such as 0o700 leaves a fresh parent untraversable, so nothing deeper could be built),
+    and a freshly created file is pinned to 0o644 (a fixture needing another mode chmods
+    after writing), while a pre-existing file keeps its mode and only its bytes change. A
+    path that is a dangling symlink is NOT handled: the write would follow the link and
+    create its target with a umask-derived mode (the R5 symlink fixtures call os.symlink
+    directly and never pass one here). A fixture verdict comes from the code under test,
+    never from the umask the harness happened to inherit."""
+    missing = []
+    parent = os.path.dirname(path)
+    while parent and not os.path.lexists(parent):
+        missing.append(parent)
+        parent = os.path.dirname(parent)
+    for made in reversed(missing):
+        os.mkdir(made)
+        os.chmod(made, DIR_MODE)
+    fresh = not os.path.lexists(path)
     with open(path, "wb") as fh:
         fh.write(data)
+    if fresh:
+        os.chmod(path, 0o644)
 
 
 def _counters_toml(values):
@@ -2595,7 +3205,7 @@ def _tree_snapshot(root):
 
 
 # The child is launched through this import stub, not as `__main__` with an argument list, so the module's own
-# entry accepts `--self-test` alone. argv: this file, then _child_main's five arguments.
+# entry accepts `--self-test` alone. argv: this file, then _child_main's six arguments.
 _CHILD_STUB = (
     "import importlib, os, sys\n"
     "sys.path.insert(0, os.path.dirname(sys.argv[1]))\n"
@@ -2603,11 +3213,12 @@ _CHILD_STUB = (
     "sys.exit(module._child_main(sys.argv[2:]))\n")
 
 
-def _child(root, env, kill="none", seed=None, recover=True, umask=None):
+def _child(root, env, kill="none", seed=None, recover=True, umask=None, opid=None):
     """Run run_init_operation in a FRESH interpreter; returns (exit status, result dict or None)."""
     import subprocess
     argv = [sys.executable, "-I", "-B", "-c", _CHILD_STUB, os.path.abspath(__file__), root, kill,
-            seed or "-", "1" if recover else "0", "-" if umask is None else "{:o}".format(umask)]
+            seed or "-", "1" if recover else "0", "-" if umask is None else "{:o}".format(umask),
+            opid or "-"]
     proc = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           timeout=300)
     out = proc.stdout.decode("utf-8", "replace").strip().splitlines()
@@ -2620,7 +3231,8 @@ def _child(root, env, kill="none", seed=None, recover=True, umask=None):
 def _child_main(argv):
     """The child entry (_CHILD_STUB): install the named kill hook, run once, print the result."""
     import signal
-    root, kill, seed, recover, umask = argv
+    root, kill, seed, recover, umask = argv[:5]
+    opid = argv[5] if len(argv) > 5 and argv[5] != "-" else None
     if umask != "-":
         os.umask(int(umask, 8))
     this = sys.modules[__name__]
@@ -2724,7 +3336,8 @@ def _child_main(argv):
         _journal.recover = _journal._restore_preimage = _journal.reconcile_and_claim_stale = refuse
     elif name != "none":
         raise SystemExit("unknown kill point {!r}".format(kill))
-    res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1")
+    res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1",
+                             operation_id=opid)
     print(json.dumps({s: getattr(res, s) for s in InitResult.__slots__}, sort_keys=True))
     return 0
 
@@ -2738,6 +3351,66 @@ def _read_plan(root):
     ops = sorted(os.listdir(_ops_dir(root)))
     with open(os.path.join(_ops_dir(root), ops[0], _opf_init_substrate.PLAN_NAME), "rb") as fh:
         return ops, fh.read()
+
+
+def _homes2_plan_tests(plan, ok, refuses):
+    """The pure generation-2 plan vectors (spec 4.2): built only through the explicit homes2
+    input under raised gates (_st_gates), with its roster, creation order, payloads and counters
+    namespaces, and the refusals that hold each generation to its own exact roster. `plan` is
+    the self-test's default generation-1 plan."""
+    def resealed(source, change):
+        doc = json.loads(json.dumps(source))
+        change(doc)
+        doc["plan_digest"] = compute_plan_digest(doc)
+        return _opf_init_contract.canonical_json_bytes(doc)
+
+    gen2_leaves = sorted("{}/{}".format(_MACHINE_HOME, n)
+                         for n in _opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
+    ok("H2-gen1-roster-unchanged",
+       bootstrap_source_roster(_opf_init._manifest_model()) == BOOTSTRAP_SOURCE_ROSTER
+       and plan_generation(plan["sets"]["S"]) == 1
+       and _st_gates(lambda: plan_generation(plan["sets"]["S"])) == 1)
+    refuses("H2-homes2-refused-at-shipped-constants", lambda: _mk_plan(homes2=True),
+            needle="homes generation 2")
+    plan2, raw2 = _st_gates(lambda: _mk_plan(homes2=True))
+    paths2 = [s["path"] for s in plan2["sets"]["S"]]
+    payloads2 = plan_payloads(plan2)
+    ok("H2-plan-carries-gitignore", paths2[0] == GITIGNORE_RELPATH
+       and payloads2[GITIGNORE_RELPATH] == _opf_store.render_homes_gitignore().encode("utf-8")
+       and _st_gates(lambda: plan_generation(plan2["sets"]["S"])) == 2
+       and _st_gates(lambda: validate_init_plan(raw2, expected_binding=_mk_binding(),
+                                                expected_head=_mk_head()))["plan_digest"]
+       == plan2["plan_digest"], str(paths2[:2]))
+    ok("H2-plan-carries-imported-leaves", set(gen2_leaves) <= set(paths2)
+       and all(payloads2[p] in (b"record = []\nschema = 1\n", b"entry = []\nschema = 1\n")
+               for p in gen2_leaves)
+       and paths2[-3:] == [PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL]
+       and set(tomllib.loads(payloads2[COUNTERS_RELPATH].decode("utf-8"))["counters"])
+       == set(_opf_store.BASELINE_TYPES.values())
+       | {"imported:" + ns for ns in _opf_store.BASELINE_TYPES.values()})
+    plan2h, _raw2h = _st_gates(lambda: _mk_plan(homes2=True), spec=None)
+    paths2h = [s["path"] for s in plan2h["sets"]["S"]]
+    ok("H2-homes-only-no-leaves", paths2h[0] == GITIGNORE_RELPATH
+       and not set(gen2_leaves) & set(paths2h)
+       and plan_payloads(plan2h)[COUNTERS_RELPATH] == plan_payloads(plan)[COUNTERS_RELPATH])
+    refuses("H2-plan-missing-gitignore-refused", lambda: _st_gates(lambda: validate_init_plan(
+        resealed(plan2, lambda d: d["sets"]["S"].pop(0)))),
+        needle="S is not exactly the bootstrap source roster")
+    gitignore_entry = dict(plan2["sets"]["S"][0], staging=staging_name(GITIGNORE_RELPATH,
+                                                                       plan["operation_id"]))
+    # Homes-only gates keep the shipped spec_version pin, so the roster is the refusal under test.
+    refuses("H2-gen1-plan-with-gitignore-refused", lambda: _st_gates(lambda: validate_init_plan(
+        resealed(plan, lambda d: d["sets"]["S"].insert(0, gitignore_entry))), spec=None),
+        needle="S is not exactly the bootstrap source roster")
+    refuses("H2-gen2-plan-refused-at-shipped-constants", lambda: validate_init_plan(_raw2h),
+            needle="S is not exactly the bootstrap source roster")
+    refuses("H2-effect-order-refuses-unplaced", lambda: _effect_order({".working/other"}),
+            needle="cannot place")
+    ok("H2-checks-accept-imported-counters",
+       _st_gates(lambda: _opf_init.imported_counter_namespaces(_plan_manifest_model(plan2)))
+       == frozenset(_opf_store.BASELINE_TYPES.values())
+       and _st_gates(lambda: _opf_init.imported_counter_namespaces(_plan_manifest_model(plan)))
+       is None)
 
 
 def _run_self_test():
@@ -2796,6 +3469,20 @@ def _run_self_test_isolated():
     manual = "sha256:" + hashlib.sha256((json.dumps(pairs, separators=(",", ":"))
                                          + "\n").encode("ascii")).hexdigest()
     ok("D-basis-independent-fixture", manual == source_digest)
+
+    # The tomllib parse-site floor (tools/check_python_floor.py, tomllib leg): the planned-view-target
+    # parse disposes of RecursionError, MemoryError and the ValueError family in its own function,
+    # refusing as InitOperationError. Deep nesting feeds a real RecursionError and an over-long integer
+    # literal a real bare ValueError; MemoryError shares the handler (the static floor scan is its
+    # per-site guard).
+    real_build_manifest = _opf_init.build_manifest
+    try:
+        for label, text in (("deep-nesting", "x = " + "[" * 6000 + "]" * 6000),
+                            ("long-integer", "x = " + "9" * 5000)):
+            _opf_init.build_manifest = lambda: text
+            refuses("D-planned-views-" + label, _planned_view_targets, needle="does not parse as TOML")
+    finally:
+        _opf_init.build_manifest = real_build_manifest
 
     # --- pure: provenance build + validate --------------------------------------------------------
     text = build_bootstrap_provenance(_mk_basis(), payloads)
@@ -2929,6 +3616,12 @@ def _run_self_test_isolated():
                                          expected_head=_mk_head())["plan_digest"]
        == plan["plan_digest"])
 
+    # --- pure: the generation-2 plan (spec 4.2), reached only through the explicit homes2 input ----
+    try:
+        _homes2_plan_tests(plan, ok, refuses)
+    except Exception:
+        ok("H2-plan-harness", False, traceback.format_exc())
+
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-op-selftest-"))
     env = _st_git_env(base)
     saved = {}
@@ -2944,6 +3637,14 @@ def _run_self_test_isolated():
         tests_run.append("physical")
         _view_tests(base, env, ok, signal)
         tests_run.append("views")
+        _seam_tests(base, env, ok)
+        tests_run.append("seam")
+        _ignore_tests(base, env, ok)
+        tests_run.append("ignore")
+        _ancestry_tests(base, env, ok)
+        tests_run.append("ancestry")
+        _homes2_tests(base, env, ok)
+        tests_run.append("homes2")
         import check_opf_init_qa
         ok("PR3a-QA-regressions", check_opf_init_qa.self_test() == 0)
     except Exception:
@@ -2960,13 +3661,817 @@ def _run_self_test_isolated():
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
     print("filesystem under test: {} (TMPDIR={})".format(base, os.environ.get("TMPDIR", "")))
-    if failed or tests_run != ["b6", "physical", "views"]:
+    if failed or tests_run != ["b6", "physical", "views", "seam", "ignore", "ancestry", "homes2"]:
         sys.stderr.write("_opf_init_operation SELF-TEST: FAIL ({} of {})\n".format(
             len(failed), len(checks)))
         return 1
     print("_opf_init_operation SELF-TEST: PASS ({} checks)".format(len(checks)))
     return 0
 
+
+
+def _homes2_tests(base, env, ok):
+    """Generation-2 init over real git stores (spec 4.2), reached only through the explicit homes2
+    input with both gates raised inside each vector: the plan creates .working/.gitignore first, the
+    empty imported leaves and their zero counter rows; the read-only inspection gates the fresh path
+    before the plan is persisted (a hold or a plan that is not a create REFUSED and a cannot-evaluate
+    state CANNOT-EVALUATE, nothing written, no operation recorded); the post-write check runs on
+    every attempt and on the completed rerun's health check; a homes2 request at the shipped
+    constants, or a non-boolean homes2, is refused before the mutex on the fresh, resume and
+    completed paths, and a resume or rerun naming the other generation than its recorded plan's is
+    refused; and a default run never inspects, even with both gates raised. The inspection refuses
+    the self-test's ambient GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM overrides, so those two are unset
+    around the group."""
+    from unittest import mock
+    d = os.path.join(base, "homes2")
+    leaves = sorted(_opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def counting(real):
+        calls = []
+
+        def wrapped(*a, **k):
+            calls.append(a)
+            return real(*a, **k)
+        return wrapped, calls
+
+    def detail(res):
+        return (res.primary_failure or {}).get("detail", "")
+
+    def unsupported(root, **kw):
+        # A homes2 request at the shipped constants: REFUSED before the mutex is taken, with the
+        # worktree and the recorded operations unchanged. Returns (verdict, detail) for ok().
+        before, ops = _tree_snapshot(root), sub_ops(root)
+        acquire, acquired = counting(_opf_oplock.acquire_init_operation)
+        with mock.patch.object(_opf_oplock, "acquire_init_operation", acquire):
+            res = run_init_operation(root, homes2=True, **kw)
+        return (res.status == REFUSED and "homes2 needs tooling" in detail(res) and not acquired
+                and _tree_snapshot(root) == before and sub_ops(root) == ops,
+                "{} {} {}".format(res.status, res.primary_failure, len(acquired)))
+
+    def no_lease(snapshot):
+        # the lock's explicit recovery legitimately settles the killed holder's stale lease
+        return {rel: v for rel, v in snapshot.items() if rel != LEASE_RELPATH.replace("/", os.sep)}
+
+    def mismatched(root, homes2, spec=_opf_store.IMPORTED_SPEC_VERSION, **kw):
+        # A resume or completed rerun naming the other generation than its recorded plan's, with
+        # homes 2 supported: REFUSED with the worktree and the recorded operations unchanged.
+        before, ops = no_lease(_tree_snapshot(root)), sub_ops(root)
+        res = _st_gates(lambda: run_init_operation(root, homes2=homes2, **kw), spec=spec)
+        return (res.status == REFUSED and "never changes its plan's generation" in detail(res)
+                and no_lease(_tree_snapshot(root)) == before and sub_ops(root) == ops,
+                "{} {}".format(res.status, res.primary_failure))
+
+    saved = {k: os.environ.pop(k, None) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
+    try:
+        # The fresh path at the shipped constants: a homes2 request, and a homes2 that is not a
+        # boolean (red when that check is dropped: 0 and None then run a default init), each refuse
+        # before the mutex with nothing written.
+        root = _plain_repo(os.path.join(d, "unsupported"), env)
+        ok("H2-fresh-unsupported-refused-up-front", *unsupported(root))
+        before = _tree_snapshot(root)
+        acquire, acquired = counting(_opf_oplock.acquire_init_operation)
+        outcomes = []
+        with mock.patch.object(_opf_oplock, "acquire_init_operation", acquire):
+            for bad in (1, 0, "yes", None):
+                res = run_init_operation(root, homes2=bad)
+                outcomes.append((bad, res.status, detail(res)))
+        ok("H2-run-homes2-non-boolean-refused", all(
+            status == REFUSED and "homes2 must be a boolean" in text
+            for _bad, status, text in outcomes)
+           and not acquired and _tree_snapshot(root) == before and sub_ops(root) == [],
+           str(outcomes))
+
+        root = _plain_repo(os.path.join(d, "fresh"), env)
+        inspect, inspected = counting(_opf_write_guard.inspect_homes_gitignore)
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", inspect), \
+                mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        snap = _tree_snapshot(root)
+        counters = snap.get(os.path.join(".working", "toml", "counters.toml"), (None, 0, b""))[2]
+        ok("H2-run-views-ready", res.status == VIEWS_READY and len(inspected) == 1
+           and len(verified) == 1
+           and snap.get(os.path.join(".working", ".gitignore"), (None,))[2:]
+           == (_opf_store.render_homes_gitignore().encode("utf-8"),)
+           and all(os.path.join(".working", "toml", n) in snap for n in leaves)
+           and b'"imported:BI" = 0' in counters, "{} {} {}".format(
+               res.status, res.primary_failure, (len(inspected), len(verified))))
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-rerun-already-initialized", res.status == ALREADY_INITIALIZED and len(verified) == 1,
+           "{} {} {}".format(res.status, res.primary_failure, len(verified)))
+        # The completed path keeps the recorded generation: a default rerun of this generation-2
+        # adoption refuses, and a homes2 rerun at the shipped constants refuses before the mutex.
+        ok("H2-completed-gen2-default-rerun-refused", *mismatched(root, False))
+        ok("H2-completed-unsupported-refused-up-front", *unsupported(root))
+        # A completed adoption whose managed block was removed is unhealthy: the rerun's health
+        # check runs the post-write check and refuses, never ALREADY-INITIALIZED, writing nothing.
+        _write(os.path.join(root, ".working", ".gitignore"), b"# adopter only\n")
+        before = _tree_snapshot(root)
+        res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-completed-block-removed-refused", res.status == REFUSED
+           and "not effective" in detail(res) and "homes-gitignore-block-missing" in detail(res)
+           and _tree_snapshot(root) == before, "{} {}".format(res.status, res.primary_failure))
+
+        # Init is create-only: an inspection that planned from a present file, or planned other
+        # bytes than the plan's payload, refuses like a hold (red when that arm is dropped).
+        rendered = _opf_store.render_homes_gitignore().encode("utf-8")
+        for label, effect, code, needle in (
+                ("hold", lambda *a, **k: (rendered, ["tracked-control-path: held"], None),
+                 REFUSED, "is held"),
+                ("cannot-evaluate", mock.Mock(side_effect=_opf_write_guard.WriteGuardError(
+                    "cannot run git")), CANNOT_EVALUATE, "cannot run git"),
+                ("present-file", lambda *a, **k: (rendered, [], b"# adopter\n"), REFUSED,
+                 "init is create-only"),
+                ("other-bytes", lambda *a, **k: (rendered + b"# extra\n", [], None), REFUSED,
+                 "init is create-only")):
+            root = _plain_repo(os.path.join(d, "inspect-" + label), env)
+            before = _tree_snapshot(root)
+            with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", effect):
+                res = _st_gates(lambda: run_init_operation(root, homes2=True))
+            ok("H2-inspector-{}-refuses".format(label), res.status == code
+               and needle in detail(res)
+               and _tree_snapshot(root) == before and sub_ops(root) == [],
+               "{} {}".format(res.status, res.primary_failure))
+
+        # The post-write check runs on the fresh attempt and again on its resume (the source-state
+        # milestone already recorded): a finding refuses with the plan kept, and the resume, naming
+        # its recorded generation-2 plan's generation, re-checks and completes. Before it, a default
+        # resume refuses (the other generation) and a homes2 resume at the shipped constants
+        # refuses before the mutex, each leaving the partial as it was.
+        root = _plain_repo(os.path.join(d, "verify"), env)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective",
+                               lambda *a, **k: ["homes-gitignore-ineffective: forced"]):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-verifier-finding-refuses", res.status == REFUSED
+           and "not effective" in detail(res)
+           and len(sub_ops(root)) == 1, "{} {}".format(res.status, res.primary_failure))
+        ok("H2-resume-gen2-default-refused", *mismatched(root, False))
+        ok("H2-resume-unsupported-refused-up-front", *unsupported(root))
+        verify, verified = counting(_opf_write_guard.verify_homes_gitignore_effective)
+        with mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", verify):
+            res = _st_gates(lambda: run_init_operation(root, homes2=True))
+        ok("H2-verifier-runs-on-resume", res.status == VIEWS_READY and len(verified) == 1
+           and len(sub_ops(root)) == 1, "{} {} {}".format(res.status, res.primary_failure,
+                                                           len(verified)))
+
+        # A generation-1 partial (killed after its second source) and then its completed adoption:
+        # a homes2 resume or rerun refuses at the shipped constants (before the mutex) and with
+        # homes 2 supported (the recorded generation is 1; the homes-only gate keeps the shipped
+        # spec_version pin, so the generation is the refusal under test), while the default resume
+        # completes it.
+        root = _plain_repo(os.path.join(d, "gen1"), env)
+        _child(root, env, kill="source:2")
+        partial = sub_ops(root)
+        good, why = unsupported(root, recover=True)
+        ok("H2-resume-gen1-unsupported-refused-up-front", len(partial) == 1 and good, why)
+        ok("H2-resume-gen1-homes2-refused", *mismatched(root, True, spec=None, recover=True))
+        res = run_init_operation(root, recover=True)
+        ok("H2-resume-gen1-default-completes", res.status == VIEWS_READY
+           and sub_ops(root) == partial, "{} {}".format(res.status, res.primary_failure))
+        ok("H2-completed-gen1-unsupported-refused-up-front", *unsupported(root))
+        ok("H2-completed-gen1-homes2-refused", *mismatched(root, True, spec=None))
+
+        # A default run plans generation 1 even with both gates raised: no inspection, no
+        # post-write check, no .working/.gitignore and no imported leaf.
+        root = _plain_repo(os.path.join(d, "default"), env)
+        refuse = mock.Mock(side_effect=_opf_write_guard.WriteGuardError("must not be called"))
+        with mock.patch.object(_opf_write_guard, "inspect_homes_gitignore", refuse), \
+                mock.patch.object(_opf_write_guard, "verify_homes_gitignore_effective", refuse):
+            res = _st_gates(lambda: run_init_operation(root))
+        snap = _tree_snapshot(root)
+        ok("H2-gen1-never-inspects", res.status == VIEWS_READY and refuse.call_count == 0
+           and os.path.join(".working", ".gitignore") not in snap
+           and not any(os.path.join(".working", "toml", n) in snap for n in leaves),
+           "{} {}".format(res.status, res.primary_failure))
+    finally:
+        for k, val in saved.items():
+            if val is not None:
+                os.environ[k] = val
+
+
+def _seam_tests(base, env, ok):
+    """The coupled-adoption seam (the admitted .working inventory) and the resume bindings. The
+    plain default (no admitted argument) is pinned UNWEAKENED first: an existing `.working`, however
+    populated, still refuses exactly as before with nothing written and no operation recorded."""
+    d = os.path.join(base, "seam")
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    # The no-weakening pin: plain init (admitted empty) over a populated .working refuses as today.
+    root = _plain_repo(os.path.join(d, "plain"), env)
+    _write(os.path.join(root, ".working", "notes.md"), b"foreign\n")
+    before = _tree_snapshot(root)
+    res = run_init_operation(root)
+    ok("SEAM-plain-populated-working-refused", res.status == REFUSED
+       and "already exists" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [],
+       str(res.primary_failure))
+    res = run_init_operation(root, admitted=())
+    ok("SEAM-empty-admitted-is-plain", res.status == REFUSED
+       and "already exists" in res.primary_failure["detail"] and _tree_snapshot(root) == before)
+
+    def oid(n):
+        # a fixed well-formed caller-minted operation id per seam fixture (the coupled
+        # adoption's binding; the seam refuses admitted/admitted_dirs without one)
+        return "%08x-c0de-4ead-8ead-%012x" % (n, n)
+
+    # The seam's bindings are coupled-only: admitted (and admitted_dirs, below) refuses
+    # without the caller-minted operation id, with nothing written.
+    res = run_init_operation(root, admitted=(
+        dict(path=".working/notes.md", mode=0o644, size=8,
+             digest="sha256:" + "0" * 64),))
+    ok("SEAM-admitted-without-operation-id-refused", res.status == REFUSED
+       and "caller-minted operation_id" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+    def admit_fixture(name, payload=b"frozen source\n"):
+        root = _plain_repo(os.path.join(d, name), env)
+        rel = os.path.join(".working", "notes", "frozen.md")
+        _write(os.path.join(root, rel), payload)
+        st = os.lstat(os.path.join(root, rel))
+        return root, ({"path": ".working/notes/frozen.md", "mode": stat.S_IMODE(st.st_mode),
+                       "size": len(payload),
+                       "digest": _opf_init_contract._digest(payload)},), payload
+
+    # The seam accepts EXACTLY the admitted inventory and preserves it byte-exact through the run.
+    root, adm, payload = admit_fixture("admit")
+    res = run_init_operation(root, admitted=adm, operation_id=oid(1))
+    with open(os.path.join(root, ".working/notes/frozen.md"), "rb") as fh:
+        live = fh.read()
+    ok("SEAM-admitted-accepted", res.status == VIEWS_READY and live == payload
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, str(res.primary_failure))
+
+    # One byte of drift in the admitted file refuses with nothing written.
+    root, adm, payload = admit_fixture("drift")
+    _write(os.path.join(root, ".working", "notes", "frozen.md"), payload[:-2] + b"X\n")
+    before = _tree_snapshot(root)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(2))
+    ok("SEAM-admitted-drift-refused", res.status == REFUSED
+       and "never adopted" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+    # An extra file beside the admitted set, or an admitted file gone missing, refuses.
+    root, adm, payload = admit_fixture("extra")
+    _write(os.path.join(root, ".working", "stray.md"), b"stray\n")
+    before = _tree_snapshot(root)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(3))
+    ok("SEAM-extra-beside-admitted-refused", res.status == REFUSED
+       and "not exactly the admitted inventory" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+    root, adm, payload = admit_fixture("missing")
+    os.unlink(os.path.join(root, ".working", "notes", "frozen.md"))
+    res = run_init_operation(root, admitted=adm, operation_id=oid(4))
+    ok("SEAM-admitted-missing-refused", res.status == REFUSED
+       and "not exactly the admitted inventory" in res.primary_failure["detail"]
+       and sub_ops(root) == [], str(res.primary_failure))
+
+    # An admitted path at a planned destination or under the machine home refuses.
+    root, adm, payload = admit_fixture("occupy")
+    os.rename(os.path.join(root, ".working", "notes", "frozen.md"),
+              os.path.join(root, ".working", "TODO.md"))
+    os.rmdir(os.path.join(root, ".working", "notes"))
+    occ = (dict(adm[0], path=".working/TODO.md"),)
+    res = run_init_operation(root, admitted=occ, operation_id=oid(5))
+    ok("SEAM-admitted-occupying-destination-refused", res.status == REFUSED
+       and "occupy planned destinations" in res.primary_failure["detail"]
+       and sub_ops(root) == [], str(res.primary_failure))
+    res = run_init_operation(root, admitted=(dict(adm[0], path=".working/toml/x.md"),),
+                             operation_id=oid(6))
+    ok("SEAM-admitted-machine-home-refused", res.status == REFUSED
+       and "machine store home" in res.primary_failure["detail"], str(res.primary_failure))
+
+    # Resume bindings over a killed SEEDED partial: the recorded plan's seed is never changed.
+    values = dict.fromkeys(sorted(set(_opf_store.BASELINE_TYPES.values())), 0)
+    values.update(WL=7, BI=3)
+    root = _plain_repo(os.path.join(d, "seeded"), env)
+    _write(os.path.join(root, COUNTERS_RELPATH), _counters_toml(values))
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "adopted"], root, env)
+    evidence = _head(root, env)
+    _git(["rm", "-q", "-r", _opf_store.WORKING_DIRNAME], root, env)
+    _git(["commit", "-q", "-m", "deleted"], root, env)
+    _child(root, env, kill="source:2", seed=evidence)
+    partial = sub_ops(root)
+    res = run_init_operation(root, recover=True)
+    ok("SEAM-seeded-partial-refuses-first-adoption-resume", len(partial) == 1
+       and res.status == REFUSED and "never from zero" in res.primary_failure["detail"]
+       and sub_ops(root) == partial, str(res.primary_failure))
+    res = run_init_operation(root, ancestral="f" * 40, recover=True)
+    ok("SEAM-seeded-partial-refuses-other-seed-resume", res.status == REFUSED
+       and "never re-seeds" in res.primary_failure["detail"] and sub_ops(root) == partial,
+       str(res.primary_failure))
+    res = run_init_operation(root, ancestral=evidence, recover=True)
+    with open(os.path.join(root, COUNTERS_RELPATH), "rb") as fh:
+        counters = tomllib.loads(fh.read().decode("utf-8"))["counters"]
+    ok("SEAM-seeded-partial-resumes-same-seed", res.status == VIEWS_READY
+       and sub_ops(root) == partial and counters.get("WL") == 7 and counters.get("BI") == 3,
+       str(res.primary_failure))
+
+    # Resume bindings over a killed UNSEEDED partial: kind, operation id and admitted inventory.
+    root = _plain_repo(os.path.join(d, "unseeded"), env)
+    _child(root, env, kill="source:2")
+    partial = sub_ops(root)
+    res = run_init_operation(root, ancestral="f" * 40, recover=True)
+    ok("SEAM-unseeded-partial-refuses-readoption-resume", len(partial) == 1
+       and res.status == REFUSED
+       and "never changes the counters seed" in res.primary_failure["detail"]
+       and sub_ops(root) == partial, str(res.primary_failure))
+    res = run_init_operation(root, recover=True,
+                             operation_id="12345678-1234-4234-8234-1234567890ab")
+    ok("SEAM-partial-refuses-other-operation-id", res.status == REFUSED
+       and "never adopts another operation's history" in res.primary_failure["detail"],
+       str(res.primary_failure))
+    res = run_init_operation(root, recover=True, operation_id=partial[0], admitted=(
+        {"path": ".working/notes/frozen.md", "mode": 0o644, "size": 1,
+         "digest": "sha256:" + "2" * 64},))
+    ok("SEAM-partial-refuses-changed-admitted", res.status == REFUSED
+       and "never changes what pre-existing content is admitted"
+       in res.primary_failure["detail"], str(res.primary_failure))
+    res = run_init_operation(root, recover=True)
+    ok("SEAM-unseeded-partial-resumes-bound", res.status == VIEWS_READY
+       and sub_ops(root) == partial, str(res.primary_failure))
+
+    # A COUPLED partial (its id caller-minted; its plan records the coupled recovery policy) is
+    # never resumed: plain and NAMED resumes both refuse with nothing written, no publication.
+    root = _plain_repo(os.path.join(d, "coupled"), env)
+    coupled_id = "deadbeef-dead-4ead-8ead-deadbeefdead"
+    _child(root, env, kill="source:2", opid=coupled_id)
+    partial = sub_ops(root)
+
+    def no_lease(snapshot):
+        # the lock's explicit recovery legitimately settles the killed holder's stale lease
+        return {rel: v for rel, v in snapshot.items() if rel != LEASE_RELPATH.replace("/", os.sep)}
+
+    before = no_lease(_tree_snapshot(root))
+    res = run_init_operation(root, recover=True)
+    ok("SEAM-coupled-partial-plain-resume-refused", len(partial) == 1
+       and res.status == REFUSED
+       and "never resumed or published outside" in res.primary_failure["detail"]
+       and _opf_store.resolve_store(root).status != _opf_store.RESOLVED
+       and sub_ops(root) == partial and no_lease(_tree_snapshot(root)) == before,
+       str(res.primary_failure))
+    res = run_init_operation(root, recover=True, operation_id=coupled_id)
+    ok("SEAM-coupled-partial-named-resume-refused", res.status == REFUSED
+       and "never resumed or published outside" in res.primary_failure["detail"]
+       and sub_ops(root) == partial and no_lease(_tree_snapshot(root)) == before,
+       str(res.primary_failure))
+
+    # A group- or world-writable admitted .working refuses before anything is written: a store is
+    # never published beneath a home others can write.
+    root, adm, payload = admit_fixture("worldwrite")
+    os.chmod(os.path.join(root, ".working"), 0o777)
+    before = _tree_snapshot(root)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(7))
+    ok("SEAM-world-writable-working-refused", res.status == REFUSED
+       and "writable" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+    # The fixture writer itself is hermetic against ANY ambient umask, including an
+    # owner-restrictive one: under umask 0o700 a bare makedirs leaves each fresh parent
+    # untraversable before any later chmod could run, so _write creates and pins one
+    # level at a time, parent-first. Every created directory is asserted at DIR_MODE and
+    # the created file at 0o644, each independently (red when its own chmod is removed),
+    # and a rewrite keeps an explicitly pinned non-default file mode (red when the
+    # fresh-only guard on the file chmod is removed).
+    def _mode(p):
+        return stat.S_IMODE(os.lstat(p).st_mode) if os.path.lexists(p) else None
+
+    def _bytes(p):
+        try:
+            with open(p, "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    wp = os.path.join(d, "writeprobe")
+    nested = os.path.join(wp, "a", "b", "c", "leaf.md")
+    built, why = False, ""
+    saved_umask = os.umask(0o700)
+    try:
+        try:
+            _write(nested, b"nested fixture bytes")
+            built = True
+        except OSError as exc:
+            why = str(exc)
+    finally:
+        os.umask(saved_umask)
+    ok("FIXTURE-write-nested-under-umask-0700", built
+       and _bytes(nested) == b"nested fixture bytes", why)
+    for level in (wp, os.path.join(wp, "a"), os.path.join(wp, "a", "b"),
+                  os.path.join(wp, "a", "b", "c")):
+        ok("FIXTURE-write-dir-mode-" + os.path.relpath(level, d).replace(os.sep, "-"),
+           _mode(level) == DIR_MODE, "mode {}".format(_mode(level)))
+    ok("FIXTURE-write-file-mode-0644", _mode(nested) == 0o644,
+       "mode {}".format(_mode(nested)))
+    if built:
+        os.chmod(nested, 0o640)
+        saved_umask = os.umask(0o700)
+        try:
+            _write(nested, b"rewritten fixture bytes")
+        finally:
+            os.umask(saved_umask)
+    ok("FIXTURE-write-rewrite-preserves-mode", built and _mode(nested) == 0o640
+       and _bytes(nested) == b"rewritten fixture bytes", "mode {}".format(_mode(nested)))
+
+    # The accepting fixture is hermetic against the ambient umask: built while the
+    # process umask is pinned to the group-permissive 0o002, the admitted tree is still
+    # accepted (red when a fixture directory takes its mode from the process umask
+    # instead of an explicit one). A sentinel ambient mask around both builds proves the
+    # pinned block restores whatever mask it found, on the successful and on the raising
+    # path alike; the outer finally restores the real ambient mask.
+    real_umask = os.umask(0o027)
+    try:
+        saved_umask = os.umask(0o002)
+        try:
+            root, adm, payload = admit_fixture("umask002")
+        finally:
+            os.umask(saved_umask)
+        mask_after_build = os.umask(0o027)
+        probe = os.path.join(d, "maskprobe")
+        _write(os.path.join(probe, "plain.md"), b"plain fixture bytes")
+        raised = False
+        saved_umask = os.umask(0o002)
+        try:
+            try:
+                _write(os.path.join(probe, "plain.md", "never.md"), b"never written")
+            except OSError:
+                raised = True
+        finally:
+            os.umask(saved_umask)
+        mask_after_raise = os.umask(0o027)
+    finally:
+        os.umask(real_umask)
+    ok("SEAM-fixture-build-restores-umask", mask_after_build == 0o027
+       and mask_after_raise == 0o027 and raised,
+       "after build {:o}; after raise {:o}; raised {}".format(
+           mask_after_build, mask_after_raise, raised))
+    res = run_init_operation(root, admitted=adm, operation_id=oid(11))
+    with open(os.path.join(root, ".working/notes/frozen.md"), "rb") as fh:
+        live = fh.read()
+    ok("SEAM-admitted-accepted-under-umask-0002", res.status == VIEWS_READY
+       and live == payload and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, str(res.primary_failure))
+
+    # An admitted .working KEEPS its observed owner-restrictive mode end to end: the plan
+    # records the observed 0o750 and validation accepts it, so the run reaches VIEWS_READY
+    # with the mode preserved (red when the keeps-its-observed-mode branch of
+    # validate_init_plan is removed and the plan falls back to DIR_MODE).
+    root, adm, payload = admit_fixture("keepmode")
+    os.chmod(os.path.join(root, ".working"), 0o750)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(12))
+    kept = _mode(os.path.join(root, ".working"))
+    ok("SEAM-admitted-working-keeps-observed-mode", res.status == VIEWS_READY
+       and kept == 0o750 and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, "mode {}; {}".format(kept, res.primary_failure))
+
+    # The seam's second leg: a pre-existing EMPTY machine home (what archival of an occupying
+    # machine-store file leaves behind) is admitted ONLY through admitted_dirs, at exactly its
+    # planned mode; plain init still refuses the same tree (the no-weakening pin).
+    root = _plain_repo(os.path.join(d, "dirs"), env)
+    os.makedirs(os.path.join(root, _MACHINE_HOME))
+    os.chmod(os.path.join(root, _opf_store.WORKING_DIRNAME), DIR_MODE)
+    os.chmod(os.path.join(root, _MACHINE_HOME), DIR_MODE)
+    before = _tree_snapshot(root)
+    res = run_init_operation(root)
+    ok("SEAM-plain-empty-machine-dir-refused", res.status == REFUSED
+       and "already exists" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+    res = run_init_operation(root, admitted_dirs=(_MACHINE_HOME,), operation_id=oid(8))
+    ok("SEAM-admitted-dirs-closure-refused", res.status == REFUSED
+       and ".working ancestor" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before, str(res.primary_failure))
+    res = run_init_operation(root, admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME))
+    ok("SEAM-admitted-dirs-without-operation-id-refused", res.status == REFUSED
+       and "caller-minted operation_id" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+    res = run_init_operation(root,
+                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME),
+                             operation_id=oid(9))
+    ok("SEAM-admitted-dirs-accepted", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, str(res.primary_failure))
+    root = _plain_repo(os.path.join(d, "dirsmode"), env)
+    os.makedirs(os.path.join(root, _MACHINE_HOME))
+    os.chmod(os.path.join(root, _opf_store.WORKING_DIRNAME), DIR_MODE)
+    os.chmod(os.path.join(root, _MACHINE_HOME), 0o700)
+    before = _tree_snapshot(root)
+    res = run_init_operation(root,
+                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME),
+                             operation_id=oid(10))
+    ok("SEAM-admitted-dir-wrong-mode-refused", res.status == REFUSED
+       and "preserved as found" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+
+def _ignore_tests(base, env, ok):
+    """OPF spec 5.1 over real git stores: the init operation refuses a store git would ignore, with
+    nothing written and no operation recorded, through the ONE shared ignore preflight the plain `opf
+    init` calls (_opf_write_guard.init_ignore_refusal), on a fresh run and on a resume; it admits a store
+    no rule ignores; and a check that cannot evaluate (check-ignore failing or not launching, a bare
+    repository, the indexed-blob probe failing or finding a blob unavailable) refuses, never reading as not
+    ignored. Without the shared preflight each refusal vector here publishes the store instead."""
+    from unittest import mock
+    d = os.path.join(base, "ignore")
+    git = _opf_observe._git_path()
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def ignoring(name, rules):
+        root = _plain_repo(os.path.join(d, name), env)
+        _write(os.path.join(root, ".gitignore"), rules)
+        _git(["add", "--", ".gitignore"], root, env)
+        _git(["commit", "-q", "-m", "ignore rules"], root, env)
+        return root
+
+    def untouched(label, res, code, needle, after, before, ops=()):
+        detail = (res.primary_failure or {}).get("detail", "")
+        ok(label, res.status == code and needle in detail and after == before and list(ops) == [],
+           "{} {}".format(res.status, res.primary_failure))
+
+    # An ignored store refuses with nothing written: the whole .working tree, only the views and
+    # the changelog (a pattern the toml sources escape), and only the committed pointer.
+    for name, rules in (("tree", b".working/\n"), ("views", b"*.md\n"),
+                        ("pointer", ("/" + _opf_store.POINTER_REL + "\n").encode("ascii"))):
+        root = ignoring(name, rules)
+        before = _tree_snapshot(root)
+        res = run_init_operation(root)
+        untouched("IGNORE-{}-refused-nothing-written".format(name), res, REFUSED, "git-ignored",
+                  _tree_snapshot(root), before, sub_ops(root))
+        ok("IGNORE-{}-not-adopted".format(name),
+           _opf_store.resolve_store(root).status == _opf_store.NOT_ADOPTED)
+
+    # A product root nested in its repository: the rule names the store under the prefix.
+    repo = ignoring("nested", b"/product/.working/\n")
+    root = os.path.join(repo, "product")
+    os.mkdir(root, 0o755)
+    before = _tree_snapshot(repo)
+    res = run_init_operation(root)
+    untouched("IGNORE-nested-prefix-refused-nothing-written", res, REFUSED, "./product/.working/",
+              _tree_snapshot(repo), before)
+
+    # A store no rule ignores is admitted: a rule naming only the machine-local pointer (a path init
+    # never creates and adopters legitimately ignore) leaves the store unignored.
+    root = ignoring("local-pointer", (_opf_store.LOCAL_POINTER_REL + "\n").encode("ascii"))
+    res = run_init_operation(root)
+    ok("IGNORE-unignored-store-admitted", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED and len(sub_ops(root)) == 1,
+       str(res.primary_failure))
+
+    # A check that cannot evaluate refuses: check-ignore exiting 128 or never launching.
+    real = _opf_observe._run_git_config_discovery
+
+    def failing(outcome):
+        def run(git_, store_root, args, *a, **k):
+            if "check-ignore" in args:
+                return outcome
+            return real(git_, store_root, args, *a, **k)
+        return run
+
+    for name, outcome, needle in (
+            ("rc128", _opf_observe._GitOutcome(True, 128, b"", "fatal: injected"),
+             "check-ignore failed (rc=128)"),
+            ("unlaunched", _opf_observe._GitOutcome(False, None, b"", "could not launch git (x)"),
+             "could not evaluate ignore status")):
+        root = _plain_repo(os.path.join(d, "git-" + name), env)
+        before = _tree_snapshot(root)
+        with mock.patch.object(_opf_observe, "_run_git_config_discovery", failing(outcome)):
+            res = run_init_operation(root)
+        untouched("IGNORE-git-{}-refused-cannot-evaluate".format(name), res, CANNOT_EVALUATE,
+                  needle, _tree_snapshot(root), before, sub_ops(root))
+
+    # The indexed-blob leg: a probe that cannot run, and an unavailable blob, each refuse.
+    root = _plain_repo(os.path.join(d, "blob"), env)
+    before = _tree_snapshot(root)
+
+    def unrunnable(*_a, **_k):
+        raise RuntimeError("injected: ls-files could not run")
+
+    for name, probe, needle in (("probe-failure", unrunnable, "injected: ls-files"),
+                                ("unavailable", lambda *_a, **_k: [".gitignore"],
+                                 "indexed .gitignore blob is unavailable")):
+        with mock.patch.object(_opf_observe, "indexed_ignore_availability", probe):
+            res = run_init_operation(root)
+        untouched("IGNORE-blob-{}-refused-cannot-evaluate".format(name), res, CANNOT_EVALUATE,
+                  needle, _tree_snapshot(root), before, sub_ops(root))
+
+    # Outside a work tree (a bare repository) the shared check itself cannot evaluate and refuses;
+    # observe_binding already refuses such a root before the mutex, so this calls the check directly.
+    bare = os.path.join(d, "bare.git")
+    _git(["init", "-q", "--bare", bare], d, env)
+    refusal = _opf_write_guard.init_ignore_refusal(git, bare, Path("."),
+                                                   [_opf_store.WORKING_DIRNAME, CHANGELOG_RELPATH])
+    ok("IGNORE-outside-worktree-cannot-evaluate", refusal is not None
+       and refusal[0] == _opf_write_guard.INIT_IGNORE_UNEVALUATED and "rc=128" in refusal[1],
+       str(refusal))
+
+    # A resume refuses too: a partial operation (killed after its second source) whose store an
+    # untracked .gitignore now ignores is refused with nothing further written (the lease the explicit
+    # recover clears aside), then finishes once the rule is gone.
+    root = _plain_repo(os.path.join(d, "resume"), env)
+    rc, _res, err = _child(root, env, kill="source:2")
+    partial = sub_ops(root)
+    _write(os.path.join(root, ".gitignore"), b".working/\n")
+    before = _worktree_without_lease(root)
+    res = run_init_operation(root, recover=True)
+    untouched("IGNORE-resume-refused-nothing-written", res, REFUSED, "git-ignored",
+              _worktree_without_lease(root), before)
+    ok("IGNORE-resume-kept-its-one-partial", rc != 0 and len(partial) == 1
+       and sub_ops(root) == partial, "{} {} {}".format(rc, partial, err[-400:]))
+    os.unlink(os.path.join(root, ".gitignore"))
+    res = run_init_operation(root, recover=True)
+    ok("IGNORE-resume-finishes-once-unignored", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED, str(res.primary_failure))
+
+
+def _ancestry_tests(base, env, ok):
+    """OPF spec 8.2 over real git stores: a FIRST adoption (no ancestral commit), plain or coupled,
+    whose HEAD's first-parent history already shows a store refuses with nothing written and no
+    operation recorded, naming the newest holding commit (a nested product prefix, and a merge
+    that drops the mainline store, included); a shallow or grafted history refuses
+    CANNOT-EVALUATE; a history that never held a store, and a store that lived only on a merged
+    side branch, proceed, each having consulted the detector (_opf_init_observe.prior_store_holder)
+    for the pinned HEAD; and a re-adoption over the same history is not scanned and seeds from its
+    evidence commit. Without the _fresh_plan call every refusal here fails (the store is published)
+    and each proceeding run consults nothing. A first adoption over an unborn HEAD reaches
+    VIEWS-READY unscanned (scanning it would raise, having no commit to pin), and a git read that
+    exits non-zero (rev-list over a pinned head the repository does not hold) is CANNOT-EVALUATE,
+    never None."""
+    from unittest import mock
+    d = os.path.join(base, "ancestry")
+    real = _opf_init_observe.prior_store_holder
+    calls = []
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        calls.append((k["pinned_head"], out))
+        return out
+
+    def run(root, **kw):
+        del calls[:]
+        with mock.patch.object(_opf_init_observe, "prior_store_holder", spy):
+            return run_init_operation(root, **kw)
+
+    def sub_ops(root):
+        ops = _ops_dir(root)
+        return sorted(os.listdir(ops)) if os.path.isdir(ops) else []
+
+    def deleted_store(name, prefix=""):
+        # A store committed under prefix (pointer, manifest, counters with BI = 7), then removed
+        # by git rm in a later commit; a kept file holds the product root open. Returns
+        # (repository, evidence commit, product root).
+        repo = _plain_repo(os.path.join(d, name), env)
+        root = os.path.join(repo, prefix) if prefix else repo
+        values = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
+        values["BI"] = 7
+        _write(os.path.join(root, "kept.txt"), b"kept\n")
+        _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+        _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+        _write(os.path.join(root, COUNTERS_RELPATH), _counters_toml(values))
+        _git(["add", "-A"], repo, env)
+        _git(["commit", "-q", "-m", "store"], repo, env)
+        evidence = _head(repo, env)
+        _git(["rm", "-q", "-r", "--", os.path.join(prefix, _opf_store.WORKING_DIRNAME),
+              os.path.join(prefix, _opf_store.POINTER_REL)], repo, env)
+        _git(["commit", "-q", "-m", "drop store"], repo, env)
+        return repo, evidence, root
+
+    def refused(label, res, code, needles, after, before, ops):
+        detail = (res.primary_failure or {}).get("detail", "")
+        ok(label, res.status == code and all(n in detail for n in needles) and after == before
+           and ops == [], "{} {}".format(res.status, res.primary_failure))
+
+    for name, kw in (("plain", {}),
+                     ("coupled", {"operation_id": "0000a001-c0de-4ead-8ead-00000000a001"})):
+        repo, evidence, root = deleted_store(name)
+        before = _tree_snapshot(root)
+        res = run(root, **kw)
+        refused("ANC-{}-first-adoption-over-history-refused".format(name), res, REFUSED,
+                ("prior store", evidence), _tree_snapshot(root), before, sub_ops(root))
+
+    repo, evidence, root = deleted_store("nested", prefix="prod")
+    before = _tree_snapshot(repo)
+    res = run(root)
+    refused("ANC-nested-prefix-first-adoption-refused", res, REFUSED, ("prior store", evidence),
+            _tree_snapshot(repo), before, sub_ops(root))
+
+    # The first-parent line is load-bearing: a merge whose tree IS its storeless side parent's
+    # drops the mainline store. On HEAD's first-parent line that merge deletes the store, so its
+    # first parent is the holder; a walk without --first-parent simplifies the merge to its
+    # TREESAME side parent, never visits the store, and would proceed.
+    root = _plain_repo(os.path.join(d, "treesame"), env)
+    fork = _head(root, env)
+    _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "store on main"], root, env)
+    store = _head(root, env)
+    _git(["checkout", "-q", "-b", "side", fork], root, env)
+    _write(os.path.join(root, "side.txt"), b"side\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "side work"], root, env)
+    side = _head(root, env)
+    merge = _git(["commit-tree", side + "^{tree}", "-p", store, "-p", side,
+                  "-m", "merge drops store"], root, env).stdout.decode("ascii").strip()
+    _git(["checkout", "-q", "main"], root, env)
+    _git(["reset", "-q", "--hard", merge], root, env)
+    before = _tree_snapshot(root)
+    res = run(root)
+    refused("ANC-treesame-merge-dropping-mainline-store-refused", res, REFUSED,
+            ("prior store", store), _tree_snapshot(root), before, sub_ops(root))
+
+    # A re-adoption over the same history is never scanned: its counters copy the pinned seed.
+    repo, evidence, root = deleted_store("readopt")
+    res = run(root, ancestral=evidence)
+    body = _read_or_none(os.path.join(root, COUNTERS_RELPATH)) or b""
+    ok("ANC-readoption-not-scanned-seeds-from-evidence", res.status == VIEWS_READY
+       and calls == [] and re.search(rb"(?m)^BI = 7$", body) is not None,
+       "{} {} {} {!r}".format(res.status, res.primary_failure, calls, body))
+
+    # Fail closed: a shallow clone hides the store behind its boundary, and a grafts entry cuts the
+    # parent link that reaches it; removing the grafts entry finds the store again.
+    repo, evidence, root = deleted_store("shallow-source")
+    shallow = os.path.join(d, "shallow")
+    _git(["clone", "-q", "--depth", "1", "file://" + repo, shallow], d, env)
+    before = _tree_snapshot(shallow)
+    res = run(shallow)
+    refused("ANC-shallow-cannot-evaluate", res, CANNOT_EVALUATE, ("SHALLOW",),
+            _tree_snapshot(shallow), before, sub_ops(shallow))
+    repo, evidence, root = deleted_store("grafts")
+    grafts = os.path.join(repo, ".git", "info", "grafts")
+    _write(grafts, (_head(repo, env) + "\n").encode("ascii"))
+    before = _tree_snapshot(root)
+    res = run(root)
+    refused("ANC-grafts-cannot-evaluate", res, CANNOT_EVALUATE, ("grafts",),
+            _tree_snapshot(root), before, sub_ops(root))
+    os.unlink(grafts)
+    res = run(root)
+    refused("ANC-grafts-removed-refused-again", res, REFUSED, ("prior store", evidence),
+            _tree_snapshot(root), before, sub_ops(root))
+
+    # No over-refusal: a history that never held a store, and a store created and deleted on a
+    # side branch that WAS merged (it never reached a first-parent tree), proceed; each consulted
+    # the detector once, for the pinned HEAD, which found nothing.
+    root = _plain_repo(os.path.join(d, "never"), env)
+    _write(os.path.join(root, "later.txt"), b"later\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "later"], root, env)
+    head = _head(root, env)
+    res = run(root)
+    ok("ANC-never-held-proceeds-after-scan", res.status == VIEWS_READY
+       and calls == [(head, None)], "{} {} {}".format(res.status, res.primary_failure, calls))
+    root = _plain_repo(os.path.join(d, "side"), env)
+    _git(["checkout", "-q", "-b", "feature"], root, env)
+    _write(os.path.join(root, _opf_store.POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    _write(os.path.join(root, _MACHINE_HOME, _opf_store.MANIFEST_NAME), b"x = 1\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "store on side"], root, env)
+    _git(["rm", "-q", "-r", "--", _opf_store.WORKING_DIRNAME, _opf_store.POINTER_REL], root, env)
+    _git(["commit", "-q", "-m", "drop store on side"], root, env)
+    _git(["checkout", "-q", "main"], root, env)
+    _git(["merge", "-q", "--no-ff", "-m", "merge feature", "feature"], root, env)
+    head = _head(root, env)
+    merged = _git(["merge-base", "--is-ancestor", "feature", head], root, env, allow_fail=True)
+    res = run(root)
+    ok("ANC-side-branch-only-store-proceeds-after-scan", merged.returncode == 0
+       and res.status == VIEWS_READY and calls == [(head, None)],
+       "{} {} {} {}".format(merged.returncode, res.status, res.primary_failure, calls))
+
+    # An unborn HEAD (a fresh git init, no commit) has no history: the first adoption reaches
+    # its normal outcome without consulting the detector, whose pinned head would not exist.
+    root = os.path.join(d, "unborn")
+    os.makedirs(root)
+    _git(["init", "-q", "-b", "main", "."], root, env)
+    try:
+        res = run(root)
+        outcome = (res.status, res.primary_failure)
+    except Exception as exc:
+        outcome = ("raised", "{}: {}".format(type(exc).__name__, exc))
+    ok("ANC-unborn-head-proceeds-without-scan", outcome[0] == VIEWS_READY and calls == [],
+       "{} {}".format(outcome, calls))
+
+    # A git read that exits non-zero is CANNOT-EVALUATE, never "no prior store": rev-list over
+    # a well-formed pinned head the repository does not hold fails, and its empty output must
+    # not read as an empty walk.
+    root = _plain_repo(os.path.join(d, "unresolvable"), env)
+    try:
+        out = _opf_init_observe.prior_store_holder(
+            _opf_observe._git_path(), root, pinned_head="f" * 40, prefix="",
+            object_format="sha1")
+    except _opf_init_observe.ObservationError as exc:
+        out = (exc.code, exc.detail)
+    ok("ANC-unresolvable-pinned-head-cannot-evaluate", type(out) is tuple
+       and out[0] == _opf_init_observe.CANNOT_EVALUATE and out[1].startswith("rc "), repr(out))
 
 
 def _b6_tests(base, env, ok, refuses):
@@ -3076,7 +4581,7 @@ def _b6_tests(base, env, ok, refuses):
     # B9: replacement objects never substitute the read bytes.
     forged = subprocess.run(["git", "-C", repo, "hash-object", "-w", "--stdin"],
                             input=_counters_toml(dict(values, WL=999)), env=env,
-                            stdout=subprocess.PIPE).stdout.decode().strip()
+                            stdout=subprocess.PIPE, timeout=60).stdout.decode().strip()
     real = _git(["rev-parse", "HEAD:.working/toml/counters.toml"], repo, env).stdout.decode().strip()
     _git(["replace", real, forged], repo, env, allow_fail=True)
     ok("B9-no-replace-objects", high_water(read_ancestral_counter_seed(
@@ -3106,6 +4611,11 @@ def _expected_views(root):
                 for _n, _s, dest, text in _opf_views.plan_views(fd, _MACHINE_HOME)}
     finally:
         os.close(fd)
+
+
+def _result_detail(got):
+    """A failed check detail: the InitResult status and primary failure, or the raised exception."""
+    return "{} {}".format(getattr(got, "status", repr(got)), getattr(got, "primary_failure", ""))
 
 
 def _read_or_none(path):
@@ -3224,6 +4734,50 @@ def _physical_tests(base, env, ok, signal):
     rc, res, err = _child(root, env)
     ok("R2b-edited-completed-is-healthy", res and res["status"] == ALREADY_INITIALIZED
        and _snapshot_all(root) == before, str(res) + err[-400:])
+
+    # R2c completed-adoption counters that tomllib refuses with RecursionError (a deeply nested value, and a
+    # 1001-part key under the emulated cap) refuse through the public seam as not TOML, the worktree
+    # untouched; a RecursionError no site maps is CANNOT-EVALUATE from run_init_operation, never raised,
+    # and the mutex is released (the restored adoption re-runs ALREADY-INITIALIZED).
+    root = _plain_repo(os.path.join(base, "recursion-counters"), env)
+    rc, res, err = _child(root, env)
+    ok("R2c-fixture-ready", res and res["status"] == VIEWS_READY, str(res) + err[-400:])
+    counters_path = os.path.join(root, COUNTERS_RELPATH)
+    good_counters = _read_or_none(counters_path)
+
+    def seam(capped=False):
+        try:
+            if not capped:
+                return init_operation(root)
+            with _opf_store._StKeyPartCap():
+                return init_operation(root)
+        except Exception as exc:  # noqa: BLE001  an escape from the seam is the failure under test
+            return exc
+    for label, text, capped in (("deep", _opf_store._ST_DEEP_TOML, False),
+                                ("key-1001", _opf_store._ST_LONG_KEY_TOML, True)):
+        _write(counters_path, text.encode("utf-8"))
+        before = _snapshot_all(root)
+        got = seam(capped)
+        ok("R2c-{}-counters-refused-not-toml".format(label), isinstance(got, InitResult)
+           and got.status == REFUSED and _snapshot_all(root) == before
+           and "counters are not TOML" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    _write(counters_path, good_counters)
+    this = sys.modules[__name__]
+    real_select = this._select
+
+    def overflowing_select(*_a):
+        raise RecursionError("injected parser overflow")
+    this._select = overflowing_select
+    try:
+        got = seam()
+    finally:
+        this._select = real_select
+    ok("R2c-unmapped-recursion-cannot-evaluate", isinstance(got, InitResult)
+       and got.status == CANNOT_EVALUATE
+       and "RecursionError" in (got.primary_failure or {}).get("detail", ""), _result_detail(got))
+    got = seam()
+    ok("R2c-mutex-released", isinstance(got, InitResult) and got.status == ALREADY_INITIALIZED,
+       _result_detail(got))
 
     # R3 an existing CHANGELOG.md is preserved byte for byte, recorded in E, never created.
     root = _plain_repo(os.path.join(base, "changelog"), env)
@@ -3417,7 +4971,9 @@ def _physical_tests(base, env, ok, signal):
     _git(["rm", "-q", "-r", ".working"], root, env)
     _git(["commit", "-q", "-m", "deleted"], root, env)
     rc, _res, _err = _child(root, env, kill="source:3", seed=evidence)
-    rc, res, err = _child(root, env, kill="noreseed")
+    # The retry carries the SAME pinned seed (a resume refuses any other binding) and the noreseed
+    # hook proves the resume still never reads the history again: the recorded plan alone seeds it.
+    rc, res, err = _child(root, env, kill="noreseed", seed=evidence)
     ok("R10-readopted", res and res["status"] == VIEWS_READY, "{} {}".format(res, err[-600:]))
     with open(os.path.join(root, COUNTERS_RELPATH), "rb") as fh:
         c = tomllib.loads(fh.read().decode())["counters"]
@@ -3450,10 +5006,45 @@ def _physical_tests(base, env, ok, signal):
     wt = os.path.join(base, "wt-linked")
     _git(["worktree", "add", "-q", "--detach", wt], main, env)
     rc, res, err = _child(wt, env)
+    gd = _git(["rev-parse", "--absolute-git-dir"], wt, env, allow_fail=True)
+    wt_gitdir = gd.stdout.decode().strip() if gd.returncode == 0 else ""
+
+    def _entry(path):
+        # Any directory entry at path, a dangling symlink included; only a missing entry reads as
+        # absent, any other lstat error propagates rather than passing as absence.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _wt_gitdir_clean():
+        # The per-worktree git dir is git's own, distinct from the main one, and holds neither the
+        # substrate home nor the lock module's control directory.
+        return (bool(wt_gitdir) and os.path.isdir(wt_gitdir)
+                and os.path.realpath(wt_gitdir) != os.path.realpath(os.path.join(main, ".git"))
+                and not any(_entry(os.path.join(wt_gitdir, name)) for name in (
+                    _opf_init_substrate.SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME)))
     ok("R11-linked-worktree", res and res["status"] == VIEWS_READY
-       and os.path.isdir(_ops_dir(main)) and not os.path.exists(os.path.join(wt, ".git",
-                                                                                "opf-init")),
-       str(res) + err[-400:])
+       and os.path.isdir(_ops_dir(main)) and _wt_gitdir_clean(), str(res) + err[-400:])
+    # The probe above must be able to fail: each name present where git itself places it for this
+    # worktree (--git-path, derived apart from the probe's own join; planted when absent) makes the
+    # SAME predicate false.
+    for name in (_opf_init_substrate.SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME):
+        gp = _git(["rev-parse", "--path-format=absolute", "--git-path", name], wt, env, allow_fail=True)
+        plant = gp.stdout.decode().strip() if gp.returncode == 0 else ""
+        present = bool(plant) and _entry(plant)
+        planted = False
+        if plant and not present:
+            try:
+                os.mkdir(plant)
+                planted = True
+            except OSError:
+                pass
+        ok("R11-linked-worktree-probe-live-" + name, (present or planted) and not _wt_gitdir_clean(),
+           plant)
+        if planted:
+            os.rmdir(plant)
     plain_dir = os.path.join(base, "not-a-repo")
     os.mkdir(plain_dir)
     rc, res, _err = _child(plain_dir, env)
