@@ -1611,24 +1611,96 @@ def retired_gate_name_findings(tools=None):
     return findings
 
 
-# The homes-1 paths are deleted: homes 2 is the only generation, and every other value refuses. Outside
-# self-test code no module under opf/tools may compare a homes generation (a name or attribute ending in
-# `homes`) with the integer 1, the shape of every deleted homes-1 arm (claim_ids, _record_journal_rel). The
-# adoption validators lost their generation input, whose homes-1 default graded a row without the
-# control-area refusal: each function named here may not name `homes` at all, as a parameter or a read.
-# A function whose name contains `self_test`, and a check_*.py module, is self-test code, which still
-# builds refused homes-1 inputs. What this AST scan cannot see is outside the gate: a generation compared
-# through a differently named variable, or a comparison built at run time.
+# The homes-1 paths of the record seam and the adoption validators are deleted: homes 2 is the only
+# generation they accept, and every other value refuses. Outside self-test code (a function whose name
+# contains `self_test`, and every check_*.py module, which still build refused homes-1 inputs) and the
+# vendored tree, this AST scan of opf/tools fails on:
+#   1. any comparison or membership test with a homes operand (a name or attribute spelled exactly
+#      `homes`, or a homes_generation(...) call) other than ONE `==` against the integer 2 or the
+#      HOMES constant: `== 1`, `< 2`, `!= 2`, `>= 2`, `in (1,)`, `== True` and a chained comparison
+#      all fail, unless the exact comparison, in that module and function, is a documented exclusion
+#      (_HOMES_COMPARE_EXCLUSIONS, one reason each);
+#   2. a `homes` parameter or read in each adoption validator named in _HOMES1_FREE;
+#   3. any reference to the deleted record journal root: a string constant other than a docstring
+#      containing .aiqt/record/journal (unless a documented exclusion, _LEGACY_JOURNAL_EXCLUSIONS), the
+#      name JOURNAL_REL anywhere in _opf_record.py, or an attribute JOURNAL_REL read off the record
+#      module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
+# RESIDUAL, outside this gate: a generation held in a differently named variable (`gen = homes`), a
+# test that is not a comparison (`if homes:`, `not homes - 1`, a mapping or index keyed by the
+# generation), a comparison or path built at run time (string joins, getattr, an imported alias of the
+# record module), the journal path spelled in pieces, and docstrings and comments, which are prose.
 _HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_plan_sources",
                                   "_control_operand_findings")}
+# The comparisons outside the record seam and the adoption validators that may stay, with the reason each
+# is not a homes-1 arm those paths can reach. Keyed by (module, innermost function, exact comparison), so
+# the same comparison anywhere else still fails.
+_HOMES_COMPARE_EXCLUSIONS = {
+    ("_opf_store.py", "_validate_base", "homes != HOMES"):
+        "the manifest validator's refusal: any [opf].homes but the integer 2 is a fail-closed finding",
+    ("_opf_adopt_plan.py", "_inventory", "homes != store.HOMES"):
+        "the investigation planner's refusal: any generation but 2 refuses before anything is planned",
+    ("_opf_store.py", "store_control_roots", "homes not in (1, 2)"):
+        "an unknown generation raises; the homes-1 control roots stay for the doctor's legacy containment "
+        "grading, which grades whatever store it is pointed at, not for any write path",
+    ("_opf_check.py", "imported_series_active", "_opf_store.homes_generation(manifest_data) >= 2"):
+        "the one imported-series flag the doctor and the writers read; on an admitted (homes-2) store it is "
+        "exactly the `== 2` grade, and below 2 it only switches the series off, opening no homes-1 path",
+    ("_opf_check.py", "required_checks", "homes < 2"):
+        "the doctor roster a legacy store is graded against; doctor reads, it writes nothing",
+    ("_opf_check.py", "_staged_run_roots", "homes >= 2"):
+        "the doctor's partial-import substantiation roots: read-only grading, the typed homes added at 2",
+    ("_opf_check.py", "_check_evidence", "homes < 2"):
+        "C-EVIDENCE-ENUM is inactive below homes 2 (spec 4.2): read-only grading",
+    ("_opf_check.py", "classify_containment", "homes >= 2"):
+        "the doctor's containment grading of a legacy store's ordinary paths: read-only",
+    ("_opf_check.py", "_check_containment", "cls.homes >= 2"):
+        "the doctor's containment grading of a legacy store's ordinary paths: read-only",
+    ("_opf_check.py", "_validate_opened_store", "homes >= 2"):
+        "the doctor's homes-2-only checks (C-EVIDENCE-ENUM, the reservation read): read-only grading",
+}
+# String constants naming the deleted record journal root that may stay, with the reason each is not a
+# path any code builds or opens. Keyed by (module, innermost function or <module>).
+_LEGACY_JOURNAL_EXCLUSIONS = {
+    ("_opf_adopt_plan.py", "<module>"):
+        "the adoption plan's residual disclosure (RESIDUALS): a leftover directory an earlier build wrote "
+        "is not read as ancestry; no path is built from the text",
+    ("_opf_adopt_plan.py", "_inventory"):
+        "the same disclosure in the plan's ancestry evidence text; no path is built from the text",
+}
+_LEGACY_RECORD_JOURNAL = ".aiqt/record/journal"
 
 
 def _homes_operand(node):
-    return ((isinstance(node, ast.Name) and node.id.endswith("homes"))
-            or (isinstance(node, ast.Attribute) and node.attr.endswith("homes")))
+    if isinstance(node, ast.Call):
+        func = node.func
+        return ((isinstance(func, ast.Name) and func.id == "homes_generation")
+                or (isinstance(func, ast.Attribute) and func.attr == "homes_generation"))
+    return ((isinstance(node, ast.Name) and node.id == "homes")
+            or (isinstance(node, ast.Attribute) and node.attr == "homes"))
 
 
-def _homes1_walk(node, rel, owner, free, findings):
+def _equals_two(node):
+    """One `==` between a homes operand and the integer 2 (type-exact) or the HOMES constant."""
+    if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
+        return False
+    other = node.comparators[0] if _homes_operand(node.left) else node.left
+    return ((isinstance(other, ast.Constant) and type(other.value) is int and other.value == 2)
+            or (isinstance(other, ast.Name) and other.id == "HOMES")
+            or (isinstance(other, ast.Attribute) and other.attr == "HOMES"))
+
+
+def _docstring_ids(tree):
+    ids = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                ids.add(id(first.value))
+    return ids
+
+
+def _homes1_walk(node, rel, owner, free, findings, docstrings):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         if "self_test" in node.name:
             return
@@ -1642,14 +1714,25 @@ def _homes1_walk(node, rel, owner, free, findings):
             findings.extend("{}:{}: {} names a homes generation again; it grades every row at homes 2".format(
                 rel, line, node.name) for line in reads)
         owner = node.name
-    if isinstance(node, ast.Compare):
-        sides = [node.left] + node.comparators
-        if any(_homes_operand(s) for s in sides) and any(
-                isinstance(s, ast.Constant) and type(s.value) is int and s.value == 1 for s in sides):
+    if isinstance(node, ast.Compare) and any(_homes_operand(s) for s in [node.left] + node.comparators):
+        text = ast.unparse(node)
+        if not _equals_two(node) and (rel, owner, text) not in _HOMES_COMPARE_EXCLUSIONS:
             findings.append("{}:{}: homes-1 arm `{}` in {} is reintroduced; homes 2 is the only generation "
-                            "and every other one refuses".format(rel, node.lineno, ast.unparse(node), owner))
+                            "and every other one refuses (only `== 2` may test a generation)".format(
+                                rel, node.lineno, text, owner))
+    if (isinstance(node, ast.Constant) and isinstance(node.value, str) and _LEGACY_RECORD_JOURNAL in node.value
+            and id(node) not in docstrings and (rel, owner) not in _LEGACY_JOURNAL_EXCLUSIONS):
+        findings.append("{}:{}: the deleted record journal root {} is named in {}; the record journal lives "
+                        "only in the typed capability home".format(rel, node.lineno, _LEGACY_RECORD_JOURNAL, owner))
+    legacy_name = ((rel == "_opf_record.py" and isinstance(node, ast.Name) and node.id == "JOURNAL_REL")
+                   or (isinstance(node, ast.Attribute) and node.attr == "JOURNAL_REL"
+                       and (rel == "_opf_record.py" or (isinstance(node.value, ast.Name)
+                                                        and node.value.id in ("_opf_record", "record")))))
+    if legacy_name:
+        findings.append("{}:{}: the deleted record journal constant JOURNAL_REL is referenced in {}; the record "
+                        "journal lives only in the typed capability home".format(rel, node.lineno, owner))
     for child in ast.iter_child_nodes(node):
-        _homes1_walk(child, rel, owner, free, findings)
+        _homes1_walk(child, rel, owner, free, findings, docstrings)
 
 
 def homes1_findings(tools=None):
@@ -1660,7 +1743,7 @@ def homes1_findings(tools=None):
         if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        _homes1_walk(tree, rel, "<module>", _HOMES1_FREE.get(rel, ()), findings)
+        _homes1_walk(tree, rel, "<module>", _HOMES1_FREE.get(rel, ()), findings, _docstring_ids(tree))
     return findings
 
 
@@ -5583,14 +5666,39 @@ def _self_test_vectors():
                           "_opf_store.py:{}: retired gate name {}; read store.{} instead".format(
                               store_source.count("\n") + 1, n, c)])
                 (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
-    # No homes-1 path: the live tools tree compares no homes generation with 1 outside self-test code,
-    # and the adoption validators name no generation. In a fixture tree holding the record and adoption
-    # modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of claim_ids, or the
-    # homes-1 default of validate_op) is red at that line; the same comparison in self-test code, or in a
-    # check_*.py module, is not (refused homes-1 inputs are still built there).
+    # No homes-1 path: outside self-test code the live tools tree tests a homes generation only by `== 2`
+    # (or a documented exclusion), the adoption validators name no generation, and nothing names the
+    # deleted record journal root. In a fixture tree holding the record and adoption modules, restoring one
+    # deleted line (the homes-1 arm of _record_journal_rel or of claim_ids, or the homes-1 default of
+    # validate_op) is red at that line, as is every non-equality form of an arm; the same comparison in
+    # self-test code, or in a check_*.py module, is not (refused homes-1 inputs are still built there).
     check("homes1-free-registry", lambda: _HOMES1_FREE == {"_opf_adopt.py": (
         "validate_op", "validate_plan", "_validate_plan_sources", "_control_operand_findings")})
     check("no-homes1-paths", lambda: homes1_findings() == [])
+    # Every documented exclusion carries a reason and still names a live site, so a stale one is red.
+    live_sites, live_strings = set(), set()
+    for path in sorted(_TOOLS.rglob("*.py")):
+        if "_vendor" in path.relative_to(_TOOLS).parts or path.name.startswith("check_"):
+            continue
+        rel = path.relative_to(_TOOLS).as_posix()
+        stack = [(ast.parse(path.read_text(encoding="utf-8")), "<module>")]
+        while stack:
+            node, owner = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = node.name
+            if isinstance(node, ast.Compare):
+                live_sites.add((rel, owner, ast.unparse(node)))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and _LEGACY_RECORD_JOURNAL in node.value:
+                live_strings.add((rel, owner))
+            stack.extend((child, owner) for child in ast.iter_child_nodes(node))
+    check("homes1-exclusions-reasoned", lambda: all(
+        isinstance(r, str) and r.strip() for r in list(_HOMES_COMPARE_EXCLUSIONS.values())
+        + list(_LEGACY_JOURNAL_EXCLUSIONS.values())))
+    check("homes1-exclusions-live", lambda: set(_HOMES_COMPARE_EXCLUSIONS) <= live_sites
+          and set(_LEGACY_JOURNAL_EXCLUSIONS) <= live_strings)
+    check("homes1-exclusions-outside-record-seam", lambda: not [
+        k for k in list(_HOMES_COMPARE_EXCLUSIONS) + list(_LEGACY_JOURNAL_EXCLUSIONS)
+        if k[0] in ("_opf_record.py", "_opf_adopt.py")])
     record_source = (_TOOLS / "_opf_record.py").read_text(encoding="utf-8")
     adopt_source = (_TOOLS / "_opf_adopt.py").read_text(encoding="utf-8")
     journal_home = '    if type(homes) is int and homes == 2:\n        return _opf_store.journal_root("record")\n'
@@ -5598,13 +5706,19 @@ def _self_test_vectors():
     validator = "def validate_op(row):\n"
     restored = (
         ("record-journal-arm", "_opf_record.py", record_source, journal_home,
-         "    if type(homes) is int and homes == 1:\n        return JOURNAL_REL\n" + journal_home,
-         "homes-1 arm `homes == 1` in _record_journal_rel is reintroduced"),
+         "    if type(homes) is int and homes == 1:\n        return _opf_store.journal_root(\"record\")\n"
+         + journal_home, "homes-1 arm `homes == 1` in _record_journal_rel is reintroduced"),
         ("claim-ids-arm", "_opf_record.py", record_source, claim_home,
          "    if type(homes) is int and homes == 1:\n        base = {}\n    el" + claim_home[4:],
          "homes-1 arm `homes == 1` in claim_ids is reintroduced"),
         ("validate-op-default", "_opf_adopt.py", adopt_source, validator, "def validate_op(row, homes=1):\n",
          "validate_op names a homes generation again"))
+    # Every non-equality shape of an arm in claim_ids is red, at its line; `== 2` in either order and
+    # `== HOMES` stay clean.
+    red_forms = ("homes < 2", "homes != 2", "homes in (1,)", "homes not in (2,)", "homes >= 2", "2 > homes",
+                 "homes == True", "homes == 1.0", "1 <= homes < 2", "homes is not 2",
+                 "_opf_store.homes_generation(m) != 2")
+    clean_forms = ("homes == 2", "2 == homes", "homes == _opf_store.HOMES")
     with tempfile.TemporaryDirectory(prefix="opf-homes-one-") as tmp:
         tree = Path(tmp)
         (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
@@ -5618,11 +5732,29 @@ def _self_test_vectors():
                 f.startswith("{}:{}: ".format(n, p.count("\n", 0, a) + 1)) and e in f
                 for f in homes1_findings(tree)] == [True])
             (tree / name).write_text(source, encoding="utf-8")
+        at = record_source.find(claim_home)
+        for form in red_forms + clean_forms:
+            arm = "    if {}:\n        base = {{}}\n    el".format(form) + claim_home[4:]
+            planted = record_source[:at] + arm + record_source[at + len(claim_home):]
+            (tree / "_opf_record.py").write_text(planted, encoding="utf-8")
+            expect = (["_opf_record.py:{}: homes-1 arm `{}` in claim_ids".format(
+                planted.count("\n", 0, at) + 1, ast.unparse(ast.parse(form, mode="eval").body))]
+                if form in red_forms else [])
+            check("homes1-form-" + ("red-" if expect else "clean-") + form, lambda e=expect: [
+                f[:len(e[0])] if e else f for f in homes1_findings(tree)] == e)
+        (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
+        # An exclusion is bounded to its module, function and exact text: the same comparison elsewhere is red.
+        (tree / "_opf_check.py").write_text("def required_checks(homes):\n    return homes < 2\n\n\n"
+                                            "def _other(homes):\n    return homes < 2\n", encoding="utf-8")
+        check("homes1-exclusion-bounded", lambda: homes1_findings(tree) == [
+            "_opf_check.py:6: homes-1 arm `homes < 2` in _other is reintroduced; homes 2 is the only "
+            "generation and every other one refuses (only `== 2` may test a generation)"])
+        (tree / "_opf_check.py").unlink()
         (tree / "planted.py").write_text("def self_test(ctx):\n    return ctx.homes == 1\n\n\n"
                                          "def _refuse(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
         check("homes1-self-test-exempt-production-red", lambda: homes1_findings(tree) == [
             "planted.py:6: homes-1 arm `ctx.homes == 1` in _refuse is reintroduced; homes 2 is the only "
-            "generation and every other one refuses"])
+            "generation and every other one refuses (only `== 2` may test a generation)"])
         (tree / "planted.py").unlink()
         (tree / "check_planted.py").write_text("def flip(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
         check("homes1-check-module-exempt", lambda: homes1_findings(tree) == [])
@@ -5633,6 +5765,29 @@ def _self_test_vectors():
         check("homes1-validator-keyword-generation-red", lambda: len(homes1_findings(tree)) == 1
               and "_validate_plan_sources names a homes generation again" in homes1_findings(tree)[0])
         (tree / "_opf_adopt.py").write_text(adopt_source, encoding="utf-8")
+        # The deleted record journal root: the constant restored in the record module, a read of it off the
+        # record module elsewhere, and the path string in production code are each red; the path in a
+        # docstring or in self-test code is not.
+        anchor = "VERB = \"record\"\n"
+        (tree / "_opf_record.py").write_text(record_source.replace(
+            anchor, anchor + "JOURNAL_REL = _opf_store.journal_root(\"record\")\n", 1), encoding="utf-8")
+        line = record_source[:record_source.find(anchor)].count("\n") + 2
+        check("homes1-legacy-constant-restored-red", lambda: record_source.count(anchor) == 1
+              and homes1_findings(tree) == [
+                  "_opf_record.py:{}: the deleted record journal constant JOURNAL_REL is referenced in <module>; "
+                  "the record journal lives only in the typed capability home".format(line)])
+        (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
+        legacy = _LEGACY_RECORD_JOURNAL
+        (tree / "planted.py").write_text(
+            "import _opf_record\n\n\ndef _home():\n    \"\"\"Not {0}.\"\"\"\n    return _opf_record.JOURNAL_REL\n\n\n"
+            "def _path():\n    return \"{0}\"\n\n\ndef self_test():\n    return \"{0}\"\n".format(legacy),
+            encoding="utf-8")
+        check("homes1-legacy-references-red", lambda: homes1_findings(tree) == [
+            "planted.py:6: the deleted record journal constant JOURNAL_REL is referenced in _home; the record "
+            "journal lives only in the typed capability home",
+            "planted.py:10: the deleted record journal root {} is named in _path; the record journal lives only "
+            "in the typed capability home".format(legacy)])
+        (tree / "planted.py").unlink()
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)

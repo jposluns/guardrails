@@ -2832,7 +2832,6 @@ def self_test():
     ctrl["import_policy"]["scope"] = [".working/FINDINGS.md", ".working/journals/old.md"]
     check("plan-v2-homes2-ordinary-sources-valid", validate_plan(full).status == VALID)
     check("plan-v2-homes2-control-source-refused", validate_plan(ctrl).status == INVALID)
-    check("plan-v2-legacy-control-source-refused", validate_plan(ctrl).status == INVALID)
     # The homes-1 grading is deleted: a caller can no longer select it, so no default grades a row
     # without the control-operand refusal (red when a `homes` parameter or default comes back).
     for fn, arg in ((validate_op, full["ops"][0]), (validate_plan, ctrl)):
@@ -3478,8 +3477,8 @@ def self_test():
             ("registration-unchanged-manifest", full, lambda p: p["ops"][-1].update(new_digest=_D0)),
             ("registration-before-init", full, lambda p: p["ops"].insert(0, p["ops"].pop(-1))),
             ("hook-rewrites-manifest", full, lambda p: p["ops"].append(_hook(_MANIFEST))),
-            # 16c: the control area is never selected, kept, created into, rewritten, relocated or removed, in
-            # the legacy generation as in homes 2 (spec 14.2).
+            # 16c: the control area is never selected, kept, created into, rewritten, relocated or removed
+            # (spec 14.2); homes 2 is the only generation graded, the homes-1 grading being deleted.
             ("keep-in-adoption-archive", full, lambda p: (
                 p["sources"][1].update(path=_old_archive), p["ops"][-1].update(entry=_old_archive))),
             ("retire-adoption-archive-original", base_plan, lambda p: (

@@ -703,6 +703,9 @@ DN_INDEX = MACH + "/done.index.toml"
 WORKLOG = MACH + "/worklog.toml"
 VERSION = MACH + "/version.toml"
 LEASE = MACH + "/lease.toml"
+# The deleted homes-1 record journal root: the vectors only assert it is never created, never read, and
+# that a context naming it refuses; the module under test no longer names it.
+LEGACY_JOURNAL = ".aiqt/record/journal"
 RECORDED_EVENT = '"event": "recorded"'
 CREATE = ["create", "--type", "backlog_item", "--title", "an item", "--actor", "assistant:gate"]
 APPEND = ["worklog-append", "--kind", "added", "--summary", "a fact", "--actor", "assistant:gate"]
@@ -1732,7 +1735,7 @@ def _t5_matrix(fx, label, base, args, operands):
                                                    point)
         states = journal_states(root)
         assert not any(s == "open" for s in states.values()), ("T5 every transaction terminal", point, states)
-        assert not (Path(root) / record.JOURNAL_REL).exists(), ("T5 no legacy journal is written", point)
+        assert not (Path(root) / LEGACY_JOURNAL).exists(), ("T5 no legacy journal is written", point)
         now = {rel: read(root, rel) for rel in operands}
         complete = any(s == "complete" for name, s in states.items() if name not in retained)
         assert now == (post if complete else pre), (
@@ -3449,7 +3452,7 @@ def flip_t19():
 def legacy_journal_leftover(root):
     """A leftover .aiqt/record/journal holding a lock and an open-looking transaction directory, the
     shape an earlier build left; at 2.0.0 OPF keeps no record state under .aiqt (spec 4.2)."""
-    legacy = Path(root) / record.JOURNAL_REL
+    legacy = Path(root) / LEGACY_JOURNAL
     (legacy / "record-create.1.1.leftover").mkdir(parents=True)
     (legacy / "lock").write_bytes(b"pid = 1\ntoken = \"leftover\"\n")
 
@@ -3473,7 +3476,8 @@ def flip_t20b():
     original = record._reconcile_journal
 
     def refusing(ctx):
-        record._refuse_legacy_journal(ctx)
+        if record._journal._lstat_contained(ctx.root_fd, LEGACY_JOURNAL) is not None:
+            raise record.RecordError("a legacy record journal {} is present".format(LEGACY_JOURNAL))
         original(ctx)
     return patch.object(record, "_reconcile_journal", refusing)
 
@@ -3526,7 +3530,7 @@ def t21_homes2_publish(fx):
 
 
 def flip_t21():
-    return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
+    return patch.object(record, "_record_journal_rel", lambda homes: LEGACY_JOURNAL)
 
 
 def t27b_homes2_report(fx):
@@ -3536,11 +3540,12 @@ def t27b_homes2_report(fx):
     report = json.loads(next(l for l in out.splitlines() if RECORDED_EVENT in l))
     assert report.get("journal_rel") == TYPED_JOURNAL, ("T27b the typed journal_rel", sorted(report))
     assert "the journal under {} is local recovery evidence".format(TYPED_JOURNAL) in out, out[-800:]
-    assert "the journal under {} ".format(record.JOURNAL_REL) not in out, out[-800:]
+    assert "the journal under {} ".format(LEGACY_JOURNAL) not in out, out[-800:]
 
 
 def flip_t27b():
-    """Drop the journal_rel key from the report, so the advice falls back to the legacy home."""
+    """Drop the journal_rel key from the report: the advice has no fallback home (the legacy one is
+    deleted), so the success report fails instead of naming the typed home."""
     original = record._emit_success
 
     def without_journal_rel(report):
@@ -3590,7 +3595,7 @@ def t22_homes2_claim_reserves(fx):
     pre_counters = model(root, COUNTERS)["counters"]
     result = record_cli(env, root, CREATE)
     recorded(result)
-    assert not (Path(root) / record.JOURNAL_REL).exists(), "T22 no legacy journal is created"
+    assert not (Path(root) / LEGACY_JOURNAL).exists(), "T22 no legacy journal is created"
     states = journal_states(root, TYPED_JOURNAL)
     assert list(states.values()) == ["complete"], ("T22 one COMPLETE transaction", states)
     (run_id,) = states
@@ -3761,9 +3766,9 @@ def t23_homes2_crash(fx):
 
 
 def flip_t23():
-    """Recover the homes-2 store from the legacy journal root (the reviewed head's routing): the typed
-    interruption is never reconciled."""
-    return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
+    """Route the context to the deleted legacy journal root: the journal-home guard refuses it, so the
+    typed interruption is never reconciled."""
+    return patch.object(record, "_record_journal_rel", lambda homes: LEGACY_JOURNAL)
 
 
 # --- T5-flip, T24-T28: the PR D fix-1 vectors ------------------------------------------------------------
@@ -3833,7 +3838,7 @@ def flip_t24b():
         try:
             record._read_operand(ctx.root_fd, ctx.rel(record._opf_store.MANIFEST_NAME))
         except record.RecordError:
-            if record._journal._lstat_contained(ctx.root_fd, record.JOURNAL_REL) is not None:
+            if record._journal._lstat_contained(ctx.root_fd, LEGACY_JOURNAL) is not None:
                 return 1
         return original(ctx)
     return patch.object(record, "_probe_admission", legacy_on_failure)
@@ -4640,7 +4645,7 @@ def t40_held_refusal_discloses(fx):
 # and named a sibling's owning checkout regardless of its generation).
 # Fix 7 retired the fix-6 "reclaimed and reconciled by this run" and "Only a run ..." sentences (T46 pins
 # the cases that leave work for a later trigger instead).
-FIX6_BOTH = ("a homes-1 record run there never reclaims a capability record",
+FIX6_BOTH = ("no other generation's record run exists to reclaim it",
              "the refusal naming whatever the acquisition removed before it refused",
              "cannot be unlinked or fsynced during the recovery deletes")
 FIX6_MODULE = ("until it releases normally, or exits and a later run confirms it dead",
@@ -4649,7 +4654,8 @@ FIX6_GUARD = ("the holder releases normally, or exits and a later run confirms i
               "That last group is NOT exhaustive")
 FIX6_PLAN = "REOPENED whenever it is present (an absent home is re-read as absent under the held capability"
 FIX6_RETIRED = ("neither reclaims nor reconciles", "refuses this run with nothing written",
-                "refuses record runs, nothing written", "the journal home is ALWAYS re-inspected and REOPENED")
+                "refuses record runs, nothing written", "the journal home is ALWAYS re-inspected and REOPENED",
+                "a homes-1 record run there never reclaims a capability record")
 
 
 def fix6_texts():
@@ -6981,7 +6987,7 @@ def flip_t83():
     original = journal_states
 
     def shortcut(root, rel=None):
-        if not (Path(root) / (record.JOURNAL_REL if rel is None else rel)).is_dir():
+        if not (Path(root) / (LEGACY_JOURNAL if rel is None else rel)).is_dir():
             return {}
         return original(root, rel)
     return patch.object(sys.modules[__name__], "journal_states", shortcut)
@@ -9623,7 +9629,7 @@ def t110_receipt_repair(fx):
         "T110 the run's own reservation stands", _reservations(root))
     payload = model(root, record._opf_store.allocation_record("record", run_id))
     assert payload["claims"] == {"DN": counters0["DN"] + 1, "WL": counters0["WL"] + 1}, payload
-    assert not (Path(root) / record.JOURNAL_REL).exists(), "T110 no legacy journal is created"
+    assert not (Path(root) / LEGACY_JOURNAL).exists(), "T110 no legacy journal is created"
     doctor_valid(env, root)
     refused_untouched(env, root, REPAIR, "already holds the clean done receipt '{}'".format(did))
 
