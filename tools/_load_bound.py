@@ -33,19 +33,15 @@ wanted success, and in the tools/check_gensrc_failclose.py probes, where a nonze
 wanted rejection of a corrupt target, that status stands as the rejection (after the same post-probe
 containment validation a completed rejection gets). An own exit of 0 beside a stop proves less than a
 completed 0 (the stop may have cut the result short), so each caller states its own treatment, every
-one conservative: tools/selftest_git_fixture_env.py files it as a bound stop (cannot-evaluate) unless
-failure-marker stderr stands beside it; tools/check_hooks_preview.py files it as unverifiable
-(cannot-evaluate); the pl239 cases of tools/selftest_aiqt_hooks.py retry it exactly like a clean bound
-stop when no stderr was captured, ending cannot-evaluate; only the tools/check_gensrc_failclose.py
-probes let it stand as a completed 0, because exit 0 on a corrupt target is the F-154 violation there,
-so cannot-evaluate would be the lenient direction. The other evidence captured beside a stop is judged
-by the contract of each caller: tools/selftest_git_fixture_env.py treats a hook, monitor or exposure
-marker or a wrong value beside a stop as a FAILURE (exit 1), and a captured stream (stderr or stdout)
-as failure evidence when it carries a failure marker (a line-start Traceback, FAIL, ERROR or
-SELF-TEST FAIL, a verbose "... FAIL"/"... ERROR"/"... unexpected success" result ending, or
-unittest's F, E or u progress characters, which only failing, erroring or unexpectedly succeeding
-tests write, a progress run cut short by other text included), never the passing progress (dots,
-"Ran N tests", "OK") its suites write to stderr in passing runs too; the pl239 cases of tools/selftest_aiqt_hooks.py treat captured stderr or a nonzero own exit
+one conservative. run() has three callers in this repository: _run_check in
+tools/check_gensrc_failclose.py, leg_selftest in tools/check_hooks_preview.py, and the pl239 dispatch
+cases of tools/selftest_aiqt_hooks.py (_pl239_launch). tools/check_hooks_preview.py files it as
+unverifiable (cannot-evaluate); the pl239 cases of tools/selftest_aiqt_hooks.py retry it exactly like a
+clean bound stop when no stderr was captured, ending cannot-evaluate; only the
+tools/check_gensrc_failclose.py probes let it stand as a completed 0, because exit 0 on a corrupt
+target is the F-154 violation there, so cannot-evaluate would be the lenient direction. The other
+evidence captured beside a stop is judged by the contract of each caller: the pl239 cases of
+tools/selftest_aiqt_hooks.py treat captured stderr or a nonzero own exit
 beside a stop as a FAILURE (exit 1) and do not consult stdout beside a stop (a wrong verdict held
 there ends cannot-evaluate after the retries); tools/check_gensrc_failclose.py and
 tools/check_hooks_preview.py judge the exit status of a member alone (a generator prints its rejection
@@ -145,10 +141,9 @@ members survive it, orphaned; it is armed only where libc prctl is available (el
 itself survives this process's death, as before); an exec of a set-user-id or set-group-id program
 clears it; it fires on the death of the SPAWNING THREAD, so run() must be called from a thread
 that lives until the child is stopped, which run() itself ensures by blocking the spawning thread
-until the stop completes: that holds on every caller path in this repository, including
-tools/selftest_git_fixture_env.py _config_results, which calls run() on ThreadPoolExecutor WORKER
-threads, not the main thread (a Python thread cannot be killed from outside mid-call, and the
-pool's shutdown joins its workers); a parent killed between the fork and the child's prctl cannot
+until the stop completes: that holds on every caller path in this repository, since the three
+callers named above each call run() on their process's main thread (none of their files starts a
+thread); a parent killed between the fork and the child's prctl cannot
 be protected after the fact, so the preexec detects it (the recorded pid is no longer the parent)
 and the child exits with UNARMED_EXIT instead of running unarmed, exactly as it does where the
 host refuses the prctl itself (a seccomp or LSM policy can return nonzero without raising): on
@@ -171,8 +166,9 @@ copy of the git binary under another name. git launches stay on a direct subproc
 maintenance-pin scan in tools/selftest_git_fixture_env.py reads and enforces their pins; a call site of
 run() answers for what its own interpreter code launches.
 
-The shared vectors (vector_failures) run in the check_gensrc_failclose.py self-test only; each other
-adopting self-test carries vectors for its own call site.
+The shared vectors (vector_failures) run in two places: this module's own `--self-test` entry
+(_self_test_main) and the check_gensrc_failclose.py self-test; each other adopting self-test carries
+vectors for its own call site.
 
 Residuals: a hang that keeps accruing CPU time or output (a spin or a polling loop) is caught only by the
 load-adjusted budget; the load average is a smoothed host-wide figure, so a burst shorter than a minute is
@@ -1167,8 +1163,8 @@ def _stat_entry(pid, proc_table=None):
 
 
 def vector_failures(python):
-    """The shared vectors, run by the check_gensrc_failclose.py self-test; returns a list of failure
-    strings. A child that outlives its bound while making CPU or output progress must pass; a silent child
+    """The shared vectors, run by this module's --self-test and the check_gensrc_failclose.py
+    self-test; returns a list of failure strings. A child that outlives its bound while making CPU or output progress must pass; a silent child
     must be stopped by the stall bound and a spinning one by the load-adjusted budget, each as Hung; a load
     reading that is malformed, or a CPU reading that turns unreadable, must not break either bound; any
     fault after the launch must still stop and reap the child, a monitoring fault keeps the streams
