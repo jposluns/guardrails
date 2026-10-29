@@ -2292,6 +2292,21 @@ class _LexFork:
         self.tails = tails
 
 
+# The skip_empty value under which a lex leaves out only a segment with no word and no redirect that repeats the
+# record before it (_empty_repeat), so a run of one separator builds one record (_lex_command).
+_SKIP_EMPTY_REPEATS = "repeats"
+
+
+def _empty_repeat(segments, sep):
+    """True when a segment with no word and no redirect, ended by sep, repeats the last record of segments: sep is a
+    separator, not '' (a newline or the end of the command), and that record has no word and no redirect and was
+    ended by the same separator (_SKIP_EMPTY_REPEATS)."""
+    if not sep or not segments:
+        return False
+    last = segments[-1]
+    return last.sep_after == sep and not last.argv and not last.redirects
+
+
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
@@ -2341,7 +2356,14 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     would be _Segment([], sep, [], raw, False, [], []), so a long run of separators ('((((', ';;;;') builds no
     record, list or tuple for it; every other record, its order and the partial-mode flags are unchanged. Only
     a caller that reads nothing from such a segment (not its sep_after, its raw slice, or its place in the
-    list) passes it; the default False keeps every record.
+    list) passes it; the default False keeps every record. skip_empty _SKIP_EMPTY_REPEATS leaves out, under
+    every reading, only such a segment that repeats the record before it in its reading's list (_empty_repeat:
+    that record has no word and no redirect either and was ended by the same separator, not a newline or the
+    end of the command), so a long run of one separator builds one record for the run, not one per separator;
+    every record left in, its order and the partial-mode flags are unchanged. Only a caller that reads such a
+    segment by its sep_after alone, never its raw slice or its index, and that decides a run of them as it
+    decides one, passes it (gate_weakening). A segment ended by a newline is never left out, so what a resumed
+    pass builds after its first newline (_LexFork.tails) does not depend on the record before that newline.
 
     Inside _CommandReading the command reading follows the readings above, the segments of each read from its
     command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
@@ -2448,7 +2470,7 @@ def _lex_readings(command, partial=False, locale=False, skip_empty=False):
             misread = misread or body
     return _with_command_readings(
         _beside_main_reading(command, partial, locale, readings, skip_empty) if misread else readings, partial,
-        locale, skip_empty, "`" in command)
+        locale, skip_empty, "`" in command, () if first is None else first.segments)
 
 
 def _hash_reading_with(reading, at, comment):
@@ -2511,7 +2533,8 @@ def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
 def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
     subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
-    skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
+    skip_empty True leaves out every segment with no word and no redirect, and _SKIP_EMPTY_REPEATS only one that
+    repeats the record before it (_lex_command). fork, when given,
     is the _LexFork the pass resumes from (_lex_reading), with copies of its lists and nesting stack. Where
     hash_reading does not map an uncertain '#' met at a word boundary or at the start of a redirect target,
     the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
@@ -2576,7 +2599,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     def end_segment(sep, op_start, next_start):
         # With no word and no redirect there is nothing to reset: argv_opaque, argv_leading_tilde, argv_spelling
         # and opaque change only together with argv, so a skipped segment leaves them empty and False as well.
-        if argv or redirects or not skip_empty:
+        if (argv or redirects or not skip_empty
+                or (skip_empty == _SKIP_EMPTY_REPEATS and not _empty_repeat(segments, sep))):
             # words(), written out: this runs once per segment, and a long run of separators makes many.
             segments.append(_Segment(list(argv) if argv_spelling is None or not argv
                                      else _SpelledWords(argv, argv_spelling), sep, list(redirects),
@@ -2740,6 +2764,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             empty = []
                             segments.extend([_Segment(empty, op, empty, "", False, empty, empty)
                                              for _ in range(count)])
+                        elif skip_empty == _SKIP_EMPTY_REPEATS and not _empty_repeat(segments, op):
+                            # The run's first record, as the per-character path builds it; each later one
+                            # would repeat it (_empty_repeat), so none is built.
+                            empty = []
+                            segments.append(_Segment(empty, op, empty, "", False, empty, empty))
                         seg_start[0] = run
                         i = run
                     continue
@@ -2950,8 +2979,11 @@ class _CommandReading:
     from or whose text opens the backquote substitution that holds it, and body True for a segment of such a
     substitution. depth counts the backquote bodies being lexed inside one another (_read_commands). scans and
     reads hold, for the context's lexes, each text already scanned for backquotes and each body already read
-    (COST above _COMMAND_LEAD_WORDS), and budget what is left of the body budget. It restores the previous
-    setting on exit, as _WordSpellings does."""
+    (COST above _COMMAND_LEAD_WORDS), and budget what is left of the body budget. shared holds, for the
+    context's last lex, the records its first reading built before the command's first uncertain '#', which
+    each reading that resumed there holds at its head (_shared_lead), and the context object holds it once it
+    exits, so a caller that judges each record on its own judges those once (diff_source_pretool). It
+    restores the previous setting on exit, as _WordSpellings does."""
 
     on = False
     added = 0
@@ -2960,26 +2992,29 @@ class _CommandReading:
     scans = None
     reads = None
     budget = 0
+    shared = ()
 
     def __init__(self, origins=False):
         self.want_origins = origins
 
     def __enter__(self):
         self.was = (_CommandReading.on, _CommandReading.added, _CommandReading.origins, _CommandReading.scans,
-                    _CommandReading.reads, _CommandReading.budget)
+                    _CommandReading.reads, _CommandReading.budget, _CommandReading.shared)
         _CommandReading.on = True
         _CommandReading.added = 0
         _CommandReading.origins = [] if self.want_origins else None
         _CommandReading.scans = {}
         _CommandReading.reads = {}
         _CommandReading.budget = _READ_BODY_LIMIT
+        _CommandReading.shared = ()
         return self
 
     def __exit__(self, *exc_info):
         self.added = _CommandReading.added
         self.origins = _CommandReading.origins
+        self.shared = _CommandReading.shared
         (_CommandReading.on, _CommandReading.added, _CommandReading.origins, _CommandReading.scans,
-         _CommandReading.reads, _CommandReading.budget) = self.was
+         _CommandReading.reads, _CommandReading.budget, _CommandReading.shared) = self.was
         return False
 
 
@@ -3202,7 +3237,23 @@ def _backquote_runs(text, at):
     return runs
 
 
-def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks=True):
+def _shared_lead(segments, shared):
+    """How many records at the head of segments, one reading of a command as _lex_readings returns it, are the
+    records of shared, the same objects in order: len(shared) where segments holds the last of them at its
+    index, else 0. shared is what the first reading's lex built before it stopped at the command's first
+    uncertain '#' (_lex_readings), which every reading that resumed from there holds at its head: a resumed
+    pass starts from a copy of the records of the lex it resumes and only appends to it (_lex_pass), every
+    record a pass appends is one it built or, at its first newline, one another resumed pass built after its
+    own first newline (_LexFork.tails), and a pass lexed from the start builds every record it holds. So a
+    reading holding the last record of shared at its index holds every record of shared before it as well,
+    and a reader that judges each record on its own may judge those once for every reading holding them. Only
+    the lexer's own readings are read this way: a reading the command reading added (_read_segments) holds
+    records it read anew and bodies' commands among them."""
+    count = len(shared)
+    return count if count and len(segments) >= count and segments[count - 1] is shared[count - 1] else 0
+
+
+def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks=True, shared=None):
     """The command reading of one reading of a command (A COMMAND'S SUBJECT PAST ITS COMPOUND WORDS, above
     _COMMAND_LEAD_WORDS): segments, that reading's _Segment records in order, each read from its command word
     (_read_past), with the commands of each backquote substitution the reading's text holds (_backquote_bodies,
@@ -3222,7 +3273,12 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks
     body) pair per segment returned when the reading changes something (_CommandReading). ticks False says the
     text the records were lexed from holds no backquote, so no record's raw text, a slice of that text, holds
     one, and the records are not searched for one. Past the last record that opens a body only the records
-    with a word are visited, so a long run of separators costs one pass over its records per reading."""
+    with a word are visited, so a long run of separators costs one pass over its records per reading. shared,
+    when given, is (records, positions): the records the first reading's lex built before the command's first
+    uncertain '#' and the positions among them of the records with a word before their command word, found
+    once (_with_command_readings); where segments holds those records at its head (_shared_lead) they are not
+    visited again, so a long run of separators before the readings of an uncertain '#' costs one pass over its
+    records, not one per reading."""
     bodies = ()
     if ticks and any("`" in seg.raw for seg in segments):
         text = "".join([seg.raw + (seg.sep_after or "\n") for seg in segments])
@@ -3258,7 +3314,13 @@ def _read_segments(segments, locale=False, skip_empty=False, origins=None, ticks
     # (_command_start): a record with no word, as each of a long run of separators is, is passed over, and
     # each of the readings of an uncertain '#', which share such a run, adds no call per record of it.
     rest = segments[number:] if number else segments
-    past = [at for at, seg in enumerate(rest, number) if seg.argv and _command_start(seg.argv)]
+    lead = 0 if shared is None else _shared_lead(segments, shared[0])
+    if lead > number:
+        # The records before lead are shared's (_shared_lead), whose positions to read anew were found once.
+        past = [at for at in shared[1] if at >= number] + [
+            at for at, seg in enumerate(segments[lead:], lead) if seg.argv and _command_start(seg.argv)]
+    else:
+        past = [at for at, seg in enumerate(rest, number) if seg.argv and _command_start(seg.argv)]
     if not changed and not past:
         return segments
     shift = len(out) - number
@@ -3329,7 +3391,7 @@ def _read_commands(body, locale=False, skip_empty=False):
     return out
 
 
-def _with_command_readings(readings, partial, locale=False, skip_empty=False, ticks=True):
+def _with_command_readings(readings, partial, locale=False, skip_empty=False, ticks=True, shared=()):
     """readings, the list of one lex's readings of a command as _lex_readings returns it (one entry per reading:
     its segments, or in partial mode its (segments, complete, in_progress)), followed inside _CommandReading by
     the command reading of each reading it changes (_read_segments), and readings itself outside it. An added
@@ -3340,17 +3402,24 @@ def _with_command_readings(readings, partial, locale=False, skip_empty=False, ti
     origins each added segment's (index, body) pair is put there, its index counted in the segments of the
     readings joined in order, as _lex_command returns them. ticks False says the command the readings were
     lexed from holds no backquote (_read_segments), so the readings of its uncertain '#' are not searched for
-    one each."""
+    one each. shared is what the first reading's lex built before the command's first uncertain '#' (()
+    for none, _lex_readings): the records among them with a word before their command word are found once,
+    for every reading holding them at its head (_shared_lead), and the context keeps shared
+    (_CommandReading.shared)."""
     if not _CommandReading.on:
         return readings
+    _CommandReading.shared = shared
     added = []
     origins = _CommandReading.origins
     pairs = []
     offset = 0
+    known = None  # (shared, the positions in it of the records read anew), once a reading holds shared
     for reading in readings:
         segments = reading[0] if partial else reading
         found = [] if origins is not None else None
-        read = _read_segments(segments, locale, skip_empty, found, ticks)
+        if known is None and _shared_lead(segments, shared):
+            known = (shared, [at for at, seg in enumerate(shared) if seg.argv and _command_start(seg.argv)])
+        read = _read_segments(segments, locale, skip_empty, found, ticks, known)
         if read is not segments:
             added.append((read,) + tuple(reading[1:]) if partial else read)
             if found is not None:
@@ -4371,6 +4440,32 @@ def _diff_compound_console(segments):
     return [all(console(compound) for compound in around) for around in enclosing]
 
 
+def _diff_possibles(readings, added, shared):
+    """The possible producers (_is_possible_producer) among the records of readings, a lex's readings of a
+    command as _lex_readings returns them inside _CommandReading (the command reading's, added records in all,
+    last), as (index, record) pairs, each index counted in the records of the readings joined in order, as
+    _lex_command returns them. A record with no word and no raw text (one of a run of separators) is no
+    possible producer: its argv holds no git word, its empty raw text matches no probe, and it carries no
+    opaque word. The records of shared that one of the lexer's own readings holds at its head (_shared_lead)
+    are judged once, for every reading holding them, so a long run of separators before the readings of an
+    uncertain '#' costs one pass over its records, not one per reading."""
+    own = sum(len(segs) for segs in readings) - added
+    out = []
+    offset = 0
+    known = None  # the possible producers among the records of shared, once a reading holds them
+    for segs in readings:
+        lead = _shared_lead(segs, shared) if offset < own else 0
+        if lead:
+            if known is None:
+                known = [(at, seg) for at, seg in enumerate(shared)
+                         if (seg.argv or seg.raw) and _is_possible_producer(seg)]
+            out.extend([(offset + at, seg) for at, seg in known])
+        out.extend([(at, seg) for at, seg in enumerate(segs[lead:] if lead else segs, offset + lead)
+                    if (seg.argv or seg.raw) and _is_possible_producer(seg)])
+        offset += len(segs)
+    return out
+
+
 def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
@@ -4436,8 +4531,11 @@ def diff_source_pretool(data):
         # test below read every segment, while the closed proofs read the lexer's own segments alone (own), so
         # an added segment can deny or note but never earn a proof. The origins say which own segment each
         # added one was read from, for the destination of the compound around it (_diff_compound_console).
+        # The readings are kept apart until a possible producer is found (_diff_possibles), so the records
+        # every reading of an uncertain '#' shares at its head are judged once; joined, they are the
+        # segments _lex_command returns.
         with _CommandReading(origins=True) as reading:
-            segments = _lex_command(command)
+            readings = _lex_readings(command)
     except _ReadingLimitError:
         # The command reading spent its body budget: the fallback below can note or allow a dump that main's
         # reading denies, so it denies (COST above _COMMAND_LEAD_WORDS).
@@ -4459,11 +4557,10 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
+    possibles = _diff_possibles(readings, reading.added, reading.shared)
+    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
+    segments = [seg for segs in readings for seg in segs] if possibles else []
     own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
-    # A segment with no word and no raw text (one of a run of separators) is no possible producer: its argv
-    # holds no git word, its empty raw text matches no probe, and it carries no opaque word.
-    possibles = [(index, seg) for index, seg in enumerate(segments)
-                 if (seg.argv or seg.raw) and _is_possible_producer(seg)]
     # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
     # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
@@ -17191,9 +17288,14 @@ def gate_weakening(data):
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
         # below, whose canonical shape needs every earlier segment benign; every other check reads the
         # segments of all readings in turn, as _lex_command returns them. Each word's spelling is recorded for
-        # the git alias reading below (_WordSpellings).
+        # the git alias reading below (_WordSpellings). A run of segments with no word and no redirect, ended by
+        # the same separator, keeps one record (_SKIP_EMPTY_REPEATS): every check here reads such a segment by its
+        # separator alone and decides a run of them as it decides one (the loop below passes each over, the note
+        # tier stops only at one ending in a pipe, and the deny tier's _gate_benign_prefix, _gate_conditional_run
+        # and stage walk answer the same for each of a run), so a long run of separators, which every reading of
+        # an uncertain '#' after it shares, builds and is read as one record, not one per separator per reading.
         with _WordSpellings():
-            readings = _lex_readings(command)
+            readings = _lex_readings(command, skip_empty=_SKIP_EMPTY_REPEATS)
     except ValueError as exc:
         # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
         # the unparseable construct are judged first for a verification run piped into a truncating sink;
@@ -20612,7 +20714,100 @@ _ORCH_SHELL_KEYWORDS = frozenset((
 _ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
-def _orch_foreground_scan(command, bash_word_starts, amps=None):
+def _orch_heredoc_spec(command, i):
+    """The here-document opened by the `<<` or `<<-` operator at command[i], as (delimiter, quoted,
+    strip_tabs): the delimiter word after quote removal, whether any part of it was quoted (a single- or
+    double-quoted span or a backslash escape, which makes bash read the body as literal data), and whether
+    the operator is `<<-` (bash strips leading tabs from each body line and from the delimiter line). None
+    when this reading does not parse the word: no word, a quote left open, a backslash-newline, a `$` or a
+    backquote anywhere in it, or a backslash inside its double quotes."""
+    n = len(command)
+    j = i + 2
+    strip_tabs = j < n and command[j] == "-"
+    j += 1 if strip_tabs else 0
+    while j < n and command[j] in " \t":
+        j += 1
+    word, quoted = [], False
+    while j < n and command[j] not in _ORCH_BASH_WORD_BREAKS:
+        ch = command[j]
+        if ch in "'\"":
+            close = command.find(ch, j + 1)
+            part = command[j + 1:close]
+            if close == -1 or (ch == '"' and any(c in part for c in "\\$`")):
+                return None
+            word.append(part)
+            quoted, j = True, close + 1
+        elif ch == "\\":
+            if j + 1 >= n or command[j + 1] == "\n":
+                return None
+            word.append(command[j + 1])
+            quoted, j = True, j + 2
+        elif ch in "$`":
+            return None
+        else:
+            word.append(ch)
+            j += 1
+    delimiter = "".join(word)
+    return (delimiter, quoted, strip_tabs) if delimiter else None
+
+
+# The one line shape that opens a here-document the detach scan may skip as data: `cat > FILE <<'DELIM'`
+# (or `>>`, or a double-quoted delimiter), blanks allowed around the operators and nothing else on the line:
+# no other word, no wrapper or assignment before cat, no second redirect or here-document, no quote, '$',
+# backslash, '|', ';', '&', '(', ')', backquote or '#'. It is only ever read as one write of a command made
+# of nothing but such writes (_orch_heredoc_data_command), never as a line inside a longer command.
+_ORCH_HEREDOC_DATA_LINE = re.compile(
+    r"[ \t]*cat[ \t]*>>?[ \t]*([A-Za-z0-9_./+,:@%=-]+)[ \t]*<<[ \t]*(?:'([A-Za-z0-9_.+-]+)'|\"([A-Za-z0-9_.+-]+)\")[ \t]*")
+
+
+def _orch_heredoc_data_line(line):
+    """The delimiter of the here-document line opens when line is, whole, one plain write
+    `cat > FILE <<'DELIM'` (or `>>`, or a double-quoted delimiter; _ORCH_HEREDOC_DATA_LINE) whose FILE is a
+    plain word naming a file outside /dev and /proc with no '..' component, so cat's output cannot be the
+    shell's own (/dev/stdout, /dev/fd/1, /proc/self/fd/1); else None. A relative FILE is read as written,
+    not against the working directory, and a symlink is not followed, so a FILE that reaches that output only
+    through a changed directory or a symlink is not seen (disclosed). This line test alone proves nothing
+    about the body: a later command in the same call can run the written file, so the body is data only when
+    the whole command is such writes (_orch_heredoc_data_command)."""
+    match = _ORCH_HEREDOC_DATA_LINE.fullmatch(line)
+    if not match:
+        return None
+    parts = [part for part in match.group(1).split("/") if part not in ("", ".")]
+    if not parts or ".." in parts or parts[0] in ("dev", "proc"):
+        return None
+    return match.group(2) or match.group(3)
+
+
+def _orch_heredoc_data_command(command):
+    """True when the WHOLE command is nothing but one or more plain cat writes, each a line
+    _orch_heredoc_data_line accepts, then its body, then a line that is exactly its delimiter, the writes
+    separated only by newlines. No other command word may appear anywhere: a later '.', source, bash or
+    ./path can run a written file, and an earlier hash, alias, function, enable, builtin, command, exec,
+    eval or PATH or other assignment can make `cat` run something else, so any such line makes every body
+    code. Only then does cat copy each body into its file with nothing in the command running it, and only
+    then are the bodies data. The word cat is trusted as written: a function, alias or builtin named cat
+    the shell already holds, or an inherited PATH or other environment that resolves cat to a shell or
+    another program, is not seen (disclosed in the manifest). An empty command is not such a command."""
+    lines = command.split("\n")
+    i, n, writes = 0, len(lines), 0
+    while i < n:
+        if not lines[i]:
+            i += 1
+            continue
+        delimiter = _orch_heredoc_data_line(lines[i])
+        if delimiter is None:
+            return False
+        i += 1
+        while i < n and lines[i] != delimiter:
+            i += 1
+        if i == n:
+            return False  # no delimiter line: bash reads the rest of the command as this body
+        i += 1
+        writes += 1
+    return writes > 0
+
+
+def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
     quote or meets a `#` whose comment reading depends on context, None otherwise. amps, when given, is a
@@ -20629,7 +20824,15 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
     the `$(...)` and backquote substitutions opened there: a `#` that is not right after a word character
     while one is open (outside a single-quoted span in it) is a comment to bash, which can hide the string's
     closing quote, so it is uncertain too. The guard runs BOTH and denies when either reports, so the bash
-    rule can only ADD denies to the historical one."""
+    rule can only ADD denies to the historical one. The pass skips a here-document body as data in ONE
+    case only: the WHOLE command is nothing but one or more plain `cat > FILE <<'DELIM'` writes (or `>>`, or
+    a double-quoted delimiter), each with its body and delimiter line, separated only by newlines, with no
+    other command word anywhere (_orch_heredoc_data_command); each body, whose delimiter this pass also
+    parses (_orch_heredoc_spec) with nothing open on the nesting stack, then resumes the pass past its
+    delimiter line unread. In every other command, one where a write is followed or preceded by any other
+    command (a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
+    other assignment that can rename cat) included, every body is read as shell text, as it is when
+    skip_bodies is False."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
@@ -20638,6 +20841,16 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
     dq_nest = _NestStack()  # the substitutions opened inside the current double-quoted string: "(" or a backquote
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
+    heredocs = []  # the here-documents opened on the current line, each a _orch_heredoc_spec or None
+    # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
+    # bash ends elsewhere, so no later here-document is skipped.
+    code_body = False
+    # The first '(', backquote or '$[' anywhere in the command: a here-document opened after one may sit in
+    # a substitution or an arithmetic expansion, whose body bash can end elsewhere, so it is never skipped.
+    grouped = min((at for at in (command.find("("), command.find("`"), command.find("$[")) if at != -1),
+                  default=len(command))
+    # Whether the whole command is nothing but plain cat writes, the one case whose bodies are data.
+    data_command = skip_bodies and _orch_heredoc_data_command(command)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -20697,6 +20910,22 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
                     break  # no later line: the comment runs to the end of the string, nothing more to scan
                 i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
                 continue
+        if ch == "\n" and heredocs:
+            # The bodies of the here-documents opened on this line start here. Only where the whole command
+            # is nothing but plain cat writes to files (_orch_heredoc_data_command) does nothing in it run a
+            # body, so only there is a quoted body literal data the scan resumes past, its quotes shifting
+            # nothing. In any other command (a write followed by '. ./s.sh' or 'bash s.sh', or preceded by
+            # 'hash -p /usr/bin/bash cat', included) the body is read as shell text, as before.
+            specs, heredocs = heredocs, []
+            literal = (data_command and not nest and not code_body
+                       and all(spec and spec[1] for spec in specs))
+            end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
+                           if literal else (i, False))
+            if closed:
+                prev_dup, prev, after_dollar = False, "break", False
+                i = end
+                continue
+            code_body = True
         if ch.isspace():
             prev_dup, after_dollar = False, False
             prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
@@ -20735,6 +20964,11 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
             amps.append(i)
             i += 1
             continue
+        if (skip_bodies and ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
+                and not (prev_dup and command[i - 1] == "<")):
+            # A here-document operator (not a here-string, nor the second '<' of one already read). One
+            # opened inside a grouping or with something open on the stack records None, never skipped.
+            heredocs.append(_orch_heredoc_spec(command, i) if i < grouped and not nest else None)
         _nest_track(nest, ch, after_dollar)
         if ch in "()":
             prev = "paren"
@@ -20750,7 +20984,7 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None):
     return "unbalanced" if in_single or in_double else None
 
 
-def _orch_foreground_detach_kind(command):
+def _orch_foreground_detach_kind(command, skip_bodies=True):
     """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote
     or meets a `#` whose comment reading depends on context, else None. The historical rule and bash's `#`
     word-start rule are both run so that the bash rule only ADDS denies: a `#` after a character bash does
@@ -20760,8 +20994,9 @@ def _orch_foreground_detach_kind(command):
     real `&` on the next line. A `#` right after a `(`, `)` or backquote (`x=$(true)#`, `(true)#`), or at a
     word start inside an open parenthesis, ${...} or backquote substitution, or inside a "$(...)" or
     backquote substitution in a double-quoted string, is uncertain under both rules, and a backslash-newline
-    before a `#` changes nothing under either."""
-    kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
+    before a `#` changes nothing under either. skip_bodies as for _orch_foreground_scan."""
+    kinds = (_orch_foreground_scan(command, False, skip_bodies=skip_bodies),
+             _orch_foreground_scan(command, True, skip_bodies=skip_bodies))
     if "detach" in kinds:
         return "detach"
     return "unbalanced" if "unbalanced" in kinds else None
@@ -20775,13 +21010,13 @@ def _orch_foreground_detach_kind(command):
 _ORCH_AMP_PLACES = frozenset(("quote", "comment", "heredoc"))
 
 
-def _orch_foreground_amps(command):
+def _orch_foreground_amps(command, skip_bodies=True):
     """The indices of every bare `&` either scan rule reads in command, each rule reading on past each one
-    (_orch_foreground_scan with amps), or None when either rule's pass ends inside a quote or meets a `#`
-    whose comment reading depends on context, so it does not read the command to its end."""
+    (_orch_foreground_scan with amps and skip_bodies), or None when either rule's pass ends inside a quote
+    or meets a `#` whose comment reading depends on context, so it does not read the command to its end."""
     amps = []
     for bash_word_starts in (False, True):
-        if _orch_foreground_scan(command, bash_word_starts, amps) is not None:
+        if _orch_foreground_scan(command, bash_word_starts, amps, skip_bodies) is not None:
             return None
     return amps
 
@@ -20844,12 +21079,14 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
     holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
     ANSI-C $'...' quote or behind an escape; a scan that ends inside a quote or meets an uncertain '#'
-    ("unbalanced", an apostrophe in a quoted here-document's body included); and a command the lexer reads
+    ("unbalanced", an apostrophe in a here-document body the scan reads as shell text included: an
+    unquoted delimiter's, or a quoted one's the scan does not skip); and a command the lexer reads
     in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
     where it places an `&` inside one of the three shapes but bash reads that `&` as an operator, the detach
     is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
-    appends True to where that narrowing reads the scan's "detach" as None, so a caller that must know
-    whether it did reads the list instead of running the scan again.
+    appends True to where that narrowing reads the scan's "detach" as None, or where the scan reads None
+    and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
+    caller that must know whether it did reads the list instead of running the scan again.
 
     COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
     scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
@@ -20868,15 +21105,29 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     if any(seg.sep_after == "&" for seg in segments):
         return "detach"
     kind = _orch_foreground_detach_kind(command)
+    if kind is None and lifts is not None:
+        # The scan's skip of a quoted here-document body can read as no detach where reading that body as
+        # text gave a detach the narrowing lifts; the caller is told of that lift as before, so the
+        # out-of-scope note keeps its lifted reading of such a command.
+        if (_orch_foreground_detach_kind(command, skip_bodies=False) == "detach"
+                and _orch_foreground_amps_lifted(command, skip_bodies=False)):
+            lifts.append(True)
+        return None
     if kind != "detach":
         return kind
-    amps = _orch_foreground_amps(command)
-    places = _orch_lexed_amp_places(command, amps) if amps else None
-    if places is not None and all(place in _ORCH_AMP_PLACES for place in places):
+    if _orch_foreground_amps_lifted(command):
         if lifts is not None:
             lifts.append(True)
         return None
     return kind
+
+
+def _orch_foreground_amps_lifted(command, skip_bodies=True):
+    """True when both scan rules read the whole command, find a bare `&`, and the shared lexer places every
+    one of them in a lifting place (_ORCH_AMP_PLACES): the narrowing of _orch_foreground_detach_lexed."""
+    amps = _orch_foreground_amps(command, skip_bodies)
+    places = _orch_lexed_amp_places(command, amps) if amps else None
+    return places is not None and all(place in _ORCH_AMP_PLACES for place in places)
 
 
 def _orch_foreground_detach(command):
@@ -20911,21 +21162,39 @@ def _orch_foreground_detach(command):
     (the false-allow residual below). A genuinely balanced, quoted `&` is literal and correctly ignored.
 
     NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only, as its own quote
-    tracking reads the outer level. Grammar it does not model (a here-document body, a nested shell string,
+    tracking reads the outer level. Grammar it does not model (a here-document body it does not skip as
+    literal data, a nested shell string,
     an alias or function that renames a detacher, and runtime detachers such as nohup/setsid/disown/coproc)
     is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
     inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest.
+    in the manifest. It judges only the `&` the top-level shell reads: a here-document body fed to a shell
+    is read as code, but the guard's lexer narrowing still lifts an `&` such a body holds under a quoted
+    delimiter where the scan reads the rest of the command to its end (`bash <<'EOF'` then `job &`), a
+    silent allow disclosed in the manifest.
 
-    OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as CODE, not data, even under a
-    quoted delimiter (<<'EOF'). The guard's lexer reading lifts that for an `&` only: a body `&` under a
-    quoted delimiter (`cat > f <<'EOF'` then `Fix A & B`, or `say "a & b"` in the commit-message form
-    "$(cat <<'EOF' ... EOF)") is allowed where the scan reads the rest of the command to its end. A body
-    with an unbalanced apostrophe (`the user's file`), or one whose quote leaves the scan open at the end,
+    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
+    command is nothing but one or more plain cat writes (_orch_heredoc_data_command): each a line holding
+    only cat, one output redirect to a plain file and one quoted here-document operator (<<'EOF' or
+    <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and nothing open, then its
+    body and a line that is, whole, its delimiter, the writes separated only by newlines, with no other
+    command word anywhere. Only in such a command does a quote, `&` or substitution in a body (`cat > f
+    <<'EOF'` then `the user's file`) read as no detach. Every other body it reads as CODE: a quoted
+    delimiter's in a cat write followed or preceded by any other command (the same write followed by a
+    line `true` included), an unquoted delimiter's, one fed to a shell or any consumer it cannot show only
+    writes the body to a file (cat to standard output and tee included), the commit-message form's in
+    "$(cat <<'EOF' ... EOF)", one in a subshell or after any '(' or backquote, one after a body read as
+    code, and one with no delimiter line.
+    The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say "a &
+    b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
+    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
+    to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
     is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The remedy is to quote the delimiter where the body needs no expansion, or to write the
-    text to a file and pass the file.
+    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
+    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
+    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
+    nothing but such writes, then run any other command in a separate call, or to write the text to a file
+    and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -20941,9 +21210,10 @@ def _orch_foreground_detach(command):
     (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
     quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
     substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
-    quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
-    including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
-    real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
+    quote, above all an apostrophe or double quote in a here-document body the scan reads as code (an
+    unquoted delimiter's, a quoted one's it does not skip, the double-quoted commit-message form's), which
+    flips the scan's quote state so that a LATER real bare `&` (between two here-documents, or before a
+    second stray quote that rebalances the scan)
     reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that bash reads as quoted text
     but the scan reads as a comment, where a double-quoted string nested inside a double-quoted "$(...)"
     ends the scan's double quote early, so a `#` inside the nested string reads as a word-start comment
@@ -22590,7 +22860,10 @@ def orch_truncation_guard(data):
                 "prove that a later '&' is quoted or commented text rather than a bare detach; it is denied "
                 "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
                 "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
-                "here-document body (scanned as code even under a quoted delimiter) or an ANSI-C $'...' "
+                "here-document body this scan reads as code (an unquoted delimiter's, or a quoted one's it "
+                "cannot end at a whole delimiter line or whose command may run it: only a command of "
+                "nothing but plain cat > file writes is read as writing data, so write such text with "
+                "cat in a call of its own) or an ANSI-C $'...' "
                 "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
