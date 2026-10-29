@@ -4067,8 +4067,10 @@ _DEADLINE_SHAPES = {
 # Every PreToolUse handler is timed on each uncertain '#' shape as well, and must reach the decision the pinned
 # base commit reached on it: "allow", except where this map names another for the (handler, shape) or, first,
 # the (handler, shape, size): protected_line denies seps_hash5 past 64 KB, where the size cap of its commit
-# reading denies a command longer than 65,536 characters. Before the readings resumed where an earlier reading
-# stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
+# reading denies a command longer than 65,536 characters, and citation_read_check allows paren_hash4 at 1 MB
+# with a note, since that command is 1,048,577 characters, one over the check's bound (_CITECHK_COMMAND_MAX),
+# and a command over it is named as not read whatever its text names. Before the readings resumed where an
+# earlier reading stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
 # seps_hash_lines took about 30 s. With the long separator runs these shapes hold built in one batch, the
 # sink check on a failed lex resuming where the lex stopped, and the commit-identity reader skipping records
 # with no word and no redirect, the two costliest cases measured on one host (max of five runs) are
@@ -4082,7 +4084,8 @@ _DEADLINE_HASH_DECISIONS = {
     ("orch_truncation_guard", "seps_hash5"): "deny", ("protected_line", "seps_hash"): "deny",
     ("protected_line", "seps_hash_lines"): "deny", ("protected_line", "seps_hash_nested"): "deny",
     ("protected_line", "paren_hash4"): "deny", ("protected_line", "seps_hash5", 262144): "deny",
-    ("protected_line", "seps_hash5", 1048576): "deny"}
+    ("protected_line", "seps_hash5", 1048576): "deny",
+    ("citation_read_check", "paren_hash4", 1048576): "allow-note"}
 
 
 def _deadline_hash_decision(name, shape, size):

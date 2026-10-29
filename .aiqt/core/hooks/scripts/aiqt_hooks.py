@@ -2285,7 +2285,8 @@ class _LexFork:
         self.tails = tails
 
 
-def _lex_command(command, partial=False, locale=False, skip_empty=False, heredocs=None, spans=None, nested=True):
+def _lex_command(command, partial=False, locale=False, skip_empty=False, heredocs=None, spans=None, nested=True,
+                 split_delims=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
@@ -2313,11 +2314,18 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False, heredoc
     delimiter. Only the citation check (_citechk_commands) passes it, and passing it changes nothing else
     the lexer returns.
 
-    Where heredocs or spans is a list or nested is False, the command is lexed in one pass under no reading
-    of an uncertain '#' and reading no here-document body in a substitution (_lex_pass with hash_reading and
-    subst_heredocs None): each segment, heredoc and span is then one lex's, so a heredoc's segment index is
-    an index into that lex's list. An uncertain '#' raises _UncertainHashError, a ValueError, so the citation
-    check scans that command as one that does not lex.
+    Where heredocs or spans is a list, nested is False or split_delims is True, the command is lexed in one
+    pass as main's reading lexes it (_main_reading: each '#' as main's lexer reads it, _MAIN_HASH_READING, and
+    no here-document body read in a substitution), the reading the citation check's rules were written
+    against: each segment, heredoc and span is then one lex's, so a heredoc's segment index is an index into
+    that lex's list, and no uncertain '#' stops it.
+
+    split_delims True reads a here-document delimiter word that a backslash-newline splits (as
+    _parse_heredoc_delim reads the word, at a '<<' this lexer reads) as a quoted delimiter that holds a
+    newline, which no line can match, so its body runs to the end of the command: the reading the citation
+    check's split-delimiter fallback names files and later commands from (_citechk_commands), which scans
+    such a command only as written and never acts on this lex. The default False reads the joined word as
+    bash does, the reading every other caller relies on.
 
     An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
     holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
@@ -2376,9 +2384,9 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False, heredoc
     command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
     WORDS, above _COMMAND_LEAD_WORDS); outside it nothing is added. A command reading that reaches its body
     budget raises _ReadingLimitError in partial mode too (COST, above _COMMAND_LEAD_WORDS)."""
-    if heredocs is not None or spans is not None or not nested:
-        return _lex_pass(command, partial, None, locale, None, skip_empty, heredocs=heredocs, spans=spans,
-                         nested=nested)
+    if heredocs is not None or spans is not None or not nested or split_delims:
+        return _lex_pass(command, partial, _MAIN_HASH_READING, locale, None, skip_empty, heredocs=heredocs,
+                         spans=spans, nested=nested, split_delims=split_delims)
     try:
         readings = _lex_readings(command, partial, locale, skip_empty)
     except _UncertainHashError as exc:
@@ -2541,7 +2549,7 @@ def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
 
 
 def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None, heredocs=None,
-              spans=None, nested=True):
+              spans=None, nested=True, split_delims=False):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
     subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
     skip_empty True leaves out every segment with no word and no redirect (_lex_command). fork, when given,
@@ -2550,8 +2558,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
     _WordSpellings each segment's argv that holds a word is a _SpelledWords holding the words' _WordSpelling records
     (spelled, the word reader's one-element list, and argv_spelling, parallel to argv), and a plain list outside it
-    or with no word. heredocs, spans and nested are those of _lex_command, which passes them only to a pass
-    from the start (fork None), so a resumed pass records no here-document place."""
+    or with no word. heredocs, spans, nested and split_delims are those of _lex_command, which passes them only
+    to a pass from the start (fork None), so a resumed pass records no here-document place."""
     n = len(command)
     spelled = [None] if _WordSpellings.on else None
     if fork is None:
@@ -2775,6 +2783,10 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 if kind == "cannot":
                     if op == "<<":
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
+                        if split_delims and parsed is not None and "\\\n" in command[i + oplen:parsed[3]]:
+                            # A delimiter word a backslash-newline splits, read for the citation check as a
+                            # quoted delimiter holding a newline, which no line matches (_lex_command).
+                            parsed = (True, "\n", parsed[2], parsed[3])
                         if parsed is not None and parsed[0]:
                             # a QUOTED heredoc: queue its delimiter; the literal body is skipped at the next
                             # newline (finding 17). The delimiter spec is consumed here; the current line's
@@ -24155,10 +24167,11 @@ _CITECHK_SPLIT_UNREAD = ("a backslash-newline splits a here-document delimiter i
                          "command is scanned only as written and this file, which a lexing of it names, was "
                          "not read: no citation in it was checked")
 # Why a git commit or gh pr create or edit that the kind search finds in a here-document's body a lexing of
-# a split-delimiter command read is named as not read: the lexer reads the split delimiter as one no line
-# can match and takes the rest of the command as that body, while bash can end the here-document at its own
-# delimiter and run the command, whose message or body files and standard input only a lexed reading could
-# name, and the scan of the command as written reads them only as text.
+# a split-delimiter command read is named as not read: the check's lexing (split_delims, _lex_command) reads
+# the split delimiter as one no line can match and takes the rest of the command as that body, while bash
+# can end the here-document at its own delimiter and run the command, whose message or body files and
+# standard input only a lexed reading could name, and the scan of the command as written reads them only as
+# text.
 _CITECHK_SWALLOWED = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
                       "reads the rest of the command as that here-document's body and this command, which "
                       "bash can still run, was scanned only as text: no message or body file it names was "
@@ -24583,9 +24596,9 @@ def _citechk_split_delim(command, spans):
     and expands the body, and for <<E\\, a newline and 'OF', <<$\\, a newline and 'EOF', <<"E"\\, a newline
     and OF, or <<"E\\, a newline and OF" it reads the quoted EOF. Two places count for "raw". One is a '<<'
     that the lexer reads as a quoted here-document's operator, whose delimiter word, as _parse_heredoc_delim
-    reads it, holds a backslash-newline: _parse_heredoc_delim, which the lexer uses, reads that backslash as
-    quoting the newline (inside double quotes it keeps both), so the delimiter it reads holds a newline,
-    which no line can, the body runs to the end of the command, and a later command in it gives no item. A
+    reads it, holds a backslash-newline: the check lexes with split_delims (_lex_command), which reads that
+    delimiter, quoted or not once the backslash-newline is removed, as one that holds a newline, which no
+    line can, so the body runs to the end of the command and a later command in it gives no item. A
     backslash-newline inside single quotes ('E\\, a newline and OF'), which bash keeps, counts too, although
     bash also runs that body to the end, and so does a '<<' inside $((...)), which the lexer reads as an
     operator and bash as a shift (each a note the command did not earn, and a message or body file the
@@ -24708,10 +24721,12 @@ def _citechk_commands(command, cwd, deadline):
     ends at its next unescaped double quote (nested=False), and as bash reads a command substitution or
     backquote in one, whose own quotes nest (nested=True); a command with no double quote is lexed once,
     since the two lexings differ only inside a double-quoted string, and that one reading serves as both.
-    A command that neither lexes is scanned as written ("raw"). A command in which a backslash-newline splits a here-document delimiter where bash
+    A command that neither lexes is scanned as written ("raw"). Each lexing reads as main's reading does
+    (_lex_command, _MAIN_HASH_READING), with split_delims. A command in which a backslash-newline splits a
+    here-document delimiter where bash
     reads one (_citechk_split_delim, from the places the first lexing that lexes shows) is scanned as one
-    that does not lex: at an operator the lexer reads, quoted or not, the lexer reads a delimiter that no
-    line can match and runs that body to the end of the command, later commands included, and in a command
+    that does not lex: at an operator the lexer reads, quoted or not, these lexings read a delimiter that no
+    line can match and run that body to the end of the command, later commands included, and in a command
     substitution in a
     double-quoted string, where bash reads that delimiter as unquoted, the lexer reads as text a body bash
     expands. A raw command names, as not read, the expansion of each here-document with an unquoted delimiter
@@ -24736,7 +24751,7 @@ def _citechk_commands(command, cwd, deadline):
     there is named as not read too (_CITECHK_STDIN_UNSEEN) unless it is the command's own here-document,
     whose text the scan as written already reads, and a git commit or gh pr create or edit that the kind
     search (_citechk_kind) finds in a here-document's body a lexing read is named as not read as well
-    (_CITECHK_SWALLOWED: the lexer reads a split delimiter as one no line can match and takes the rest of
+    (_CITECHK_SWALLOWED: these lexings read a split delimiter as one no line can match and take the rest of
     the command, which bash can still run, as that body; a spelling that search misses there, such as a git
     word quotes split, is not named); so a citation only such a file or stream holds is not judged, but the
     note and the row say it was not read. A command is found after any reserved words
@@ -24758,8 +24773,8 @@ def _citechk_commands(command, cwd, deadline):
     for nested in nestings:
         heredocs, spans = [], []
         try:
-            readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested), heredocs,
-                             spans))
+            readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested,
+                                          split_delims=True), heredocs, spans))
         except ValueError:
             continue
     if not readings:
@@ -24772,8 +24787,8 @@ def _citechk_commands(command, cwd, deadline):
         # once per option spelling and path as the command writes it, however many lexings name it, on the
         # scan's item where the kind search found one, else as the lexed command's own item. A commit or pr
         # command that the kind search finds in a here-document's body a lexing read is kept the same way
-        # (the lexer reads a split delimiter as one no line can match, so the rest of the command, which
-        # bash can still run, is that body to it): the scan as written reads its message or body files and
+        # (these lexings read a split delimiter as one no line can match, so the rest of the command, which
+        # bash can still run, is that body to them): the scan as written reads its message or body files and
         # its standard input only as text, so the entry says they were not read.
         found = set()  # the entries already named, so a later lexing or option adds only entries new to
         # it: a set, so many distinct entries cost time that grows with their number, not its square
