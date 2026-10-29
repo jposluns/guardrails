@@ -9,7 +9,7 @@ retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-
 phase, never rewritten; the homes-1 bundle verification the completion checks carry themselves while
 C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
-transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
+transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed ten-op
 ADOPT_OPS vocabulary. Slice 2 makes the three pure file ops executable (EXECUTABLE_OPS: create-file,
 move-file, retire-file), staged as spec 14.1 and 14.2 order them: the run's base transaction is the APPLY
 stage, which creates a planned file, takes a non-occupying retire source's retirement preimage while the
@@ -38,25 +38,29 @@ register-unmanaged, repoint-consumer). The stage driver
 adds the plan-v2 apply-input gate, the one approval and the apply stage (spec 14.1): `opf adopt approve`
 re-proves a frozen plan from its own bytes, re-derives it over the live tree and prints the approval
 binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply` admits only that approved
-pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
+pair, persists both, beside the sealed planning inventory re-derivation reproves against the plan's
+inventory_digest, in the run's evidence bundle within the run's one base transaction, and dispatches
 every plan op through the dispatch table and then the driver's mandatory receipt stage (which mints the
 record-adoption row and assembles the receipt core), so while any plan op or the driver's mandatory
-receipt stage is unlanded, apply refuses before anything is written. Every other op returns a
-refusing not-yet-executable verdict: pack installation (install-pack), the completion checks, the stage
-driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
+receipt stage is unlanded, apply refuses before anything is written. Every op of the vocabulary has a
+landed handler (the enforcement pack is planted by plant-governance rows and its hook registered by
+enable-hook); the completion checks, the stage driver's retirement stage (it opens the RETIREMENT_PHASE transaction the file ops compose into only after
 a green completion check, and no adoption interface opens that transaction in this build), and the
-`complete` and `reconcile` CLI subcommands remain later slices, as does the driver's receipt stage; the
-read-only `opf adopt` subcommands plan and status shipped with K9a. Live outside the self-test fixtures
-today: `opf adopt status` opens and lists the evidence home in opf.py through the _journal containment
-primitives, then grades each listed bundle through this module's _verify_bundle_at (beneath the HELD home
-descriptor it is passed) and the journal through journal_state, with _open_product_root anchoring both
-reads to one product-root descriptor; plan, approve and apply refuse over a non-clean adoption journal
-(require_clean_journal); the transaction shell and the dispatch table are reachable from `opf adopt
-apply` only past the unlanded-op gate and the driver's mandatory receipt stage (unlanded in this build),
-which no plan passes, and reconcile() and compose_rows stay reachable only from the self-test and the
-crash children it starts in a fresh interpreter through the `--selftest-child` flag (the
-`_opf_init_operation` crash-child precedent), a self-test harness entry, never an adoption
-interface, which runs whatever spec it is handed without an approval.
+`complete` CLI subcommand remains a later slice, as does the driver's receipt stage; the read-only
+`opf adopt` subcommands plan and status shipped with K9a, and `opf adopt reconcile` runs the
+journal-only recovery (reconcile_report) under the journal lock and its own store leases (releasing a
+dead run's leftover lease lands with the lease join). Live
+outside the self-test fixtures today: `opf adopt status` opens and lists the evidence home in opf.py
+through the _journal containment primitives, then grades each listed bundle through this module's
+_verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal through
+journal_state, with _open_product_root anchoring both reads to one product-root descriptor; plan,
+approve and apply refuse over a non-clean adoption journal (require_clean_journal); the transaction
+shell and the dispatch table are reachable from `opf adopt apply` only past the unlanded-op gate and
+the driver's mandatory receipt stage (unlanded in this build), which no plan passes; reconcile() is
+reachable from `opf adopt reconcile` through reconcile_report; and compose_rows stays reachable only
+from the self-test and the crash children it starts in a fresh interpreter through the
+`--selftest-child` flag (the `_opf_init_operation` crash-child precedent), a self-test harness entry,
+never an adoption interface, which runs whatever spec it is handed without an approval.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
 is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
@@ -91,7 +95,8 @@ recovery of an interrupted apply MUST resolve from the apply journal alone and M
 tree to resolve as a store (spec 14.2): an apply that archived and removed an occupying manifest leaves no
 store to resolve. reconcile() therefore never resolves the store. Homes 2 keeps transaction records
 under `.working/journals/adoption/` and forbids OPF state under `.aiqt/` (spec 4.2, 14.2); homes 2 is not
-activated in this build (SUPPORTED_HOMES = 1).
+activated in this build (SUPPORTED_HOMES = 1). Where it is (adoption_journal_fenced), apply and reconcile
+refuse before any `.aiqt` access, and plan, approve and status do not read this journal.
 
 Journal discipline (reconcile-first, the `opf record` step-1 posture): every transaction inspects the
 adoption journal FIRST and REFUSES on a held lock (never seized) or any open (INTENT-without-terminal)
@@ -103,7 +108,9 @@ most one base transaction and COMMITS at most one transaction per phase: a secon
 phase attempt once one has committed, refuses before it opens, and changing approved work takes a fresh
 plan with its own run id (spec 14.1). A phase attempt that ended terminal WITHOUT committing (rolled back,
 by its own pre-commit abort or by reconcile() after an interruption, or never opened) is retained in the
-journal as it stands, and a retry of that phase opens as the next attempt, `<run>.<phase>.attempt-<n>`,
+journal as it stands (one refused before its INTENT keeps its directory and frames.log but not the copies of
+product bytes its capture wrote, which no recovery reads: _discard_unopened_preimages discards them under
+the lock), and a retry of that phase opens as the next attempt, `<run>.<phase>.attempt-<n>`,
 bound to the same committed base and its preservation exactly as the first attempt was
 (_next_attempt_or_refuse). The base is never retried: nothing binds to a base that has not committed, so a
 base that did not commit takes a fresh plan with its own run id.
@@ -205,8 +212,9 @@ closed pop-before-close, so no number is ever closed twice, but no signal mask i
 asynchronous interrupt (SIGINT or SIGTERM, delivered through any thread), or any other exception raised
 at the same point (an injected one included), can leave a descriptor open in the process until it
 exits: one landing between a C call's return and the binding of the descriptor it returned; between a
-helper's return and the handoff of the descriptors it returned to the owning list (journal_state's
-transaction directory descriptors, bound to txns before held.extend has taken them all); between a
+helper's return and the handoff of the descriptors it returned to the owning list (journal_state's and
+reconcile's transaction directory descriptors, bound to txns before held.extend or held_fds.extend has
+taken them all); between a
 descriptor's pop and its close inside a close-out (every close-out loop in this module runs through
 _close_held_into, which still closes the rest of its list and records every exception it meets;
 _close_held re-raises the first, each later one noted on it, and the transaction's final close-out runs
@@ -226,10 +234,13 @@ Leak-freedom under interrupt, or under an exception raised in those windows, is 
 finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
 has run, a real adoption's plant, render and receipt transactions refuse until the lease join lands;
-render-views composes create-only view publications through this journal (an occupied view destination
-refuses fail-closed in this slice; the spec 14.2 preserve-then-render write for a plan-enumerated
-occupying source composes with the file-ops slice), delegating only read-only planning and the U6 source
-gate to the render and check engines; the receipt core's content (files, approval,
+render-views composes create-only view publications through this journal, save that a destination whose
+plan-enumerated occupying source this same transaction archived is taken over by one write pinned to the
+archived bytes in place of that source's removal (ApplyOps.replace_vacated; the view keeps the source's
+mode bits, and any other occupied view destination refuses fail-closed), delegating only read-only
+planning and the U6 source gate to the render and check engines; the stage driver does not yet supply a
+render-views row (_DRIVER_UNSUPPLIED: it gathers no observations), so that takeover is reached only by
+direct dispatch, as in the self-test; the receipt core's content (files, approval,
 transaction ids, checks, probes) is the stage driver's to assemble, held here only to the shipped
 validator and the plan bindings adoption_record names; and the trust gate proves member bytes against the
 agreed release inventory, never the publisher's authenticity beyond it.
@@ -300,10 +311,10 @@ file is a verified no-op that composes nothing. The op writes configuration only
 activates the hook. Disclosed residuals of slice 2: the shell's store-posture gate admits only a first
 adoption (no lease join yet), so a re-adoption's enable-hook refuses with it; the registration target is
 bound to the merge core's closed v1 path allowlist (_opf_adopt_hook.REGISTRATION_PATHS) and plugin_entry
-to the plan-row pack-member grammar (_opf_adopt._is_hook_entry, one shell word, never arbitrary command
-text), while checking the entry against a digest-verified installed pack is the trust gate's
-(a later slice); binding the rows to the one approved plan is the stage driver's; and a platform that
-already loaded a merged registration is not un-executed by restoring the file.
+to exactly the fixed deny-hook command (_opf_adopt._is_hook_entry, _opf_adopt.HOOK_COMMAND, never other
+command text), while the plan validator binds that command's target to the hook file the same plan plants
+from its digest-verified pack member; binding the rows to the one approved plan is the stage driver's;
+and a platform that already loaded a merged registration is not un-executed by restoring the file.
 
 Registration ops (slice 4): each rewrites ONE existing file whole, never by text substitution, under the
 record writer's byte-reproduction discipline: the bytes it rewrites (live, or the previous link of a
@@ -331,8 +342,11 @@ caller's (the stage driver's), bound only through new_digest; a consumer in any 
 TOML's is this slice's one canonical emitter; the preserve-first archive copy of each rewritten file
 (.working/archive/adoption/<run-id>/<path>) is a creation the plan's derived effects list
 (_opf_adopt.rewrite_preservations), so apply creates no file the plan does not bind; repoint-consumer reads
-the live manifest's [unmanaged] and [views] without a plan digest for it; and binding the rows, the store
-table, the kept files' source digests and the consumer models to the one approved plan is the stage driver's.
+the live manifest's [unmanaged] and [views] only while its bytes hash to the manifest digest the plan's
+re-derived observation bound (RegistrationContext.manifest_digest, sealed by the plan's inventory_digest),
+re-read under the journal lock, so a manifest edited after the plan froze refuses as drifted; and binding
+the rows, the store table, the kept files' source digests and the consumer models to the one approved plan
+is the stage driver's.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
 grading is the doctor's own shared validator (`_opf_check._evidence_rows`), so a malformed inventory or a
@@ -387,11 +401,22 @@ SESSION_ID = "opf-adopt"
 OPERATION = "adopt-apply"
 # The adoption journal root, at the PRODUCT root and outside `.working/` (see the module docstring).
 JOURNAL_REL = ".aiqt/adopt/journal"
+# The refusal of apply and reconcile on base 2.0.0 (adoption_journal_fenced).
+ADOPTION_FENCE = "adoption on base 2.0.0 lands with the adoption-journal move; nothing was read or written"
+# The cannot-evaluate of plan, approve and status on base 2.0.0 (adoption_journal_fenced): the journal is
+# not read there, so its state is unknown, never clean.
+JOURNAL_UNREAD = ("the adoption journal state on base 2.0.0 is unknown: the .aiqt adoption journal is not "
+                  "read, and its homes-2 home lands with the adoption-journal move")
 # The only plan format apply may take (spec 14.1), the schema's own marker.
 PLAN_V2_FORMAT = schema.PLAN_FORMAT
-# The run's evidence-bundle members apply persists: the approved plan and its captured approval (spec 14.1).
+# The run's evidence-bundle members apply persists: the approved plan, its captured approval and the
+# sealed planning inventory the plan's inventory_digest binds (spec 14.1).
 PLAN_NAME = "plan.toml"
 APPROVAL_NAME = "approval.toml"
+# Not an evidence-inventory name (store.is_evidence_inventory_name), so the persisted copy is a listed
+# bundle member, never read as a bundle-root inventory; `inventory-planning.toml` would match that
+# pattern and be taken for a phase inventory.
+PLANNING_INVENTORY_NAME = "planning-inventory.toml"
 BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
 # The stage every plan op composes in during apply; the retirement stage follows a green completion check.
 APPLY_STAGE = "apply"
@@ -428,6 +453,29 @@ class AdoptCommittedLockError(AdoptApplyError):
         super().__init__("the adoption transaction {} COMMITTED: its product-tree changes LANDED and are not "
                          "rolled back; {}".format(txn, note))
         self.txn = txn
+
+
+# The named findings `opf adopt reconcile` prints beside its exit-2 refusal (ReconcileRefusal.finding).
+RECONCILE_LOCK_HELD = "journal-lock-held"                 # a possibly-live owner holds the journal lock
+RECONCILE_UNCLASSIFIABLE = "journal-unclassifiable"       # a lock, entry or transaction that cannot be read
+RECONCILE_STORE_LEASE_HELD = "store-lease-held"           # a store writer may be mid-write (spec 5.7)
+RECONCILE_REVERSAL_UNPROVEN = "init-store-reversal-unproven"   # it may remove what init-store did not create
+RECONCILE_PRELOCK_FAULT = "pre-lock-fault"                # a fault before the lock was held and recovery began
+RECONCILE_FAILED = "recovery-failed"                      # the recovery faulted after it began: may be partial
+RECONCILE_LEASE_RELEASE_FAILED = "store-lease-release-failed"  # a store lease this run took stays
+RECONCILE_FINDINGS = (RECONCILE_LOCK_HELD, RECONCILE_UNCLASSIFIABLE, RECONCILE_STORE_LEASE_HELD,
+                      RECONCILE_REVERSAL_UNPROVEN, RECONCILE_PRELOCK_FAULT, RECONCILE_FAILED,
+                      RECONCILE_LEASE_RELEASE_FAILED)
+
+
+class ReconcileRefusal(AdoptApplyError):
+    """reconcile()'s refusal, carrying `finding`, one of RECONCILE_FINDINGS, which `opf adopt reconcile`
+    names beside its exit-2 refusal. A subclass of AdoptApplyError, so every existing caller's handling and
+    the message text are unchanged."""
+
+    def __init__(self, finding, message):
+        super().__init__(message)
+        self.finding = finding
 
 
 def _sha256(data):
@@ -668,7 +716,7 @@ def _open_product_root(product_root):
                               "fail-closed".format(str(root), exc))
 
 
-def verify_bundle(product_root, run_id):
+def verify_bundle(product_root, run_id, *, inventory_bytes=None):
     """Homes-1 evidence verification carried by the completion checks (spec 14.1, 4.2): RE-READ every
     bundle-root inventory of this adoption run from disk, then every payload those inventories list,
     contained and single-linked. Read-only. A missing bundle, a bundle with no inventory, a missing listed
@@ -685,17 +733,19 @@ def verify_bundle(product_root, run_id):
     mid-verification (round 3). Each inventory's [adoption] identity is held to the doctor's bar (spec
     4.2): a phase other than its file name's, or a plan digest other than the one the bundle's own
     plan.toml proves (read once, and its row checked against those same bytes), is CANNOT-EVALUATE, as
-    is a bundle whose plan.toml is absent, unreadable or unproven."""
+    is a bundle whose plan.toml is absent, unreadable or unproven. `inventory_bytes` (default None): a
+    dict that receives {inventory path: the exact bytes read} for each bundle-root inventory this
+    verification read, so a caller grades those bytes instead of reading the inventory a second time."""
     if not is_run_id(run_id):
         return schema._cannot("bundle run id {!r} does not match the adoption grammar".format(run_id))
     root_fd = _open_product_root(product_root)
     try:
-        return _verify_bundle_at(root_fd, run_id, evidence_home_rel(run_id))
+        return _verify_bundle_at(root_fd, run_id, evidence_home_rel(run_id), inventory_bytes=inventory_bytes)
     finally:
         store._close_fd_exc_safe(root_fd)
 
 
-def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
+def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None, *, inventory_bytes=None):
     # Round-3 identity retention (the read_lock_owner_at posture applied to the bundle): ONE descriptor
     # per directory, opened contained/no-follow beneath its retained parent and HELD from the bundle
     # listing through every inventory and payload read, so no read re-resolves a pathname from root_fd
@@ -797,6 +847,8 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
             rel = bundle + "/" + name
             try:
                 raw, _fst = read_retained(rel)
+                if inventory_bytes is not None:
+                    inventory_bytes[rel] = raw
                 doc = tomllib.loads(raw.decode("utf-8"))
             except (_journal.JournalError, OSError, ValueError, RecursionError, MemoryError) as exc:
                 # ValueError: tomllib.TOMLDecodeError, a UnicodeDecodeError and an over-long integer literal;
@@ -926,16 +978,18 @@ def _pinned_remove(rel, data, mode):
 
 class _Composition:
     """ONE transaction's whole composition state in one object: the ordered op list, the staged bytes,
-    the directory bookkeeping and the seal. ApplyOps reaches all four only through its one `_state`
-    reference, so publishing a fork's state is a single attribute store (ApplyOps._adopt)."""
+    the directory bookkeeping, the seal and the vacated map (each occupying path this transaction archived,
+    keyed to its pinned removal still in the op list). ApplyOps reaches all five only through its one
+    `_state` reference, so publishing a fork's state is a single attribute store (ApplyOps._adopt)."""
 
-    __slots__ = ("ops", "staged", "dirs", "sealed")
+    __slots__ = ("ops", "staged", "dirs", "sealed", "vacated")
 
-    def __init__(self, ops, staged, dirs, sealed):
+    def __init__(self, ops, staged, dirs, sealed, vacated):
         self.ops = ops
         self.staged = staged
         self.dirs = dirs
         self.sealed = sealed
+        self.vacated = vacated
 
 
 class ApplyOps:
@@ -943,8 +997,8 @@ class ApplyOps:
     against the live tree beneath `root_fd`: create-only publication, preserve-first archival, and a
     final inventory derived from the list itself. check_apply_ops re-proves every invariant over the
     finished list, so a hand-built list is held to the same rules. The composition state (ops, staged,
-    _dirs, sealed) is held in ONE _Composition behind the `_state` reference; the four names are
-    read-only views of it, so nothing rebinds one of them apart from the other three."""
+    _dirs, sealed, vacated) is held in ONE _Composition behind the `_state` reference; the five names are
+    read-only views of it, so nothing rebinds one of them apart from the other four."""
 
     def __init__(self, root_fd, run_id, phase=None, plan_digest=None):
         self.root_fd = root_fd
@@ -952,7 +1006,7 @@ class ApplyOps:
         self.phase = phase
         self.plan_digest = plan_digest
         self.inventory = inventory_rel(run_id, phase)
-        self._state = _Composition([], {}, set(), False)
+        self._state = _Composition([], {}, set(), False, {})
         # A phase transaction's view of the run's COMMITTED base: the archive copies its INTENT published
         # ({path: content sha256}) and the mode each was created at ({path: mode}, the source's own mode),
         # set by run_adopt_transaction. And the source -> destination pairs this transaction relocates, each
@@ -976,6 +1030,10 @@ class ApplyOps:
     @property
     def sealed(self):
         return self._state.sealed
+
+    @property
+    def vacated(self):
+        return self._state.vacated
 
     def _mkdirs(self, rel):
         parts = rel.split("/")[:-1]
@@ -1071,9 +1129,39 @@ class ApplyOps:
 
     def archive_occupying(self, source_path, plan_digest):
         """Resolve one occupied destination preserve-first (spec 14.2): the verified archive copy's create
-        op, then the pinned removal of the live source, in THIS transaction and in that order."""
+        op, then the pinned removal of the live source, in THIS transaction and in that order. The removal
+        is also recorded in `vacated`, so a later composer may take the path over (replace_vacated, which
+        swaps that removal for one pinned write at the same position); otherwise the removal stays."""
         data, mode = self.preserve(source_path, plan_digest)
-        self.ops.append(_pinned_remove(source_path, data, mode))
+        removal = _pinned_remove(source_path, data, mode)
+        self.ops.append(removal)
+        self.vacated[source_path] = removal
+
+    def replace_vacated(self, rel, data):
+        """Take over a path this transaction archived and vacated (archive_occupying) with new bytes (spec
+        14.2: after the archival the destination is an ordinary managed path). Its pending pinned removal
+        is REPLACED, at the same position in the op list and so still after the archive copy's create, by
+        one `write` pinned to the same source digest and mode: the pairing check_apply_ops admits, one op
+        per path, and a reversal (the journal's inverse of a write) that restores the source bytes. A
+        journal write installs bytes only, so the path keeps the source's mode bits and the poststate names
+        no mode. The removal's table is replaced in the list, never edited, so a fork's copied list never
+        changes a table its parent holds. A path not pending in `vacated`, a path already staged and
+        anything but bytes refuse, as does a removal not found exactly once in the list."""
+        if self.sealed:
+            raise AdoptApplyError("the transaction is sealed by its inventory; nothing may follow it")
+        if rel not in self.vacated or not isinstance(data, bytes) or rel in self.staged:
+            raise AdoptApplyError("replace_vacated needs a path this transaction archived and vacated and "
+                                  "has not yet rewritten, and bytes, not {!r} (fail-closed)".format(rel))
+        removal = self.vacated[rel]
+        at = [i for i, op in enumerate(self.ops) if op is removal]
+        if len(at) != 1:
+            raise AdoptApplyError("the pinned removal of {!r} is not in this transaction's op list exactly "
+                                  "once, so it cannot be replaced (fail-closed)".format(rel))
+        self.ops[at[0]] = dict(op="write", path=rel,
+                               poststate=dict(kind="file", **{"content-sha256": _sha256(data)}),
+                               **{"source-poststate": dict(removal["source-poststate"])})
+        self.staged[rel] = data
+        del self.vacated[rel]
 
     def _sealing_plan_digest(self):
         """The plan digest the sealed inventory's [adoption] identity carries (spec 4.2): the explicit
@@ -1135,22 +1223,26 @@ class ApplyOps:
 
     def _fork(self):
         """An isolated copy of this transaction's composition state (ops, staged bytes, directory
-        bookkeeping, seal) over the SAME live tree, so a multi-op pass composes into it and publishes
-        through _adopt only once the whole pass succeeds; a refusal part-way leaves this one untouched.
-        The op list, staged map and directory set are copied one level (the composing methods only
-        append to them, and staged values are immutable bytes); the seal is carried over, so a sealed
-        transaction's fork refuses every create exactly as the transaction itself does."""
+        bookkeeping, seal, vacated map) over the SAME live tree, so a multi-op pass composes into it and
+        publishes through _adopt only once the whole pass succeeds; a refusal part-way leaves this one
+        untouched. The op list, staged map, directory set and vacated map are copied one level: the
+        composing methods only append to them, save replace_vacated, which assigns one element of the
+        fork's own list and never edits the op table it replaces; staged values are immutable bytes; and
+        each vacated value is the very removal table the copied list holds, so replace_vacated finds it
+        there by identity. The seal is carried over, so a sealed transaction's fork refuses every create
+        exactly as the transaction itself does."""
         work = ApplyOps(self.root_fd, self.run_id, self.phase)
         state = self._state
-        work._state = _Composition(list(state.ops), dict(state.staged), set(state.dirs), state.sealed)
+        work._state = _Composition(list(state.ops), dict(state.staged), set(state.dirs), state.sealed,
+                                   dict(state.vacated))
         return work
 
     def _adopt(self, work):
         """Publish a fork's finished composition state as this transaction's own by ONE attribute store,
-        `self._state = work._state`: ops, staged bytes, directory bookkeeping and seal travel together
-        in the fork's _Composition, so this method has no instruction boundary at which the caller holds
-        part of the fork's state. An exception or interruption raised at any instruction up to that
-        store leaves the full entry state; one raised after it leaves the full new state (pinned by an
+        `self._state = work._state`: ops, staged bytes, directory bookkeeping, seal and vacated map travel
+        together in the fork's _Composition, so this method has no instruction boundary at which the
+        caller holds part of the fork's state. An exception or interruption raised at any instruction up to
+        that store leaves the full entry state; one raised after it leaves the full new state (pinned by an
         opcode-level fault at every instruction of this method and of compose_preservation, an
         AdoptApplyError and a KeyboardInterrupt alike). The store itself runs no Python code (no
         __setattr__ and no `_state` descriptor), so nothing can raise part-way through it; that is
@@ -1243,10 +1335,12 @@ def compose_preservation(ops, plan):
     whole pass as cannot-evaluate, never a silent skip. Then, in plan order, every live read and every op is
     composed into an ISOLATED copy of the caller's ops, staged bytes and directory bookkeeping
     (ApplyOps._fork): an OCCUPYING source is archived and then removed with a pinned remove, in that order
-    and in this transaction (ApplyOps.archive_occupying); a NON-OCCUPYING retire or migrate source is
-    preserved (its byte-identical archive copy created) and left frozen in place (ApplyOps.preserve), its
-    removal waiting for the green completion check; a kept source and a non-occupying move source take no
-    op here (a non-occupying move is preserved at its move destination by move-file, not by this pass).
+    and in this transaction (ApplyOps.archive_occupying), unless a later op rewrites the path through
+    ApplyOps.replace_vacated, which swaps that removal for one pinned write; a NON-OCCUPYING retire or
+    migrate source is preserved (its byte-identical archive copy created) and left frozen in place
+    (ApplyOps.preserve), its removal waiting for the green completion check; a kept source and a
+    non-occupying move source take no op here (a non-occupying move is preserved at its move destination
+    by move-file, not by this pass).
     Nor does a retire source, or an occupying move source, that a retire-file or move-file row of the
     plan's `ops` binds at its path and digest (_file_op_archived): that file op composes its archive copy in
     the apply stage, so the stage driver, which composes this pass and then every plan row into ONE
@@ -1329,7 +1423,11 @@ def check_apply_ops(run_id, phase, ops, staged, committed=None, moves=None, comm
     any kind, save a mkdir of this run's own homes or
     their ancestors. Immutable homes: under `.working/archive/` and `.working/imported/` only a create
     beneath this run's own archive, own bundle, or the Move root (and the mkdirs leading there) is allowed,
-    never a write, remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path. The
+    never a write, remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path, paths
+    compared under the canonical caseless key the file-op claims use (_claim_key: two spellings that differ
+    only by case or Unicode normalization name one file on a case- or normalization-insensitive filesystem;
+    refusing them on a filesystem that keeps them apart is the fail-closed side, two real entries that
+    differ only so included). The
     final op, and the only bundle-root inventory, is this transaction's own inventory, byte-equal to the inventory
     derived from the list's retained bytes (spec 4.2). Spec 4.2 MAY lets a phase inventory publish in the
     same transaction as the base to claim a promotion receipt without a digest cycle; this shell has no
@@ -1359,9 +1457,12 @@ def check_apply_ops(run_id, phase, ops, staged, committed=None, moves=None, comm
             findings.append("{} would {} {!r}, a protected destination: {} (fail-closed)".format(
                 where, kind, path, protected))
             continue
-        if path in seen:
+        # compared under the canonical caseless key the file-op claims use (_claim_key): two spellings that
+        # differ only by case or Unicode normalization name one file on a case- or normalization-insensitive
+        # filesystem, where the second op would fail only after INTENT and roll the transaction back
+        if _claim_key(path) in seen:
             findings.append("{} touches {!r} a second time (one op per path)".format(where, path))
-        seen.add(path)
+        seen.add(_claim_key(path))
         if kind not in ("create", "mkdir") and any(_within(path, home) for home in _CONTROL_HOMES):
             findings.append("{} would {} {!r}: the adoption archive and evidence bundles are immutable "
                             "(spec 14.2, 4.2); only a create beneath this run's own homes is "
@@ -1532,15 +1633,18 @@ def journal_state(root_fd, journal_root):
 def journal_clean_or_refuse(root_fd, journal_root):
     """The reconcile-first discipline (`opf record` step 1): inspect the adoption journal READ-ONLY
     (journal_state) and REFUSE on a held lock (a possibly-live owner is never seized) or any open
-    transaction, directing the operator to the explicit reconcile() entry. An absent journal root is
-    clean; an unreadable or corrupt journal refuses. Nothing is written here, recovery included."""
+    transaction, directing the operator to the explicit reconcile() entry, which `opf adopt reconcile`
+    runs. An absent journal root is clean; an unreadable or corrupt journal refuses. Nothing is written
+    here, recovery included."""
     owner, opened = journal_state(root_fd, journal_root)
     if owner is not None:
-        raise AdoptApplyError("the adoption journal lock is held (pid {}); it is never seized. "
-                              "Reconcile once no adoption run is live (fail-closed)".format(owner.get("pid")))
+        raise AdoptApplyError("the adoption journal lock is held (pid {}); it is never seized. Run "
+                              "`opf adopt reconcile` once no adoption run is live (fail-closed)".format(
+                                  owner.get("pid")))
     if opened:
         raise AdoptApplyError("interrupted adoption transaction(s) {} must be reconciled before this run "
-                              "(run reconcile()); nothing was written (fail-closed)".format(", ".join(opened)))
+                              "(run `opf adopt reconcile`); nothing was written (fail-closed)".format(
+                                  ", ".join(opened)))
 
 
 def reconcile(product_root):
@@ -1555,70 +1659,419 @@ def reconcile(product_root):
     broken only through `_journal.reconcile_and_claim_stale`. Returns the (transaction, outcome) pairs;
     on the stale-lock path each outcome names what the break's own recovery DID (rolled-forward or
     rolled-back), never 'terminal' for work this call performed. The interrupted run itself stays
-    refused, so the operator inspects the reconciled tree first."""
+    refused, so the operator inspects the reconciled tree first. This is reconcile_report without its
+    stale-lock flag; every refusal is a ReconcileRefusal naming its finding, except a product root that
+    cannot be opened, which raises AdoptApplyError before anything is read (`opf adopt reconcile` prints
+    it as cannot evaluate)."""
+    return reconcile_report(product_root)[0]
+
+
+def _reconcile_intent(jr_fd, txn_dir, txn_fd=None):
+    """(init_store, paths) from an open transaction's durable INTENT. init_store is True only when the
+    transaction's NAME carries the init-store phase AND its INTENT header says so (kind, phase and op), so a
+    directory merely named `*.initstore` never skips the store lease; paths is the set of op paths the
+    INTENT names. A JournalError or OSError reading the frames propagates (the caller's classification).
+    txn_fd, when given, is the transaction directory descriptor the caller HELD from its listing, and the
+    frames are read through it, never by reopening the name."""
+    frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
+    intent = _journal._first(frames, _journal.F_INTENT)
+    intent = intent if isinstance(intent, dict) else {}
+    header = intent.get("header") if isinstance(intent.get("header"), dict) else {}
+    ops = intent.get("ops") if isinstance(intent.get("ops"), list) else []
+    init_store = (Path(txn_dir).name.endswith("." + INIT_STORE_PHASE) and header.get("kind") == KIND
+                  and header.get("phase") == INIT_STORE_PHASE and header.get("op") == "init-store")
+    return init_store, {op.get("path") for op in ops if isinstance(op, dict) and isinstance(op.get("path"), str)}
+
+
+def _reconcile_lease_targets(root_fd, shell, touched):
+    """The machine subdirectories whose single-writer lease (spec 5.7) reconcile takes before its first
+    recovery write when it reconciles an open transaction other than an init-store one (`shell` names
+    them; with none it takes no lease and observes nothing here). The targets are every immediate real
+    subdirectory of the product root's `.working/` that is not a reserved store control area
+    (store.RESERVED_MACHINE_SUBDIRS): the set store discovery scans (_opf_store._immediate_subdirs), so
+    every machine subdirectory a store at the product root can resolve to, the default `toml` and any
+    other alike. A store POINTER at the product root (.opf.local.toml or .opf.toml) can resolve a store
+    at another store root, whose lease this journal-only reconcile cannot take without resolving the
+    store (spec 14.2), so a present pointer REFUSES as RECONCILE_STORE_LEASE_HELD. A lease already
+    present in any listed subdirectory refuses the same way, whatever its payload. This observation runs
+    before anything is written, as an early refusal only: the exclusion is the atomic claim the caller
+    makes under the journal lock (_take_reconcile_leases). A subdirectory an open transaction's INTENT
+    names (the directory itself, or its lease name) is observed but not leased, since a lease there
+    would block or collide with that transaction's own recovery. Whatever cannot be observed refuses as
+    held. Every read is a contained, no-follow read beneath the product-root descriptor; the store is
+    never resolved. NOT BUILT (the lease leg, which lands with OPF-ADOPT-LEASE-JOIN): releasing a dead
+    run's leftover lease through _opf_write_guard.acquire_lease_for_recovery. Until then the operator
+    confirms that no opf run is live and releases a leftover lease as their own reconciliation step
+    (spec 5.7); reconcile never does."""
+    import _opf_check
+    if not shell:
+        return []
+    rel = None
+    targets = []
+    try:
+        for rel in (store.LOCAL_POINTER_REL, store.POINTER_REL):
+            if _journal._lstat_contained(root_fd, rel) is not None:
+                raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the store pointer {} is present beside "
+                                       "the interrupted adoption transaction(s) {}: an opf writer may resolve "
+                                       "a store at another store root, whose single-writer lease this "
+                                       "journal-only reconcile cannot take without resolving the store "
+                                       "(spec 14.2), so it is treated as held (spec 5.7). Nothing was "
+                                       "written (fail-closed)".format(rel, ", ".join(shell)))
+        rel = store.WORKING_DIRNAME
+        for name in store._immediate_subdirs(root_fd, store.WORKING_DIRNAME) or []:
+            if name in store.RESERVED_MACHINE_SUBDIRS:
+                continue
+            machine_rel = "{}/{}".format(store.WORKING_DIRNAME, name)
+            rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
+            if _journal._lstat_contained(root_fd, rel) is not None:
+                raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "the store lease {} is present beside the "
+                                       "interrupted adoption transaction(s) {}: another opf run may be writing "
+                                       "the store, and a lease is never seized (spec 5.7). This reconcile "
+                                       "does not release a leftover lease yet: once no opf run is live, "
+                                       "release the leftover lease yourself, then reconcile again. Nothing "
+                                       "was written (fail-closed)".format(rel, ", ".join(shell)))
+            if machine_rel not in touched and rel not in touched:
+                targets.append(machine_rel)
+    except (_journal.JournalError, store.StoreError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
+        raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "cannot observe the store lease or pointer {} ({}); "
+                               "what cannot be observed is treated as held (spec 5.7), and nothing was "
+                               "written (fail-closed)".format(rel, exc))
+    return targets
+
+
+RECONCILE_LEASE_VERB = "adopt reconcile"    # the operation this run stamps on the store leases it takes
+
+# The held classification each recover() outcome leaves (_reconcile_run's agreement check).
+_RECOVERY_LEAVES = {"nothing-opened": ("nothing-opened",), "terminal": ("complete", "rolled-back"),
+                    "rolled-forward": ("complete",), "rolled-back": ("rolled-back",)}
+
+
+def _take_reconcile_leases(root_fd, targets, taken):
+    """Claim the single-writer lease of each target machine subdirectory through the store writers' own
+    atomic claim (_opf_write_guard.acquire_lease: O_EXCL, never seized), appending (machine_rel, payload)
+    to `taken` as each is claimed, so the caller releases exactly the leases this run took and no other.
+    Called with the journal's exclusion already held (the adoption journal lock, or on the stale-lock path
+    the journal's arbitration lock over the retained dead-run lock) and before the first recovery write,
+    the order the adoption apply takes them: init-store takes the adoption journal lock, then its
+    substrate's operation mutex and store lease. A lease another writer holds, or one that cannot be
+    taken, refuses as RECONCILE_STORE_LEASE_HELD before any recovery write."""
+    import _opf_check
+    import _opf_write_guard
+    for machine_rel in targets:
+        try:
+            payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, RECONCILE_LEASE_VERB)
+        except _opf_write_guard.LeaseHeldError as exc:
+            raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "{} This reconcile refused before any recovery "
+                                   "write, and releases every lock and lease it took (fail-closed)".format(exc))
+        except (_opf_write_guard.WriteGuardError, _journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
+            raise ReconcileRefusal(RECONCILE_STORE_LEASE_HELD, "cannot take the store lease {}/{} ({}); a "
+                                   "lease that cannot be taken is treated as held (spec 5.7). This reconcile "
+                                   "refused before any recovery write, and releases every lock and lease it "
+                                   "took (fail-closed)".format(machine_rel, _opf_check.LEASE_NAME, exc))
+        taken.append((machine_rel, payload))
+
+
+def _release_reconcile_leases(root_fd, taken):
+    """Release, last taken first, ONLY the store leases this run took (`taken`), each through the store
+    writers' ownership-verified release (_opf_write_guard.release_lease: a lease is removed only while it
+    still holds the exact bytes this run wrote, never one another writer holds). Returns one clause per
+    lease that could not be released (it stays, for the operator's own reconciliation, spec 5.7); an
+    ordinary failure is returned, never raised, so it never hides the outcome or refusal it accompanies."""
+    import _opf_check
+    import _opf_write_guard
+    failures = []
+    while taken:
+        machine_rel, payload = taken.pop()
+        try:
+            _opf_write_guard.release_lease(root_fd, machine_rel, payload, RECONCILE_LEASE_VERB)
+        except (_opf_write_guard.WriteGuardError, _journal.JournalError, OSError) as exc:
+            failures.append("{}/{} ({})".format(machine_rel, _opf_check.LEASE_NAME, exc))
+    return failures
+
+
+def reconcile_report(product_root):
+    """reconcile() and what it did: (outcomes, stale_lock_released, lock_taken). stale_lock_released is
+    True only when THIS call broke a confirmed-dead owner's journal lock through
+    `_journal.reconcile_and_claim_stale` (a lock a concurrent reconcile broke first is not this call's,
+    and neither is that reconcile's recovery), so a call that found no open transaction can still
+    report that it released a dead run's lock. lock_taken is True when this call took the adoption
+    journal lock, so a caller tells "found nothing and wrote nothing" from "took the lock and found every
+    transaction already terminal" (a concurrent reconcile recovered it first). With no journal, or a
+    journal holding no lock and no open transaction, it returns ([], False, False) and writes NOTHING (no
+    lock is taken).
+
+    Exclusion (spec 5.7): when an open transaction other than an init-store one is reconciled, this call
+    takes the single-writer store lease of every machine subdirectory a store at the product root can
+    resolve to (_reconcile_lease_targets) through the store writers' own atomic claim, BEFORE its first
+    recovery write, holds them until the journal lock is released, and releases only the leases it took.
+    The acquisition order is the adoption apply's: init-store takes the adoption journal lock, then its
+    substrate's operation mutex and lease (_init_store_run, _opf_init_operation.run_init_operation), so
+    reconcile takes the journal lock first and the store leases second; on the stale-lock path the leases
+    are taken under the journal's arbitration lock with the dead run's lock retained (the `claim` hook of
+    reconcile_and_claim_stale), before that break's own recovery. An open init-store transaction alone
+    takes no store lease: its own substrate's lease may be the one left at the default store, and the
+    init-store reversal clears it (_init_store_scrub). RESIDUAL (disclosed): a non-adoption writer that
+    resolved that half-scaffolded store is not excluded during the reversal; a machine subdirectory that
+    first appears after the targets are listed, and one an open transaction itself names, is not leased.
+
+    Every refusal is a ReconcileRefusal naming its finding, except an unopenable product root (below).
+    BEFORE ANY RECOVERY WRITE, leaving the product files and every transaction as found:
+    RECONCILE_UNCLASSIFIABLE (a journal, lock, entry or transaction that cannot be read or classified, a
+    stray or wrong-type journal entry, or a transaction renamed or replaced after the listing),
+    RECONCILE_LOCK_HELD (a possibly-live owner holds the lock, or a run took it meanwhile; never seized),
+    RECONCILE_STORE_LEASE_HELD (a pointer or a present
+    lease observed before the lock, or a lease another writer claimed, or that cannot be claimed, under
+    it), RECONCILE_REVERSAL_UNPROVEN (an init-store reversal not proven to remove only the operation's own
+    publication) and RECONCILE_PRELOCK_FAULT (any other fault before this call held the journal lock and
+    began recovering: the owner-liveness test, an init-store preverify or stale-state read that faults,
+    the stale-lock arbitration's own refusals, an acquire_lock OSError). A lock or lease this call took is
+    released, and the message names what stays: a lock acquire_lock created that could not be released
+    (_failed_lock_state), the stale-lock arbitration file lock.break this call created, a lease the claim
+    left. RECONCILE_FAILED: the recovery faulted AFTER it began, or a transaction directory was replaced
+    during it, so it may be PARTIAL: what it already restored or published stays as the journal records
+    it, the transaction stays open, and a later reconcile resumes it. RECONCILE_LEASE_RELEASE_FAILED: a
+    store lease this call took could not be released; it stays, named beside what the recovery did.
+
+    The journal is listed strictly and HELD (the journal_state posture): a stray or wrong-type entry (a
+    file, FIFO or socket, a symlinked entry, a non-regular or multiply-linked lock or lock.break) refuses
+    as RECONCILE_UNCLASSIFIABLE, never skipped, and every transaction directory is opened at the listing
+    and classified, its INTENT and its init-store preverify read, through that held descriptor, never by
+    reopening its name. Before the journal lock, each listed name must still name the directory this call
+    holds: a transaction renamed or replaced after the listing refuses as RECONCILE_UNCLASSIFIABLE, nothing
+    written. After each recovery, the held directory's classification must agree with what recover()
+    reported (_RECOVERY_LEAVES): a transaction directory replaced during the recovery refuses as
+    RECONCILE_FAILED, never reported recovered or clean. RESIDUAL (disclosed): recover() itself reopens
+    each transaction by name, so a directory swapped onto the name after the identity check can receive
+    that recovery's writes (frames appended, preimages restored from it); the agreement check then
+    refuses, so it is never reported recovered. A product root that cannot be opened raises
+    AdoptApplyError before anything is read, never a ReconcileRefusal (`opf adopt reconcile` prints it as
+    cannot evaluate), and so does every call on base 2.0.0 (adoption_journal_fenced: ADOPTION_FENCE,
+    before the product root is opened)."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(ADOPTION_FENCE)
     root_fd = _open_product_root(product_root)
-    journal_root = _journal_root(product_root)
-    outcomes = []
+    taken = []      # (machine_rel, payload) of every store lease THIS call took: only these are released
+    broke = []      # non-empty once THIS call's stale-lock break claimed its leases; its recovery follows
     try:
         try:
-            _journal.require_containment()
-            st = _journal._lstat_contained(root_fd, JOURNAL_REL)
-            if st is None:
-                return outcomes
-            if not stat.S_ISDIR(st.st_mode):
-                raise AdoptApplyError("the adoption journal {} is not a directory; "
-                                      "fail-closed".format(JOURNAL_REL))
-            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
-            try:
-                # beneath the HELD jr_fd (round 3, the journal_state posture): the journal path is
-                # never re-resolved after the contained open, so a concurrently swapped journal
-                # cannot hide the held lock or substitute a decoy's.
-                owner = _journal.read_lock_owner_at(jr_fd)
-                txns = _journal._journal_txn_dirs(jr_fd, journal_root)
-                opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
-                if owner is None and not opened:
-                    return outcomes
-                if owner is not None and not _journal.owner_confirmed_dead(owner):
-                    raise AdoptApplyError("the adoption journal lock is held by a possibly-live owner "
-                                          "(pid {}); it is never seized (fail-closed)".format(owner.get("pid")))
-                # Before ANY rollback can run (the stale-lock break below reconciles every
-                # transaction itself), prove each open init-store transaction's reversal removes
-                # only the operation's own publication: a foreign file at a member path is
-                # preserved and the whole reconciliation refuses fail-closed
-                # (_init_store_reversal_preverify).
-                for t in txns:
-                    if t.name.endswith("." + INIT_STORE_PHASE) and t.name in opened:
-                        _init_store_reversal_preverify(root_fd, product_root, jr_fd, t)
-                stale = None
-                if owner is not None:
-                    # The stale-lock break reconciles every transaction ITSELF (under its arbitration
-                    # lock), so the idempotent recover() re-run below would read each one 'terminal'.
-                    # Record the pre-break states so the reported outcome names what that recovery DID.
-                    stale = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
-                    if _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd,
-                                                          SESSION_ID) != "acquired":
-                        raise AdoptApplyError("the adoption journal lock became live during "
-                                              "reconciliation; it is never seized (fail-closed)")
-                else:
-                    _journal.acquire_lock(journal_root, SESSION_ID)
-                try:
-                    for txn in txns:
-                        outcome = _journal.recover(jr_fd, txn, root_fd)
-                        if stale is not None and stale.get(txn.name) == "open" and outcome == "terminal":
-                            outcome = ("rolled-forward"
-                                       if _journal.classify_state(jr_fd, txn) == "complete"
-                                       else "rolled-back")
-                        outcomes.append((txn.name, outcome))
-                finally:
-                    _journal.release_lock(journal_root)
-            finally:
-                _journal._close_fd_quietly(jr_fd)
-        except (_journal.JournalError, OSError) as exc:
-            raise AdoptApplyError("the adoption journal {} cannot be reconciled ({}); "
-                                  "fail-closed".format(JOURNAL_REL, exc))
+            outcomes, lock_taken = _reconcile_run(product_root, root_fd, taken, broke)
+        except BaseException as exc:
+            failures = _release_reconcile_leases(root_fd, taken)    # after the journal lock's release
+            if failures:
+                said = "; ".join(failures)
+                if isinstance(exc, ReconcileRefusal):
+                    raise ReconcileRefusal(exc.finding, "{}; additionally the store lease(s) this run took "
+                                           "could not be released and stay for the operator's own "
+                                           "reconciliation (spec 5.7): {}".format(exc, said)) from exc
+                exc.add_note("the store lease(s) this run took could not be released: {}".format(said))
+            raise
+        failures = _release_reconcile_leases(root_fd, taken)        # after the journal lock's release
+        if failures:
+            raise ReconcileRefusal(RECONCILE_LEASE_RELEASE_FAILED, "the recovery finished ({}), but the store "
+                                   "lease(s) this run took could not be released: {}. Each stays: once no opf "
+                                   "run is live, release it as your own reconciliation step (spec 5.7)".format(
+                                       ", ".join("{} {}".format(t, o) for t, o in outcomes) or "nothing to "
+                                       "recover", "; ".join(failures)))
+        return outcomes, bool(broke), lock_taken
     finally:
         store._close_fd_exc_safe(root_fd)
-    return outcomes
+
+
+def _reconcile_run(product_root, root_fd, taken, broke):
+    """reconcile_report's body beneath its product-root descriptor; returns (outcomes, lock_taken). `taken`
+    and `broke` are the caller's, so the caller releases the store leases this run took after the journal
+    lock's release, whatever this raises. `stage` is what a JournalError or OSError maps to: classify
+    (RECONCILE_UNCLASSIFIABLE), prelock (RECONCILE_PRELOCK_FAULT) and recovering (RECONCILE_FAILED), the
+    last set only once the journal exclusion is held and the leases are taken, right before the first
+    recovery write."""
+    journal_root = _journal_root(product_root)
+    arb_rel = JOURNAL_REL + "/lock.break"
+    outcomes = []
+    stage = ["classify"]
+    held = []           # non-empty once THIS run holds the journal lock (released by the finally below)
+    arb_before = []     # whether lock.break was present as this run's stale-lock arbitration began
+
+    def arbitration_said():
+        if arb_before != [False]:
+            return ""
+        try:
+            if _journal._lstat_contained(root_fd, arb_rel) is None:
+                return ""
+        except (_journal.JournalError, OSError):
+            return "; whether this run's stale-lock arbitration left {} could not be observed".format(arb_rel)
+        return ("; this run's stale-lock arbitration created {}, which stays (the journal's arbitration "
+                "file, never removed)".format(arb_rel))
+
+    try:
+        _journal.require_containment()
+        st = _journal._lstat_contained(root_fd, JOURNAL_REL)
+        if st is None:
+            return outcomes, False
+        if not stat.S_ISDIR(st.st_mode):
+            raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption journal {} is not a "
+                                   "directory; nothing was written (fail-closed)".format(JOURNAL_REL))
+        held_fds = []   # jr_fd, then every held transaction directory descriptor: ONE list, ONE close-out
+        try:
+            held_fds.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
+            jr_fd = held_fds[0]
+            # beneath the HELD jr_fd (round 3, the journal_state posture): the journal path is
+            # never re-resolved after the contained open, so a concurrently swapped journal
+            # cannot hide the held lock or substitute a decoy's.
+            owner = _journal.read_lock_owner_at(jr_fd)
+            # strict=True, hold=True (the journal_state posture): a stray or wrong-type journal entry
+            # refuses here, never skipped, and every transaction directory is opened AT the listing and
+            # read through that held descriptor below, so one renamed aside and replaced by an empty decoy
+            # after the listing is never reopened by name and read as nothing to reconcile.
+            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
+            # the handoff: an exception landing here, before extend has taken every descriptor in txns
+            # (an interrupt at the generator's start or a resume), leaves the ones not yet taken open
+            # until the process exits (the disclosed residual, module docstring)
+            held_fds.extend(tfd for _t, tfd in txns)
+            opened = sorted(t.name for t, tfd in txns
+                            if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
+            if owner is None and not opened:
+                return outcomes, False
+            intents = {t.name: _reconcile_intent(jr_fd, t, txn_fd=tfd) for t, tfd in txns if t.name in opened}
+            stage[0] = "prelock"
+            if owner is not None and not _journal.owner_confirmed_dead(owner):
+                raise ReconcileRefusal(RECONCILE_LOCK_HELD, "the adoption journal lock is held by a "
+                                       "possibly-live owner (pid {}); it is never seized, and nothing "
+                                       "was written (fail-closed)".format(owner.get("pid")))
+            shell = [name for name in opened if not intents[name][0]]
+            touched = set()
+            for _init_store, paths in intents.values():
+                touched |= paths
+            targets = _reconcile_lease_targets(root_fd, shell, touched)
+            # Before ANY rollback can run (the stale-lock break below reconciles every
+            # transaction itself), prove each open init-store transaction's reversal removes
+            # only the operation's own publication: a foreign file at a member path is
+            # preserved and the whole reconciliation refuses fail-closed
+            # (_init_store_reversal_preverify). Named by its INTENT or by its name, either.
+            for t, tfd in txns:
+                if t.name in opened and (intents[t.name][0] or t.name.endswith("." + INIT_STORE_PHASE)):
+                    try:
+                        _init_store_reversal_preverify(root_fd, product_root, jr_fd, t, txn_fd=tfd)
+                    except AdoptApplyError as exc:
+                        raise ReconcileRefusal(RECONCILE_REVERSAL_UNPROVEN, str(exc)) from exc
+            # The identity gate, the last read before the journal lock: recover() reopens each
+            # transaction by NAME, so every listed name must still name the directory this run holds and
+            # classified. One renamed aside or replaced after the listing refuses here, nothing written.
+            for t, tfd in txns:
+                try:
+                    now = os.lstat(t.name, dir_fd=jr_fd)
+                except FileNotFoundError:
+                    now = None
+                was = os.fstat(tfd)
+                if now is None or (now.st_dev, now.st_ino) != (was.st_dev, was.st_ino):
+                    raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption transaction {!r} was renamed "
+                                           "or replaced after this run listed it ({}), so a recovery by its "
+                                           "name would not reach the directory this run classified; nothing "
+                                           "was written (fail-closed)".format(
+                                               t.name, "its name is now absent" if now is None
+                                               else "its name now names another entry"))
+
+            def lock_fault(exc):
+                """An acquire_lock OSError: what it left, read and released by _failed_lock_state (only a
+                lock this run created, ownership-checked), named in the refusal."""
+                _state, clause, interrupt = _failed_lock_state(jr_fd, journal_root, exc)
+                finding = RECONCILE_FAILED if stage[0] == "recovering" else RECONCILE_PRELOCK_FAULT
+                refusal = ReconcileRefusal(finding, "the adoption journal {} cannot be reconciled: taking "
+                                           "its journal lock failed ({}); {}{}{} (fail-closed)".format(
+                                               JOURNAL_REL, exc, clause,
+                                               "" if finding == RECONCILE_FAILED else
+                                               ", and no recovery write was made", arbitration_said()))
+                if interrupt is not None:
+                    interrupt.add_note(str(refusal))
+                    raise interrupt
+                raise refusal from exc
+
+            stale = None
+            if owner is not None:
+                # The stale-lock break reconciles every transaction ITSELF (under its arbitration
+                # lock), so the idempotent recover() re-run below would read each one 'terminal'.
+                # Record the pre-break states so the reported outcome names what that recovery DID.
+                stale = {t.name: _journal.classify_state(jr_fd, t, txn_fd=tfd) for t, tfd in txns}
+
+                def claim():
+                    _take_reconcile_leases(root_fd, targets, taken)
+                    broke.append(True)
+                    stage[0] = "recovering"
+                arb_before.append(_journal._lstat_contained(root_fd, arb_rel) is not None)
+                try:
+                    claimed = _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, SESSION_ID,
+                                                                 claim=claim)
+                except OSError as exc:
+                    if getattr(exc, "lock_created", False):
+                        lock_fault(exc)
+                    raise
+                if claimed != "acquired":
+                    raise ReconcileRefusal(RECONCILE_LOCK_HELD, "the adoption journal lock became live "
+                                           "during reconciliation; it is never seized, and no recovery "
+                                           "write was made (fail-closed)")
+            else:
+                try:
+                    _journal.acquire_lock(journal_root, SESSION_ID)
+                except _journal.JournalError as exc:
+                    raise ReconcileRefusal(RECONCILE_LOCK_HELD, "another run took the adoption journal "
+                                           "lock during reconciliation ({}); it is never seized, and "
+                                           "nothing was written (fail-closed)".format(exc))
+                except OSError as exc:
+                    lock_fault(exc)
+            held.append(True)
+            try:
+                if not broke:
+                    _take_reconcile_leases(root_fd, targets, taken)
+                stage[0] = "recovering"
+                for txn, tfd in txns:
+                    outcome = _journal.recover(jr_fd, txn, root_fd)
+                    # The agreement check: recover() reopened the transaction by name, so what it reports
+                    # stands only when the directory this run HOLDS now classifies as that outcome leaves
+                    # it; one replaced during the recovery is never reported recovered or clean.
+                    state = _journal.classify_state(jr_fd, txn, txn_fd=tfd)
+                    if state not in _RECOVERY_LEAVES.get(outcome, ()):
+                        raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery of "
+                                               "transaction {!r} reported {!r}, but the directory this run "
+                                               "listed under that name classifies {!r}: the name was renamed "
+                                               "or replaced during the recovery, so it is never reported "
+                                               "recovered. What the recovery wrote stays as the journal "
+                                               "records it{}; the journal lock this run took is released, and "
+                                               "a later `opf adopt reconcile` reconciles what the journal then "
+                                               "holds (fail-closed)".format(
+                                                   JOURNAL_REL, txn.name, outcome, state,
+                                                   "" if not outcomes else " (recovered before it: {})".format(
+                                                       ", ".join("{} {}".format(t, o) for t, o in outcomes))))
+                    if broke and stale.get(txn.name) == "open" and outcome == "terminal":
+                        outcome = "rolled-forward" if state == "complete" else "rolled-back"
+                    outcomes.append((txn.name, outcome))
+            finally:
+                _journal.release_lock(journal_root)
+        finally:
+            _close_held(held_fds)   # the held transaction directories (deepest appended last), then jr_fd
+    except ReconcileRefusal as exc:
+        said = arbitration_said()
+        if said and said not in str(exc):
+            raise ReconcileRefusal(exc.finding, "{}{}".format(exc, said)) from exc
+        raise
+    except (_journal.JournalError, OSError) as exc:
+        if stage[0] == "classify":
+            raise ReconcileRefusal(RECONCILE_UNCLASSIFIABLE, "the adoption journal {} holds a lock, entry or "
+                                   "transaction that cannot be read or classified ({}); nothing was written "
+                                   "(fail-closed)".format(JOURNAL_REL, exc))
+        if stage[0] == "prelock":
+            raise ReconcileRefusal(RECONCILE_PRELOCK_FAULT, "the adoption journal {} cannot be reconciled: a "
+                                   "fault before this run held the journal lock and began recovering ({}); no "
+                                   "recovery write was made, and every transaction is as found{} "
+                                   "(fail-closed)".format(JOURNAL_REL, exc, arbitration_said()))
+        raise ReconcileRefusal(RECONCILE_FAILED, "the adoption journal {} recovery faulted after it began ({}): "
+                               "the recovery may be PARTIAL (what it already restored or published stays as "
+                               "the journal records it, and the transaction stays open); {}; a later `opf adopt "
+                               "reconcile` resumes it from the journal (fail-closed)".format(
+                                   JOURNAL_REL, exc, "the journal lock this run took is released" if held
+                                   else "the dead run's journal lock is kept, so a later reconcile breaks it "
+                                   "again"))
+    return outcomes, bool(held)
 
 
 def _default_store_present_without_manifest(product_root):
@@ -1888,6 +2341,44 @@ def _remove_journal_dirs(root_fd, created, raised=None):
              if not any(rel.startswith(g + "/") for g in gone)], unconfirmed)
 
 
+# A preimage payload name, as capture_preimages writes it: the op's sequence number in decimal.
+_PREIMAGE_NAME = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+
+
+def _discard_unopened_preimages(jr_fd, journal_root, txn, raised):
+    """Discard the copies of product bytes the journal's capture wrote into this run's transaction `txn`
+    when the journal refused it before its INTENT: with no durable INTENT nothing applied, and no recovery
+    ever reads them (recover() returns nothing-opened first). The attempt's record, its directory and
+    frames.log, stays as the journal keeps every attempt, so the base stays this run's one transaction
+    and a phase retry still opens as the next attempt. Called under the journal lock, before the refusal
+    is raised. The transaction directory is opened no-follow beneath the held journal descriptor and
+    re-classified through that descriptor; only a `preimages/` holding nothing but regular files named
+    as capture_preimages names them is emptied and removed, then the transaction directory fsynced.
+    Anything else there, or any error, stops the discard with what remains in place, never raising over
+    the refusal: the closing listing names what stays. A close exception is recorded in `raised`."""
+    held = []   # the transaction, then its preimages descriptor, each closed once by the finally
+    try:
+        try:
+            held.append(os.open(txn, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=jr_fd))
+            if _journal.classify_state(jr_fd, journal_root / txn, txn_fd=held[0]) != "nothing-opened":
+                return
+            held.append(os.open("preimages", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[0]))
+            names = sorted(os.listdir(held[1]))
+            if not all(_PREIMAGE_NAME.match(name)
+                       and stat.S_ISREG(os.stat(name, dir_fd=held[1], follow_symlinks=False).st_mode)
+                       for name in names):
+                return
+            for name in names:
+                os.unlink(name, dir_fd=held[1])
+            os.fsync(held[1])
+            os.rmdir("preimages", dir_fd=held[0])
+            os.fsync(held[0])
+        except (_journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc, raised)     # a close's exception is recorded, never dropped
+    finally:
+        _close_held_into(held, raised)
+
+
 _NOTHING_WRITTEN = "nothing written (fail-closed)"
 # The trailing claims a refusal reason may carry from a shared helper. _refusal_text strips them, so a
 # refusal of run_adopt_transaction carries only the claim derived from its observation.
@@ -1909,7 +2400,9 @@ def _journal_listing(root_fd, keep=None, raised=None):
     of the descriptor it opened, never by the stat by name before the open: one whose identity differs
     between the two (swapped in between) is keyed to ("unlisted", reason) and not traversed. A directory
     the walk cannot open or list is keyed `<dir>/` to ("unlisted", reason), a key no entry name can take
-    (a name is never empty), so a listing never stands for what it did not see. When `keep` is a list, the
+    (a name is never empty), so a listing never stands for what it did not see. A JOURNAL_REL ancestor's
+    next component is stated by name even when the ancestor's own entries could not be listed; when the
+    ancestor could not be opened, that component is keyed unlisted itself. When `keep` is a list, the
     descriptors this listing opened for the JOURNAL_REL components are handed to it as (rel, fd) pairs and
     stay open: while they are HELD no filesystem can hand a removed component's freed inode number to a
     recreation, so a later listing compared against this one can never read a recreated component as
@@ -2001,6 +2494,10 @@ def _journal_listing(root_fd, keep=None, raised=None):
                 cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except OSError as exc:
                 found[rel + "/"] = ("unlisted", str(exc))
+                if i + 1 < len(parts):
+                    # the next component is then never stated by name: keyed unlisted itself, so this
+                    # marker never has to stand for it (_unseen_below)
+                    found[rel + "/" + parts[i + 1]] = ("unlisted", "{} could not be opened ({})".format(rel, exc))
                 break
             opened.append((rel, cur))
             if not opened_as(rel, st, cur):
@@ -2023,6 +2520,20 @@ def _journal_components():
     """The JOURNAL_REL path components, shallowest first: .aiqt, .aiqt/adopt, .aiqt/adopt/journal."""
     parts = JOURNAL_REL.split("/")
     return ["/".join(parts[:i + 1]) for i in range(len(parts))]
+
+
+def _unseen_below(rel, key):
+    """True when a _journal_listing that keyed `key` ("unlisted") did not observe `rel` beneath it. An entry
+    it could not state, or whose identity changed before its open, was never traversed, so it hides
+    everything below it. A directory it could not open or list (keyed `<dir>/`) hides everything below it
+    too, except at a JOURNAL_REL ancestor, whose next component the listing states by name whatever the
+    ancestor's own listing did (keying it unlisted when the ancestor could not be opened): that marker
+    never stands for the next component or what is below it, which the component's own keys decide."""
+    if not key.endswith("/"):
+        return rel.startswith(key + "/")
+    comps = _journal_components()
+    nxt = dict(zip(comps, comps[1:])).get(key[:-1])
+    return rel.startswith(key) and not (nxt is not None and (rel == nxt or rel.startswith(nxt + "/")))
 
 
 def _entry_named(rel, seen, created, txn, mine, maybe_mine, lock_gone=False):
@@ -2057,21 +2568,24 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine, lock_gone=False):
                        "which this run never creates there".format(seen[0]), False
     if (rel.startswith(journal) and "/" not in rel[len(journal):] and seen[0] != "directory"
             and rel != journal + "lock.break"):
-        return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() does not "
-                        "touch it, so no sanctioned path clears it and it stays"), False
+        return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() refuses on "
+                        "it too (journal-unclassifiable), so no sanctioned path clears it and it stays"), False
     return named, False
 
 
 def _observed(before, after, created, txn, mine=None, maybe_mine=False, lock_gone=False):
     """What the run's closing listing shows against its first one: ([], False) when the two are equal and
-    each saw everything, else (clauses, ours). A directory EITHER listing could not open or list makes the
-    journal not fully observed, which is named first and always stands in place of the claim, even when
-    both listings failed alike. Then each entry present now that was not (or not as the same type and
-    inode), under a lead-in that attributes them to this run only when one of them is (or may be) its
-    own, then each entry gone. An entry either listing could not state hides itself and everything below
-    it; a directory either listing stated but could not list (keyed `<dir>/`) hides only what is below it,
-    so an entry the closing listing observed absent is always named gone. `ours` is True when any clause
-    concerns what this run wrote or cannot rule out. `lock_gone` is _entry_named's."""
+    each saw everything, else (clauses, ours). An entry EITHER listing could not state, or a directory
+    either could not open or list, makes the journal not fully observed, which is named first and always
+    stands in place of the claim, even when both listings failed alike. Then each entry present now that
+    was not (or not as the same type and inode), under a lead-in that attributes them to this run only
+    when one of them is (or may be) its own, then each entry gone. Each listing speaks only for what it
+    observed (_unseen_below): an entry present now is named only where the opening listing looked, never
+    below an entry or directory that listing could not see; an entry the opening listing stated is named
+    gone exactly when the closing listing observed it absent, never below an entry or directory the
+    closing listing could not see, and what the opening listing could not see hides nothing it did state.
+    An entry the opening listing could not state is named in the first clause only, never as gone. `ours`
+    is True when any clause concerns what this run wrote or cannot rule out. `lock_gone` is _entry_named's."""
     blind = {}
     for listing in (before, after):
         for rel, seen in listing.items():
@@ -2082,16 +2596,18 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False, lock_gon
         said.append("the adoption journal could not be fully observed, so what this run left there is not "
                     "known: {}".format("; ".join("{} could not be listed ({})".format(rel, why)
                                                  for rel, why in sorted(blind.items()))))
+    unseen_then = [rel for rel, seen in before.items() if seen[0] == "unlisted"]
+    unseen_now = [rel for rel, seen in after.items() if seen[0] == "unlisted"]
     named = [_entry_named(rel, after[rel], created, txn, mine, maybe_mine, lock_gone)
-             for rel in sorted(rel for rel in after if rel not in blind and after[rel] != before.get(rel))]
+             for rel in sorted(rel for rel in after if rel not in blind and after[rel] != before.get(rel)
+                               and not any(_unseen_below(rel, key) for key in unseen_then))]
     ours = bool(blind) or any(own for _text, own in named)
     if named:
         said.append(("the adoption journal now holds entries it did not hold when this run began: " if ours
                      else "the adoption journal now holds entries it did not hold when this run began, not "
                      "attributed to this run: ") + ", ".join(text for text, _own in named))
-    gone = sorted(rel for rel in before if rel not in after and not any(
-        rel.startswith(key) if key.endswith("/") else rel == key or rel.startswith(key + "/")
-        for key in blind))
+    gone = sorted(rel for rel in before if rel not in blind and rel not in after
+                  and not any(_unseen_below(rel, key) for key in unseen_now))
     if gone:
         said.append("entries present when this run began are gone: {}".format(", ".join(gone)))
     return said, ours
@@ -2101,9 +2617,11 @@ def _journal_unbound(jr_fd, held, after):
     """None when the closing listing observed the journal directory this run wrote to: the journal path
     still resolves to the identity (st_dev, st_ino) of the descriptor the run held, or it is absent and
     that held directory is unlinked (this run's cleanup removed it, empty). Else the clause saying the
-    binding changed, or could not be observed (the listing could not see the journal path or one of its
-    ancestors), in place of the claim: what the directory this run wrote to now holds is unobserved.
-    Called while the descriptor is still held, so its inode cannot be reused by a later directory."""
+    binding changed, or could not be observed (the listing could not state the journal path or one of its
+    ancestors; below an ancestor whose own entries it could not list it still stated the next component by
+    name, so a journal path absent there was observed absent), in place of the claim: what the directory
+    this run wrote to now holds is unobserved. Called while the descriptor is still held, so its inode
+    cannot be reused by a later directory."""
     if jr_fd is None or held is None:
         return None
     now = after.get(JOURNAL_REL)
@@ -2116,8 +2634,7 @@ def _journal_unbound(jr_fd, held, after):
         except OSError:
             pass
     if now is not None and now[0] == "unlisted" or now is None and any(
-            after.get(r, ("",))[0] == "unlisted" or after.get(r + "/", ("",))[0] == "unlisted"
-            for r in _journal_components()[:-1]):
+            after.get(r, ("",))[0] == "unlisted" for r in _journal_components()[:-1]):
         return ("the adoption journal path {} could not be observed, so whether it still resolves to the "
                 "journal directory this run wrote to (st_dev {}, st_ino {}), and what that directory holds, "
                 "is not known".format(JOURNAL_REL, held[0], held[1]))
@@ -2546,7 +3063,9 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
     the cleanup durable, and the lock released durably (or never taken); otherwise the refusal names what
     could not be observed and every entry present now that was not before, attributed to this run only
     when one is (or may be) its own (a
-    pre-INTENT transaction directory, its frames.log and preimages included), what its cleanup left or may
+    pre-INTENT transaction directory and its frames.log, and any preimages its discard left: a refusal
+    before INTENT discards the product-byte copies the capture wrote under the lock, keeping the record,
+    _discard_unopened_preimages), what its cleanup left or may
     not have made durable, and what its lock release left, in place of the claim. The first listing's
     descriptors on the journal path components are HELD until that closing comparison (as jr_fd is), the
     components' before-identities re-read from the held descriptors with fstat, and the descriptor on the
@@ -2744,6 +3263,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
                         _journal._exc_said(unread))
                 if state == "nothing-opened":
                     entered = False
+                    _discard_unopened_preimages(jr_fd, journal_root, txn, closeout)
                     raise AdoptApplyError("the adoption transaction was refused before it opened "
                                           "({})".format(_journal._msg_said(exc)))
                 if state == "rolled-back":
@@ -3305,15 +3825,17 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     only through _init_store_prior_run_paths: that run's init-store transaction terminal
     ROLLED-BACK, its bundle verified, every artefact created by a COMPLETE transaction of this
     journal, and the machine home only on its committed archival -- so a fresh run continues a
-    reversed run's committed work without re-running its burnt id (claude round 4, F1;
-    spec 14.1). Only then is the emptied, pre-existing
+    reversed run's committed work without re-running its burnt id (spec
+    14.1). Only then is the emptied, pre-existing
     directory admitted as a pre-existing planned directory, its mode pre-checked HERE (before
     the run's intent opens, so a wrong-mode tree never burns the run id) at the FULL
-    stat.S_IMODE the substrate compares: the machine directory against the planned mode
-    (codex round 4), and `.working` with admitted files against the substrate's own two
+    stat.S_IMODE the substrate compares: the machine directory against the planned mode,
+    and `.working` with admitted files, whether or not the machine directory
+    is admitted too, against the substrate's own two
     facts -- it records `.working`'s observed mode MASKED to 0o777 and re-compares the full
     S_IMODE against that record, so a special bit (a setgid 02755) can never pass, and it
-    refuses a group- or world-writable mode outright (claude round 5, N2). The substrate
+    refuses a group- or world-writable mode outright, since a store is never published beneath
+    a home others can write. The substrate
     re-verifies and preserves what it admits.
     Every consumed
     sources-row field (path, digest, disposition, occupying, preservation) is validated
@@ -3393,49 +3915,52 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
                                       "nothing written)".format(machine))
         stray.remove(machine)
         admitted_dirs = (store.WORKING_DIRNAME, machine)
-        # The admitted-directory MODE is pre-checked HERE, before the run's intent opens, so a
-        # wrong-mode pre-existing tree (a umask-002 adopter) refuses with nothing written and
-        # the run id never burnt; the substrate re-proves the same fact under its mutex. The
-        # comparison reads the SAME full stat.S_IMODE value the substrate compares (codex
-        # round 4, finding 2): observe_inventory's entries mask to 0o777, so a special bit
-        # (a setgid 02755 directory) would otherwise pass here and burn the run id on the
-        # substrate's own post-intent refusal.
-        for dpath in admitted_dirs:
-            try:
-                dst = os.stat(dpath, dir_fd=root_fd, follow_symlinks=False)
-            except OSError as exc:
-                raise AdoptApplyError("cannot stat {} ({}); fail-closed".format(dpath, exc))
-            if not stat.S_ISDIR(dst.st_mode):
-                raise AdoptApplyError("admitted pre-existing path {} is no longer a directory; "
-                                      "fail-closed (nothing written)".format(dpath))
-            if dpath == store.WORKING_DIRNAME and admitted:
-                # With admitted files the substrate records `.working`'s observed mode MASKED
-                # to 0o777 and re-compares the FULL stat.S_IMODE against that record under its
-                # mutex, and refuses a group- or world-writable mode; the SAME two facts are
-                # pre-checked HERE so a special-bit or writable `.working` refuses BEFORE the
-                # run's intent opens and never burns the run id (claude round 5, N2).
-                wmode = stat.S_IMODE(dst.st_mode)
-                if wmode != (wmode & 0o777):
-                    raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, "
-                                          "whose special bit the substrate's 0o777-masked "
-                                          "recorded mode can never match; it is preserved as "
-                                          "found, never rewritten, and refused BEFORE the "
-                                          "run's intent opens (nothing written)".format(
-                                              dpath, "%o" % wmode))
-                if wmode & 0o022:
-                    raise AdoptApplyError("the admitted {} directory mode {} is group- or "
-                                          "world-writable; a store is never published beneath "
-                                          "a home writable by others, and it is refused "
-                                          "BEFORE the run's intent opens (nothing "
-                                          "written)".format(dpath, "%o" % wmode))
-                continue
-            if stat.S_IMODE(dst.st_mode) != init_op.DIR_MODE:
-                raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, not "
-                                      "the planned {}; it is preserved as found, never "
-                                      "rewritten, and refused BEFORE the run's intent opens "
-                                      "(nothing written)".format(
-                                          dpath, "%o" % stat.S_IMODE(dst.st_mode),
-                                          "%o" % init_op.DIR_MODE))
+    # The admitted-directory MODE is pre-checked HERE, before the run's intent opens, so a
+    # wrong-mode pre-existing tree (a umask-002 adopter) refuses with nothing written and
+    # the run id never burnt; the substrate re-proves the same fact under its mutex. The
+    # comparison reads the SAME full stat.S_IMODE value the substrate compares:
+    # observe_inventory's entries mask to 0o777, so a special bit
+    # (a setgid 02755 directory) would otherwise pass here and burn the run id on the
+    # substrate's own post-intent refusal. `.working` holding admitted files is checked
+    # whether or not the machine directory is admitted too: the substrate checks it on its
+    # admitted files alone, so with no machine directory it would otherwise refuse only
+    # after the intent opens, burning the run id.
+    for dpath in admitted_dirs or ((store.WORKING_DIRNAME,) if admitted else ()):
+        try:
+            dst = os.stat(dpath, dir_fd=root_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise AdoptApplyError("cannot stat {} ({}); fail-closed".format(dpath, exc))
+        if not stat.S_ISDIR(dst.st_mode):
+            raise AdoptApplyError("admitted pre-existing path {} is no longer a directory; "
+                                  "fail-closed (nothing written)".format(dpath))
+        if dpath == store.WORKING_DIRNAME and admitted:
+            # With admitted files the substrate records `.working`'s observed mode MASKED
+            # to 0o777 and re-compares the FULL stat.S_IMODE against that record under its
+            # mutex, and refuses a group- or world-writable mode; the SAME two facts are
+            # pre-checked HERE so a special-bit or writable `.working` refuses BEFORE the
+            # run's intent opens and never burns the run id.
+            wmode = stat.S_IMODE(dst.st_mode)
+            if wmode != (wmode & 0o777):
+                raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, "
+                                      "whose special bit the substrate's 0o777-masked "
+                                      "recorded mode can never match; it is preserved as "
+                                      "found, never rewritten, and refused BEFORE the "
+                                      "run's intent opens (nothing written)".format(
+                                          dpath, "%o" % wmode))
+            if wmode & 0o022:
+                raise AdoptApplyError("the admitted {} directory mode {} is group- or "
+                                      "world-writable; a store is never published beneath "
+                                      "a home writable by others, and it is refused "
+                                      "BEFORE the run's intent opens (nothing "
+                                      "written)".format(dpath, "%o" % wmode))
+            continue
+        if stat.S_IMODE(dst.st_mode) != init_op.DIR_MODE:
+            raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, not "
+                                  "the planned {}; it is preserved as found, never "
+                                  "rewritten, and refused BEFORE the run's intent opens "
+                                  "(nothing written)".format(
+                                      dpath, "%o" % stat.S_IMODE(dst.st_mode),
+                                      "%o" % init_op.DIR_MODE))
     if stray:
         raise AdoptApplyError("foreign .working directory(ies) {} hold no admitted file; a blind "
                               "init over them is refused (spec 14; nothing written)".format(stray))
@@ -3842,7 +4367,7 @@ def _init_store_recorded_plan(product_root, op_id):
                 _journal._close_fd_quietly(fd)
 
 
-def _init_store_reversal_preverify(root_fd, product_root, jr_fd, txn_dir):
+def _init_store_reversal_preverify(root_fd, product_root, jr_fd, txn_dir, txn_fd=None):
     """The reversal removes EXACTLY what the operation created and nothing else (spec 14.2):
     every recorded creation still PRESENT live must be proven the operation's own publication by
     ATTRIBUTABLE SUBSTRATE EVIDENCE -- the digest the operation's own recorded plan binds to the
@@ -3858,9 +4383,11 @@ def _init_store_reversal_preverify(root_fd, product_root, jr_fd, txn_dir):
     the foreign content aside, then reconcile()). RESIDUAL (disclosed): the verification and
     the rollback's unlink are two observations, so a same-user adversarial swap between them
     stays outside the journal's quiescence guarantee, and a foreign file whose bytes EQUAL the
-    substrate's own published payload is indistinguishable from it and is removed."""
+    substrate's own published payload is indistinguishable from it and is removed. txn_fd, when given,
+    is the transaction directory descriptor reconcile HELD from its listing, and the INTENT is read
+    through it, never by reopening the name."""
     try:
-        frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
+        frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
         intent = _journal._first(frames, _journal.F_INTENT)
     except (_journal.JournalError, OSError) as exc:
         raise AdoptApplyError("cannot read the init-store intent before its reversal ({}); "
@@ -4140,7 +4667,7 @@ def _init_store_run(op_row, context):
         _owner, opened = journal_state(root_fd, journal_root)
         if opened:
             raise AdoptApplyError("interrupted adoption transaction(s) {} must be reconciled before "
-                                  "this run (run reconcile()); nothing written (fail-closed)".format(
+                                  "this run (run `opf adopt reconcile`); nothing written (fail-closed)".format(
                                       ", ".join(opened)))
         state = "nothing-opened"
         try:
@@ -4228,15 +4755,20 @@ class RegistrationContext:
     _opf_adopt.store_manifest of it, never a caller-supplied path), and the planned postimage MODEL of each
     repoint-consumer path, which the handler re-emits and digest-checks against the row before staging it.
     `kept` maps each kept path to its approved source digest (the plan's keep source rows), against which
-    register-unmanaged re-checks the kept file's live bytes. `rewrites` holds the one write op each
+    register-unmanaged re-checks the kept file's live bytes. `manifest_digest` is the plan-bound digest of
+    the store manifest the planner observed (the re-derived observation's resolution.manifest_digest, which
+    the plan's inventory_digest seals; empty when no store resolved), which the LIVE manifest repoint-consumer
+    reads must still hash to (_store_model; register-unmanaged's live read is bound by its row's old_digest).
+    `rewrites` holds the one write op each
     rewritten path has in this transaction, so a register-unmanaged chain extends that one write link by link
     (one op per path) and a second repointing of one consumer refuses."""
 
-    def __init__(self, ops, store_table=None, consumers=None, kept=None):
+    def __init__(self, ops, store_table=None, consumers=None, kept=None, manifest_digest=None):
         self.ops = ops
         self.store = store_table
         self.consumers = dict(consumers or {})
         self.kept = dict(kept or {})
+        self.manifest_digest = manifest_digest
         self.rewrites = {}
 
 
@@ -4317,8 +4849,12 @@ def _adopt_created(context, rel):
 
 def _store_model(context, manifest):
     """The frozen store manifest as this transaction leaves it so far (its pending chain link, a manifest
-    created earlier in this transaction, or the live bytes), parsed and VALID, else refuse: both
-    registration ops need it to tell the store's own paths from adopter content (fail-closed)."""
+    created earlier in this transaction, or the live bytes), parsed and VALID, else refuse: repoint-consumer,
+    its one caller, needs it to tell the store's own paths from a consumer (fail-closed); register-unmanaged
+    reads the manifest through its row's old_digest instead (_current_bytes). The live bytes must hash to
+    the plan-bound manifest digest (context.manifest_digest), re-read here under the journal lock, so a
+    manifest edited after the plan froze (an [unmanaged] entry dropped, a view target moved) never weakens
+    the guards that read it; with no bound digest (no store observed) a live manifest refuses."""
     _adopt_created(context, manifest)
     if manifest in context.rewrites:
         data = context.ops.staged.get(manifest)
@@ -4327,6 +4863,16 @@ def _store_model(context, manifest):
         if fst is None:
             raise AdoptApplyError("the store manifest {!r} the plan's store identity names is absent at "
                                   "apply; a fresh plan with its own approval is the remedy "
+                                  "(spec 14.1)".format(manifest))
+        bound = context.manifest_digest
+        if not schema._is_digest(bound):
+            raise AdoptApplyError("the live store manifest {!r} is bound by no observed manifest digest (the "
+                                  "plan observed no store), so no repoint-consumer row is composed against "
+                                  "it (fail-closed)".format(manifest))
+        if "sha256:" + _sha256(data) != bound:
+            raise AdoptApplyError("the live store manifest {!r} is drifted: its bytes no longer match the "
+                                  "manifest digest the plan bound, so no repoint-consumer row is composed "
+                                  "against it; a fresh plan with its own approval is the remedy "
                                   "(spec 14.1)".format(manifest))
     # For a LIVE manifest this parse guard is redundant with the posture gate, which refuses an unparseable
     # manifest first ("the store posture cannot be evaluated"); it is reachable only for a manifest created
@@ -4558,8 +5104,8 @@ def _compose_enable_hook(op_row, ops):
     the threat model). The registration path must name a supported v1 registration target (the merge
     core's closed REGISTRATION_PATHS allowlist: PATH identity selects the platform, decided BEFORE any
     read, so an unsupported platform or a non-settings file refuses with nothing read and nothing
-    written, however settings-shaped its content). The plugin_entry must match the pack-member grammar
-    dispatch already validated, re-proved here because OP_HANDLERS is a public table and a direct
+    written, however settings-shaped its content). The plugin_entry must be exactly the fixed deny-hook
+    command dispatch already validated, re-proved here because OP_HANDLERS is a public table and a direct
     caller skips dispatch; for the same reason a row that is not a table carrying string
     registration_path, plugin_entry, old_digest and new_digest refuses first, never an uncaught
     KeyError or AttributeError. The registration file must then be present, regular,
@@ -4590,8 +5136,8 @@ def _compose_enable_hook(op_row, ops):
                               "one (fail-closed)".format(path, hook.REGISTRATION_FAMILY,
                                                          ", ".join(hook.REGISTRATION_PATHS)))
     if not schema._is_hook_entry(op_row["plugin_entry"]):
-        raise AdoptApplyError("enable-hook plugin_entry is not one word of the pack-member grammar "
-                              "(_opf_adopt._is_hook_entry), re-proved here so a caller of the handler "
+        raise AdoptApplyError("enable-hook plugin_entry is not the fixed deny-hook command "
+                              "(_opf_adopt.HOOK_COMMAND), re-proved here so a caller of the handler "
                               "table that skips dispatch still cannot register it; nothing read or "
                               "written (fail-closed)")
     if path in ops.staged:
@@ -4744,7 +5290,10 @@ def _plant_governance(op_row, context=None):
     which removes the planted file. Every refusal is CANNOT-EVALUATE and precedes any filesystem
     publication; one raised inside ApplyOps.create (a path component that is not a directory) can leave
     context["ops"] partly composed, so the compose callable MUST raise on any refusing verdict, discarding
-    the whole transaction before it opens (run_adopt_transaction then writes nothing)."""
+    the whole transaction before it opens (run_adopt_transaction then writes nothing). A path beneath the
+    opf/ mirror or at an enforcement destination is planted only from its own pack source
+    (_opf_adopt.pack_source), the binding the plan validator holds, re-proved here because OP_HANDLERS is
+    a public table and a direct caller skips dispatch."""
     try:
         ops = _composing_ops(op_row, context)
         path = op_row["path"]
@@ -4756,6 +5305,10 @@ def _plant_governance(op_row, context=None):
             raise AdoptApplyError("{!r} is the product-root VERSION deliverable, a render-managed "
                                   "destination (spec 14.2), where no governance adapter is planted "
                                   "(fail-closed)".format(path))
+        want = schema.pack_source(path)
+        if want is not None and op_row["source_member"] != want:
+            raise AdoptApplyError("source_member {!r} is not {!r}, the only pack source planted at {!r} "
+                                  "(fail-closed)".format(op_row["source_member"], want, path))
         data, digest = verify_pack_member(_context_plan(context), context.get("pack"), op_row["source_member"])
         if "sha256:" + digest != op_row["content_digest"]:
             raise AdoptApplyError("the verified member {!r} is not the content_digest the row "
@@ -4791,12 +5344,14 @@ def _planned_views(res):
 
 def _render_views(op_row, context=None):
     """render-views (spec 14, 14.2): compose, into the transaction context["ops"] carries, the CREATE of
-    every declared view with the exact approved bytes, so the views land through the same journaled
-    adoption transaction, per-op preimage checks, reversal (the journal's rollback removes them from their
-    captured absent preimages) and adoption-journal lock as every other composing op. `context` carries
-    `product_root` (the transaction's own product root, bound to ops.root_fd by directory identity), `plan`
-    (its frozen `store` identity) and `observations` (the inert git-derived facts the git-aware caller
-    gathers, exactly as `opf render --write` does through _opf_observe.gather).
+    every declared view with the exact approved bytes (or, at a destination this transaction vacated, the
+    pinned WRITE below), so the views land through the same journaled adoption transaction, per-op
+    preimage checks, reversal (the journal's rollback removes a created view from its captured absent
+    preimage and writes a vacated source's bytes back) and adoption-journal lock as every other composing
+    op. `context` carries `product_root` (the transaction's own product root, bound to ops.root_fd by
+    directory identity), `plan` (its frozen `store` identity and its `sources` rows) and `observations`
+    (the inert git-derived facts the git-aware caller gathers, exactly as `opf render --write` does
+    through _opf_observe.gather).
 
     Preconditions, all before anything is composed: the plan's frozen DEFAULT store resolves at the product
     root, which is the transaction's own root; the row's members are EXACTLY the declared view destinations
@@ -4806,15 +5361,27 @@ def _render_views(op_row, context=None):
     view is rendered over a store whose source integrity is not sound; every authored deliverable this op
     does not own (C-CHANGELOG-GATES always, C-VERSION-FILE unless a VERSION view is planned) already
     passes, so an authored residual refuses with NOTHING written, never after a write; and every
-    destination is observed ABSENT, contained and no-follow. An occupied view destination refuses
-    fail-closed in this slice (spec 14.2: adopter content is never absorbed, deleted or overwritten; the
-    preserve-then-render write for a plan-enumerated occupying source composes with the file-ops slice).
-    The journal then captures each create's absent prestate under its lock and digest-verifies the written
-    poststate: a destination raced in between compose and that capture is refused there as a prestate
-    violation before the transaction's INTENT publishes (nothing opened), and the create itself is
-    exclusive and no-follow; an arbitrary concurrent writer is outside the journal's model. Every handler
-    refusal is CANNOT-EVALUATE and precedes any filesystem publication; the preconditions above refuse
-    before anything is composed, while one raised inside ApplyOps.create can leave context["ops"] partly
+    destination is observed ABSENT, contained and no-follow, or is VACATED: the plan's `sources` carry an
+    OCCUPYING row at exactly that path, and this same transaction has already archived that source
+    (ApplyOps.archive_occupying, from the preservation pass or a file op composed before this row), so its
+    pinned removal is still pending in the op list. Any other occupied view destination refuses
+    fail-closed (spec 14.2: adopter content is never absorbed, deleted or overwritten). A vacated
+    destination is taken over through ApplyOps.replace_vacated: ONE write, pinned to the archived source's
+    digest and mode, replaces that pending removal (one op per path), still after the verified archive
+    copy, and the journal's reversal of that write restores the source bytes. Spec 14.2 says the source is
+    removed from the live path; here its bytes are destroyed by that pinned write after the archive copy,
+    not by an unlink and a later create, a disclosed reading of that sentence. The rendered view keeps the
+    vacated source's mode bits, not FILE_MODE (a journal write installs bytes only), a disclosed residual
+    (git records only 644 or 755). The stage driver does not reach this handler yet: run_apply refuses a
+    render-views row for want of the observations it does not gather (_DRIVER_UNSUPPLIED), so this path
+    runs only under direct dispatch, as in the self-test, until the driver gathers them.
+    The journal then captures each op's prestate under its lock (a create's absence, a takeover write's
+    pinned source bytes and mode) and digest-verifies the written poststate: a destination raced in
+    between compose and that capture is refused there as a prestate violation before the transaction's
+    INTENT publishes (nothing opened), and the create itself is exclusive and no-follow; an arbitrary
+    concurrent writer is outside the journal's model. Every handler refusal is CANNOT-EVALUATE and
+    precedes any filesystem publication; the preconditions above refuse before anything is composed,
+    while one raised inside ApplyOps.create or ApplyOps.replace_vacated can leave context["ops"] partly
     composed, so the compose callable MUST raise on any refusing verdict, discarding the whole transaction
     before it opens (run_adopt_transaction then writes nothing)."""
     try:
@@ -4872,12 +5439,22 @@ def _render_views_compose(op_row, context):
                               "own declared views and repairs nothing authored; nothing composed".format(
                                   ", ".join(residual)))
     occupied = sorted(p for p in planned if observe_live(ops.root_fd, p)["kind"] != "absent")
+    # a destination is vacated only when the plan enumerates its occupant as an occupying source AND this
+    # transaction already archived it (its pinned removal pending); every other occupied one refuses
+    sources = plan.get("sources") if isinstance(plan.get("sources"), list) else []
+    enumerated = set(row["path"] for row in sources if isinstance(row, dict)
+                     and isinstance(row.get("path"), str) and row.get("occupying") is True)
+    vacated = set(p for p in occupied if p in ops.vacated and p in enumerated)
+    occupied = [p for p in occupied if p not in vacated]
     if occupied:
         raise AdoptApplyError("view destination(s) {} are occupied; adopter content is never absorbed or "
                               "overwritten (spec 14.2), and an occupying source routes to its preserve-first "
                               "disposition with the file ops; nothing composed".format(", ".join(occupied)))
     for path in sorted(planned):
-        ops.create(path, planned[path])
+        if path in vacated:
+            ops.replace_vacated(path, planned[path])
+        else:
+            ops.create(path, planned[path])
 
 
 def event_digest(event):
@@ -5022,7 +5599,7 @@ def _record_adoption(op_row, context=None):
     return schema._ok()
 
 
-# --- the dispatch table: every op but the landed ops (the three file ops, init-store, the registration ops, enable-hook and the three finish ops) refuses not-yet-executable --
+# --- the dispatch table: every op has landed (the three file ops, init-store, the registration ops, enable-hook and the three finish ops); a stand-in refuses not-yet-executable --
 
 def _not_yet_executable(op_row, context=None):
     """The refusing not-yet-executable verdict behind every dispatch entry no slice has landed yet. Each
@@ -5219,7 +5796,6 @@ def _execute_file_op(op_row, context=None):
 # Keyed by the closed ADOPT_OPS vocabulary; the self-test reconciles this table against
 # ADOPT_OPS_BY_NAME in BOTH directions so it can neither drop nor invent an op.
 OP_HANDLERS = {
-    "install-pack": _not_yet_executable,
     "init-store": _init_store,
     "create-file": _execute_file_op,
     "plant-governance": _plant_governance,
@@ -5275,6 +5851,22 @@ def plan_rel(run_id):
 def approval_rel(run_id):
     """`<bundle>/approval.toml`: the captured approval's exact bytes, which apply persists beside its plan."""
     return evidence_home_rel(run_id) + "/" + APPROVAL_NAME
+
+
+def planning_inventory_rel(run_id):
+    """`<bundle>/planning-inventory.toml`: the sealed planning inventory the plan's inventory_digest binds,
+    which apply persists beside the plan and approval after re-derivation reproves it (rederive_bound_or_refuse);
+    the completion evaluator's check 2 reads this copy (spec 14.1)."""
+    return evidence_home_rel(run_id) + "/" + PLANNING_INVENTORY_NAME
+
+
+def adoption_journal_fenced():
+    """True while this tooling activates homes generation 2 (spec 4.2), whose stores keep no OPF state
+    under .aiqt: the adoption journal at JOURNAL_REL is a homes-1 location, and its homes-2 home has
+    not landed. While fenced, run_apply and reconcile_report refuse with ADOPTION_FENCE before any
+    .aiqt access, and plan, approve and status do not read the journal. False at the shipped
+    constants (SUPPORTED_HOMES 1), so every adoption path is unchanged there."""
+    return store.SUPPORTED_HOMES >= 2
 
 
 def require_clean_journal(product_root):
@@ -5469,15 +6061,17 @@ def _unsupplied(rows):
     return found
 
 
-def _driver_contexts(ops, plan_doc, approval, product_root):
+def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None):
     """The contexts the plan op handlers of ONE apply-stage composition take, built from the sealed plan, the
     captured approval and `product_root`, run_apply's own argument (the root it admitted the plan against
     and re-derived it over), never from other ambient state (spec 14.1); only the table carries
     `product_root` and `approval`, and no typed context carries either. Returns (table, typed). `typed` maps
     each handler that composes through a typed context to it: the file-op handler to ONE OpContext over the
     plan's source rows (so its claims span every file-op row), the registration handler to ONE
-    RegistrationContext over the plan's frozen store identity and each keep source's approved digest (so a
-    registration chain extends link by link), and the enable-hook handler to a HookContext. Every other
+    RegistrationContext over the plan's frozen store identity, each keep source's approved digest (so a
+    registration chain extends link by link) and `manifest_digest`, the store manifest digest of the
+    observation rederive_bound_or_refuse re-derived (plan-bound: the byte-identical plan's inventory_digest seals
+    it; None binds nothing, so a live manifest refuses), and the enable-hook handler to a HookContext. Every other
     handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`).
     No typed context carries a value the plan does not bind: the OpContext holds no planned bytes, the
     RegistrationContext no consumer model and the HookContext only `ops`, and run_apply refuses a row that
@@ -5485,7 +6079,8 @@ def _driver_contexts(ops, plan_doc, approval, product_root):
     table = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
     kept = dict((row["path"], row["digest"]) for row in plan_doc["sources"] if row["disposition"] == "keep")
     typed = {_execute_file_op: OpContext(ops, plan_doc["sources"]),
-             _execute_registration_op: RegistrationContext(ops, plan_doc["store"], kept=kept),
+             _execute_registration_op: RegistrationContext(ops, plan_doc["store"], kept=kept,
+                                                           manifest_digest=manifest_digest),
              _execute_enable_hook: HookContext(ops)}
     return table, typed
 
@@ -5644,7 +6239,24 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
     not observed here, so re-derivation proves only that the worksheet still freezes this plan, never that
     the tool release, prompt pack or enforcement pack in use match it; observing them is the trust-verification
     slice's. `worksheet` is the parsed planning worksheet: sources, targets, expected_observation_digest,
-    product, decisions, ops, bindings."""
+    product, decisions, ops, bindings. Returns the store manifest digest of the re-derived observation
+    (resolution.manifest_digest: a sha256 digest, or empty when no store resolved), plan-bound because the
+    byte-identical plan's inventory_digest seals that observation; an observation that carries none in
+    that shape refuses. The re-derivation is rederive_bound_or_refuse's, so the sealed planning inventory
+    is proved here as well and an inventory that does not seal to the plan refuses approve exactly as it
+    refuses apply; run_apply takes both values from rederive_bound_or_refuse itself."""
+    return rederive_bound_or_refuse(product_root, plan_doc, plan_bytes, worksheet)[0]
+
+
+def rederive_bound_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
+    """The re-derivation rederive_or_refuse states (its docstring is the freshness rule), returning the two
+    values the re-derived, byte-identical plan binds: (manifest_digest, inventory_bytes). `inventory_bytes`
+    is the sealed planning inventory the re-run planner produced, proved by the completion evaluator's own
+    rule (pop the digest field, re-seal the re-emitted body) to seal its own bytes and to equal the plan's
+    bound inventory_digest, so apply can persist that copy in the run's evidence bundle (check 2 reads it);
+    re-planning that returns no inventory, or one that does not seal to the plan, refuses before anything
+    is written and before the observation is read. `manifest_digest` is the store manifest digest of the
+    re-derived observation, rederive_or_refuse's return, which the driver's RegistrationContext binds."""
     import _opf_adopt_plan as planner
     observed = observe_revision(product_root)
     if observed != plan_doc["revision"]:
@@ -5670,6 +6282,35 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
         raise AdoptApplyError("re-planning from the worksheet over the live tree freezes a different plan than "
                               "{}: a bound item drifted, so a fresh plan with its own single approval is the "
                               "remedy (spec 14.1, fail-closed)".format(plan_doc["plan_digest"]))
+    inventory_bytes = res.inventory
+    if not isinstance(inventory_bytes, bytes):
+        raise AdoptApplyError("re-planning returned no planning inventory beside the byte-identical plan; "
+                              "apply persists the sealed planning inventory, so it refuses (fail-closed)")
+    inventory_doc = _canonical_toml(inventory_bytes, "the re-derived planning inventory")
+    body = dict(inventory_doc)
+    claimed = body.pop("inventory_digest", None)
+    try:
+        sealed = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    except EmitError as exc:
+        raise AdoptApplyError("the re-derived planning inventory cannot be re-sealed ({}); "
+                              "fail-closed".format(exc))
+    if claimed != sealed:
+        raise AdoptApplyError("the re-derived planning inventory's inventory_digest does not seal its own "
+                              "bytes; fail-closed")
+    if claimed != plan_doc["inventory_digest"]:
+        raise AdoptApplyError("the re-derived planning inventory {!r} is not the one the plan binds ({!r}); "
+                              "any bound-item drift refuses into a fresh plan with its own single approval "
+                              "(spec 14.1, fail-closed)".format(claimed, plan_doc["inventory_digest"]))
+    try:
+        digest = tomllib.loads(res.observation.decode("utf-8"))["resolution"]["manifest_digest"]
+    except (AttributeError, KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError,
+            RecursionError, MemoryError) as exc:
+        raise AdoptApplyError("the re-derived observation carries no store manifest digest ({!r}); "
+                              "fail-closed".format(exc))
+    if not isinstance(digest, str) or (digest != "" and not schema._is_digest(digest)):
+        raise AdoptApplyError("the re-derived observation's store manifest digest {!r} is neither empty nor a "
+                              "sha256 digest; fail-closed".format(digest))
+    return digest, inventory_bytes
 
 
 def capture_approval(product_root, plan_bytes, worksheet, actor, now):
@@ -5680,7 +6321,11 @@ def capture_approval(product_root, plan_bytes, worksheet, actor, now):
     return the canonical
     approval bytes, in the receipt's APPROVAL_REQUIRED shape, binding the plan's plan_digest and
     inventory_digest. `now` is the clock instant of the approval. The adopter holds those bytes until apply,
-    which persists them with the plan in the run's evidence bundle; nothing is written here."""
+    which persists them with the plan in the run's evidence bundle; nothing is written here. On base 2.0.0
+    (adoption_journal_fenced) the adoption journal is not read, so it refuses with JOURNAL_UNREAD before any
+    of this: no approval issues over a journal state that is unknown."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(JOURNAL_UNREAD)
     plan_doc = frozen_plan(plan_bytes)
     require_clean_journal(product_root)
     _require_unapplied(product_root, plan_doc["run_id"])
@@ -5705,14 +6350,16 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     apply_plan (the approval binds this plan's plan_digest and inventory_digest and follows its plan);
     refuse over a non-clean adoption journal; refuse a run already applied (_require_unapplied, replay
     admission ahead of freshness); re-derive the plan over the live tree and its observed revision
-    (rederive_or_refuse); refuse while any plan op's slice, or the driver's mandatory receipt stage
-    (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
+    (rederive_bound_or_refuse, which returns the store manifest digest the RegistrationContext binds and
+    the sealed planning inventory the bundle persists); refuse while any plan op's slice, or the driver's
+    mandatory receipt stage (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
     construction, never half of it; and refuse a row whose handler needs what this driver cannot supply
     (_DRIVER_UNSUPPLIED: a value neither the sealed plan nor its approval carries, or init-store's own
     sequencing), naming it, never composing the row over a default.
 
-    Composition is the driver's, and so are its rules. One compose function stages the plan and approval
-    bytes in the run's evidence bundle, composes the preservation pass (compose_preservation: the archive
+    Composition is the driver's, and so are its rules. One compose function stages the plan, approval and
+    sealed planning-inventory bytes (the inventory rederive_bound_or_refuse returned, proved to seal to the
+    plan's inventory_digest) in the run's evidence bundle, composes the preservation pass (compose_preservation: the archive
     copy of each source requiring one that no plan file-op row archives, a migrate source's), dispatches
     EVERY plan op in plan
     order in the apply stage, each with the context its handler requires, built from the sealed plan, its
@@ -5737,7 +6384,10 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     created, so it too leaves the tree as it found it, unless a release or a removal fails or may not be
     durable (a directory a concurrent run has populated meanwhile stays, disclosed): run_adopt_transaction
     then names each such leftover in place of "nothing written".
-    Returns the transaction name."""
+    Returns the transaction name. On base 2.0.0 (adoption_journal_fenced) it refuses with
+    ADOPTION_FENCE before any of this, so nothing is read or written."""
+    if adoption_journal_fenced():
+        raise AdoptApplyError(ADOPTION_FENCE)
     plan_doc = frozen_plan(plan_bytes)
     approval = _canonical_toml(approval_bytes, "the adoption approval")
     gate = apply_plan(plan_doc, approval)
@@ -5747,7 +6397,7 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     run_id = plan_doc["run_id"]
     require_clean_journal(product_root)
     _require_unapplied(product_root, run_id)
-    rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
+    manifest_digest, inventory_bytes = rederive_bound_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     rows = list(plan_doc["ops"])
     unlanded = []
     ops_unlanded = sorted(set(row["op"] for row in rows
@@ -5770,8 +6420,9 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
         with _composing():
             ops.create(plan_rel(run_id), plan_bytes)
             ops.create(approval_rel(run_id), approval_bytes)
+            ops.create(planning_inventory_rel(run_id), inventory_bytes)
             compose_preservation(ops, plan_doc)
-            context, typed = _driver_contexts(ops, plan_doc, approval, product_root)
+            context, typed = _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest)
             for i, row in enumerate(rows):
                 verdict = dispatch(row, typed.get(OP_HANDLERS.get(row["op"]), context))
                 if verdict.status != store.VALID:
@@ -5859,7 +6510,7 @@ def _selftest_git_set_head(root, commit):
 
 # --- self-test -----------------------------------------------------------------------------------------
 
-def self_test():
+def self_test(section=None):
     """Fail-closed invariants over synthetic vectors and throwaway temporary fixtures, judged on returned
     statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
     or of apply input also matches one reason keyword so the refusal is attributed to the rule under test,
@@ -5874,7 +6525,12 @@ def self_test():
     init-store vectors use git too (real fixture repositories, which the substrate binds) and a subprocess
     (a child dispatch of THIS engine, SIGKILLed inside the substrate's publication), under that same
     throwaway HOME, as are the file-ops crash matrix's --selftest-child interpreters of this module,
-    which inherit that environment."""
+    which inherit that environment. `section` (default None, the whole module) names one entry of
+    _SELF_TEST_SECTIONS to run alone (_self_test_section); an unknown name is refused with exit 2."""
+    if section is not None and section not in _SELF_TEST_SECTIONS:
+        print("OPF-ADOPT-APPLY SELF-TEST: unknown section {!r} (known: {})".format(
+            section, ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+        return 2
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -5886,7 +6542,7 @@ def self_test():
     try:
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-home-") as home:
             with mock.patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM="1"):
-                return _self_test_checks()
+                return _self_test_checks() if section is None else _self_test_section(section)
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-ADOPT-APPLY SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
@@ -5918,10 +6574,11 @@ def _self_test_checks():
     failures = []
     failure_details = {}
     checked = [0]
-    skipped = []    # (check, why): a check this platform cannot evaluate, named, never silently dropped
+    skipped = []    # (check, why): a check this platform cannot evaluate, named (exit 2, never a pass)
     bound_expired = []  # each child bound that expired, named: its checks did not run (exit 2, never a pass)
     # The descriptor census the inode-reuse, handoff and NFS vectors use is /proc/self/fd; a platform
-    # without it (macOS) skips exactly those vectors, each named with this note, never a partial run.
+    # without it (macOS) skips exactly those vectors, each named with this note, and the run then reports
+    # cannot evaluate (exit 2, _self_test_outcome), never a pass over the checks it did not run.
     census = Path("/proc/self/fd").is_dir()
     no_census = _NO_CENSUS
 
@@ -6515,6 +7172,20 @@ def _self_test_checks():
         [c(copy, body), _pinned_remove(src, body, FILE_MODE),
          dict(op="write", path=src, poststate=dict(kind="file", **{"content-sha256": _sha256(body)}))],
         {copy: body, src: body}))))
+    # one op per path compares paths under the canonical caseless key: two spellings that differ only by
+    # case, or only by Unicode normalization (NFC and NFD), name one file on a filesystem that folds them,
+    # so the second refuses before the transaction opens (red against an exact-string comparison, which
+    # admits both creates; the NFD vector is red against a bare casefold too); distinct names stay admitted.
+    mv_upper, mv_lower = store.moved_dest("legacy/OLD.md"), store.moved_dest("legacy/old.md")
+    check("compose-path-twice-case-refused", any("second time" in f for f in findings_of(*sealed(
+        [c(mv_upper, body), c(mv_lower, body)], {mv_upper: body, mv_lower: body}))))
+    mv_nfc, mv_nfd = store.moved_dest("legacy/caf\u00e9.md"), store.moved_dest("legacy/cafe\u0301.md")
+    check("compose-path-twice-normalization-refused", mv_nfc != mv_nfd and any(
+        "second time" in f for f in findings_of(*sealed([c(mv_nfc, body), c(mv_nfd, body)],
+                                                         {mv_nfc: body, mv_nfd: body}))))
+    check("compose-distinct-paths-admitted", findings_of(*sealed(
+        [c(mv_upper, body), c(store.moved_dest("legacy/NEW.md"), body)],
+        {mv_upper: body, store.moved_dest("legacy/NEW.md"): body})) == [])
     # a write over a live path destroys its bytes exactly as a removal does, so it takes the SAME pinned,
     # same-transaction, digest-verified archive-copy pairing (spec 14.2); an rmdir may target only a
     # directory this transaction created; and the store control roots (_opf_store.STORE_ROOT_CONTROL_DIRS,
@@ -6607,39 +7278,8 @@ def _self_test_checks():
         return {rel: data for rel, (kind, _mode, data) in tree_state(root).items()
                 if kind == "file" and not rel.startswith(".aiqt/")}
 
-    # The whole-tree state the file-op checks (section 11 on) compare: EVERY entry beneath the root, `.aiqt/`
-    # included, as (kind, mode, bytes or link target), never followed; directories, symlinks and special
-    # entries count, as do modes. journal=False leaves out exactly the adoption journal root's subtree and
-    # its ancestor directories (the journal's own bookkeeping), for comparisons across a transaction.
-    # A directory the walk cannot list (the root or any subtree) RAISES (os.walk alone skips it silently), so
-    # an unreadable subtree fails the comparison instead of dropping out of both states (section 11k).
-    journal_dirs = tuple("/".join(JOURNAL_REL.split("/")[:i]) for i in range(1, JOURNAL_REL.count("/") + 2))
-
-    def walk_error(exc):
-        raise exc
-
-    def tree_state(root, journal=True):
-        out = {}
-        for dirpath, dirnames, filenames in os.walk(root, onerror=walk_error):
-            base = os.path.relpath(dirpath, root)
-            for name in dirnames + filenames:
-                rel = name if base == "." else base + "/" + name
-                if not journal and (rel in journal_dirs or _within(rel, JOURNAL_REL)):
-                    continue
-                full = os.path.join(dirpath, name)
-                st = os.lstat(full)
-                mode = stat.S_IMODE(st.st_mode)
-                if stat.S_ISLNK(st.st_mode):
-                    out[rel] = ("link", mode, os.readlink(full))
-                elif stat.S_ISDIR(st.st_mode):
-                    out[rel] = ("dir", mode, None)
-                elif stat.S_ISREG(st.st_mode):
-                    out[rel] = ("file", mode, Path(full).read_bytes())
-                else:
-                    out[rel] = ("special", mode, None)
-            if not journal:
-                dirnames[:] = [d for d in dirnames if (d if base == "." else base + "/" + d) != JOURNAL_REL]
-        return out
+    # The whole-tree state the file-op checks (section 11 on) compare (_st_tree_state).
+    journal_dirs, tree_state = _ST_JOURNAL_DIRS, _st_tree_state
 
     def untouched_save_journal_dirs(before, root):
         """A refusal's whole-tree predicate: every entry of `before` is unchanged in kind, mode and bytes or
@@ -6662,6 +7302,31 @@ def _self_test_checks():
             return _journal.classify_state(jr_fd, _journal_root(root) / txn)
         finally:
             _journal._close_fd_quietly(jr_fd)
+
+    # Two distinct live files whose paths differ only by case, each archived preserve-first: one file on a
+    # case-insensitive filesystem, where the second archive copy would meet EEXIST only after INTENT and roll
+    # back. The composition refuses before the transaction opens, with nothing written (red against an
+    # exact-string one-op-per-path rule: the transaction commits). Needs a case-sensitive filesystem.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        cased = {"ci/x.toml": b"lower\n", "CI/X.toml": b"upper\n"}
+        for rel, payload in cased.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        if (root / "ci/x.toml").read_bytes() != cased["ci/x.toml"]:
+            skipped.append(("compose-case-alias-sources-refused-pre-intent",
+                            "the filesystem under the temporary directory folds case"))
+        else:
+            before = snapshot(root)
+
+            def compose_cased(ops):
+                for rel, payload in sorted(cased.items()):
+                    ops.archive_occupying(rel, plan_digest(payload))
+            why = refusal(run_adopt_transaction, root, rid, compose_cased)
+            check("compose-case-alias-sources-refused-pre-intent",
+                  why is not None and "a second time" in why and "nothing written" in why
+                  and snapshot(root) == before and not (root / JOURNAL_REL / rid).exists() and lock_free(root),
+                  observed=why)
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -9227,26 +9892,86 @@ def _self_test_checks():
     # 6a'''': a refusal past the journal's own pre-INTENT capture (its transaction directory, frames.log and
     # preimages written) never says "nothing written": the composer names each entry the run's two journal
     # listings differ by, over a journal that predates the run and over one the run created (red against
-    # the hand-written claim of a "refused before it opened" branch).
+    # the hand-written claim of a "refused before it opened" branch). The attempt's record stays, while the
+    # copies of product bytes the capture wrote are discarded under the lock, never named or kept (red
+    # against a nothing-opened branch that leaves them: the captured payloads stay in preimages/).
     for prebuilt in (True, False):
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root, files = fixture(temp)
             if prebuilt:
                 os.makedirs(root / JOURNAL_REL)
             real_capture = _journal.capture_preimages
+            txn_rel = JOURNAL_REL + "/" + rid
+            captured = []
 
             def capture_then_refuse(*args):
                 real_capture(*args)
+                captured.extend(sorted(os.listdir(root / txn_rel / "preimages")))
                 raise _journal.JournalError("injected refusal after capture, before INTENT")
             with mock.patch.object(_journal, "capture_preimages", capture_then_refuse):
                 err = refusal(run_adopt_transaction, root, rid, compose_full(files))
-            txn_rel = JOURNAL_REL + "/" + rid
-            check("pre-intent-capture-leftover-named-" + ("prebuilt" if prebuilt else "created"),
+            label = "prebuilt" if prebuilt else "created"
+            check("pre-intent-capture-leftover-named-" + label,
                   "refused before it opened" in (err or "") and "nothing written" not in (err or "")
                   and "{} (directory)".format(txn_rel) in (err or "")
                   and "{}/frames.log (file)".format(txn_rel) in (err or "")
-                  and "{}/preimages".format(txn_rel) in (err or "")
                   and (root / txn_rel / "frames.log").is_file() and lock_free(root))
+            check("pre-intent-capture-preimages-discarded-" + label,
+                  len(captured) == 2 and all(_PREIMAGE_NAME.match(name) for name in captured)
+                  and "{}/preimages".format(txn_rel) not in (err or "")
+                  and not (root / txn_rel / "preimages").exists() and txn_state(root, rid) == "nothing-opened",
+                  observed="captured={!r} refusal={!r}".format(captured, err))
+    # 6a''''b: the discard empties only a preimages/ holding exactly what the capture writes: an entry it
+    # never writes (here a directory) stops it, every captured payload stays, and the refusal names the
+    # entries left, never "nothing written" (red against a discard that removes a non-regular entry; a
+    # regular file under a name the capture never writes is 6a''''c's).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        real_capture = _journal.capture_preimages
+        txn_rel = JOURNAL_REL + "/" + rid
+        captured = []
+
+        def capture_plant_then_refuse(*args):
+            real_capture(*args)
+            captured.extend(sorted(os.listdir(root / txn_rel / "preimages")))
+            os.mkdir(root / txn_rel / "preimages" / "stray")
+            raise _journal.JournalError("injected refusal after capture, before INTENT")
+        with mock.patch.object(_journal, "capture_preimages", capture_plant_then_refuse):
+            err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        left = sorted(os.listdir(root / txn_rel / "preimages")) if (root / txn_rel / "preimages").is_dir() else []
+        check("pre-intent-capture-unattributed-preimage-stops-discard",
+              len(captured) == 2 and left == sorted(captured + ["stray"])
+              and "{}/preimages/stray (directory)".format(txn_rel) in (err or "")
+              and "{}/preimages/{} (file)".format(txn_rel, captured[0] if captured else "") in (err or "")
+              and "nothing written" not in (err or "") and lock_free(root),
+              observed="captured={!r} left={!r} refusal={!r}".format(captured, left, err))
+    # 6a''''c: a REGULAR file in preimages/ whose name capture_preimages never writes (not the op's sequence
+    # number in decimal: a word, or a decimal with a leading zero) stops the discard too: that file, every
+    # captured payload and frames.log stay, and the refusal names the entries left, never "nothing written"
+    # (red against a discard that checks the entry type alone, which removes that file with the payloads).
+    for label, stray in (("non-numeric", "stray"), ("leading-zero", "01")):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            real_capture = _journal.capture_preimages
+            txn_rel = JOURNAL_REL + "/" + rid
+            captured = []
+
+            def capture_plant_file_then_refuse(*args):
+                real_capture(*args)
+                captured.extend(sorted(os.listdir(root / txn_rel / "preimages")))
+                (root / txn_rel / "preimages" / stray).write_bytes(b"not a captured payload\n")
+                raise _journal.JournalError("injected refusal after capture, before INTENT")
+            with mock.patch.object(_journal, "capture_preimages", capture_plant_file_then_refuse):
+                err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+            preimages = root / txn_rel / "preimages"
+            left = sorted(os.listdir(preimages)) if preimages.is_dir() else []
+            check("pre-intent-capture-unattributed-preimage-file-stops-discard-" + label,
+                  len(captured) == 2 and stray not in captured and left == sorted(captured + [stray])
+                  and (preimages / stray).is_file() and (root / txn_rel / "frames.log").is_file()
+                  and "{}/preimages/{} (file)".format(txn_rel, stray) in (err or "")
+                  and "{}/preimages/{} (file)".format(txn_rel, captured[0] if captured else "") in (err or "")
+                  and "nothing written" not in (err or "") and lock_free(root),
+                  observed="captured={!r} left={!r} refusal={!r}".format(captured, left, err))
     # 6a5: a journal listing that could not read part of the tree never authorizes "nothing written", even
     # when both listings failed alike; it says the journal could not be fully observed (red against a
     # comparison in which two equal "unlisted" markers vanish). The fault hits the listing only.
@@ -9585,14 +10310,20 @@ def _self_test_checks():
               and "{}/ could not be listed".format(JOURNAL_REL) in (err or "")
               and "entries present when this run began are gone: {}".format(JOURNAL_REL) in (err or "")
               and "nothing written" not in (err or "") and not (root / JOURNAL_REL).exists())
-    # 6a12c: the same rule read directly, one level up (red against hiding `adopt` under its own key); and
+    # 6a12c: the same rule read directly, one level up (red against hiding `adopt` under its own key), beside
+    # a transaction directory the closing listing stated but could not list, whose frames.log is therefore
+    # never named gone (red against a `<dir>/` key read as that one key, which hides nothing below it); and
     # an entry literally named "*" whose stat fails is that entry alone, never its directory's contents
     # (red against a "contents not listed" key an entry name can take).
     adopt = JOURNAL_REL.rsplit("/", 1)[0]
     said, _ours = _observed({".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
                              adopt + "/": ("unlisted", "an injected fault")}, {".aiqt": ("directory", 1, 1)}, [], rid)
-    check("observed-unlisted-contents-dir-gone", ("entries present when this run began are gone: " + adopt) in said
-          and "{}/ could not be listed (an injected fault)".format(adopt) in said[0])
+    txn_rel = JOURNAL_REL + "/" + rid
+    kept, _ours = _observed({txn_rel: ("directory", 1, 3), txn_rel + "/frames.log": ("file", 1, 4)},
+                            {txn_rel: ("directory", 1, 3), txn_rel + "/": ("unlisted", "an injected fault")}, [], rid)
+    check("observed-unlisted-contents-dir-gone", said[1:] == ["entries present when this run began are gone: " + adopt]
+          and "{}/ could not be listed (an injected fault)".format(adopt) in said[0]
+          and len(kept) == 1 and "{}/ could not be listed".format(txn_rel) in kept[0], observed=(said, kept))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         jdir = Path(temp) / JOURNAL_REL
         os.makedirs(jdir)
@@ -9616,6 +10347,85 @@ def _self_test_checks():
         check("observed-star-entry-not-contents", second.get(JOURNAL_REL + "/*", ("",))[0] == "unlisted"
               and JOURNAL_REL + "/" not in second
               and ("entries present when this run began are gone: {}/x".format(JOURNAL_REL)) in said)
+    # 6a12d: what a closing listing could not see at a journal path ancestor never stands for the next
+    # component, which the listing states by name. One that could not list `adopt` still observed the
+    # journal and names its removed x gone, the removed stray beside the journal unnamed (red against an
+    # ancestor's `<dir>/` key hiding the journal beneath it); one that could not open `adopt` keys the
+    # journal unlisted and names nothing gone (red against a listing that leaves the journal unkeyed there).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        jdir = Path(temp) / JOURNAL_REL
+        os.makedirs(jdir)
+        (jdir / "x").write_bytes(b"")
+        (jdir.parent / "stray").write_bytes(b"")
+        adopt_st = os.stat(jdir.parent)
+        real_open, real_listdir = os.open, os.listdir
+
+        def adopt_unopenable(path, flags, *args, **kwargs):
+            if path == "adopt" and flags & os.O_DIRECTORY:
+                raise PermissionError(13, "an injected open fault")
+            return real_open(path, flags, *args, **kwargs)
+
+        def adopt_unlistable(target="."):
+            if isinstance(target, int) and (os.fstat(target).st_dev, os.fstat(target).st_ino) == (
+                    adopt_st.st_dev, adopt_st.st_ino):
+                raise PermissionError(13, "an injected listing fault")
+            return real_listdir(target)
+        ancestor_fd = store._open_dir_nofollow(Path(temp).resolve())
+        try:
+            first = _journal_listing(ancestor_fd)
+            os.unlink(jdir / "x")
+            os.unlink(jdir.parent / "stray")
+            with mock.patch.object(os, "listdir", adopt_unlistable):
+                unlistable = _journal_listing(ancestor_fd)
+            with mock.patch.object(os, "open", adopt_unopenable):
+                unopenable = _journal_listing(ancestor_fd)
+        finally:
+            os.close(ancestor_fd)
+        said, _ours = _observed(first, unlistable, [], rid)
+        check("observed-ancestor-marker-next-component-gone",
+              unlistable.get(adopt + "/", ("",))[0] == "unlisted" and unlistable.get(JOURNAL_REL) == first[JOURNAL_REL]
+              and said[1:] == ["entries present when this run began are gone: {}/x".format(JOURNAL_REL)],
+              observed=said)
+        said, _ours = _observed(first, unopenable, [], rid)
+        check("observed-unopened-ancestor-next-component-unlisted",
+              unopenable.get(JOURNAL_REL, ("",))[0] == "unlisted" and len(said) == 1
+              and "{} could not be listed ({} could not be opened".format(JOURNAL_REL, adopt) in said[0],
+              observed=said)
+    # 6a12e: what the opening listing could not see hides nothing it did see, and an entry present now is
+    # named only where that listing looked. It could not list `adopt` but stated the journal: the journal's
+    # removed x is named gone (red against an opening `<dir>/` key hiding an observed disappearance) and its
+    # new y is named, while the stray beside the journal, never seen, is not named new, nor is a lock in a
+    # journal the opening listing could not list (red against a new-entries list without the `<dir>/` rule).
+    said, _ours = _observed({".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                             adopt + "/": ("unlisted", "an injected fault"), JOURNAL_REL: ("directory", 1, 3),
+                             JOURNAL_REL + "/x": ("file", 1, 4)},
+                            {".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                             adopt + "/stray": ("file", 1, 5), JOURNAL_REL: ("directory", 1, 3),
+                             JOURNAL_REL + "/y": ("directory", 1, 6)}, [], rid)
+    unseen_lock, _ours = _observed({JOURNAL_REL: ("directory", 1, 3),
+                                    JOURNAL_REL + "/": ("unlisted", "an injected fault")},
+                                   {JOURNAL_REL: ("directory", 1, 3), JOURNAL_REL + "/lock": ("file", 1, 7)}, [], rid)
+    check("observed-opening-marker-hides-no-observed-gone",
+          said[-1] == "entries present when this run began are gone: {}/x".format(JOURNAL_REL), observed=said)
+    check("observed-new-entries-opening-marker-rule", len(said) == 3 and said[1] == (
+        "the adoption journal now holds entries it did not hold when this run began: {}/y (directory)".format(
+            JOURNAL_REL)) and len(unseen_lock) == 1, observed=(said, unseen_lock))
+    # 6a12f: a journal path the closing listing observed absent below an ancestor whose own entries it could
+    # not list no longer resolves, never "could not be observed" (red against reading that ancestor's
+    # `<dir>/` key as an unobserved journal path); a journal path keyed unlisted could not be observed.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        unbound_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            ust = os.fstat(unbound_fd)
+            marked = {".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                      adopt + "/": ("unlisted", "an injected fault")}
+            absent_said = _journal_unbound(unbound_fd, (ust.st_dev, ust.st_ino), marked)
+            unlisted_said = _journal_unbound(unbound_fd, (ust.st_dev, ust.st_ino),
+                                             dict(marked, **{JOURNAL_REL: ("unlisted", "an injected fault")}))
+        finally:
+            os.close(unbound_fd)
+        check("journal-unbound-ancestor-marker-observed-absent", "no longer resolves" in (absent_said or "")
+              and "could not be observed" in (unlisted_said or ""), observed=(absent_said, unlisted_said))
     # 6a13: an ordinary exception inside acquire, after the lock file exists, is described as an error,
     # never as an interrupt (red against the interrupt wording for every exception).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -10468,6 +11278,17 @@ def _self_test_checks():
               dead is not None and txn_state(root, rid) == "rolled-back"
               and (rid, "rolled-back") in outcomes and snapshot(root) == before and lock_free(root))
 
+    def finding_of(fn, *args):
+        """The named finding of a reconcile refusal (ReconcileRefusal.finding, which `opf adopt reconcile`
+        prints), "unnamed" for any other refusal, None when fn did not refuse."""
+        try:
+            fn(*args)
+        except ReconcileRefusal as exc:
+            return exc.finding
+        except AdoptApplyError:
+            return "unnamed"
+        return None
+
     # 8: a held journal lock refuses a transaction and a reconcile (never seized).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -10482,6 +11303,7 @@ def _self_test_checks():
               (refusal(run_adopt_transaction, root, rid, compose_full(files)) or ""))
         check("held-lock-refuses-reconcile",
               "possibly-live owner" in (refusal(reconcile, root) or ""))
+        check("held-lock-reconcile-finding-named", finding_of(reconcile, root) == RECONCILE_LOCK_HELD)
         _journal.release_lock(journal_root)
 
     # 8b (round 3): reconcile reads the journal lock beneath the HELD contained journal-root fd (the
@@ -10515,6 +11337,512 @@ def _self_test_checks():
             _res, why = attempt(reconcile, root)
         check("reconcile-lock-read-beneath-held-jr-fd",
               _jr_swap_fired != [] and why is not None and "possibly-live owner" in why)
+
+    # 8c (OPF-ADOPT-RECONCILE-CLI): a store lease beside an open shell transaction refuses, named, with the
+    # tree unchanged and the transaction still open, and the rollback runs once the lease is gone; an
+    # invalid frame sequence refuses as unclassifiable, nothing written; a dead run's lock beside a
+    # completed transaction is released and REPORTED (reconcile_report), the product files unchanged; and
+    # with nothing to recover reconcile_report writes nothing at all, the journal included.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        man = ".working/toml/manifest.toml"
+        mid = interrupt_when(lambda: (root / archive_rel(rid, man)).exists() and (root / man).exists())
+        with mock.patch.object(_journal, "_kill_point", mid):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        lease = root / store.WORKING_DIRNAME / store.DEFAULT_MACHINE_SUBDIR / "lease.toml"
+        lease.write_bytes(b"held\n")
+        was = tree_state(root)
+        check("reconcile-store-lease-beside-open-txn-refused-named",
+              finding_of(reconcile, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
+              and txn_state(root, rid) == "open" and lock_free(root))
+        lease.unlink()
+        check("reconcile-lease-gone-rolls-back", (rid, "rolled-back") in (attempt(reconcile, root)[0] or []))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        # the committed frame log written twice over: two INTENTs, never an accepted frame sequence
+        frames = _journal_root(root) / rid / "frames.log"
+        frames.write_bytes(frames.read_bytes() * 2)
+        was = tree_state(root)
+        check("reconcile-unclassifiable-transaction-refused-named",
+              txn == rid and finding_of(reconcile, root) == RECONCILE_UNCLASSIFIABLE and tree_state(root) == was)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        dead = dead_pid()
+        owner_row = dict(uid=os.getuid(), pid=dead or 1, session="opf-adopt-selftest-dead",
+                         utc="2026-09-17T12:00:00Z")
+        owner_row["pid-start"] = ""
+        product_files = snapshot(root)
+        (_journal_root(root) / "lock").write_text(json.dumps(owner_row), encoding="utf-8")
+        report, _why = attempt(reconcile_report, root)
+        check("reconcile-report-names-released-dead-lock",
+              dead is not None and txn == rid and report is not None and report[1] is True
+              and (rid, "terminal") in report[0] and lock_free(root) and snapshot(root) == product_files)
+        was = tree_state(root)
+        report, _why = attempt(reconcile_report, root)
+        check("reconcile-nothing-to-recover-writes-nothing", report == ([], False, False) and tree_state(root) == was)
+
+    # 8d (FIX-527-R1): reconcile EXCLUDES store writers across its recovery, never only observes them. It
+    # takes the adoption journal lock, then (the init-store order) the single-writer lease of every machine
+    # subdirectory under .working/ through the writers' own O_EXCL claim, before its first recovery write,
+    # holds them until the journal lock is released, and releases only its own. The build before this one
+    # only observed the default lease before the lock (codex MAJOR, claude MEDIUM 4), named pre-lock faults
+    # recovery-failed (claude MEDIUM 3), left an acquire_lock fault's lock (claude MINOR 1), misreported a
+    # lost race (claude MINOR 2) and skipped the lease by a transaction's name (claude MINOR 4); the
+    # recovery-failed vector pins the partial state the journal records, which that build left too.
+    import _opf_write_guard
+    lease_rel = "{}/{}/lease.toml".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
+    real_acquire_lock = _journal.acquire_lock
+    real_claim_stale = _journal.reconcile_and_claim_stale
+
+    def interrupted_mid(temp):
+        root, files = fixture(temp)
+        before = snapshot(root)
+        man = ".working/toml/manifest.toml"
+        mid = interrupt_when(lambda: (root / archive_rel(rid, man)).exists() and (root / man).exists())
+        with mock.patch.object(_journal, "_kill_point", mid):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        return root, before
+
+    def writer_lease(root, machine_rel):
+        """Another opf writer's claim, through the writers' own acquire: the exact bytes it wrote."""
+        fd = _open_product_root(root)
+        try:
+            return _opf_write_guard.acquire_lease(fd, machine_rel, "record")
+        finally:
+            store._close_fd_exc_safe(fd)
+
+    def stale_lock_bytes():
+        dead = dead_pid()
+        row = dict(uid=os.getuid(), pid=dead or 1, session="opf-adopt-selftest-dead", utc="2026-09-17T12:00:00Z")
+        row["pid-start"] = ""
+        return dead, json.dumps(row).encode("utf-8")
+
+    def without(state, rel):
+        return {k: v for k, v in state.items() if k != rel}
+
+    # codex's interleaving: a writer claims the lease AFTER the pre-lock observation, before the journal lock.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        was = snapshot(root)
+        writer = []
+
+        def writer_after_check(journal_root, session_id):
+            writer.append(writer_lease(root, ".working/toml"))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", writer_after_check):
+            got = finding_of(reconcile, root)
+        check("reconcile-writer-lease-after-check-excluded-named",
+              writer != [] and got == RECONCILE_STORE_LEASE_HELD and txn_state(root, rid) == "open"
+              and lock_free(root) and (root / lease_rel).read_bytes() == writer[0]
+              and without(snapshot(root), lease_rel) == was, got)
+
+    # the order and the span: the journal lock is held when each lease is claimed, the lease is held at every
+    # recovery checkpoint and when the journal lock is released, and it is gone (released) afterwards.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, before = interrupted_mid(temp)
+        lock_path = _journal_root(root) / "lock"
+        lease_path = root / lease_rel
+        seen = []
+        real_acquire_lease = _opf_write_guard.acquire_lease
+        real_release_lock = _journal.release_lock
+
+        def acquire_lease_seen(root_fd, machine_rel, verb):
+            seen.append(("lease", machine_rel, lock_path.exists()))
+            return real_acquire_lease(root_fd, machine_rel, verb)
+
+        def release_lock_seen(journal_root):
+            seen.append(("unlock", lease_path.exists()))
+            return real_release_lock(journal_root)
+
+        def restore_seen(name):
+            if name.startswith("after-restore-"):
+                seen.append(("restore", lease_path.exists()))
+        with mock.patch.object(_opf_write_guard, "acquire_lease", acquire_lease_seen), \
+                mock.patch.object(_journal, "release_lock", release_lock_seen), \
+                mock.patch.object(_journal, "_kill_point", restore_seen):
+            report, _why = attempt(reconcile_report, root)
+        leases = [e for e in seen if e[0] == "lease"]
+        restores = [e for e in seen if e[0] == "restore"]
+        check("reconcile-holds-store-lease-journal-lock-first-until-unlock",
+              report is not None and (rid, "rolled-back") in report[0] and report[2] is True
+              and ("lease", ".working/toml", True) in leases and all(e[2] for e in leases)
+              and seen.index(leases[0]) < seen.index(restores[0]) if leases and restores else False, seen)
+        check("reconcile-lease-released-after-journal-lock",
+              restores != [] and all(e[1] for e in restores) and seen[-1:] == [("unlock", True)]
+              and not lease_path.exists() and lock_free(root) and snapshot(root) == before, seen)
+
+    # the stale-lock path: the leases are claimed under the arbitration lock, before that break's recovery.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        was = snapshot(root)
+        writer = []
+
+        def writer_before_break(*args, **kwargs):
+            writer.append(writer_lease(root, ".working/toml"))
+            return real_claim_stale(*args, **kwargs)
+        with mock.patch.object(_journal, "reconcile_and_claim_stale", writer_before_break):
+            got = finding_of(reconcile, root)
+        check("reconcile-stale-break-writer-lease-excluded-named",
+              dead is not None and writer != [] and got == RECONCILE_STORE_LEASE_HELD
+              and txn_state(root, rid) == "open" and (_journal_root(root) / "lock").read_bytes() == stale
+              and (root / lease_rel).read_bytes() == writer[0] and without(snapshot(root), lease_rel) == was, got)
+
+    # every machine subdirectory, not only the default: a claim and a present lease at .working/data.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        (root / ".working/data").mkdir()
+        (root / ".working/data/manifest.toml").write_bytes(b"[opf]\nstandard = \"opf\"\n")
+        other = root / ".working/data/lease.toml"
+        writer = []
+
+        def writer_other_subdir(journal_root, session_id):
+            writer.append(writer_lease(root, ".working/data"))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", writer_other_subdir):
+            claimed = finding_of(reconcile, root)
+        present = finding_of(reconcile, root)
+        check("reconcile-lease-at-every-machine-subdirectory-named",
+              writer != [] and claimed == RECONCILE_STORE_LEASE_HELD and present == RECONCILE_STORE_LEASE_HELD
+              and txn_state(root, rid) == "open" and lock_free(root) and other.read_bytes() == writer[0]
+              and not (root / lease_rel).exists(), (claimed, present))
+
+    # a store pointer can resolve a store elsewhere, whose lease a journal-only reconcile cannot take.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        (root / store.POINTER_REL).write_bytes(b"[store]\ntarget = \"dir:../elsewhere\"\n")
+        was = tree_state(root)
+        check("reconcile-store-pointer-beside-open-txn-refused-named",
+              finding_of(reconcile, root) == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was
+              and txn_state(root, rid) == "open")
+
+    # recovery-failed after recovery began: PARTIAL as the journal records it (the archive copy already
+    # discarded, the transaction still open), the journal lock and this run's lease released; a later
+    # reconcile resumes it to the byte-identical prestate.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, before = interrupted_mid(temp)
+        discarded = root / archive_rel(rid, ".working/toml/manifest.toml")
+        fault_at = []
+
+        def restore_fault(name):
+            if name.startswith("after-restore-") and not discarded.exists() and not fault_at:
+                fault_at.append(name)
+                raise OSError(5, "injected EIO at " + name)
+        with mock.patch.object(_journal, "_kill_point", restore_fault):
+            got = finding_of(reconcile, root)
+        left_partial = (fault_at != [] and got == RECONCILE_FAILED and txn_state(root, rid) == "open"
+                        and not discarded.exists() and lock_free(root) and not (root / lease_rel).exists()
+                        and snapshot(root) != before)
+        outcomes, _why = attempt(reconcile, root)
+        check("reconcile-recovery-failed-partial-then-resumed",
+              left_partial and outcomes is not None and (rid, "rolled-back") in outcomes
+              and snapshot(root) == before, (fault_at, got, outcomes))
+
+    # pre-lock faults are their own finding, not recovery-failed, and leave no lock this run created.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        was = tree_state(root)
+
+        def eacces(journal_root, session_id):
+            raise PermissionError(13, "injected EACCES at the lock create")
+
+        def fsync_fault(path):
+            raise OSError(5, "injected EIO after the lock create")
+        with mock.patch.object(_journal, "acquire_lock", eacces):
+            no_create = finding_of(reconcile, root)
+        with mock.patch.object(_journal, "_fsync_path_dir", fsync_fault):
+            created = finding_of(reconcile, root)
+        check("reconcile-pre-lock-faults-named-no-lock-left",
+              no_create == RECONCILE_PRELOCK_FAULT and created == RECONCILE_PRELOCK_FAULT and lock_free(root)
+              and txn_state(root, rid) == "open" and tree_state(root) == was, (no_create, created))
+    # the stale-lock arbitration's own refusal: the second name for lock.break lands after reconcile's
+    # strict listing accepted it (singly linked then), so the arbitration itself refuses it (a second name
+    # present at the listing refuses there as unclassifiable, section 8e).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        arb = _journal_root(root) / "lock.break"
+        arb.write_bytes(b"")
+        planted = []
+
+        def second_name_before_break(*args, **kwargs):
+            os.link(arb, root / "arbitration-second-name")
+            planted.append(tree_state(root))
+            return real_claim_stale(*args, **kwargs)
+        with mock.patch.object(_journal, "reconcile_and_claim_stale", second_name_before_break):
+            got = finding_of(reconcile, root)
+        check("reconcile-stale-arbitration-refusal-named-pre-lock",
+              dead is not None and planted != [] and got == RECONCILE_PRELOCK_FAULT
+              and tree_state(root) == planted[0] and txn_state(root, rid) == "open", got)
+
+    # a lost race is reported as what it was: a second reconcile that takes the lock after the first
+    # recovered reports every transaction terminal with the lock taken, and a stale lock a peer broke first
+    # is not this run's release.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        nested = []
+
+        def second_after_first(journal_root, session_id):
+            if not nested:
+                with mock.patch.object(_journal, "acquire_lock", real_acquire_lock):
+                    nested.append(reconcile_report(root))
+            return real_acquire_lock(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", second_after_first):
+            report, _why = attempt(reconcile_report, root)
+        check("reconcile-race-second-run-reports-lock-taken-nothing-recovered",
+              nested != [] and (rid, "rolled-back") in nested[0][0]
+              and report == ([(rid, "terminal")], False, True) and lock_free(root), (nested, report))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        nested = []
+
+        def peer_breaks_first(*args, **kwargs):
+            if not nested:
+                with mock.patch.object(_journal, "reconcile_and_claim_stale", real_claim_stale):
+                    nested.append(reconcile_report(root))
+            return real_claim_stale(*args, **kwargs)
+        with mock.patch.object(_journal, "reconcile_and_claim_stale", peer_breaks_first):
+            report, _why = attempt(reconcile_report, root)
+        check("reconcile-race-peer-broke-stale-lock-not-claimed",
+              dead is not None and nested != [] and nested[0][1] is True
+              and report == ([(rid, "terminal")], False, True) and lock_free(root), (nested, report))
+
+    # a transaction directory merely NAMED *.initstore whose INTENT is not init-store's keeps the lease rule.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        os.rename(_journal_root(root) / rid, _journal_root(root) / (rid + "." + INIT_STORE_PHASE))
+        (root / lease_rel).write_bytes(b"held\n")
+        was = tree_state(root)
+        got = finding_of(reconcile, root)
+        check("reconcile-initstore-name-alone-keeps-lease-rule",
+              got == RECONCILE_STORE_LEASE_HELD and tree_state(root) == was, got)
+
+    # a lease this run took that cannot be released is named beside the finished recovery, never hidden.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+
+        def release_fails(root_fd, machine_rel, payload, verb):
+            raise _opf_write_guard.WriteGuardError("injected release failure")
+        with mock.patch.object(_opf_write_guard, "release_lease", release_fails):
+            got = finding_of(reconcile, root)
+        check("reconcile-own-lease-release-failure-named",
+              got == RECONCILE_LEASE_RELEASE_FAILED and txn_state(root, rid) == "rolled-back"
+              and (root / lease_rel).exists() and lock_free(root), got)
+
+    # only this run's own lease is released: a peer's lease that replaced it mid-recovery stays, byte-identical.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        peer = []
+
+        def peer_replaces(name):
+            if name.startswith("after-restore-") and not peer and (root / lease_rel).exists():
+                (root / lease_rel).unlink()
+                peer.append(writer_lease(root, ".working/toml"))
+        with mock.patch.object(_journal, "_kill_point", peer_replaces):
+            got = finding_of(reconcile, root)
+        check("reconcile-releases-only-its-own-lease",
+              peer != [] and got == RECONCILE_LEASE_RELEASE_FAILED and (root / lease_rel).read_bytes() == peer[0]
+              and lock_free(root), got)
+
+    # 8e: reconcile lists the journal strictly and HELD (the journal_state posture), so it never reads as
+    # nothing to reconcile a journal that journal_state refuses or reports open. A stray or wrong-type
+    # journal entry refuses as unclassifiable with nothing written (red against the skipping listing: the
+    # open transaction is rolled back, and a committed one reads as nothing to reconcile); every pre-lock
+    # read of a transaction goes through the descriptor the listing held; a transaction renamed aside and
+    # replaced by an empty decoy after the listing refuses before the lock (red against a by-name
+    # classification, which reads nothing to reconcile); one replaced during its recovery is never reported
+    # recovered (red against reporting what recover() returned for the decoy); and every descriptor the
+    # listing held is closed.
+    def refusal_of(fn, *args):
+        """(finding, message) of a reconcile refusal, the finding as finding_of names it; (None, None) when
+        fn did not refuse."""
+        try:
+            fn(*args)
+        except ReconcileRefusal as exc:
+            return exc.finding, str(exc)
+        except AdoptApplyError as exc:
+            return "unnamed", str(exc)
+        return None, None
+
+    def state_at(path):
+        """The C2 classification of the transaction directory at `path`, read through a descriptor of it (a
+        directory moved out of the journal root has no journal-relative name)."""
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            return _journal.classify_state(fd, path, txn_fd=fd)
+        finally:
+            os.close(fd)
+
+    def swap_aside(root):
+        """Rename the transaction directory aside (beside the journal root, outside it) and put an empty decoy
+        directory at its name; returns where it went."""
+        aside = _journal_root(root).parent / "aside"
+        os.rename(_journal_root(root) / rid, aside)
+        os.mkdir(_journal_root(root) / rid)
+        return aside
+
+    real_txn_dirs = _journal._journal_txn_dirs
+    real_recover = _journal.recover
+    real_open_jr = _journal.open_journal_root_fd
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        (_journal_root(root) / "stray").write_bytes(b"")
+        was = tree_state(root)
+        got, why = refusal_of(reconcile, root)
+        check("reconcile-strict-stray-entry-refused-named",
+              got == RECONCILE_UNCLASSIFIABLE and "'stray'" in (why or "")
+              and "neither a transaction directory" in (why or "") and tree_state(root) == was
+              and txn_state(root, rid) == "open" and lock_free(root) and not (root / lease_rel).exists(), why)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        txn, _why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+        (_journal_root(root) / "stray").write_bytes(b"")
+        was = tree_state(root)
+        got, why = refusal_of(reconcile_report, root)
+        check("reconcile-strict-stray-entry-never-reads-nothing-to-reconcile",
+              txn == rid and got == RECONCILE_UNCLASSIFIABLE and tree_state(root) == was, why)
+
+    # a second name for lock.break present at the listing refuses there, before the stale-lock arbitration
+    # (red against the skipping listing: the arbitration's own refusal, a pre-lock fault, section 8d).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        dead, stale = stale_lock_bytes()
+        (_journal_root(root) / "lock").write_bytes(stale)
+        arb = _journal_root(root) / "lock.break"
+        arb.write_bytes(b"")
+        os.link(arb, root / "arbitration-second-name")
+        was = tree_state(root)
+        got, why = refusal_of(reconcile, root)
+        check("reconcile-strict-hardlinked-arbitration-refused-at-listing",
+              dead is not None and got == RECONCILE_UNCLASSIFIABLE
+              and "'lock.break' has 2 hard links" in (why or "") and tree_state(root) == was
+              and txn_state(root, rid) == "open", why)
+
+    # the interrupted transaction renamed aside and an empty decoy put at its name right after the listing
+    # (the deterministic stand-in for a concurrent writer): refused before the lock, nothing written, the
+    # transaction aside still open (red against a by-name classification: nothing to reconcile; red against
+    # no identity gate: recovery-failed after the lock and the lease were taken).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        was = snapshot(root)
+        swapped = []
+
+        def swap_after_listing(*args, **kwargs):
+            out = real_txn_dirs(*args, **kwargs)
+            if not swapped:
+                swapped.append(swap_aside(root))
+            return out
+        with mock.patch.object(_journal, "_journal_txn_dirs", swap_after_listing):
+            got, why = refusal_of(reconcile, root)
+        check("reconcile-swap-after-listing-refused-named",
+              swapped != [] and got == RECONCILE_UNCLASSIFIABLE and repr(rid) in (why or "")
+              and "renamed or replaced after this run listed it" in (why or "") and snapshot(root) == was
+              and lock_free(root) and not (root / lease_rel).exists() and state_at(swapped[0]) == "open", why)
+
+    # the same swap inside the recovery, after the identity gate: recover() reads the decoy by name and
+    # reports nothing-opened, which the held directory (still open) disagrees with, so the run refuses and
+    # never reports it recovered (red against reporting recover()'s outcome: nothing to reconcile).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        swapped = []
+
+        def swap_then_recover(jr_fd, txn_dir, root_fd):
+            if not swapped:
+                swapped.append(swap_aside(root))
+            return real_recover(jr_fd, txn_dir, root_fd)
+        with mock.patch.object(_journal, "recover", swap_then_recover):
+            got, why = refusal_of(reconcile_report, root)
+        check("reconcile-swap-during-recovery-never-reported-recovered",
+              swapped != [] and got == RECONCILE_FAILED and repr(rid) in (why or "")
+              and "never reported recovered" in (why or "") and state_at(swapped[0]) == "open"
+              and lock_free(root) and not (root / lease_rel).exists(), why)
+
+    # every read of the transaction before the journal lock (its classification, its INTENT and the
+    # init-store preverify its name triggers) goes through the descriptor the listing held (red against any
+    # one of them reopening the name).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        named = rid + "." + INIT_STORE_PHASE
+        os.rename(_journal_root(root) / rid, _journal_root(root) / named)
+        real_read_frames = _journal.read_frames
+        locked, reads = [], []
+
+        def lock_seen(journal_root, session_id):
+            locked.append(True)
+            return real_acquire_lock(journal_root, session_id)
+
+        def read_seen(jr_fd, txn_dir, txn_fd=None):
+            if Path(txn_dir).name == named:
+                reads.append((locked != [], txn_fd is not None))
+            return real_read_frames(jr_fd, txn_dir, txn_fd=txn_fd)
+        with mock.patch.object(_journal, "acquire_lock", lock_seen), \
+                mock.patch.object(_journal, "read_frames", read_seen):
+            got = finding_of(reconcile, root)
+        prelock = [through_held for after_lock, through_held in reads if not after_lock]
+        check("reconcile-prelock-reads-through-held-descriptors",
+              len(prelock) >= 3 and all(prelock), (got, reads))
+
+    # every descriptor the run held (the journal root's and each listed transaction directory's) is closed
+    # after a recovery and after a refusal (red against a close-out of the journal root's alone).
+    def held_after(root, swap):
+        """(finding, recorded, still open, swapped) of one reconcile over `root` that records the journal-root
+        descriptor and every transaction directory descriptor its listing held, each with its identity
+        while open; swap renames the transaction aside right after the listing, as above."""
+        rec, swapped = [], []
+
+        def open_jr_recorded(*args, **kwargs):
+            fd = real_open_jr(*args, **kwargs)
+            rec.append((fd, _fd_ident(fd)))
+            return fd
+
+        def txn_dirs_recorded(*args, **kwargs):
+            out = real_txn_dirs(*args, **kwargs)
+            if kwargs.get("hold"):
+                rec.extend((tfd, _fd_ident(tfd)) for _t, tfd in out)
+            if swap and not swapped:
+                swapped.append(swap_aside(root))
+            return out
+        with mock.patch.object(_journal, "open_journal_root_fd", open_jr_recorded), \
+                mock.patch.object(_journal, "_journal_txn_dirs", txn_dirs_recorded):
+            got, _why = refusal_of(reconcile, root)
+        return got, rec, [fd for fd, _ident in _held_open(rec)], swapped
+
+    closed = []
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        got, rec, rolled_left, _swapped = held_after(root, False)
+        # a copy: _close_held empties the list it closes
+        closed.append((got is None and txn_state(root, rid) == "rolled-back" and len(rec) >= 2,
+                       list(rolled_left)))
+        _close_held(rolled_left)    # a run that leaks them fails below; close them so the suite stays clean
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, _before = interrupted_mid(temp)
+        got, rec, refused_left, swapped = held_after(root, True)
+        closed.append((swapped != [] and got == RECONCILE_UNCLASSIFIABLE and len(rec) >= 2, list(refused_left)))
+        _close_held(refused_left)
+    check("reconcile-held-descriptors-closed", closed == [(True, []), (True, [])], closed)
+
+    # GREEN-ON-REVERT GUARD (a contract pin; the fix states it in the docstrings only): a product root that
+    # cannot be opened raises the plain AdoptApplyError before anything is read, never a named finding, which
+    # `opf adopt reconcile` prints as cannot evaluate; red against a refusal that names a finding for it.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        missing = Path(temp).resolve() / "missing"
+        got, why = refusal_of(reconcile, missing)
+        check("reconcile-unopenable-root-cannot-evaluate-not-a-finding",
+              got == "unnamed" and "cannot open product root" in (why or "") and not missing.exists(), why)
 
     # 9: live re-observation over a throwaway fixture.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -10666,8 +11994,8 @@ def _self_test_checks():
 
     def ops_state(ops):
         """A copy of one ApplyOps's composition state (each op table copied one level): ops, staged bytes,
-        directory bookkeeping, seal."""
-        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed
+        directory bookkeeping, seal, vacated map."""
+        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed, dict(ops.vacated)
 
     def entry_compose(root, plan, sealed_entry=False, run_pass=attempt):
         """(accounting, refusal, entry state, final state) of the pass, run through `run_pass`, over an
@@ -10998,6 +12326,8 @@ def _self_test_checks():
               acct is None and entry[3] is True
               and "the transaction is sealed by its inventory; nothing may follow it" in (why or "")
               and final == entry and snapshot(root) == before)
+    # 9c: the takeover of a vacated path (ApplyOps.replace_vacated), see _replace_vacated_self_test.
+    _replace_vacated_self_test(check)
     # retire-file has landed with the file-ops slice (handlers-executable-exactly-the-file-ops), so this
     # vector no longer pins it to the refusing handler: the preservation pass did not enable it and is not
     # its route; it executes only through _execute_file_op, and a bare row still refuses for want of its
@@ -11087,10 +12417,10 @@ def _self_test_checks():
         rows = [dict(op="init-store", store_root=".", members=[dict(
                     path=".working/toml/manifest.toml", digest=_digest(manifest.encode("utf-8")))]),
                 dict(op="render-views", store_root=".",
-                     members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views]),
-                schema.enforcement_install_op(bindings["enforcement"])]
-        # The opf/ mirror the pack row plants (the pre-commit hook, the CI recipe and the tool entry point)
-        # lies outside every walked root, so its absence is a declared target.
+                     members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views])]
+        rows += schema.enforcement_install_ops(bindings["enforcement"])
+        # The opf/ mirror the plant rows fill (the pre-commit hook, the CI recipe, the tool tree with its entry
+        # point, and the deny hook) lies outside every walked root, so its absence is a declared target.
         sheet = dict(sources=["keep.md", "legacy.md"], targets=[schema.PACK_MIRROR_ROOT], product="opf",
                      decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
                                 dict(path="legacy.md", disposition="retire", actor="fixture")],
@@ -11102,7 +12432,15 @@ def _self_test_checks():
 
     def _freeze(root, sheet, nonce="0123456789abcdef"):
         res = planner.plan(root, now=now, run_nonce=nonce, **_copy.deepcopy(sheet))
-        return res.plan if res.status == VALID else None
+        return (res.plan, res.inventory) if res.status == VALID else (None, None)
+
+    def _inventory_seal(data):
+        """The planning inventory's inventory_digest, but only when it seals its own bytes (the evaluator's
+        check-2 rule: pop the digest field, re-seal the re-emitted body); None otherwise."""
+        doc = tomllib.loads(data.decode("utf-8"))
+        body = dict((k, v) for k, v in doc.items() if k != "inventory_digest")
+        sealed = _digest(emit_checked(body).encode("utf-8"))
+        return sealed if doc.get("inventory_digest") == sealed else None
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = Path(temp).resolve()
@@ -11111,9 +12449,9 @@ def _self_test_checks():
         head = _selftest_git_commit(root)
         check("driver-fixture-git-revision", head is not None and attempt(observe_revision, root)[0] == head)
         sheet = _sheet(root, head)
-        plan_bytes = _freeze(root, sheet)
-        check("driver-fixture-plan-frozen", plan_bytes is not None)
-        plan_bytes = plan_bytes or b""
+        plan_bytes, inventory_bytes = _freeze(root, sheet)
+        check("driver-fixture-plan-frozen", plan_bytes is not None and inventory_bytes is not None)
+        plan_bytes, inventory_bytes = plan_bytes or b"", inventory_bytes or b""
         plan_doc, _err = attempt(frozen_plan, plan_bytes)
         check("driver-frozen-plan-reproved", isinstance(plan_doc, dict)
               and plan_doc == tomllib.loads(plan_bytes.decode("utf-8")))
@@ -11138,6 +12476,50 @@ def _self_test_checks():
               and approval_doc.get("inventory_digest") == plan_doc.get("inventory_digest")
               and approval_doc.get("approved_at") == "2026-09-17T12:00:00Z")
         check("driver-approve-writes-nothing", _snapshot(root) == before)
+        # re-derivation returns the sealed planning inventory the plan's inventory_digest binds, for apply
+        # to persist in the run's bundle, beside the store manifest digest rederive_or_refuse returns, empty
+        # at this NOT-ADOPTED root where no store resolves (red if the inventory is dropped from the pair).
+        rederived, err = attempt(rederive_bound_or_refuse, root, plan_doc, plan_bytes, sheet)
+        digest_only, err_digest = attempt(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+        check("rederive-returns-sealed-inventory", err is None and err_digest is None
+              and rederived == (digest_only, inventory_bytes) and digest_only == ""
+              and _inventory_seal(inventory_bytes) == plan_doc["inventory_digest"])
+        # the persisted copy's name is a listed bundle member, never an evidence-inventory name (red if
+        # renamed to a name the bundle-root inventory pattern matches).
+        check("planning-inventory-name-is-bundle-member",
+              not store.is_evidence_inventory_name(PLANNING_INVENTORY_NAME)
+              and _evidence_eligible(frid, planning_inventory_rel(frid))
+              and not _bundle_root_inventory(frid, planning_inventory_rel(frid)))
+        # the byte-identical plan beside an inventory that does not seal to the plan's inventory_digest
+        # refuses, in approve's re-derivation and before apply writes anything (red with the plan-binding
+        # comparison removed): the forged inventory seals its own bytes, so only the plan binding refuses it.
+        forged_doc = tomllib.loads(inventory_bytes.decode("utf-8"))
+        forged_doc.pop("inventory_digest", None)
+        forged_doc["decisions"] = list(forged_doc["decisions"]) + [dict(
+            path="zz.md", disposition="keep", actor="forger")]
+        forged = emit_checked(dict(forged_doc, inventory_digest=_digest(
+            emit_checked(forged_doc).encode("utf-8")))).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=forged)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-sealed-to-plan",
+              "is not the one the plan binds" in (err_direct or "")
+              and "is not the one the plan binds" in (err_apply or "") and _snapshot(root) == before)
+        # the same changed body carrying the plan's APPROVED inventory_digest is caught only by the
+        # self-seal comparison (the kept digest still satisfies the plan binding), so it refuses in
+        # re-derivation, approve and apply, with the tree unchanged (red with only the self-seal
+        # comparison removed).
+        unsealed = emit_checked(dict(forged_doc, inventory_digest=plan_doc["inventory_digest"])).encode("utf-8")
+        fake = planner.AdoptResult(VALID, plan=plan_bytes, inventory=unsealed)
+        with mock.patch.object(planner, "plan", lambda *a, **k: fake):
+            err_direct = refusal(rederive_or_refuse, root, plan_doc, plan_bytes, sheet)
+            err_approve = refusal(capture_approval, root, plan_bytes, sheet, "adopter", now)
+            err_apply = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("rederive-refuses-inventory-not-self-sealed",
+              "does not seal its own bytes" in (err_direct or "")
+              and "does not seal its own bytes" in (err_approve or "")
+              and "does not seal its own bytes" in (err_apply or "") and _snapshot(root) == before)
         check("driver-approve-multiline-actor-refused", "actor" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
         # the approval follows its plan: an approval instant before the plan's created_at is refused.
@@ -11212,7 +12594,7 @@ def _self_test_checks():
               and "mandatory receipt stage" in (err or "") and "retire-file" not in (err or "")
               and _bytes(root / "legacy.md") == b"legacy rules\n", observed=err)
         check("driver-apply-unlanded-writes-nothing", _snapshot(root) == before)
-        other_plan = _freeze(root, sheet, nonce="fedcba9876543210") or b""
+        other_plan = _freeze(root, sheet, nonce="fedcba9876543210")[0] or b""
         check("driver-apply-approval-binding-flip-refused", "does not bind" in
               (refusal(run_apply, root, other_plan, approval_bytes, sheet) or ""))
         check("driver-apply-edited-approval-refused", "canonical emitted form" in
@@ -11549,10 +12931,16 @@ def _self_test_checks():
               and _bytes(root / archive_rel(frid, "legacy.md")) == b"legacy rules\n")
         check("driver-apply-persists-plan-and-approval",
               _bytes(root / plan_rel(frid)) == plan_bytes and _bytes(root / approval_rel(frid)) == approval_bytes)
+        # the bundle copy is the planner's own sealed inventory for this worksheet, sealing to the plan's
+        # bound inventory_digest (red without the compose line that persists it).
+        check("driver-apply-persists-plan-approval-and-planning-inventory",
+              _bytes(root / planning_inventory_rel(frid)) == inventory_bytes
+              and _inventory_seal(inventory_bytes) == plan_doc["inventory_digest"])
         bundle_rows = tomllib.loads((_bytes(root / inventory_rel(frid)) or b"").decode("utf-8")).get("file", [])
         check("driver-apply-bundle-verifies", verify_bundle(root, frid).status == VALID
               and sorted(r["path"] for r in bundle_rows)
-              == sorted([plan_rel(frid), approval_rel(frid), archive_rel(frid, "legacy.md")]))
+              == sorted([plan_rel(frid), approval_rel(frid), planning_inventory_rel(frid),
+                         archive_rel(frid, "legacy.md")]))
         # one approval, one apply: the second apply refuses on that rule itself, ahead of the freshness
         # refusal its own first apply would otherwise trigger, with the evidence unchanged.
         applied = _snapshot(root)
@@ -11569,8 +12957,8 @@ def _self_test_checks():
     # 11b: the driver's typed contexts and its one preservation pass (B2, B3), over a planner-frozen fixture
     # with a kept file (register-unmanaged), a non-occupying retire source (retire-file), a non-occupying
     # migrate source (no op row) and an adopter registration its enable-hook row merges. The rows whose
-    # handlers this build cannot run under the driver (init-store, which _DRIVER_UNSUPPLIED names;
-    # render-views and install-pack) and the receipt stage are stand-ins; the retire-file, register-unmanaged
+    # handlers this build cannot run under the driver (init-store, render-views and plant-governance, which
+    # _DRIVER_UNSUPPLIED names) and the receipt stage are stand-ins; the retire-file, register-unmanaged
     # and enable-hook rows run their REAL handlers, the first two spied at their per-op composers, which a
     # handler reaches only through its typed context. Each check names the mutant it is red against, or
     # says it is a fixture PRECONDITION or a GREEN-ON-REVERT GUARD (green against the pre-B2/B3 driver too).
@@ -11579,13 +12967,14 @@ def _self_test_checks():
         sheet["sources"] = sorted(d["path"] for d in decisions)
         sheet["decisions"] = decisions
         if hook_op is not None:
-            # the hook row installs the claude-code enforcement member (its new_digest), so install-pack
-            # plants the other platforms' members only (the planner's rule).
+            # the hook row merges the observed registration into the claude-code registration member (its
+            # new_digest), and plant rows plant every other member, the deny hook it runs among them.
             for row in sheet["bindings"]["enforcement"]:
                 if row["platform"] == "claude-code":
-                    row["members"] = [dict(path=hook_op["registration_path"], digest=hook_op["new_digest"])]
-            others = [row for row in sheet["bindings"]["enforcement"] if row["platform"] != "claude-code"]
-            sheet["ops"] = sheet["ops"][:2] + [schema.enforcement_install_op(others), hook_op]
+                    row["members"] = [dict(m, digest=hook_op["new_digest"])
+                                      if m["path"] == hook_op["registration_path"] else m for m in row["members"]]
+            sheet["ops"] = sheet["ops"][:2] + schema.enforcement_install_ops(sheet["bindings"]["enforcement"],
+                                                                            hook_op["old_digest"])
         obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
         sheet["expected_observation_digest"] = (
             tomllib.loads(obs.observation.decode("utf-8"))["observation_digest"] if obs.observation else "")
@@ -11598,16 +12987,16 @@ def _self_test_checks():
             (root / rel).write_bytes(payload)
         hook_rel = ".claude/settings.json"
         hook_old = hook._emit(hook.canonical_registration())
-        hook_new = hook.merge_registration(hook_old, "opf-governance").new_bytes
+        hook_new = hook.merge_registration(hook_old, schema.HOOK_COMMAND).new_bytes
         (root / hook_rel).parent.mkdir()
         (root / hook_rel).write_bytes(hook_old)
         head = _selftest_git_commit(root)
-        hook_op = dict(op="enable-hook", registration_path=hook_rel, plugin_entry="opf-governance",
+        hook_op = dict(op="enable-hook", registration_path=hook_rel, plugin_entry=schema.HOOK_COMMAND,
                        old_digest=plan_digest(hook_old), new_digest=plan_digest(hook_new))
         sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture"),
                                          dict(path="legacy.md", disposition="retire", actor="fixture"),
                                          dict(path="old.md", disposition="migrate", actor="fixture")], hook_op)
-        typed_plan = _freeze(root, sheet) or b""
+        typed_plan = _freeze(root, sheet)[0] or b""
         typed_doc = tomllib.loads(typed_plan.decode("utf-8")) if typed_plan else dict(
             run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
         trid = typed_doc["run_id"]
@@ -11615,13 +13004,15 @@ def _self_test_checks():
         typed_ops = [row["op"] for row in typed_doc["ops"]]
         # PRECONDITION: the fixture froze and was approved, carrying the rows the checks below drive.
         check("driver-typed-fixture-frozen-and-approved", bool(typed_plan) and bool(typed_approval)
-              and {"retire-file", "register-unmanaged", "enable-hook", "init-store"} <= set(typed_ops)
-              and "move-file" not in typed_ops)
+              and {"retire-file", "register-unmanaged", "enable-hook", "init-store",
+                   "plant-governance"} <= set(typed_ops)
+              and "move-file" not in typed_ops
+              and [row for row in typed_doc["ops"] if row["op"] == "enable-hook"] == [hook_op])
         manifest_rel = schema.store_manifest(typed_doc["store"])
         manifest_bytes = _opf_init.build_manifest().encode("utf-8")
         reached = []
         composed_creates = []
-        stand_in_names = ("init-store", "render-views", "install-pack")
+        stand_in_names = ("init-store", "render-views", "plant-governance")
 
         def scaffold(op_row, context):
             # init-store's stand-in: the scaffolded manifest the registration chain starts from, staged
@@ -11666,15 +13057,26 @@ def _self_test_checks():
         # each refusal still refuses before anything is written: render-views keeps its REAL handler, which
         # reads observations this driver does not gather, so apply names that value and writes nothing (red
         # against a run_apply without its _unsupplied gate, which composes the row over an absent value).
-        with typed_driver({"init-store": scaffold, "install-pack": benign}):
+        with typed_driver({"init-store": scaffold, "plant-governance": benign}):
             err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
         check("driver-apply-unsupplied-observations-refused", "render-views" in (err or "")
               and "needs context observations" in (err or "") and "before anything is written" in (err or "")
               and not reached and _snapshot(root) == before, observed=err)
+        # plant-governance keeps its REAL handler: the plan's enforcement plant rows need the pack (the
+        # release manifest, root.txt and member bytes), which this driver cannot supply, so apply names
+        # that value for the plant rows alone and writes nothing (red against a _DRIVER_UNSUPPLIED without
+        # the plant-governance entry, where the real handler composes against an absent pack).
+        with typed_driver({"init-store": scaffold, "render-views": benign}):
+            err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
+        check("driver-apply-unsupplied-pack-refused",
+              "('plant-governance') needs context pack" in (err or "")
+              and "('render-views')" not in (err or "") and "('init-store')" not in (err or "")
+              and "before anything is written" in (err or "") and not reached and _snapshot(root) == before,
+              observed=err)
         # init-store keeps its REAL handler: apply names its unsequenced substrate run before anything is
         # written (red against a _DRIVER_UNSUPPLIED without the init-store entry, where the real handler
         # dispatches and refuses at its member-set precondition instead, the substrate run unnamed).
-        with typed_driver({"render-views": benign, "install-pack": benign}):
+        with typed_driver({"render-views": benign, "plant-governance": benign}):
             err = refusal(run_apply, root, typed_plan, typed_approval, sheet)
         check("driver-apply-init-store-named-refused",
               "('init-store') needs its own journaled substrate run" in (err or "")
@@ -11747,8 +13149,9 @@ def _self_test_checks():
         # whose fallback is a typed context, and never vacuous: every stand-in row was reached in both the
         # preflight and the transaction, each with the table.
         took = sorted((name, kind) for name, kind in reached if name in stand_in_names)
-        check("driver-other-rows-take-the-context-table",
-              took == sorted([(name, "dict") for name in stand_in_names] * 2), observed=took)
+        check("driver-other-rows-take-the-context-table", set(name for name, _ in took) == set(stand_in_names)
+              and took == sorted([(row["op"], "dict") for row in typed_doc["ops"]
+                                  if row["op"] in stand_in_names] * 2), observed=took)
         retire_copy_rel, migrate_copy_rel = archive_rel(trid, "legacy.md"), archive_rel(trid, "old.md")
         # red against a pass that also archives a retire-file row's source (the second create refuses, so no
         # pass reaches the receipt stage) and against a driver that skips the pass (no migrate copy).
@@ -11763,8 +13166,8 @@ def _self_test_checks():
               and all(after.get(rel) == payload for rel, payload in typed_files.items())
               and verify_bundle(root, trid).status == VALID
               and sorted(r["path"] for r in typed_rows)
-              == sorted([plan_rel(trid), approval_rel(trid), retire_copy_rel, migrate_copy_rel,
-                         archive_rel(trid, hook_rel)]))
+              == sorted([plan_rel(trid), approval_rel(trid), planning_inventory_rel(trid), retire_copy_rel,
+                         migrate_copy_rel, archive_rel(trid, hook_rel)]))
 
     # the unsupplied values are keyed by the handler that needs them, each named: red against a
     # _DRIVER_UNSUPPLIED missing any one entry (for example the init-store entry).
@@ -11799,7 +13202,7 @@ def _self_test_checks():
         head = _selftest_git_commit(root)
         sheet = _sheet_with(root, head, [dict(path=".working/TODO.md", disposition="move", actor="fixture"),
                                          dict(path="legacy/MOVE.md", disposition="move", actor="fixture")])
-        move_plan = _freeze(root, sheet) or b""
+        move_plan = _freeze(root, sheet)[0] or b""
         move_doc = tomllib.loads(move_plan.decode("utf-8")) if move_plan else dict(
             run_id=rid, ops=[], sources=[], store=dict(store_root=".", machine_rel=".working/toml"))
         mrid = move_doc["run_id"]
@@ -11832,7 +13235,7 @@ def _self_test_checks():
             stack = contextlib.ExitStack()
             stack.enter_context(mock.patch.dict(OP_HANDLERS, dict([
                 ("init-store", move_scaffold), ("render-views", move_benign),
-                ("install-pack", move_benign)])))
+                ("plant-governance", move_benign)])))
             stack.enter_context(mock.patch.dict(DRIVER_STAGES, dict([(RECEIPT_STAGE, move_receipt)])))
             if move is not None:
                 stack.enter_context(mock.patch.dict(_FILE_OPS, dict([("move-file", move)])))
@@ -11902,7 +13305,7 @@ def _self_test_checks():
     # new_digest is the merge core's own output over the planned bytes, so apply is held to publishing
     # exactly the post-merge registration the approval bound. Each refusal vector names its rule's keyword
     # and leaves the tree byte-identical with no transaction opened.
-    reg_rel, entry = ".claude/settings.json", "opf-governance"
+    reg_rel, entry = ".claude/settings.json", schema.HOOK_COMMAND
     reg_old = hook._emit(hook.canonical_registration())
     reg_new = hook.merge_registration(reg_old, entry).new_bytes
 
@@ -11924,7 +13327,7 @@ def _self_test_checks():
                 verdict = handler(row, context)
                 if verdict.status != VALID:
                     raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
-                        i, row.get("op"), "; ".join(verdict.findings)))
+                        i, row.get("op") if isinstance(row, dict) else None, "; ".join(verdict.findings)))
         return compose
 
     # the round trip, under a spawn denial (threat 6: the op writes configuration only and never runs,
@@ -12001,19 +13404,20 @@ def _self_test_checks():
           and foreign_merge.new_bytes is None)
     empty = b"{}"
     empty_new = hook.merge_registration(empty, entry).new_bytes
-    # A candidate that is NOT one shell word: the pure merge core accepts any token (its disclosed
-    # trust boundary), so this row's digests are built from the core's own output over it, and
-    # ONLY the plan-row pack-member grammar (_opf_adopt._is_hook_entry) refuses the row: through
+    # A candidate that is NOT the fixed deny-hook command: the pure merge core accepts any token (its
+    # disclosed trust boundary), so this row's digests are built from the core's own output over it,
+    # and ONLY the plan-row command rule (_opf_adopt._is_hook_entry) refuses the row: through
     # dispatch (validate_op), and again inside the handler, which a direct OP_HANDLERS caller
     # reaches without dispatch. Handed straight to the handler with its re-proof removed, the
     # merge agrees with the row's digests and the write LANDS, so BOTH checks of that vector go
-    # red: a behavioural flip, not a diagnostic one.
+    # red: a behavioural flip, not a diagnostic one. The one-word entry the former grammar admitted
+    # is refused the same way.
     multiword = "pkg-tool a.cfg;b"
-    multiword_new = hook.merge_registration(reg_old, multiword).new_bytes
 
-    def multiword_row():
-        return dict(op="enable-hook", registration_path=reg_rel, plugin_entry=multiword,
-                    old_digest=plan_digest(reg_old), new_digest=plan_digest(multiword_new))
+    def multiword_row(candidate=multiword):
+        return dict(op="enable-hook", registration_path=reg_rel, plugin_entry=candidate,
+                    old_digest=plan_digest(reg_old),
+                    new_digest=plan_digest(hook.merge_registration(reg_old, candidate).new_bytes))
 
     # Guard accounting (QA rounds 1 and 2): each vector names the rule that refuses it and what
     # removing that rule ALONE actually does, as observed under single-guard mutants of this
@@ -12080,23 +13484,26 @@ def _self_test_checks():
                   and all((root / rel).read_bytes() == data
                           for rel, data in (extra or dict()).items()))
 
-    # the grammar re-proof IN the handler: the multiword row handed straight to OP_HANDLERS, skipping
-    # dispatch, refuses with the tree unchanged and no transaction opened.
-    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        root = hook_fixture(temp)
-        before = snapshot(root)
-        why = refusal(run_adopt_transaction, root, rid,
-                      compose_hook([multiword_row()], handler=OP_HANDLERS["enable-hook"]))
-        check("hook-multiword-entry-direct-handler-refused",
-              why is not None and "pack-member grammar" in why)
-        check("hook-multiword-entry-direct-handler-writes-nothing",
-              snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
+    # the command re-proof IN the handler: the multiword row, and a row carrying the one-word entry the
+    # former grammar admitted, handed straight to OP_HANDLERS, skipping dispatch, each refuse with the tree
+    # unchanged and no transaction opened.
+    for label, candidate in (("multiword", multiword), ("one-word", "opf-governance")):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = hook_fixture(temp)
+            before = snapshot(root)
+            why = refusal(run_adopt_transaction, root, rid,
+                          compose_hook([multiword_row(candidate)], handler=OP_HANDLERS["enable-hook"]))
+            check("hook-{}-entry-direct-handler-refused".format(label),
+                  why is not None and "not the fixed deny-hook command" in why)
+            check("hook-{}-entry-direct-handler-writes-nothing".format(label),
+                  snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
     # the row-shape re-proof IN the handler: a malformed row handed straight to OP_HANDLERS (a field
-    # missing, or a path that is not a string) refuses attributed, never an uncaught KeyError or
-    # AttributeError, with the tree unchanged and no transaction opened. Removing the shape guard
-    # admits no write, but the uncaught exception then escapes to the harness, which fails closed
-    # to exit 2 in place of the attributed refusal (as for the absent-registration guard).
+    # missing, a path that is not a string, or a row that is not a table at all) refuses attributed, never
+    # an uncaught KeyError or AttributeError, with the tree unchanged and no transaction opened. Removing
+    # the shape guard, or either of its two checks, admits no write, but the row then fails closed on
+    # that uncaught exception in place of the attributed refusal: each row's refused check records it
+    # and fails (red against dropping the table check, or old_digest from the fields it requires).
     def hook_row_without(field):
         row = hook_row()
         del row[field]
@@ -12104,15 +13511,20 @@ def _self_test_checks():
 
     malformed = [("no-plugin-entry", hook_row_without("plugin_entry"), "string registration_path"),
                  ("non-string-path", dict(hook_row(), registration_path=None), "string registration_path"),
-                 ("no-new-digest", hook_row_without("new_digest"), "string registration_path")]
+                 ("no-new-digest", hook_row_without("new_digest"), "string registration_path"),
+                 ("no-old-digest", hook_row_without("old_digest"), "string registration_path"),
+                 ("non-table", list(hook_row().items()), "string registration_path")]
     for label, row, keyword in malformed:
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root = hook_fixture(temp)
             before = snapshot(root)
-            why = refusal(run_adopt_transaction, root, rid,
-                          compose_hook([row], handler=OP_HANDLERS["enable-hook"]))
+            try:
+                why, escaped = refusal(run_adopt_transaction, root, rid,
+                                       compose_hook([row], handler=OP_HANDLERS["enable-hook"])), None
+            except (KeyError, AttributeError, TypeError) as exc:
+                why, escaped = None, exc
             check("hook-malformed-row-{}-direct-handler-refused".format(label),
-                  why is not None and keyword in why)
+                  why is not None and keyword in why, observed="refusal={!r} escaped={!r}".format(why, escaped))
             check("hook-malformed-row-{}-direct-handler-writes-nothing".format(label),
                   snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
@@ -12237,12 +13649,16 @@ def _self_test_checks():
         return dict(op="repoint-consumer", path=path, old_digest=plan_digest(files.get(path, b"")),
                     new_digest=plan_digest(body))
 
-    def compose_reg(rows, consumers=None, store_table=reg_store, before_row=None):
+    def compose_reg(rows, consumers=None, store_table=reg_store, before_row=None, bound_digest=True):
         # the kept files' approved source digests: the fixture's planted bytes, as the plan's keep sources
-        # bind them (the stage driver's), so a kept file drifts only where a vector makes it
+        # bind them (the stage driver's), so a kept file drifts only where a vector makes it; and the store
+        # manifest digest the plan bound: the planted manifest's (the planner observed the fixture's store),
+        # unless a vector binds another (bound_digest)
         def compose(ops):
+            digest = bound_digest if bound_digest is not True else (
+                plan_digest(planted[man]) if man in planted else None)
             context = RegistrationContext(ops, store_table, consumers,
-                                          dict((p, plan_digest(b)) for p, b in planted.items()))
+                                          dict((p, plan_digest(b)) for p, b in planted.items()), digest)
             for i, row in enumerate(rows):
                 if before_row is not None:
                     before_row(i, ops, context)
@@ -12504,6 +13920,98 @@ def _self_test_checks():
             reg_refusal(temp, rows, keyword, label, consumers,
                         None if label == "no-store-identity" else reg_store, manifest_text, extra,
                         hooks.get(label))
+    # repoint-consumer reads a LIVE manifest only at the digest the plan bound: the plan observed a manifest
+    # that keeps the consumer under [unmanaged], and the live one, edited since, drops that entry. The
+    # repointing refuses as drifted with nothing written (red against a live read with no digest check: the
+    # transaction commits and rewrites a file the bound manifest kept); and with no digest bound (the plan
+    # observed no store) a live manifest refuses too (red the same way).
+    for label, bound_digest, keyword in (
+            ("consumer-live-manifest-drift", plan_digest(kept_consumer.encode("utf-8")), "is drifted"),
+            ("consumer-live-manifest-unbound", None, "bound by no observed manifest digest")):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = reg_fixture(temp)
+            before = snapshot(root)
+            with lease_join():
+                why = refusal(run_adopt_transaction, root, rid, compose_reg(
+                    [repoint_row(files)], tracked, bound_digest=bound_digest))
+            check("reg-{}-refused".format(label), why is not None and keyword in why
+                  and "store manifest" in why, observed=why)
+            check("reg-{}-writes-nothing".format(label),
+                  snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
+    # the driver binds the digest re-derivation returns: rederive_or_refuse hands back the re-derived
+    # observation's manifest digest (red against a re-derivation that returns nothing), refuses one in
+    # neither accepted shape, and _driver_contexts carries it into the RegistrationContext (red against a
+    # context built without it, which binds nothing). Re-planning also returns the sealed planning inventory
+    # the plan's inventory_digest binds, without which re-derivation refuses (apply persists it), so the
+    # stand-in result carries one sealed to the stand-in plan's inventory_digest: rederive_bound_or_refuse
+    # returns it beside the digest, and the same result with no inventory refuses before the observation
+    # is read (red against a re-derivation that admits a missing inventory).
+    rederive_body = dict(format="opf.adoption.planning-inventory/v1", run_id=rid)
+    rederive_seal = plan_digest(emit_checked(rederive_body).encode("utf-8"))
+    rederive_inventory = emit_checked(dict(rederive_body, inventory_digest=rederive_seal)).encode("utf-8")
+    rederive_doc = dict(revision="a" * 40, run_id=rid, plan_digest=_D_ZERO, inventory_digest=rederive_seal)
+    rederive_sheet = dict.fromkeys(("sources", "targets", "expected_observation_digest", "product", "decisions",
+                                    "ops", "bindings"))
+    for label, observation, want in (
+            ("store", emit_checked(dict(resolution=dict(manifest_digest=plan_digest(b"m\n")))), plan_digest(b"m\n")),
+            ("no-store", emit_checked(dict(resolution=dict(manifest_digest=""))), ""),
+            ("malformed", emit_checked(dict(resolution=dict(manifest_digest="sha256:nope"))), None)):
+        result = _opf_adopt_plan.AdoptResult(VALID, observation=observation.encode("utf-8"), plan=b"frozen\n",
+                                             inventory=rederive_inventory)
+        with mock.patch.dict(globals(), observe_revision=lambda product_root: "a" * 40), \
+                mock.patch.object(_opf_adopt_plan, "plan", lambda *args, **kwargs: result):
+            got, why = attempt(rederive_or_refuse, "unused-root", rederive_doc, b"frozen\n", rederive_sheet)
+            got_pair, why_pair = attempt(rederive_bound_or_refuse, "unused-root", rederive_doc, b"frozen\n",
+                                         rederive_sheet)
+        check("driver-rederive-returns-manifest-digest-{}".format(label),
+              (got, why is None) == (want, True) if want is not None
+              else got is None and "neither empty nor a sha256 digest" in (why or ""), observed=(got, why))
+        check("driver-rederive-bound-returns-digest-and-inventory-{}".format(label),
+              (got_pair, why_pair is None) == ((want, rederive_inventory), True) if want is not None
+              else got_pair is None and "neither empty nor a sha256 digest" in (why_pair or ""),
+              observed=(got_pair, why_pair))
+    result = _opf_adopt_plan.AdoptResult(VALID, observation=emit_checked(dict(resolution=dict(
+        manifest_digest=plan_digest(b"m\n")))).encode("utf-8"), plan=b"frozen\n")
+    with mock.patch.dict(globals(), observe_revision=lambda product_root: "a" * 40), \
+            mock.patch.object(_opf_adopt_plan, "plan", lambda *args, **kwargs: result):
+        why = refusal(rederive_or_refuse, "unused-root", rederive_doc, b"frozen\n", rederive_sheet)
+    check("driver-rederive-refuses-without-planning-inventory",
+          "returned no planning inventory" in (why or ""), observed=why)
+    _table, typed_reg = _driver_contexts(None, dict(sources=[], store=reg_store), None, "unused-root",
+                                         plan_digest(b"m\n"))
+    check("driver-registration-context-carries-manifest-digest",
+          typed_reg[_execute_registration_op].manifest_digest == plan_digest(b"m\n"))
+    # and run_apply hands that digest on: over a plan the real planner froze over a tree whose store resolves
+    # (this section's fixture, so the observation binds the planted manifest's digest), the
+    # RegistrationContext run_apply builds carries it (red against a run_apply that calls _driver_contexts
+    # without it, which binds nothing). render-views and plant-governance, which this driver cannot run, and
+    # the receipt stage are stand-ins as in 11b; the recording wrapper refuses once the contexts are built, in
+    # the write-free preflight, so nothing is written.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        bound_head = _selftest_git_commit(root)
+        bound_sheet = _sheet_with(root, bound_head, [dict(path=keep, disposition="keep", actor="fixture")])
+        # the store resolves, so the plan takes no init-store row
+        bound_sheet["ops"] = [row for row in bound_sheet["ops"] if row["op"] != "init-store"]
+        bound_plan = _freeze(root, bound_sheet)[0] or b""
+        bound_approval = attempt(capture_approval, root, bound_plan, bound_sheet, "adopter", now)[0] or b""
+        bound_before = _snapshot(root)
+        bound_built = []
+        real_driver_contexts = _driver_contexts
+
+        def recording_contexts(*args, **kwargs):
+            _table, typed = real_driver_contexts(*args, **kwargs)
+            bound_built.append(typed[_execute_registration_op].manifest_digest)
+            raise AdoptApplyError("stopped once the driver's contexts are built")
+        stand_ins = dict.fromkeys(("render-views", "plant-governance"), lambda op_row, context=None: schema._ok())
+        with mock.patch.dict(globals(), _driver_contexts=recording_contexts), \
+                mock.patch.dict(OP_HANDLERS, stand_ins), \
+                mock.patch.dict(DRIVER_STAGES, {RECEIPT_STAGE: lambda context: schema._ok()}):
+            bound_err = refusal(run_apply, root, bound_plan, bound_approval, bound_sheet)
+        check("driver-apply-registration-context-carries-bound-manifest-digest",
+              bool(bound_plan) and bool(bound_approval) and bound_built == [plan_digest(files[man])]
+              and "stopped once the driver's contexts are built" in (bound_err or "")
+              and _snapshot(root) == bound_before, observed=(bound_built, bound_err))
     # the committed store pointer as an entry: a planted pointer naming the product root itself, so the store
     # still resolves in-root and only the protected-destination rule refuses the registration.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -12635,49 +14143,15 @@ def _self_test_checks():
     # stays frozen, archives an occupying retire or move source preserve-first, and leaves a non-occupying
     # move source frozen; the retirement stage (RETIREMENT_PHASE, after the green check) removes the
     # frozen retire source, relocates both move sources, and touches nothing for the occupying retire.
-    # Each round trip below goes red if its op still refuses.
-    fx_files = {"legacy/RULES.md": b"old rules\n", ".working/TODO.md": b"hand-kept todo\n",
-                "legacy/MOVE.md": b"move me\n", "docs/VIEW.md": b"old view\n"}
-    fx_new, fx_new_bytes = "adopter/NEW.md", b"planned\n"
-    fx_moved = store.moved_dest("legacy/MOVE.md")
-    fx_view_dest = "adopter/view-old.md"
-    fx_sources = [dict(path="legacy/RULES.md", disposition="retire", occupying=False,
-                       preservation=archive_rel(rid, "legacy/RULES.md")),
-                  dict(path=".working/TODO.md", disposition="retire", occupying=True,
-                       preservation=archive_rel(rid, ".working/TODO.md")),
-                  dict(path="legacy/MOVE.md", disposition="move", occupying=False, preservation=fx_moved),
-                  dict(path="docs/VIEW.md", disposition="move", occupying=True,
-                       preservation=archive_rel(rid, "docs/VIEW.md"))]
-    for row in fx_sources:
-        row["digest"] = plan_digest(fx_files[row["path"]])
-    fx_create = dict(op="create-file", path=fx_new, content_digest=plan_digest(fx_new_bytes))
-    fx_disposed = [dict(op="retire-file", path="legacy/RULES.md",
-                        preimage_digest=plan_digest(fx_files["legacy/RULES.md"])),
-                   dict(op="retire-file", path=".working/TODO.md",
-                        preimage_digest=plan_digest(fx_files[".working/TODO.md"])),
-                   dict(op="move-file", source="legacy/MOVE.md", destination=fx_moved,
-                        source_digest=plan_digest(fx_files["legacy/MOVE.md"])),
-                   dict(op="move-file", source="docs/VIEW.md", destination=fx_view_dest,
-                        source_digest=plan_digest(fx_files["docs/VIEW.md"]))]
+    # Each round trip below goes red if its op still refuses. The fixture is _st_file_ops's, shared with the
+    # kill-injection matrix (section 17).
+    fx = _st_file_ops(rid)
+    fx_files, fx_new, fx_new_bytes, fx_moved, fx_view_dest = (fx.files, fx.new, fx.new_bytes, fx.moved,
+                                                              fx.view_dest)
+    fx_sources, fx_create, fx_disposed = fx.sources, fx.create, fx.disposed
     check("file-ops-fixture-rows-valid",
           all(schema.validate_op(r).status == VALID for r in [fx_create] + fx_disposed))
-
-    def file_fixture(temp):
-        root = Path(temp).resolve()
-        for rel, payload in fx_files.items():
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_bytes(payload)
-        return root
-
-    def apply_stage(root, rows=None, sources=None, content=None):
-        return attempt(run_adopt_transaction, root, rid, compose_rows(
-            [fx_create] + fx_disposed if rows is None else rows, fx_sources if sources is None else sources,
-            {fx_new: fx_new_bytes} if content is None else content))
-
-    def retirement_stage(root, rows=None, sources=None):
-        return attempt(run_adopt_transaction, root, rid, compose_rows(
-            fx_disposed if rows is None else rows, fx_sources if sources is None else sources),
-            phase=RETIREMENT_PHASE)
+    file_fixture, apply_stage, retirement_stage = fx.file_fixture, fx.apply_stage, fx.retirement_stage
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = file_fixture(temp)
@@ -12948,8 +14422,11 @@ def _self_test_checks():
               wrong is None and late is not None and "runs no file op" in late
               and untouched_save_journal_dirs(before, root) and lock_free(root))
         before = tree_state(root)
-        unlanded = refusal(run_adopt_transaction, root, other_run,
-                           compose_rows([schema.canonical_op("install-pack")]))
+        # every op has landed in this build, so an unlanded op is a create-file row pinned back to the
+        # refusing handler for this vector
+        with mock.patch.dict(OP_HANDLERS, {"create-file": _not_yet_executable}):
+            unlanded = refusal(run_adopt_transaction, root, other_run,
+                               compose_rows([schema.canonical_op("create-file")]))
         check("compose-rows-unlanded-op-refuses-whole-transaction-untouched-save-journal-dirs",
               unlanded is not None and "not yet executable" in unlanded
               and not (root / JOURNAL_REL / other_run).exists()
@@ -13296,6 +14773,199 @@ def _self_test_checks():
         check("tree-state-control-leg-lists-every-entry",
               "legacy" in intact and "legacy/RULES.md" in intact and tree_state(root) == intact)
 
+    # 17: the kill-injection matrix, see _kill_matrix_self_test (also run alone by
+    # --self-test-section kill-matrix).
+    _kill_matrix_self_test(check)
+
+    _self_test_fence(check)
+
+    if census:
+        left_open = sorted(descriptors() - entry_descriptors)
+        check("self-test-leaves-no-descriptor-open", not left_open,
+              observed="{} descriptor(s) left open, first {}".format(
+                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd)))
+                                   for fd, _identity in left_open[:4]]))
+    else:
+        skipped.append(("self-test-leaves-no-descriptor-open", no_census))
+    for name, why in skipped:
+        print("  SKIPPED: {} ({})".format(name, why))
+    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)
+
+
+def _st_fixture_plan(run_id_):
+    """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
+    digest of its canonical emission without that field), so the bundle verifier proves it exactly as
+    it proves a real plan (spec 4.2)."""
+    body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+    digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+
+
+def _st_run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
+    """Self-test shadow of the module transaction: a base transaction that names no plan digest
+    stages its run's fixture plan first, as apply stages the approved plan, and every transaction
+    that names none carries that plan's digest."""
+    plan_bytes_, digest = _st_fixture_plan(run_id_)
+    staged = compose
+    if phase is None and plan_digest is None:
+        def staged(ops):
+            ops.create(plan_rel(run_id_), plan_bytes_)
+            return compose(ops)
+    return run_adopt_transaction(product_root, run_id_, staged, phase,
+                                 digest if plan_digest is None else plan_digest)
+
+
+def _st_fixture(temp):
+    """The journaled shell's throwaway fixture: (root, the bytes of each relpath) written beneath temp."""
+    root = Path(temp).resolve()
+    files = dict(((".working/TODO.md", b"hand-kept todo\n"),
+                  (".working/toml/manifest.toml", b"# a foreign manifest-shaped file\n"),
+                  ("legacy/RULES.md", b"old rules\n")))
+    for rel, payload in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(payload)
+    return root, files
+
+
+def _st_compose_full(files, drift=False):
+    def compose(ops):
+        todo = files[".working/TODO.md"] + (b"drift" if drift else b"")
+        ops.archive_occupying(".working/TODO.md", "sha256:" + _sha256(todo))
+        ops.archive_occupying(".working/toml/manifest.toml",
+                              "sha256:" + _sha256(files[".working/toml/manifest.toml"]))
+        ops.preserve("legacy/RULES.md", "sha256:" + _sha256(files["legacy/RULES.md"]))
+    return compose
+
+
+def _st_lock_free(root):
+    return _journal.read_lock_owner(_journal_root(root)) is None
+
+
+_ST_JOURNAL_DIRS = tuple("/".join(JOURNAL_REL.split("/")[:i])
+                         for i in range(1, JOURNAL_REL.count("/") + 2))
+
+
+def _st_walk_error(exc):
+    raise exc
+
+
+def _st_tree_state(root, journal=True):
+    """The whole-tree state the file-op checks (section 11 on) compare: EVERY entry beneath the root, `.aiqt/`
+    included, as (kind, mode, bytes or link target), never followed; directories, symlinks and special
+    entries count, as do modes. journal=False leaves out exactly the adoption journal root's subtree and
+    its ancestor directories (_ST_JOURNAL_DIRS, the journal's own bookkeeping), for comparisons across a
+    transaction. A directory the walk cannot list (the root or any subtree) RAISES (os.walk alone skips it
+    silently), so an unreadable subtree fails the comparison instead of dropping out of both states
+    (section 11k)."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_st_walk_error):
+        base = os.path.relpath(dirpath, root)
+        for name in dirnames + filenames:
+            rel = name if base == "." else base + "/" + name
+            if not journal and (rel in _ST_JOURNAL_DIRS or _within(rel, JOURNAL_REL)):
+                continue
+            full = os.path.join(dirpath, name)
+            st = os.lstat(full)
+            mode = stat.S_IMODE(st.st_mode)
+            if stat.S_ISLNK(st.st_mode):
+                out[rel] = ("link", mode, os.readlink(full))
+            elif stat.S_ISDIR(st.st_mode):
+                out[rel] = ("dir", mode, None)
+            elif stat.S_ISREG(st.st_mode):
+                out[rel] = ("file", mode, Path(full).read_bytes())
+            else:
+                out[rel] = ("special", mode, None)
+        if not journal:
+            dirnames[:] = [d for d in dirnames if (d if base == "." else base + "/" + d) != JOURNAL_REL]
+    return out
+
+
+def _st_attempt(fn, *args, **kwargs):
+    """(result, None) on success, (None, refusal text) on AdoptApplyError."""
+    try:
+        return fn(*args, **kwargs), None
+    except AdoptApplyError as exc:
+        return None, str(exc)
+
+
+def _st_file_ops(rid):
+    """The three file ops' fixture at run `rid` (section 16 of _self_test_checks and the kill-injection
+    matrix): the source files, the planned create, the plan's source rows and disposed rows, a writer of
+    the files beneath a temporary directory, and the apply and retirement stages over them, each returning
+    _st_attempt's (result, refusal text)."""
+    import types
+
+    def plan_digest(payload):
+        return "sha256:" + _sha256(payload)
+
+    files = {"legacy/RULES.md": b"old rules\n", ".working/TODO.md": b"hand-kept todo\n",
+             "legacy/MOVE.md": b"move me\n", "docs/VIEW.md": b"old view\n"}
+    new, new_bytes = "adopter/NEW.md", b"planned\n"
+    moved = store.moved_dest("legacy/MOVE.md")
+    view_dest = "adopter/view-old.md"
+    source_rows = [dict(path="legacy/RULES.md", disposition="retire", occupying=False,
+                    preservation=archive_rel(rid, "legacy/RULES.md")),
+               dict(path=".working/TODO.md", disposition="retire", occupying=True,
+                    preservation=archive_rel(rid, ".working/TODO.md")),
+               dict(path="legacy/MOVE.md", disposition="move", occupying=False, preservation=moved),
+               dict(path="docs/VIEW.md", disposition="move", occupying=True,
+                    preservation=archive_rel(rid, "docs/VIEW.md"))]
+    for row in source_rows:
+        row["digest"] = plan_digest(files[row["path"]])
+    create = dict(op="create-file", path=new, content_digest=plan_digest(new_bytes))
+    disposed = [dict(op="retire-file", path="legacy/RULES.md",
+                     preimage_digest=plan_digest(files["legacy/RULES.md"])),
+                dict(op="retire-file", path=".working/TODO.md",
+                     preimage_digest=plan_digest(files[".working/TODO.md"])),
+                dict(op="move-file", source="legacy/MOVE.md", destination=moved,
+                     source_digest=plan_digest(files["legacy/MOVE.md"])),
+                dict(op="move-file", source="docs/VIEW.md", destination=view_dest,
+                     source_digest=plan_digest(files["docs/VIEW.md"]))]
+
+    def file_fixture(temp):
+        root = Path(temp).resolve()
+        for rel, payload in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        return root
+
+    def apply_stage(root, rows=None, sources=None, content=None):
+        return _st_attempt(_st_run_adopt_transaction, root, rid, compose_rows(
+            [create] + disposed if rows is None else rows, source_rows if sources is None else sources,
+            {new: new_bytes} if content is None else content))
+
+    def retirement_stage(root, rows=None, sources=None):
+        return _st_attempt(_st_run_adopt_transaction, root, rid, compose_rows(
+            disposed if rows is None else rows, source_rows if sources is None else sources),
+            phase=RETIREMENT_PHASE)
+
+    return types.SimpleNamespace(files=files, new=new, new_bytes=new_bytes, moved=moved,
+                                 view_dest=view_dest, sources=source_rows, create=create, disposed=disposed,
+                                 file_fixture=file_fixture,
+                                 apply_stage=apply_stage, retirement_stage=retirement_stage)
+
+
+def _kill_matrix_self_test(check):
+    """The kill-injection matrix (section 17 of _self_test_checks, which calls it; also run alone by
+    `--self-test-section kill-matrix`), over the file-ops fixture (_st_file_ops) at the self-test's run id."""
+    import tempfile
+    from unittest import mock
+    VALID = store.VALID
+    now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    rid = mint_run_id(now, "0123456789abcdef")
+    fx = _st_file_ops(rid)
+    fx_create, fx_disposed, fx_sources, fx_new, fx_new_bytes = (fx.create, fx.disposed, fx.sources, fx.new,
+                                                                fx.new_bytes)
+    file_fixture, apply_stage, retirement_stage = fx.file_fixture, fx.apply_stage, fx.retirement_stage
+    fixture_plan, tree_state, attempt = _st_fixture_plan, _st_tree_state, _st_attempt
+
+    def txn_state(root, txn):
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+        try:
+            return _journal.classify_state(jr_fd, _journal_root(root) / txn)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+
     # 17: the kill-injection matrix (the journal's crash harness, the migrate.py model): each stage's
     # transaction runs in a CHILD interpreter that os._exit()s (137) at one kill point, leaving only what
     # was already fsync'd; a FRESH child then reconciles, breaking the dead owner's stale lock, and an
@@ -13374,11 +15044,23 @@ def _self_test_checks():
                 recovered = crash_child(temp, dict(action="reconcile", root=str(root)))
                 again, _why = attempt(reconcile, root)
                 state, txn_now = tree_state(root, journal=False), txn_state(root, txn_of)
+                # Each conjunct is evaluated exactly where the short-circuit chain evaluates it (the journal
+                # read only after the three exit facts hold, the bundle verified at most once and only on
+                # the complete-poststate leg), so the verdict is the chain's; the observed detail names
+                # which conjunct failed, an unevaluated one as None.
+                quiet = journal_quiet(root) if died == 137 and recovered == 0 and again == [] else None
+                at_pre, at_post = state == pre, state == post
+                verified = (verify_bundle(root, rid) if quiet and not (at_pre and txn_now != "complete")
+                            and at_post and txn_now == "complete" else None)
                 check("kill-{}-{}-recovers-to-prestate-or-verified-poststate".format(stage, point),
-                      died == 137 and recovered == 0 and again == [] and journal_quiet(root)
-                      and ((state == pre and txn_now != "complete")
-                           or (state == post and txn_now == "complete"
-                               and verify_bundle(root, rid).status == VALID)))
+                      quiet is True
+                      and ((at_pre and txn_now != "complete")
+                           or (at_post and txn_now == "complete"
+                               and verified is not None and verified.status == VALID)),
+                      observed=dict(died=died, recovered=recovered, again=again, journal_quiet=quiet,
+                                    txn_now=txn_now, state_is_pre=at_pre, state_is_post=at_post,
+                                    verify_bundle=None if verified is None
+                                    else (verified.status, list(verified.findings))))
         for rpoint in (["torn:ROLLBACK-IN-PROGRESS"] + ["after-restore-{}".format(i) for i in range(n)]
                        + ["torn:ROLLBACK-COMPLETE"]):
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -13391,67 +15073,6 @@ def _self_test_checks():
                 check("kill-rollback-{}-{}-lands-exact-prestate".format(stage, rpoint),
                       died == 137 and rdied == 137 and recovered == 0 and again == [] and journal_quiet(root)
                       and tree_state(root, journal=False) == pre and txn_state(root, txn_of) == "rolled-back")
-
-    if census:
-        left_open = sorted(descriptors() - entry_descriptors)
-        check("self-test-leaves-no-descriptor-open", not left_open,
-              observed="{} descriptor(s) left open, first {}".format(
-                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd)))
-                                   for fd, _identity in left_open[:4]]))
-    else:
-        skipped.append(("self-test-leaves-no-descriptor-open", no_census))
-    for name, why in skipped:
-        print("  SKIPPED: {} ({})".format(name, why))
-    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)
-
-
-def _st_fixture_plan(run_id_):
-    """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
-    digest of its canonical emission without that field), so the bundle verifier proves it exactly as
-    it proves a real plan (spec 4.2)."""
-    body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
-    digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
-    return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
-
-
-def _st_run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
-    """Self-test shadow of the module transaction: a base transaction that names no plan digest
-    stages its run's fixture plan first, as apply stages the approved plan, and every transaction
-    that names none carries that plan's digest."""
-    plan_bytes_, digest = _st_fixture_plan(run_id_)
-    staged = compose
-    if phase is None and plan_digest is None:
-        def staged(ops):
-            ops.create(plan_rel(run_id_), plan_bytes_)
-            return compose(ops)
-    return run_adopt_transaction(product_root, run_id_, staged, phase,
-                                 digest if plan_digest is None else plan_digest)
-
-
-def _st_fixture(temp):
-    """The journaled shell's throwaway fixture: (root, the bytes of each relpath) written beneath temp."""
-    root = Path(temp).resolve()
-    files = dict(((".working/TODO.md", b"hand-kept todo\n"),
-                  (".working/toml/manifest.toml", b"# a foreign manifest-shaped file\n"),
-                  ("legacy/RULES.md", b"old rules\n")))
-    for rel, payload in files.items():
-        (root / rel).parent.mkdir(parents=True, exist_ok=True)
-        (root / rel).write_bytes(payload)
-    return root, files
-
-
-def _st_compose_full(files, drift=False):
-    def compose(ops):
-        todo = files[".working/TODO.md"] + (b"drift" if drift else b"")
-        ops.archive_occupying(".working/TODO.md", "sha256:" + _sha256(todo))
-        ops.archive_occupying(".working/toml/manifest.toml",
-                              "sha256:" + _sha256(files[".working/toml/manifest.toml"]))
-        ops.preserve("legacy/RULES.md", "sha256:" + _sha256(files["legacy/RULES.md"]))
-    return compose
-
-
-def _st_lock_free(root):
-    return _journal.read_lock_owner(_journal_root(root)) is None
 
 
 def _st_rendering(exc):
@@ -13641,11 +15262,90 @@ def _class_sweep_record(check, bound_expired, run=None):
             check(name, rows[index][1], observed=rows[index][2])
 
 
-def _self_test_outcome(failures, failure_details, checked, bound_expired):
+def _self_test_fence(check):
+    """The base 2.0.0 adoption fence (adoption_journal_fenced), with SUPPORTED_HOMES raised to 2 inside each
+    vector and restored in a finally. Every engine step a fenced call must not reach is replaced by a
+    recorder that refuses under its own name, so a step reached is named, never run. apply and reconcile
+    refuse with ADOPTION_FENCE before any of them and leave no .aiqt entry; approve refuses with
+    JOURNAL_UNREAD before any of them; at the shipped constants each of those steps is still reached."""
+    import tempfile
+    from unittest import mock
+    this = sys.modules[__name__]
+
+    def raised(thunk):
+        saved = store.SUPPORTED_HOMES
+        store.SUPPORTED_HOMES = 2
+        try:
+            return thunk()
+        finally:
+            store.SUPPORTED_HOMES = saved
+
+    def refusal(thunk):
+        try:
+            thunk()
+        except AdoptApplyError as exc:
+            return str(exc)
+        return None
+
+    def recorded(names, thunk):
+        # (refusal text, the recorded steps reached in order) of thunk with each named step replaced.
+        reached = []
+
+        def recorder(name):
+            def step(*_args, **_kwargs):
+                reached.append(name)
+                raise AdoptApplyError("reached " + name)
+            return step
+        with contextlib.ExitStack() as stack:
+            for name in names:
+                stack.enter_context(mock.patch.object(this, name, recorder(name)))
+            said = refusal(thunk)
+        return said, reached
+
+    apply_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "_open_product_root")
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-fence-") as temp:
+        said, reached = raised(lambda: recorded(apply_steps, lambda: run_apply(temp, b"", b"", {})))
+        check("adopt-apply-fenced-homes2",
+              said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
+        said, reached = recorded(apply_steps, lambda: run_apply(temp, b"", b"", {}))
+        check("adopt-apply-unfenced-at-shipped-constants",
+              said == "reached frozen_plan" and reached == ["frozen_plan"],
+              observed="{!r} reached {}".format(said, reached))
+
+        reconcile_steps = ("_open_product_root", "_reconcile_run", "_journal_root")
+        said, reached = raised(lambda: recorded(reconcile_steps, lambda: reconcile_report(temp)))
+        check("adopt-reconcile-fenced-homes2",
+              said == ADOPTION_FENCE and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
+        said, reached = recorded(reconcile_steps, lambda: reconcile_report(temp))
+        check("adopt-reconcile-unfenced-at-shipped-constants",
+              said == "reached _open_product_root" and reached == ["_open_product_root"],
+              observed="{!r} reached {}".format(said, reached))
+
+        def approve():
+            return capture_approval(temp, b"", {}, "fixture", None)
+        approve_steps = ("frozen_plan", "require_clean_journal", "_require_unapplied", "rederive_or_refuse")
+        said, reached = raised(lambda: recorded(approve_steps, approve))
+        check("adopt-approve-no-journal-read-homes2",
+              said == JOURNAL_UNREAD and reached == [] and os.listdir(temp) == [],
+              observed="{!r} reached {}".format(said, reached))
+        with mock.patch.object(this, "frozen_plan", lambda _bytes: dict(run_id="fixture-run")):
+            said, reached = recorded(approve_steps[1:], approve)
+            check("adopt-approve-journal-read-at-shipped-constants",
+                  said == "reached require_clean_journal" and reached == ["require_clean_journal"],
+                  observed="{!r} reached {}".format(said, reached))
+        check("adopt-fence-inert-at-shipped-constants",
+              store.SUPPORTED_HOMES == 1 and not adoption_journal_fenced()
+              and raised(adoption_journal_fenced) is True)
+
+
+def _self_test_outcome(failures, failure_details, checked, bound_expired, skipped=()):
     """Print the run's verdict and return its exit code: 1 when a check failed (each bound that expired is
-    named beside the failures), 2 when the only problem is a bound that expired (cannot evaluate: the
-    checks behind it did not run, because either the host was too slow or the code under test hangs, and
-    the expiry does not tell which), else 0."""
+    named beside the failures), 2 when the only problems are a bound that expired or a required check
+    this platform could not run (cannot evaluate: the checks behind an expired bound did not run, because
+    either the host was too slow or the code under test hangs, and the expiry does not tell which; each
+    skipped (check, why) entry was never evaluated, so the run is not a pass), else 0."""
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
         for f in failures:
@@ -13655,15 +15355,53 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired):
         for entry in bound_expired:
             print("  BOUND EXPIRED: {}".format(entry))
         return 1
-    if bound_expired:
+    if bound_expired or skipped:
         for entry in bound_expired:
             print("  BOUND EXPIRED: {}".format(entry))
-        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({} bound(s) expired: the checks behind each "
-              "did not run, because either the host was too slow or the code under test hangs; the other "
-              "{} checks passed)".format(len(bound_expired), checked))
+        reasons = []
+        if bound_expired:
+            reasons.append("{} bound(s) expired: the checks behind each did not run, because either the host "
+                           "was too slow or the code under test hangs".format(len(bound_expired)))
+        if skipped:
+            reasons.append("{} required check(s) skipped, never evaluated on this platform: {}".format(
+                len(skipped), ", ".join(name for name, _why in skipped)))
+        print("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE ({}; the other {} checks passed)".format(
+            "; ".join(reasons), checked))
         return 2
     print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
           "init-store, the registration ops, enable-hook and the finish ops)".format(checked))
+    return 0
+
+
+# The self-test sections `--self-test-section NAME` runs alone, each a suite of _self_test_checks that builds
+# its own fixtures and takes only the check recorder.
+_SELF_TEST_SECTIONS = {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence}
+
+
+def _self_test_section(name):
+    """Run the one self-test section `name` and return its exit code: 1 when one of its checks failed, else
+    0. Only that section runs (no other section and no descriptor census), so the summary names the
+    section and never reports a pass of the module self-test."""
+    failures, failure_details, checked = [], {}, [0]
+
+    def check(check_name, cond, observed=None):
+        checked[0] += 1
+        if not cond:
+            failures.append(check_name)
+            if observed is not None:
+                failure_details[check_name] = observed
+
+    _SELF_TEST_SECTIONS[name](check)
+    if failures:
+        print("OPF-ADOPT-APPLY SELF-TEST SECTION {}: FAIL ({} of {} checks failed)".format(
+            name, len(failures), checked[0]))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+            if f in failure_details:
+                print("    observed: {}".format(failure_details[f]))
+        return 1
+    print("OPF-ADOPT-APPLY SELF-TEST SECTION {}: {} checks passed (only this section ran; not a result for "
+          "the whole module self-test, which --self-test runs)".format(name, checked[0]))
     return 0
 
 
@@ -13803,10 +15541,11 @@ def _skip_list_write_sites(tree):
     capture, a mapping-pattern rest, an import alias, an except-as target, a global or nonlocal
     declaration's name list) and the string wherever else it occurs (a keyword argument name, an
     attribute name, a string constant equal to `skipped`). Sanctioned, and so not foreign: the one
-    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, and `skipped` as
-    a for statement's iterable (the skip report's read). The skip report is honest only while nothing
-    erases, rebinds or hands off the list between a skip's recording and the report, and the executed
-    reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
+    initialisation, a statement-level skipped.append(...) or skipped.extend(...) call, `skipped` as a for
+    statement's iterable (the skip report's read), and `skipped` as the fifth and last positional argument
+    of a keyword-free _self_test_outcome call (the verdict's read). The skip report is honest only while
+    nothing erases, rebinds or hands off the list between a skip's recording and the report, and the
+    executed reporting slice (_sweep_report_source) never contains a statement naming only `skipped`, so any
     unsanctioned field carrying the string is refused HERE. Residual: an erasure that reaches the list
     object without the string `skipped` in any field (through another name already bound to the same
     object, or an indirect read of the frame's locals) is outside this reader's scope."""
@@ -13829,6 +15568,10 @@ def _skip_list_write_sites(tree):
                 elif (isinstance(sub, ast.For) and isinstance(sub.iter, ast.Name)
                         and sub.iter.id == "skipped"):
                     sanctioned.add(id(sub.iter))
+                elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "_self_test_outcome" and len(sub.args) == 5 and not sub.keywords
+                        and isinstance(sub.args[4], ast.Name) and sub.args[4].id == "skipped"):
+                    sanctioned.add(id(sub.args[4]))
             foreign = sorted(
                 "line {}: {}.{}".format(getattr(sub, "lineno", 0), type(sub).__name__, field)
                 for sub in ast.walk(node) if id(sub) not in sanctioned
@@ -14063,6 +15806,33 @@ def _class_sweep_bound_self_test(check):
           and said["clean"][0] == 0 and "SELF-TEST: PASS (41 " in said["clean"][1]
           and "BOUND EXPIRED" not in said["clean"][1],
           observed=repr(said))
+    # A required check this platform could not run is cannot-evaluate too: one skipped check alone is exit 2,
+    # naming it and never PASS; a failure beside it is still 1; a skip beside an expired bound is 2 naming
+    # both; an empty skip list is the clean 0. Red against a verdict that ignores the skip list (the
+    # descriptor-census skips printed as SKIPPED while the run exits 0).
+    skip_one = [("self-test-leaves-no-descriptor-open", _NO_CENSUS)]
+    skip_said = {}
+    for label, args in (("one", ([], {}, 41, [], skip_one)),
+                        ("two", ([], {}, 41, [], skip_one + [("x-census-check", _NO_CENSUS)])),
+                        ("fail", (["x"], {}, 41, [], skip_one)),
+                        ("bound", ([], {}, 40, ["class sweep child killed at its 3000s bound"], skip_one)),
+                        ("none", ([], {}, 41, [], []))):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = _self_test_outcome(*args)
+        skip_said[label] = (code, out.getvalue())
+    check("self-test-exit-skipped-check-cannot-evaluate",
+          skip_said["one"][0] == 2 and "CANNOT EVALUATE (1 required check(s) skipped" in skip_said["one"][1]
+          and "self-test-leaves-no-descriptor-open" in skip_said["one"][1]
+          and "PASS" not in skip_said["one"][1] and "FAIL" not in skip_said["one"][1]
+          and skip_said["two"][0] == 2 and "2 required check(s) skipped" in skip_said["two"][1]
+          and "self-test-leaves-no-descriptor-open, x-census-check" in skip_said["two"][1]
+          and skip_said["fail"][0] == 1 and "FAILED: x" in skip_said["fail"][1]
+          and skip_said["bound"][0] == 2 and bound_line in skip_said["bound"][1]
+          and "1 bound(s) expired" in skip_said["bound"][1]
+          and "1 required check(s) skipped" in skip_said["bound"][1]
+          and skip_said["none"][0] == 0 and "SELF-TEST: PASS (41 " in skip_said["none"][1],
+          observed=repr(skip_said))
     # The no-census skip roster: every census-only sweep check is named, each with the given reason, in
     # _CLASS_SWEEP_CHECKS order, then the parent comparison and the expiry probe, and nothing else.
     entries = _class_sweep_skip_entries("probe reason")
@@ -14110,14 +15880,14 @@ def _class_sweep_bound_self_test(check):
             "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
             "    else:\n"
             "        _class_sweep_record(check, bound_expired)\n"
-            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)\n")
+            "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)\n")
     wiring_probes = {}
     for label, text in (("good", good),
                         ("fresh-list", good.replace("_class_sweep_record(check, bound_expired)",
                                                     "_class_sweep_record(check, [])")),
                         ("other-list", good.replace(
-                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired)",
-                            "_self_test_outcome(failures, failure_details, checked[0], [])")),
+                            "_self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)",
+                            "_self_test_outcome(failures, failure_details, checked[0], [], skipped)")),
                         ("no-skips", good.replace(
                             "        skipped.extend(_class_sweep_skip_entries(no_census))",
                             "        pass"))):
@@ -14132,8 +15902,8 @@ def _class_sweep_bound_self_test(check):
     # The reporting, proved by RUNNING the real statements: the sweep-reporting slice of this module's
     # own _self_test_checks (_sweep_report_source) is executed with the sweep child controlled, asserting
     # the final exit code and the emitted entries. A controlled no-census run must put every sweep check
-    # into the skip report and still exit 0; a controlled expiry must exit 2 with the bound entry emitted
-    # and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
+    # into the skip report and exit 2, cannot evaluate, naming them; a controlled expiry must exit 2 with
+    # the bound entry emitted and no sweep check recorded; a controlled clean result must record all 13 checks and exit 0.
 
     def _slice_outcomes(module_text):
         slice_source = _sweep_report_source(ast.parse(module_text))
@@ -14160,9 +15930,16 @@ def _class_sweep_bound_self_test(check):
                 outcomes[label] = (code, list(skipped_list), recorded_calls, out.getvalue())
         return outcomes
     live_report = _slice_outcomes(source_text)
+    # The no-census verdict line itself names every skipped sweep check (not only the SKIPPED lines).
+    no_census_verdict = [] if live_report is None else [
+        line for line in live_report["no-census"][3].splitlines()
+        if line.startswith("OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (")]
     check("class-sweep-reporting-slice-reports-skips-and-expiry",
           live_report is not None
-          and live_report["no-census"][0] == 0
+          and live_report["no-census"][0] == 2
+          and "PASS" not in live_report["no-census"][3]
+          and len(no_census_verdict) == 1
+          and all(name in no_census_verdict[0] for name in names)
           and [entry[0] for entry in live_report["no-census"][1]] == names
           + ["class-sweep-child-leaves-this-process-descriptors-unchanged",
              "class-sweep-bound-expiry-attributed-to-the-bound"]
@@ -14181,14 +15958,21 @@ def _class_sweep_bound_self_test(check):
     # Negative controls: each reporting mutation, applied to this module's source, must change what the
     # executed slice reports. A bare call that drops the skip entries, an extend into a throwaway list,
     # and a rebinding of the expiry list to empty just before the verdict each keep the name-reading
-    # wiring check above green; the executed slice refuses all three.
+    # wiring check above green; the executed slice refuses all three. A verdict that no longer reads the
+    # skip list ("verdict-blind") keeps the skip report but lets a no-census run exit 0; the executed
+    # slice refuses it too.
     extend_stmt = "        skipped.extend(_class_sweep_skip_entries(no_census))"
-    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired)"
+    verdict_stmt = "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)"
+    # The verdict statement on a line of its own, so a mutation lands on the live statement and never inside
+    # a probe string above that quotes it; a live verdict without that exact form leaves the source
+    # unchanged, which the check below refuses.
+    verdict_line = "\n" + verdict_stmt + "\n"
     mutated = {
         "discard": source_text.replace(extend_stmt, "        _class_sweep_skip_entries(no_census)", 1),
         "throwaway": source_text.replace(
             extend_stmt, "        [].extend(_class_sweep_skip_entries(no_census))", 1),
-        "rebind": source_text.replace(verdict_stmt, "    bound_expired = []\n" + verdict_stmt, 1),
+        "rebind": source_text.replace(verdict_line, "\n    bound_expired = []" + verdict_line, 1),
+        "verdict-blind": source_text.replace(verdict_line, verdict_line.replace(", skipped)", ")"), 1),
     }
     mutant_reports = {label: _slice_outcomes(text) for label, text in mutated.items()}
     check("class-sweep-reporting-slice-refuses-dropped-skips-and-rebound-expiry",
@@ -14199,7 +15983,10 @@ def _class_sweep_bound_self_test(check):
           and "SKIPPED" not in mutant_reports["throwaway"]["no-census"][3]
           and mutant_reports["rebind"]["expiry"][0] == 0
           and "BOUND EXPIRED" not in mutant_reports["rebind"]["expiry"][3]
-          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3],
+          and "CANNOT EVALUATE" not in mutant_reports["rebind"]["expiry"][3]
+          and mutant_reports["verdict-blind"]["no-census"][0] == 0
+          and "  SKIPPED: " in mutant_reports["verdict-blind"]["no-census"][3]
+          and "CANNOT EVALUATE" not in mutant_reports["verdict-blind"]["no-census"][3],
           observed=repr({label: None if report is None else
                          (report["no-census"][0], len(report["no-census"][1]), report["expiry"][0])
                          for label, report in mutant_reports.items()}))
@@ -14219,7 +16006,8 @@ def _class_sweep_bound_self_test(check):
                   "        skipped.append((name, no_census))\n"
                   "        skipped.extend(_class_sweep_skip_entries(no_census))\n"
                   "    for name, why in skipped:\n"
-                  "        print(name, why)\n")
+                  "        print(name, why)\n"
+                  "    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)\n")
     report_loop = "    for name, why in skipped:"
     shape_probes = {}
     for label, inserted in (("good", None),
@@ -14240,7 +16028,11 @@ def _class_sweep_bound_self_test(check):
                              "    try:\n        pass\n"
                              "    except Exception as skipped:\n        pass\n"),
                             ("global-declared", "    global skipped\n"),
-                            ("keyword-named", "    _some_helper(skipped=[])\n")):
+                            ("keyword-named", "    _some_helper(skipped=[])\n"),
+                            ("verdict-keyword", "    _self_test_outcome(failures, failure_details, checked[0], "
+                             "bound_expired, skipped=skipped)\n"),
+                            ("verdict-other-slot", "    _self_test_outcome(skipped, failure_details, checked[0], "
+                             "bound_expired, [])\n")):
         text = shape_good if inserted is None else shape_good.replace(
             report_loop, inserted + report_loop, 1)
         shape_probes[label] = _skip_list_write_sites(ast.parse(text))
@@ -14255,7 +16047,8 @@ def _class_sweep_bound_self_test(check):
           and all(shape_probes[label][0] == 1 and shape_probes[label][1] != []
                   for label in ("cleared", "slice-assigned", "deleted", "handed-off", "popped",
                                 "match-captured", "star-captured", "mapping-rest", "import-aliased",
-                                "except-bound", "global-declared", "keyword-named"))
+                                "except-bound", "global-declared", "keyword-named", "verdict-keyword",
+                                "verdict-other-slot"))
           and cleared_live is not None and cleared_live[0] == 1 and cleared_live[1] != []
           and captured_live is not None and captured_live[0] == 1 and captured_live[1] != []
           and _skip_list_write_sites(ast.parse("def other():\n    skipped = []\n")) is None,
@@ -15041,11 +16834,21 @@ def _init_store_self_test(check):
     # Fail-closed sources-row validation (round 2): a malformed consumed field never reads as
     # non-occupying, never freezes a source, and never authorizes a control-area copy; the
     # planner's own _validate_plan_sources is the ONE validator for these fields.
+    # Test-hermeticity: with an admitted file the pre-check refuses a group- or world-writable
+    # `.working`, so the fixture sets it to EXACTLY 0755 rather than leaving it at the ambient umask
+    # (0775 under umask 002), which would refuse on that mode instead of the row under test. The
+    # fixture is built under a pinned umask 002 (restored in the finally), so a dropped mode pin
+    # fails under every ambient umask, never only under a group-writable one.
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         rel = store.WORKING_DIRNAME + "/notes.md"
-        (root / store.WORKING_DIRNAME).mkdir()
-        (root / rel).write_bytes(b"adopter notes\n")
+        saved_umask = os.umask(0o002)
+        try:
+            (root / store.WORKING_DIRNAME).mkdir()
+            os.chmod(root / store.WORKING_DIRNAME, 0o755)
+            (root / rel).write_bytes(b"adopter notes\n")
+        finally:
+            os.umask(saved_umask)
         digest = "sha256:" + _sha256(b"adopter notes\n")
         run = "adopt-20260917T120000Z-0123456789abcdef"
         rfd = _open_product_root(root)
@@ -15068,10 +16871,18 @@ def _init_store_self_test(check):
                               preservation=store.ARCHIVE_REL + "/adoption/other/x.md")
             check("init-store-wrong-preservation-home-refused-fail-closed",
                   "validated fail-closed" in (admitted_err([wrong_home]) or ""))
+            # A refusal of the valid row is this check's named failure, never an exception that
+            # ends the whole run as a harness error with every later check unreported.
             good = dict(path=rel, digest=digest, disposition="keep", occupying=False)
-            adm, adirs = _init_store_admitted(rfd, root, dict(run_id=run, sources=[good]))
+            adm, adirs, why = (), (), None
+            try:
+                adm, adirs = _init_store_admitted(rfd, root, dict(run_id=run, sources=[good]))
+            except AdoptApplyError as exc:
+                why = str(exc)
             check("init-store-valid-row-still-admits",
-                  [e["path"] for e in adm] == [rel] and adirs == ())
+                  why is None and [e["path"] for e in adm] == [rel] and adirs == (),
+                  observed="refusal={!r} admitted={!r} dirs={!r}".format(
+                      why, [e["path"] for e in adm], adirs))
         finally:
             store._close_fd_exc_safe(rfd)
 
@@ -15603,14 +17414,16 @@ def _init_store_git_checks(check, ctx, refused):
             check("init-store-foreign-{}-preserved-not-reversed".format(target),
                   refused(res, "foreign") and foreign_kept()
                   and txn_state(root, run) == "open")
-            rec_err = None
+            rec_err = rec_finding = None
             try:
                 reconcile(root)
             except AdoptApplyError as exc:
-                rec_err = str(exc)
+                rec_err, rec_finding = str(exc), getattr(exc, "finding", None)
             check("init-store-reconcile-preserves-foreign-{}".format(target),
                   rec_err is not None and "preserved" in rec_err and foreign_kept()
                   and txn_state(root, run) == "open")
+            check("init-store-reconcile-foreign-{}-finding-named".format(target),
+                  rec_finding == RECONCILE_REVERSAL_UNPROVEN)
 
         # THE FOREIGN-VIEW BINDING (codex round 3, finding 1): a row that binds the deferred
         # TODO.md view digest to FOREIGN bytes never authorizes their removal -- the reversal
@@ -15765,9 +17578,11 @@ def _init_store_git_checks(check, ctx, refused):
                        disposition="retire", occupying=True,
                        preservation=archive_rel(run, manifest_rel))
         os.chmod(os.path.join(root, machine_dir), 0o775)
+        # Each pre-intent refusal is judged per check by the run's init-store transaction holding no
+        # INTENT: op_ids alone is empty after a post-intent substrate reversal too.
         check("init-store-wrong-mode-admitted-dir-refused-pre-intent",
               refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])), "holds mode")
-              and op_ids(root) == [])
+              and op_ids(root) == [] and txn_state(root, run) == "nothing-opened")
         # THE FULL-S_IMODE PRE-CHECK (codex round 4, finding 2): a setgid 02755 machine
         # directory is NOT the planned 0755 under the same full stat.S_IMODE comparison the
         # substrate makes, so it refuses BEFORE the intent too (observe_inventory's 0o777 mask
@@ -15775,7 +17590,7 @@ def _init_store_git_checks(check, ctx, refused):
         os.chmod(os.path.join(root, machine_dir), 0o2755)
         check("init-store-setgid-admitted-dir-refused-pre-intent",
               refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])), "holds mode 2755")
-              and op_ids(root) == [])
+              and op_ids(root) == [] and txn_state(root, run) == "nothing-opened")
         os.chmod(os.path.join(root, machine_dir), 0o755)
         res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
         check("init-store-unburnt-run-id-reruns-after-mode-fix", res.status == valid
@@ -15802,11 +17617,35 @@ def _init_store_git_checks(check, ctx, refused):
             os.chmod(os.path.join(root, store.WORKING_DIRNAME), wmode)
             check("init-store-working-mode-{:o}-refused-pre-intent".format(wmode),
                   refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])), why)
-                  and op_ids(root) == [])
+                  and op_ids(root) == [] and txn_state(root, run) == "nothing-opened")
         os.chmod(os.path.join(root, store.WORKING_DIRNAME), 0o755)
         res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
         check("init-store-working-unburnt-run-id-reruns-after-mode-fix", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED)
+
+        # THE SAME `.working` PRE-CHECK WITH NO MACHINE DIRECTORY: admitted files (a frozen source
+        # dispositioned in place) and no machine directory still pre-check `.working`'s mode before
+        # the run's intent opens, since the substrate checks it on admitted files alone; each wrong
+        # mode refuses with no INTENT and the SAME run id then publishes (red against a pre-check
+        # reached only beside an admitted machine directory: the substrate refuses after the intent,
+        # the scaffold is reversed and the run id burnt).
+        root = init_op._plain_repo(os.path.join(base, "wmodenomachine"), env)
+        notes_bytes = b"adopter notes" + b"\x0a"
+        plant(root, os.path.join(store.WORKING_DIRNAME, "notes.md"), notes_bytes)
+        notes_row = dict(path=".working/notes.md", digest="sha256:" + _sha256(notes_bytes),
+                         disposition="keep", occupying=False)
+        run = rid()
+        for wmode, why in ((0o2755, "holds mode 2755"), (0o1755, "holds mode 1755"),
+                           (0o775, "group- or world-writable")):
+            os.chmod(os.path.join(root, store.WORKING_DIRNAME), wmode)
+            check("init-store-working-mode-{:o}-no-machine-dir-refused-pre-intent".format(wmode),
+                  not os.path.lexists(os.path.join(root, machine_dir))
+                  and refused(dispatch(row, ctx(root, run_id=run, sources=[notes_row])), why)
+                  and op_ids(root) == [] and txn_state(root, run) == "nothing-opened")
+        os.chmod(os.path.join(root, store.WORKING_DIRNAME), 0o755)
+        res = dispatch(row, ctx(root, run_id=run, sources=[notes_row]))
+        check("init-store-working-no-machine-dir-unburnt-run-id-reruns", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED and txn_state(root, run) == "complete")
 
         # THE PRIOR REVERSED RUN'S COMMITTED ARTEFACTS (claude round 4, F1; the orchestrator
         # ruling): spec 14.1 keeps the reversed run id burnt, and a FRESH run continues the
@@ -15874,6 +17713,55 @@ def _init_store_git_checks(check, ctx, refused):
               and live_digest(root, moved_rel) == "sha256:" + _sha256(moved_bytes)
               and live_digest(root, archive_rel(r1, manifest_rel)) == occ_digest
               and live_digest(root, manifest_rel) == scaffold[manifest_rel])
+
+        # THE RETAINED-EVIDENCE DOMAIN CONJUNCT of _init_store_prior_run_paths, defence in depth: the
+        # inventory validator already confines a listed path to the same domains, so the conjunct is
+        # redundant today and only a widened listing reaches it. A proven prior run's listing widened by
+        # one .working path outside every retained-evidence domain, which a COMPLETE transaction of
+        # this journal is made to have created at the listed digest, keeps the WHOLE prior bundle
+        # foreign and admits no machine directory, while the same run's genuine listing is admitted
+        # (red against the conjunct mutated to True: the widened listing is admitted, stray included).
+        root = init_op._plain_repo(os.path.join(base, "priordomain"), env)
+        plant(root, manifest_rel, occ_bytes)
+        r1 = rid()
+        run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(r1, manifest_rel))
+        reversed_r1 = refused(dispatch(dict(row, members=wrongv),
+                                       ctx(root, run_id=r1, sources=[occ_row])),
+                              "restoring NOT-ADOPTED")
+        stray_rel, stray_hex = store.WORKING_DIRNAME + "/stray.md", "d" * 64
+        real_listed, real_ops = _init_store_bundle_listed, _init_store_prior_committed_ops
+
+        def widened_listed(root_fd_, model_, run_id_):
+            return dict(real_listed(root_fd_, model_, run_id_), **{stray_rel: "sha256:" + stray_hex})
+
+        def widened_ops(jr_fd_, journal_root_, prior_):
+            creates, archivals = real_ops(jr_fd_, journal_root_, prior_)
+            return dict(creates, **{stray_rel: stray_hex}), archivals
+
+        def prior_paths(fresh):
+            root_fd = _open_product_root(root)
+            try:
+                jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+                try:
+                    model, _present = init_op.observe_inventory(root_fd)
+                    return _init_store_prior_run_paths(root_fd, fresh, model, machine_dir, jr_fd,
+                                                       _journal_root(root))
+                finally:
+                    _journal._close_fd_quietly(jr_fd)
+            finally:
+                store._close_fd_exc_safe(root_fd)
+
+        r2 = rid()
+        genuine = prior_paths(r2)
+        with mock.patch.dict(globals(), _init_store_bundle_listed=widened_listed,
+                             _init_store_prior_committed_ops=widened_ops):
+            widened = prior_paths(r2)
+        check("init-store-prior-out-of-domain-artefact-keeps-bundle-foreign",
+              reversed_r1 and archive_rel(r1, manifest_rel) in genuine[0] and genuine[1] is True
+              and stray_rel not in genuine[0] and widened == ({}, False),
+              observed=(sorted(genuine[0]), genuine[1], widened))
 
         # The negatives stay foreign and refuse with nothing written: a prior bundle that no
         # longer verifies (a tampered archive copy), and a prior archival that ROLLED BACK with
@@ -16153,7 +18041,11 @@ def _init_store_git_checks(check, ctx, refused):
         # The scrub's OWN lease branch is exercised by planting a leftover lease AFTER the
         # mutex acquisition: the oplock's recovery deletes a verified stale lease itself
         # (fsynced) during acquire, so the organic fixture never reaches the scrub's lease
-        # unlink and its fsync would otherwise go unpinned (claude round 5, N3).
+        # unlink and its fsync would otherwise go unpinned. paired()
+        # matches a removal by its parent directory, never by name: the machine-directory
+        # pair below proves that SOME unlink in the machine directory, where the planted
+        # lease lies, is immediately followed by that directory's fsync, not that the unlink
+        # was the lease's; every_paired proves each removal's own parent fsync.
         import _opf_oplock
         real_acquire = _opf_oplock.acquire_init_operation
 
@@ -16172,7 +18064,7 @@ def _init_store_git_checks(check, ctx, refused):
               rc1 != 0 and head is not None
               and every_paired(head)                        # EVERY removal, lease included
               and paired(seq, "unlink", root_id)            # the staging leftover
-              and paired(seq, "unlink", machine_id)         # the planted leftover lease
+              and paired(seq, "unlink", machine_id)         # an unlink in the lease's directory
               and paired(seq, "rmdir", working_id)          # the created machine directory
               and paired(seq, "rmdir", root_id))            # the created .working
         res = dispatch(row, ctx(root, run_id=rid(), recover=True))
@@ -16196,6 +18088,168 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-scrub-restart-recovers", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED
               and stage_leftovers(root) == [] and len(op_ids(root)) == 1)
+
+
+def _replace_vacated_self_test(check):
+    """ApplyOps.replace_vacated over the shell's own throwaway fixture (_st_fixture, where no store
+    resolves): a path this transaction archived and vacated (archive_occupying) is taken over by ONE write
+    pinned to the archived bytes, in place of its pending removal. The takeover commits, a path never
+    vacated and a second takeover of one path refuse, a bare archival keeps its op list (copy, then pinned
+    removal), a fork's takeover leaves the caller's state untouched, and an interruption after the write
+    landed leaves an open transaction the explicit reconcile rolls back byte-exact."""
+    import tempfile
+    from unittest import mock
+    now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    rid = mint_run_id(now, "0123456789abcdef")
+    todo, taken = ".working/TODO.md", b"rendered over the vacated path\n"
+    todo_copy = archive_rel(rid, todo)
+
+    class _Interrupt(Exception):
+        pass
+
+    def digest(payload):
+        return "sha256:" + _sha256(payload)
+
+    def snapshot(root):
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob("*"))
+                if p.is_file() and not p.is_symlink() and not str(p.relative_to(root)).startswith(".aiqt/")}
+
+    def state(ops):
+        return [dict(op) for op in ops.ops], dict(ops.staged), set(ops._dirs), ops.sealed, dict(ops.vacated)
+
+    def attempt(fn, *args):
+        """(result, None), or (None, refusal text); a raw escape fails the vector, never the harness."""
+        try:
+            return fn(*args), None
+        except AdoptApplyError as exc:
+            return None, str(exc)
+        except Exception as exc:  # noqa: BLE001  a raw escape fails this vector, never the harness
+            return None, "raw {}: {}".format(type(exc).__name__, exc)
+
+    def bare(root, compose):
+        """(refusal text, composed ops, staged bytes, vacated map) of `compose` over a bare ApplyOps."""
+        root_fd = _open_product_root(root)
+        try:
+            ops = ApplyOps(root_fd, rid)
+            why = attempt(compose, ops)[1]
+            return why, [dict(op) for op in ops.ops], dict(ops.staged), dict(ops.vacated)
+        finally:
+            store._close_fd_exc_safe(root_fd)
+
+    def kinds(ops_list):
+        return [(op["op"], op["path"]) for op in ops_list if op["op"] != "mkdir"]
+
+    # the takeover commits through the shell: the archive copy holds the source's bytes, the path holds the
+    # new bytes, and the one op at the path is the write, after the copy, pinned to the archived digest.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        seen = []
+
+        def take_over(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            ops.replace_vacated(todo, taken)
+            seen.append(state(ops))
+        txn, why = attempt(_st_run_adopt_transaction, root, rid, take_over)
+        after = snapshot(root)
+        composed = seen[0] if seen else ([], {}, set(), False, {})
+        pins = [op.get("source-poststate", {}).get("sha256") for op in composed[0] if op["path"] == todo]
+        check("apply-replace-vacated-write-commits",
+              txn == rid and after.get(todo) == taken and after.get(todo_copy) == files[todo]
+              and kinds(composed[0]) == [("create", plan_rel(rid)), ("create", todo_copy), ("write", todo)]
+              and pins == [_sha256(files[todo])] and composed[1].get(todo) == taken and composed[4] == {}
+              and verify_bundle(root, rid).status == store.VALID, observed=why)
+
+    # a path this transaction never vacated (a live source no archival composed), and a second takeover of a
+    # vacated path, each refuse by the takeover's own rule, the first with nothing composed.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        before = snapshot(root)
+        why, composed, staged, vacated = bare(root, lambda ops: ops.replace_vacated("legacy/RULES.md", taken))
+        check("apply-replace-vacated-unvacated-refused",
+              "replace_vacated needs" in (why or "") and composed == [] and staged == {} and vacated == {}
+              and snapshot(root) == before, observed=why)
+
+        def twice(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            ops.replace_vacated(todo, taken)
+            ops.replace_vacated(todo, b"a second takeover\n")
+        why, composed, staged, vacated = bare(root, twice)
+        check("apply-replace-vacated-twice-refused",
+              "replace_vacated needs" in (why or "") and staged.get(todo) == taken and vacated == {}
+              and kinds(composed) == [("create", todo_copy), ("write", todo)] and snapshot(root) == before,
+              observed=why)
+
+    # a bare archival is unchanged by the takeover's bookkeeping: copy, then the pinned removal, which the
+    # vacated map names by identity, and the source is gone once the transaction commits.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        seen = []
+
+        def archive_only(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            seen.append((state(ops), ops.vacated.get(todo) is ops.ops[-1]))
+        txn, why = attempt(_st_run_adopt_transaction, root, rid, archive_only)
+        after = snapshot(root)
+        composed, same = seen[0] if seen else (([], {}, set(), False, {}), False)
+        check("apply-unreplaced-vacated-still-removed",
+              txn == rid and kinds(composed[0]) == [("create", plan_rel(rid)), ("create", todo_copy),
+                                                    ("remove", todo)]
+              and same and list(composed[4]) == [todo] and todo not in after
+              and after.get(todo_copy) == files[todo], observed=why)
+
+    # a takeover composed in a fork leaves the caller's ops, staged bytes, directories, seal and vacated map
+    # exactly as they were, the caller's removal table included (it is replaced in the fork's list, never
+    # edited), while the fork holds the write; the fork is then discarded.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        seen = []
+
+        def forked(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            removal, entry = ops.ops[-1], state(ops)
+            work = ops._fork()
+            work.replace_vacated(todo, taken)
+            seen.append((entry == state(ops) and ops.ops[-1] is removal and ops.vacated.get(todo) is removal,
+                         kinds(work.ops), dict(work.vacated)))
+        why = bare(root, forked)[0]
+        isolated, fork_ops, fork_vacated = seen[0] if seen else (False, [], None)
+        check("apply-replace-vacated-fork-isolated",
+              why is None and isolated and fork_ops == [("create", todo_copy), ("write", todo)]
+              and fork_vacated == {}, observed=why)
+
+    # an interruption after the takeover's write landed (the journal's kill-point seam) leaves an open
+    # transaction, which reconcile(), working from the journal alone, rolls back to the byte-identical source.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = _st_fixture(temp)
+        before = snapshot(root)
+
+        def take_over_only(ops):
+            ops.archive_occupying(todo, digest(files[todo]))
+            ops.replace_vacated(todo, taken)
+
+        def written(name):
+            live = root / todo
+            if name.startswith("after-apply-") and live.is_file() and live.read_bytes() == taken:
+                raise _Interrupt(name)
+        interrupted, why, left = False, None, None
+        with mock.patch.object(_journal, "_kill_point", written):
+            try:
+                _st_run_adopt_transaction(root, rid, take_over_only)
+            except _Interrupt:
+                interrupted = True
+            except AdoptApplyError as exc:
+                why = str(exc)
+        if interrupted:
+            jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+            try:
+                left = _journal.classify_state(jr_fd, _journal_root(root) / rid)
+            finally:
+                _journal._close_fd_quietly(jr_fd)
+        with mock.patch.object(store, "resolve_store", side_effect=AssertionError("reconcile resolved")):
+            outcomes = attempt(reconcile, root)[0] or []
+        check("apply-replace-vacated-kill-reconciles",
+              interrupted and left == "open" and (rid, "rolled-back") in outcomes and snapshot(root) == before
+              and _st_lock_free(root), observed=why)
 
 
 def _finish_ops_self_test(check):
@@ -16260,7 +18314,7 @@ def _finish_ops_self_test(check):
     # The release: one governance member, its frozen pack inventory (a manifest in the shipped grammar whose
     # TREE recomputes from its source rows) and the agreed ROOT the plan binds and root.txt reports.
     member = b"# Governance adapter\nRecords are written through opf record, never by hand.\n"
-    source = "governance/AGENTS.md"
+    source = schema.pack_source("AGENTS.md")
 
     def manifest_bytes(data, tree=None):
         rows = [dict(path=source, bytes=len(data), sha256=_sha256(data))]
@@ -16438,7 +18492,38 @@ def _finish_ops_self_test(check):
     refuses_untouched("plant-unbound-content-digest-refused",
                       [dict(plant, content_digest="sha256:" + "7" * 64)], "not the content_digest")
     refuses_untouched("plant-unknown-source-member-refused",
-                      [dict(plant, source_member="governance/OTHER.md")], "not a source row")
+                      [dict(plant, path="docs/AGENTS.md", source_member="governance/OTHER.md")], "not a source row")
+    # the pack-source binding re-proved IN the handler (OP_HANDLERS is public, and dispatch checks one row,
+    # never the plan's bindings): over a release that also lists another member, a row planting that member's
+    # verified bytes at AGENTS.md, whose only pack source is the codex instructions, refuses with nothing
+    # written; without the re-check the trust gate passes and the foreign member lands at AGENTS.md.
+    foreign_rel, foreign = schema.HOOK_MEMBER, b"# not the codex instructions\n"
+
+    def two_member_manifest():
+        rows, q = sorted([(source, member), (foreign_rel, foreign)]), chr(34)
+        tree = pack_manifest.compute_tree([dict(path=p, bytes=len(d), sha256=_sha256(d)) for p, d in rows])
+        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q, "genesis = true",
+                 "tree-sha256 = " + q + tree + q]
+        for p, d in rows:
+            lines += ["", "[[sources]]", "path = " + q + p + q, "bytes = " + str(len(d)),
+                      "sha256 = " + q + _sha256(d) + q]
+        for p, d in rows:
+            lines += ["", "[[artifacts]]", "artifact-id = " + q + "file:" + p + q, "path = " + q + p + q,
+                      "kind = " + q + "file" + q, "sha256 = " + q + _sha256(d) + q]
+        return ("\n".join(lines) + "\n").encode("utf-8")
+    two = two_member_manifest()
+    plan_two, pack_two = release(two)
+    pack_two["members"] = dict([(source, member), (foreign_rel, foreign)])
+    check("finish-fixture-two-member-manifest-valid", pack_manifest.parse_manifest(two)[1].status == valid)
+    refuses_untouched("op-plant-governance-pack-source-refused",
+                      [dict(plant, source_member=foreign_rel, content_digest="sha256:" + _sha256(foreign))],
+                      "the only pack source planted at 'AGENTS.md'", plan=plan_two, pack=pack_two)
+    # counter-vector: the same release plants the destination's own source there
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
+        root = Path(temp).resolve()
+        txn, why = run(root, [plant], **dict(ctx, plan=plan_two, pack=pack_two))
+        check("plant-governance-own-pack-source-commits", txn == rid and why is None
+              and snapshot(root).get("AGENTS.md") == member)
     refuses_untouched("plant-store-tree-path-refused", [dict(plant, path=".working/AGENTS.md")], "store tree")
     # the approved release identity reconciles with the digest-agreed pack manifest: a plan naming
     # another version over the same agreed bytes is contradictory and refuses, nothing written.
@@ -16604,6 +18689,80 @@ def _finish_ops_self_test(check):
               txn is None and "are occupied; adopter content is never absorbed" in (why or "")
               and (root / views[0]).read_bytes() == adopter and snapshot(root) == before)
 
+        # the spec 14.2 takeover: the same adopter file, enumerated by the plan as an OCCUPYING source and
+        # archived earlier in the SAME transaction (ApplyOps.archive_occupying, as the preservation pass or a
+        # file op composes it before this row), is rendered through ONE write pinned to the archived bytes in
+        # place of the source's pending removal: one op per path, after the verified archive copy. The view
+        # keeps the source's mode bits (a journal write installs bytes only), the disclosed residual, pinned.
+        def vacated_plan(occupying=True):
+            return seal(dict(plan, sources=[dict(path=views[0], digest="sha256:" + _sha256(adopter),
+                                                 disposition="retire", occupying=occupying,
+                                                 preservation=archive_rel(rid, views[0]))]))
+
+        def takeover(name, vplan, archive=True, patch=None):
+            """(root, prestate, transaction name, refusal text, composed ops) of one base transaction over an
+            adopter file at views[0] (mode 0640): stage `vplan`, archive that file when `archive`, render."""
+            root = built_store(temp, name)
+            (root / views[0]).write_bytes(adopter)
+            os.chmod(root / views[0], 0o640)
+            before, seen = snapshot(root), []
+
+            def compose(ops):
+                ops.create(plan_rel(rid), emit_checked(vplan).encode("utf-8"))
+                if archive:
+                    ops.archive_occupying(views[0], "sha256:" + _sha256(adopter))
+                composer([row], **rctx(root, plan=vplan))(ops)
+                seen.append([dict(op) for op in ops.ops])
+            with lease_stand_in(), (patch or contextlib.nullcontext()):
+                try:
+                    txn, why = run_adopt_transaction(root, rid, compose, None, vplan["plan_digest"]), None
+                except AdoptApplyError as exc:
+                    txn, why = None, str(exc)
+            return root, before, txn, why, (seen[0] if seen else [])
+
+        vplan, copy_rel = vacated_plan(), archive_rel(rid, views[0])
+        root, before, txn, why, composed = takeover("vacated", vplan)
+        after = snapshot(root)
+        at = [i for i, op in enumerate(composed) if op["path"] == views[0]]
+        copied = [i for i, op in enumerate(composed) if op["op"] == "create" and op["path"] == copy_rel]
+        write = composed[at[0]] if len(at) == 1 else {}
+        check("render-views-vacated-destination-rendered",
+              txn == rid and why is None and all(after.get(v) == rendered.get(v) for v in views)
+              and after.get(copy_rel) == adopter and write.get("op") == "write" and len(copied) == 1
+              and copied[0] < at[0] and write.get("source-poststate", {}).get("sha256") == _sha256(adopter)
+              and "mode" not in write.get("poststate", {}) and verify_bundle(root, rid).status == valid
+              and set(after) - set(before) == (set(views) - {views[0]}) | {plan_rel(rid), inventory_rel(rid),
+                                                                          copy_rel}, observed=why)
+        check("render-views-vacated-view-keeps-source-mode",
+              txn == rid and stat.S_IMODE(os.stat(root / views[0]).st_mode) == 0o640)
+        # an injected failure at the final op rolls the takeover back: the journal's inverse of the write
+        # restores the source's bytes (and the archive copy's create is undone), the exact prestate.
+        abort = mock.patch.object(_journal, "_verify_staged_digest", failing_inventory)
+        root, before, txn, why, _composed = takeover("vacated-abort", vplan, patch=abort)
+        check("render-views-vacated-abort-restores-source",
+              txn is None and "rolled back" in (why or "") and snapshot(root) == before
+              and (root / views[0]).read_bytes() == adopter
+              and stat.S_IMODE(os.stat(root / views[0]).st_mode) == 0o640, observed=why)
+        # no archival in this transaction, though the plan enumerates the occupying source: refused, untouched.
+        root, before, txn, why, _composed = takeover("vacated-unarchived", vplan, archive=False)
+        check("render-views-occupied-without-archive-refused",
+              txn is None and "are occupied; adopter content is never absorbed" in (why or "")
+              and snapshot(root) == before, observed=why)
+        # archived, but the plan's source row is not occupying: the vacated test is bound to the plan too.
+        root, before, txn, why, _composed = takeover("vacated-unplanned", vacated_plan(occupying=False))
+        check("render-views-vacated-unplanned-source-refused",
+              txn is None and "are occupied; adopter content is never absorbed" in (why or "")
+              and snapshot(root) == before, observed=why)
+        # the takeover, its inherited mode, the spec 14.2 reading and the driver's reach are disclosed where
+        # a reader of the handler, the module and the op roster looks.
+        rv_doc = _render_views.__doc__ or ""
+        rv_note = schema.ADOPT_OPS_BY_NAME["render-views"].preconditions[0]
+        check("render-views-preserve-then-render-disclosed",
+              "replace_vacated" in rv_doc and "replace_vacated" in (_this.__doc__ or "")
+              and all(word in rv_doc for word in ("mode bits", "_DRIVER_UNSUPPLIED",
+                                                  "removed from the live path"))
+              and "takes over" in rv_note and "not yet exercised" not in rv_note)
+
         def refuses_uncomposed(label, name, needle, rrow=row, changelog=True, **changes):
             root = built_store(temp, name, changelog)
             before = snapshot(root)
@@ -16698,10 +18857,16 @@ def main():
         return _init_store_child_main(args[1:])
     if args[:1] == ["--selftest-class-sweep-child"]:
         return _class_sweep_child_main(args[1:])
+    if args[:1] == ["--self-test-section"]:
+        if len(args) == 2:
+            return self_test(section=args[1])
+        print("usage: _opf_adopt_apply.py --self-test-section NAME (one of: {})".format(
+            ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+        return 2
     if "--self-test" in args or "--selftest" in args:
         return self_test()
-    print("usage: _opf_adopt_apply.py --self-test (a library module; the adoption verb is `opf adopt`)",
-          file=sys.stderr)
+    print("usage: _opf_adopt_apply.py --self-test | --self-test-section NAME (a library module; the adoption "
+          "verb is `opf adopt`)", file=sys.stderr)
     return 2
 
 

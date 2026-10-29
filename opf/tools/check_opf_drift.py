@@ -164,6 +164,7 @@ def _self_test_isolated():
     # Reuse the U4 engine's helpers to build a render-clean synthetic store (the U4 fixture idiom).
     import _opf_store  # noqa: E402
     import _opf_views  # noqa: E402
+    import _opf_init  # noqa: E402  the production [opf] base declaration
 
     def _classify(body):
         """Run a self-test `body` (a no-arg callable that returns its list of assertion failures and raises
@@ -194,14 +195,11 @@ def _self_test_isolated():
         views_block = "".join(
             _opf_views._view(name, kind, list(sources))
             for name, (kind, sources, _renderer) in _opf_views.NAMED_VIEWS.items())
+        # The [opf] base table comes from the production builder, so the fixture follows the tooling's
+        # constants rather than restating them.
         manifest = (
-            "[opf]\n"
-            'standard = "opf"\n'
-            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
-            'layout = "inline"\n'
-            'posture = "required"\n'
-            'import_status = "none"\n'
-            "\n"
+            _opf_init.base_table_text(_opf_init._manifest_model())
+            + "\n"
             "[store]\n"
             'sync_target = ""\n'
             "\n"

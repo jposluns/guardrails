@@ -11,6 +11,8 @@ drift-gated in CI; the hand-authored governance around the pointer block is huma
 
   gen_claude.py           regenerate .claude/RULES-INDEX.md and the CLAUDE.md pointer block
   gen_claude.py --check    exit 0 clean, 1 on drift (run gen_claude.py to regenerate), 2 on malformed corpus
+  gen_claude.py --self-test  build synthetic trees and assert drift is caught (exit 1) and a .claude/ symlinked
+                             outside the root fails closed (exit 2) without its index being read
 """
 import sys
 
@@ -29,7 +31,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402
 
@@ -146,9 +148,11 @@ def replace_block(text, inner):
     return text[:i] + BEGIN + "\n" + inner + "\n" + text[j:]
 
 
-def main():
-    check = "--check" in sys.argv[1:]
-    root = repo_root()
+def run(root, check):
+    """Reconcile .claude/RULES-INDEX.md and the CLAUDE.md pointer block under root. Exit 0 in sync, 1 on drift,
+    2 on a malformed corpus, a missing CLAUDE.md or missing markers, or a .claude/ that cannot be read as a
+    directory inside the repository. Parameterized on root so the self-test drives it against synthetic trees,
+    never the real repo."""
     src_dir = root / ".aiqt" / "core" / "rules"
     claude_md = root / "CLAUDE.md"
     index_md = root / INDEX_PATH
@@ -164,15 +168,100 @@ def main():
         print("error: {}".format(exc), file=sys.stderr)
         return 2
     drift = False
-    if reconcile(index_md, indexdoc, check):
+    if reconcile(index_md, indexdoc, check, root):
         print("drift: {}".format(INDEX_PATH))
         drift = True
-    if reconcile(claude_md, new_claude, check):
+    if reconcile(claude_md, new_claude, check, root):
         print("drift: CLAUDE.md")
         drift = True
     if drift:
         print("run tools/gen_claude.py to regenerate")
         return 1
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        return self_test_main()
+    return run(repo_root(), "--check" in args)
+
+
+# --- self-test ------------------------------------------------------------------------------------
+# Synthetic temp trees only, never the real tree: a two-rule corpus (the apex and one AIQT rule) and a
+# CLAUDE.md carrying the pointer markers. Vectors:
+#   1. the tree generates (exit 0) and re-checks clean (exit 0), and a hand-edited pointer block is drift
+#      (exit 1);
+#   2. a .claude/ symlinked outside the root fails closed (exit 2) in --check and write mode with the index
+#      there untouched and never read (it is not valid UTF-8 there, and each run prints the link refusal, not
+#      a read error); symlinked inside the root, it is read and the index rewritten.
+
+_SELFTEST_RULES = (
+    ("prjint1.md", "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n"
+                   "---\n\n# Project integrity\n\nA fixture rule.\n"),
+    ("ruleaa.md", "---\ncorpus-id: ruleaa1\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\n"
+                  "slug: fixture-rule\n---\n\n# A fixture rule\n\nA fixture rule.\n"),
+)
+
+
+def _write_tree(root):
+    """A synthetic tree with the corpus, CLAUDE.md and .claude/, for run(root, check)."""
+    rules = root / ".aiqt" / "core" / "rules"
+    rules.mkdir(parents=True)
+    for name, text in _SELFTEST_RULES:
+        (rules / name).write_text(text, encoding="utf-8")
+    (root / ".claude").mkdir()
+    (root / "CLAUDE.md").write_text("# Governance\n\n" + BEGIN + "\n" + END + "\n\nHand prose.\n",
+                                    encoding="utf-8")
+
+
+def self_test_main():
+    import io
+    import shutil
+    import tempfile
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def quiet(root, check):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            try:
+                return run(root, check)
+            except SystemExit as exc:  # reconcile's fail-closed path raises SystemExit(2)
+                return exc.code
+
+    failures = []
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-claude-selftest-"))
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        # 1. A well-formed tree generates and re-checks clean; a hand edit of the pointer block is drift.
+        good = tmp / "good"
+        _write_tree(good)
+        got = (quiet(good, False), quiet(good, True))
+        if got != (0, 0):
+            failures.append("well-formed tree expected generate and --check exit (0, 0), got {}".format(got))
+        claude_md = good / "CLAUDE.md"
+        claude_md.write_text(claude_md.read_text(encoding="utf-8").replace("AIQT rule index", "Hand-edited"),
+                             encoding="utf-8")
+        code = quiet(good, True)
+        if code != 1:
+            failures.append("a hand-edited pointer block expected --check exit 1 (drift), got {}".format(code))
+
+        # 2. .claude/ symlinked outside the root (index never read) and inside it (followed).
+        failures.extend(linked_dir_failures(tmp, "claude", _write_tree, run, ".claude", INDEX_PATH,
+                                            unread=lambda p: p.write_bytes(b"\xff\n")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("SELF-TEST PASS: a well-formed tree generates the index and the pointer block and re-checks clean; a "
+          "hand-edited pointer block is drift (exit 1); a .claude/ symlinked outside the root fails closed (exit 2) "
+          "with the index there untouched and never read, and one symlinked inside the root is read and rewritten.")
     return 0
 
 

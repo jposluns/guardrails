@@ -127,7 +127,11 @@ vector), with HEAD unmoved, while the same commit in a clone without the hook su
 not the working tree, is what is checked (a staged tamper with restored working-tree bytes is refused, an
 unstaged tamper does not block a clean staged change); `git commit PATH` and `git commit -a` are checked
 against the temporary index git names in GIT_INDEX_FILE; an unborn branch commits a clean store; and a
-dedicated sync target equal to the clone's remote stays VALID in the snapshot. Under a recording stub tool,
+dedicated sync target equal to the clone's remote stays VALID in the snapshot. Over a store made with opf
+init and committed, render --write output and an opf record write each commit through the hook, while a
+comment line appended to the manifest is refused by doctor's canonical-bytes finding and a new file under
+an applied adoption run's archive by its unregistered-path finding (the hook output must name each
+finding). Under a recording stub tool,
 run by hand: exact order and arguments (doctor --require-store, then render --check, over one snapshot root
 under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
 finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
@@ -288,6 +292,8 @@ def _self_test_isolated():
     import _opf_release   # noqa: E402  span coverage digests for the version ledger
     import _opf_changelog  # noqa: E402  freeze digests for the changelog gates
     import _opf_views     # noqa: E402  the U4 view planner (the drifted-view fixture populates through it)
+    import _opf_init      # noqa: E402  the production base declaration and imported-series documents
+    import _opf_schema    # noqa: E402  the imported counter-row prefix
 
     git = shutil.which("git")
     git = os.path.abspath(git) if git else None
@@ -349,10 +355,10 @@ def _self_test_isolated():
             ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
             ("autonomous_decision", "AD"), ("block", "BL"),
             ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
+        # The base declaration comes from the production builder (_opf_init._manifest_model), so the
+        # fixture follows the tooling's constants rather than restating them.
         return {
-            "opf": {"standard": "opf", "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
-                           "layout": "inline",
-                           "posture": "required", "import_status": "none"},
+            "opf": dict(_opf_init._manifest_model()["opf"]),
             "store": {"sync_target": ""},
             "types": types,
             "vendors": {"registered": []},
@@ -389,7 +395,7 @@ def _self_test_isolated():
                     {"covers": "1.1.0", "status": "published", "digest": _digs["1.1.0"]},
                     {"covers": "unreleased", "status": "working"}]}
 
-    def clean_machine(done_title="t"):
+    def handwritten_machine(done_title):
         return {
             "manifest.toml": base_manifest(),
             "counters.toml": counters(),
@@ -411,6 +417,16 @@ def _self_test_isolated():
                                                              "destination": "archive/2026/worklog.toml"}]},
             "archive/2026/worklog.toml": {"schema": 1, "entry": [wl(1), wl(2)]},
         }
+
+    def clean_machine(done_title="t"):
+        # The builders' imported-series documents for this manifest (spec 4.2/8.2): its empty imported
+        # leaves and zero imported counter rows, none while its imported series is inactive.
+        m = handwritten_machine(done_title)
+        m.update(_opf_init.imported_leaf_documents(m["manifest.toml"]))
+        m["counters.toml"]["counters"].update(
+            {_opf_schema.IMPORTED_PREFIX + ns: 0
+             for ns in _opf_init.imported_counter_namespaces(m["manifest.toml"]) or ()})
+        return m
 
     def _write_machine(root, machine):
         mdir = Path(root) / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
@@ -1201,7 +1217,7 @@ def _self_test_isolated():
                 env.update(extra)
             return env
 
-        def _run(args, cwd, extra=None):
+        def _run(args, cwd, extra=None, stdout=subprocess.DEVNULL):
             # Run a pack script under sh and return its exit status. A missing sh is a harness error.
             sh = shutil.which("sh")
             if sh is None:
@@ -1209,7 +1225,7 @@ def _self_test_isolated():
             argv = [os.path.abspath(sh)] + list(args)
             try:
                 proc = subprocess.run(argv, cwd=str(cwd), env=_env(extra),
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+                                      stdout=stdout, stderr=subprocess.DEVNULL, timeout=300)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OSError("could not run {} in {} ({})".format(args, cwd, exc))
             return proc.returncode
@@ -1578,22 +1594,38 @@ def _self_test_isolated():
                 finally:
                     os.chmod(str(unreg / ".git" / "worktrees"), 0o755)
                 expect("install-refuses-unreadable-worktree-registry", (rc, _stub(unreg)), (EXIT_ERROR, None))
+            # A worktree entry git cannot read as a git directory (its HEAD removed; its gitdir file still
+            # names the worktree) reads every key as unset, the core.hooksPath its config.worktree sets
+            # included: the install is refused (2), with no stub written, rather than taking it as unset.
+            broken = _fixture("install-broken-worktree-entry")
+            _git(broken, home, "config", "extensions.worktreeConfig", "true")
+            _git(broken, home, "worktree", "add", "-q", "-b", "side", str(base / "install broken worktree entry wt"))
+            _git(base / "install broken worktree entry wt", home, "config", "--worktree", "core.hooksPath",
+                 str(base / "elsewhere"))
+            broken_entries = os.listdir(str(broken / ".git" / "worktrees"))
+            if len(broken_entries) != 1:
+                raise OSError("the linked worktree entry of " + str(broken) + " could not be found")
+            os.remove(str(broken / ".git" / "worktrees" / broken_entries[0] / "HEAD"))
+            expect("install-refuses-unreadable-worktree-entry", (_install(broken), _stub(broken)), (EXIT_ERROR, None))
             # Something that arrives at the stub path between the last check and ln (a stand-in ln makes it
-            # arrive, then runs the real ln): a link to another repository's hooks directory, and a
-            # directory. Each is refused (2) and kept; nothing this run wrote is left in either repository.
+            # arrive, then runs the real ln): a link to another repository's hooks directory, a directory,
+            # and a regular file (a hook another process wrote; ln never replaces it). Each is refused (2) and
+            # kept; nothing this run wrote is left in either repository.
             real_ln = shutil.which("ln")
             real_mkdir = shutil.which("mkdir")
             if real_ln is None or real_mkdir is None:
                 raise OSError("ln or mkdir not found on PATH; the placement race vectors cannot be built")
             race_target = _fixture("install-race-target")
             (race_target / ".git" / "hooks").mkdir(exist_ok=True)
-            for kind in ("link", "dir"):
+            theirs = "#!/bin/sh\necho theirs\n"
+            for kind in ("link", "dir", "file"):
                 racer = _fixture("install-race-" + kind)
                 (racer / ".git" / "hooks").mkdir(exist_ok=True)
                 race_env = _path_without("ln", install_tools, "install-race-" + kind)
                 shim = Path(race_env["PATH"]) / "ln"
-                arrive = ('"$OPF_QA_REAL_LN" -s -- "$OPF_QA_TARGET" "$last" || exit 1\n' if kind == "link"
-                          else '"$OPF_QA_REAL_MKDIR" -- "$last" || exit 1\n')
+                arrive = {"link": '"$OPF_QA_REAL_LN" -s -- "$OPF_QA_TARGET" "$last" || exit 1\n',
+                          "dir": '"$OPF_QA_REAL_MKDIR" -- "$last" || exit 1\n',
+                          "file": 'printf "#!/bin/sh\\necho theirs\\n" > "$last" || exit 1\n'}[kind]
                 shim.write_text("#!/bin/sh\nfor last in \"$@\"; do :; done\n" + arrive
                                 + 'exec "$OPF_QA_REAL_LN" "$@"\n', encoding="utf-8")
                 os.chmod(str(shim), 0o755)
@@ -1601,8 +1633,13 @@ def _self_test_isolated():
                                 OPF_QA_TARGET=str(race_target / ".git" / "hooks"))
                 race_stub = racer / ".git" / "hooks" / "pre-commit"
                 rc = _install(racer, race_env)
-                kept = os.path.islink(str(race_stub)) if kind == "link" else (
-                    race_stub.is_dir() and not os.path.islink(str(race_stub)) and os.listdir(str(race_stub)) == [])
+                if kind == "link":
+                    kept = os.path.islink(str(race_stub))
+                elif kind == "dir":
+                    kept = race_stub.is_dir() and not os.path.islink(str(race_stub)) and os.listdir(str(race_stub)) == []
+                else:
+                    kept = (race_stub.is_file() and not os.path.islink(str(race_stub))
+                            and race_stub.read_text(encoding="utf-8") == theirs)
                 expect("install-placement-race-" + kind + "-leaves-nothing",
                        (rc, kept, sorted(n for n in os.listdir(str(racer / ".git" / "hooks")) if n.startswith(".opf-")),
                         [n for n in os.listdir(str(race_target / ".git" / "hooks"))
@@ -1797,15 +1834,17 @@ def _self_test_isolated():
             # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
             # installer runs the trap as soon as that command returns). After the ln or the final rmdir it
             # leaves no stub and no private directory and names nothing at either. After a mkdir, the trap
-            # runs before the directory is recorded as this run's, so that one empty directory is left and
-            # named (the disclosed instant).
+            # runs before the directory is recorded as this run's, so that empty directory is left and named
+            # (the disclosed instant); after the private mkdir in a run that made the hooks directory too,
+            # that hooks directory is left as well, holding it, and both are named.
             for label, tool, real, when in (("hooks-mkdir", "mkdir", real_mkdir, '[ "$1" = -- ]'),
                                             ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
+                                            ("private-mkdir-in-made-hooks", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("ln", "ln", real_ln, ":"),
                                             ("rmdir", "rmdir", real_rmdir, ":")):
                 after = _fixture("install-signal-after-" + label)
                 after_hooks = after / ".git" / "hooks"
-                if label == "hooks-mkdir":
+                if label in ("hooks-mkdir", "private-mkdir-in-made-hooks"):
                     if after_hooks.exists():
                         shutil.rmtree(str(after_hooks))
                 else:
@@ -1814,12 +1853,14 @@ def _self_test_isolated():
                     '"$OPF_QA_REAL_' + tool.upper() + '" "$@" || exit $?\n' + when
                     + ' && kill -TERM "$PPID"\nexit 0\n'))})
                 rc, lines, priv = _install_seen(after, after_env, "install-signal-after-" + label)
-                outcome = ("names-the-directory" if label.endswith("mkdir") else "leaves-nothing")
+                private = label.startswith("private-mkdir")
+                outcome = ("names-both-directories" if label == "private-mkdir-in-made-hooks"
+                           else "names-the-directory" if label.endswith("mkdir") else "leaves-nothing")
                 expect("install-signal-after-" + label + "-" + outcome,
                        (rc, _opf_names(after), lines[-1]),
-                       (EXIT_ERROR, [(priv, [])] if label == "private-mkdir" else [],
+                       (EXIT_ERROR, [(priv, [])] if private else [],
                         _seen("stopped by a signal", after, priv, "a directory",
-                              priv_kind="a directory" if label == "private-mkdir" else "nothing")))
+                              priv_kind="a directory" if private else "nothing")))
             # A mkdir that fails because a directory arrived after the check (the stand-in makes it, then runs
             # the real mkdir) leaves that directory and its contents alone and names it: the hooks directory,
             # and a private directory holding a file at the temporary stub's name.
@@ -1891,14 +1932,18 @@ def _self_test_isolated():
                                  if n.startswith(".opf-pre-commit-install.")] or ["missing"], True))
             # A hooks directory that cannot be searched when the rollback runs (the stand-in chmod makes it
             # so, then sends TERM) leaves the stub path and the private directory named as not known, not
-            # as nothing (unprivileged user only: root searches any directory).
+            # as nothing (unprivileged user only: root searches any directory). The stand-in is given the
+            # hooks directory by name, not derived from the path the installer passes it, so an installer
+            # that changes what it chmods still meets the unsearchable directory and fails this vector,
+            # never the harness.
             if hasattr(os, "geteuid") and os.geteuid() != 0:
                 blind = _fixture("install-signal-unsearchable-hooks")
                 blind_hooks = blind / ".git" / "hooks"
                 blind_hooks.mkdir(exist_ok=True)
                 blind_env = _shimmed("install-signal-unsearchable-hooks", {"chmod": (real_chmod, (
-                    '"$OPF_QA_REAL_CHMOD" "$@" || exit 1\n"$OPF_QA_REAL_CHMOD" 600 "${2%/*/*}" || exit 1\n'
+                    '"$OPF_QA_REAL_CHMOD" "$@" || exit 1\n"$OPF_QA_REAL_CHMOD" 600 "$OPF_QA_BLIND_HOOKS" || exit 1\n'
                     'kill -TERM "$PPID"\n'))})
+                blind_env["OPF_QA_BLIND_HOOKS"] = str(blind_hooks)
                 try:
                     rc, lines, priv = _install_seen(blind, blind_env, "install-signal-unsearchable-hooks")
                 finally:
@@ -1908,6 +1953,28 @@ def _self_test_isolated():
                        (rc, lines[-1]),
                        (EXIT_ERROR, _seen("stopped by a signal", blind, priv, "a directory", stub_kind=unknown,
                                           priv_kind=unknown)))
+
+            def _install_quiet(root, label):
+                # The installer with a standard output it cannot write: closed (the shell closes it, then
+                # execs the installer), or a pipe whose read end is closed before the installer starts.
+                if label == "closed":
+                    return _run(["-c", 'exec 1>&- && exec "$1" "$0"', str(root / rel / "install.sh"),
+                                 os.path.abspath(sh_path)], base)
+                r, w = os.pipe()
+                try:
+                    os.close(r)
+                    return _run([str(root / rel / "install.sh")], base, stdout=w)
+                finally:
+                    os.close(w)
+
+            # A standard output the closing message cannot reach does not change the status: the install and
+            # the already-installed rerun each exit 0 (not 1 for a closed one, nor a death by SIGPIPE).
+            for label in ("closed", "broken-pipe"):
+                quiet = _fixture("install-stdout-" + label)
+                first = _install_quiet(quiet, label)
+                ok = _stub_ok(quiet)
+                expect("install-stdout-" + label + "-exits-zero", (first, ok, _install_quiet(quiet, label)),
+                       (EXIT_OK, True, EXIT_OK))
             # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
             # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
             branchy = _fixture("branch-hooks")
@@ -1998,6 +2065,130 @@ def _self_test_isolated():
             (remote / "README.md").write_text("readme\n", encoding="utf-8")
             _git(remote, home, "add", "README.md")
             expect("commit-remote-sync-target-passes", _committed(remote), (EXIT_OK, True))
+            # The two direct writes completion check 5 probes (spec 14.1), over a store made the way an
+            # adopter makes one: opf init and a commit, then, with the hook installed, render --write and a
+            # sanctioned opf record, each committed through the hook. A comment line appended to the manifest
+            # (bytes every other check parses past) and a new file under an applied adoption run's archive
+            # are each refused by a named doctor finding over the snapshot, with HEAD unmoved.
+            tool = Path(__file__).resolve().parent / "opf.py"
+            manifest_rel = "{}/{}/manifest.toml".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+
+            def _opf_verb(root, *args):
+                # One opf.py verb over root, launched isolated (-I -B) under the fixture env; its exit status.
+                # opf init takes the shared init operation mutex, whose rev-parse strips every GIT_* variable,
+                # the fixture env's system-config pins included. The launch therefore runs inside the OPF git
+                # lifecycle: _env() carries its PATH, whose git wrapper reasserts those pins in the child, so
+                # the verb does not read the host's system configuration.
+                import _opf_oplock
+
+                def launch():
+                    return subprocess.run([sys.executable, "-I", "-B", str(tool)] + list(args)
+                                          + ["--root", str(root)], cwd=str(root), env=_env(),
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+
+                try:
+                    proc = _opf_oplock._st_with_git_lifecycle(launch)
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                    raise OSError("could not run opf {} in {} ({})".format(args[0], root, exc))
+                return proc.returncode
+
+            def _refused_by(root, finding):
+                # (refused, HEAD unchanged, the hook output names `finding`) for one commit attempt.
+                before = _head(root)
+                rc, text = _commit(root)
+                return rc != EXIT_OK, _head(root) == before, finding in text
+
+            def _applied_run(root):
+                # An applied adoption run as committed evidence: the real planner freezes the retirement of
+                # one file at the store location in a scratch tree, and the plan, its approval, the file's
+                # preimage under the run archive and the sealed inventory are written into root beside the
+                # frozen file (apply itself refuses while its receipt stage has not landed). Returns the run id;
+                # a fixture that cannot be built is a harness error.
+                import copy
+                import datetime
+                import _opf_adopt as schema
+                import _opf_adopt_apply as apply
+                import _opf_adopt_plan as planner
+                import _opf_init
+
+                def digest(blob):
+                    return "sha256:" + hashlib.sha256(blob).hexdigest()
+
+                old, data = ".working/OLD.md", b"old rules\n"
+                plan_root = base / "adopt-plan"
+                (plan_root / ".working").mkdir(parents=True)
+                (plan_root / old).write_bytes(data)
+                head = apply._selftest_git_commit(plan_root)
+                if head is None:
+                    raise OSError("the adoption plan fixture could not be committed")
+                try:
+                    manifest = _opf_init.build_manifest().encode("utf-8")
+                    views = sorted(v["target"] for v in _opf_init._manifest_model()["views"].values())
+                    bindings = dict(schema.canonical_plan_bindings(), revision=head)
+                    ops = [dict(op="init-store", store_root=".",
+                                members=[dict(path=manifest_rel, digest=digest(manifest))]),
+                           dict(op="render-views", store_root=".",
+                                members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views])]
+                    ops += schema.enforcement_install_ops(bindings["enforcement"])
+                    sheet = dict(sources=[old], targets=[schema.PACK_MIRROR_ROOT], product="opf",
+                                 decisions=[dict(path=old, disposition="retire", actor="fixture")], ops=ops,
+                                 bindings=bindings)
+                    obs = planner.investigate(plan_root, sources=sheet["sources"], targets=sheet["targets"])
+                    if obs.status != _opf_store.VALID:
+                        raise OSError("the observation is not VALID: {}".format(obs.findings))
+                    sheet["expected_observation_digest"] = _opf_store._parse_store_toml(
+                        "observation.toml", obs.observation)["observation_digest"]
+                    now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
+                    res = planner.plan(plan_root, now=now, run_nonce="0123456789abcdef", **copy.deepcopy(sheet))
+                    if res.status != _opf_store.VALID:
+                        raise OSError("the plan is not VALID: {}".format(res.findings))
+                    approval = apply.capture_approval(plan_root, res.plan, sheet, "adopter", now)
+                    plan = apply.frozen_plan(res.plan)
+                    rid = plan["run_id"]
+                    bundle = {apply.plan_rel(rid): res.plan, apply.approval_rel(rid): approval,
+                              apply.archive_rel(rid, old): data}
+                    bundle[apply.inventory_rel(rid)] = apply.emit_inventory(
+                        rid, [apply.inventory_row(path, blob) for path, blob in bundle.items()], None,
+                        plan["plan_digest"])
+                except Exception as exc:  # noqa: BLE001  any refusal while building the fixture is a harness error
+                    raise OSError("the applied adoption run fixture cannot be built ({!r})".format(exc))
+                bundle[old] = data
+                for path, blob in bundle.items():
+                    (root / path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / path).write_bytes(blob)
+                return rid
+
+            made = base / "opf-made"
+            made.mkdir()
+            shutil.copytree(str(pack), str(made / rel))
+            _git(made, home, "init")
+            expect("made-init", _opf_verb(made, "init"), EXIT_OK)
+            _git(made, home, "add", "-A")
+            _git(made, home, "commit", "-m", "init store")
+            expect("made-install", _install(made), EXIT_OK)
+            expect("made-render-write", _opf_verb(made, "render", "--write"), EXIT_OK)
+            _git(made, home, "add", "-A")
+            expect("commit-render-write-output-passes", _committed(made), (EXIT_OK, True))
+            expect("made-record", _opf_verb(made, "record", "worklog-append", "--kind", "added",
+                                            "--summary", "a fact", "--actor", "assistant:gate"), EXIT_OK)
+            _git(made, home, "add", "-A")
+            expect("commit-writer-output-passes", _committed(made), (EXIT_OK, True))
+            hand = (made / manifest_rel).read_text(encoding="utf-8") + "# a hand comment\n"
+            (made / manifest_rel).write_text(hand, encoding="utf-8")
+            _git(made, home, "add", manifest_rel)
+            expect("commit-manifest-comment-refused",
+                   _refused_by(made, "FINDING: C-CONTAINMENT: machine-store file '" + manifest_rel
+                               + "' is not in canonical emitted form"), (True, True, True))
+            _git(made, home, "reset", "-q", "--hard")
+            run_id = _applied_run(made)
+            _git(made, home, "add", "-A")
+            expect("commit-applied-run-passes", _committed(made), (EXIT_OK, True))
+            stray = ".working/archive/adoption/" + run_id + "/opf-wiring-probe.md"
+            (made / stray).write_text("probe\n", encoding="utf-8")
+            _git(made, home, "add", stray)
+            expect("commit-adoption-archive-file-refused",
+                   _refused_by(made, "FINDING: C-CONTAINMENT: unregistered path '" + stray + "'"),
+                   (True, True, True))
             # The stub fails closed when the working tree being committed has no pack hook (a branch that
             # predates the pack, say): the commit is refused rather than passing silently.
             nopack = _fixture("stub-no-pack")
@@ -2057,8 +2248,10 @@ def _self_test_isolated():
                 "CI stays the shared floor" in hook_text,
                 "is the floor that every change meets" in inst_text,
                 "CI is the shared floor" in inst_text,
-                "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text),
-                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True))
+                "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text,
+                "can leave that empty directory, and the hooks directory holding it when this run made that one"
+                in inst_text),
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True, True))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
@@ -2188,16 +2381,18 @@ def _self_test_isolated():
               "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
               "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
               "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
-              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, an "
+              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory, and the hooks directory holding it when this run made that too; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, a worktree entry git cannot read, a closed or broken stdout leaving a successful install at 0, an "
               "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
-              "configured trace2 target, read-back rollback, a partial write left nowhere, a link or "
-              "directory arriving at the stub path refused and kept with nothing left, a backslash kept in "
+              "configured trace2 target, read-back rollback, a partial write left nowhere, a link, "
+              "directory or regular file arriving at the stub path refused and kept with nothing left, a backslash kept in "
               "a refusal, "
               "branch-added hooks not run, "
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
-              "passes an unborn branch and a remote sync target; stubbed hook order, -I -B, read-only, "
+              "passes an unborn branch and a remote sync target; over an opf init store passes render "
+              "--write and opf record output and refuses, by named finding, a manifest comment line and "
+              "a new file in an applied adoption run's archive; stubbed hook order, -I -B, read-only, "
               "propagation, normalization, usage and snapshot cleanup; fail closed on an unreadable hooks "
               "directory, an environment-only hooksPath, git below 2.32, an unreadable environment, a "
               "missing dirname and a failed cleanup; the --no-verify history bypass CI misses is disclosed "

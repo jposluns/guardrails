@@ -1,6 +1,6 @@
 # OPFiles at a glance
 
-Date: 2026-10-03 (UTC). The two-minute version of the OPFiles standard; the full specification
+Date: 2026-10-24 (UTC). The two-minute version of the OPFiles standard; the full specification
 lives in OPF-SPEC.md beside this file.
 
 ## What it is
@@ -60,11 +60,15 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 ## Getting started
 
-1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "opf"` in its `[opf]` table, plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
-   exempt ledger listed above, not an index); specification
-   sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+1. Create `.working/toml/` by hand with `manifest.toml` declaring `standard = "opf"`,
+   `spec_version = "2.0.0"` and `homes = 2` in its `[opf]` table, plus `counters.toml` (with the
+   imported counter row of each enabled type beside its clean row), `version.toml`,
+   `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
+   exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
+   `worklog.imported.toml`, all empty to start; specification sections 4, 8 and 9 give the full
+   file baseline. The reference tooling's `opf init` does not scaffold this store yet: its
+   scaffold still writes a 1.2.0 store, a format the specification's validation refuses
+   (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
    `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
@@ -77,8 +81,7 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    record whose holder is confirmed dead, and refuses a record whose holder may still be live.
    `opf init` also refuses when the git
    history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
-   never restart, so record ids are never
-   reissued). That scan follows the first-parent line only: a store that never reached a tree on
+   never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
    is not detected. The scan also has a path limit: the scan checks the root's current path only
    (a store committed under another directory, for example before a rename, is not detected).
@@ -127,10 +130,17 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    the same way: one last-resort handler catches the exceptions the command lets
    escape from init dispatch onward and prints only the rendered exception type and
    text, so from that point `opf init` reports a rendered line rather than a Python
-   traceback, up to exactly three windows. A failure before init dispatch (a
-   bootstrap fault other than the import or read errors mapped to a rendered
-   cannot-evaluate, or an interrupt before or during dispatch) is outside that
-   handler entirely; an interrupt landing in the boundary handler's own few
+   traceback, up to exactly three windows. Every fault raised while a helper module
+   is imported, a SyntaxError in an installed helper included, is mapped to a
+   rendered cannot-evaluate (exit 2) except a keyboard interrupt, as long as the
+   code opf loads neither ends the process itself nor replaces anything opf uses.
+   That code runs in opf's process with its privileges, at import, when called or
+   later (an atexit hook, a thread, a signal handler, a destructor, or a replaced
+   stream whose flush fails at shutdown, so that the process exits 120), and can do
+   both, so every exit status stated here holds only while it does neither. A
+   failure before init dispatch (a keyboard interrupt while a helper is imported,
+   or any interrupt before or during dispatch) is
+   outside that handler entirely; an interrupt landing in the boundary handler's own few
    statements, after dispatch, escapes it; and an interrupt arriving after that
    handler has returned, in the dispatcher's own return and exit statements, escapes
    it too. Each of the three windows can surface as Python's own traceback or
@@ -138,8 +148,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    caught exception is still being handled, so its traceback can chain that
    exception, with its raw, unrendered text; an interrupt after the handler has
    returned interpolates no init value into its traceback; and a pre-dispatch
-   fault's traceback carries that fault's own text, a SyntaxError message included,
-   unrendered -- the stated bootstrap residual. What the static route gate proves,
+   interrupt's traceback carries that interrupt's own text unrendered -- the stated
+   bootstrap residual. What the static route gate proves,
    and the residual it cannot see (introspection reached at runtime through allowed
    spellings, rendered-type constructions outside the scanned module, and the
    sibling modules the init path calls into), is stated in the tooling docstrings.
@@ -166,13 +176,13 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack; until
 then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
-so. An implementation declares a conformance class: an upgrade-capable one carries older stores
-forward within its disclosed limits, and a fresh-only one supports one current format and refuses by
-name an older store or one in which its admission check detects an item on its closed legacy-state
-list (OPF-SPEC section 16.1). That check searches only the files section 16.1 permits and the list
-catches only what it lists, so legacy state the list omits, or that sits where the check does not
-search, goes undetected. The reference tooling targets the upgrade-capable class, but its upgrade
-into base 1.3.0 is still a target it does not yet perform.
+so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
+section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
+defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
+grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
+VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
+and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
+refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling requires Python 3.14 or newer.
 
@@ -224,7 +234,7 @@ Superseded by the OPFiles identity fold (this revision):
 
 - The base discovery token is `opf`, carried in the `[opf]` base manifest table. This supersedes the
   earlier `aiqt-opf` token; the interim `devprocess` token and `[devprocess]` table are retired by the
-  OPFiles rebrand, and a legacy store still carrying them is migrated forward by `opf upgrade`.
+  OPFiles rebrand.
 - The base storage field `layout_profile` is renamed to `layout`, reserving the word "profile" for
   the base/profile mechanism (`[profiles.<name>]`).
 

@@ -1091,7 +1091,7 @@ def check_budget_note(root, findings):
 def run(root):
     findings = []
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
+        manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         if not manifests:
             print("error: no manifests under .aiqt/standards/; fail-closed", file=sys.stderr)
             return 2
@@ -2009,7 +2009,7 @@ def self_test_main():
         os.chmod(unreadable_std, 0)
         if os.access(unreadable_std, os.R_OK):
             saved_load = module.load_manifests
-            def _deny_load(path, _real=saved_load):
+            def _deny_load(path, *, root, _real=saved_load):
                 raise PermissionError(13, "injected permission denied", str(path))
             module.load_manifests = _deny_load
             try:
