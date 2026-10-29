@@ -55,7 +55,7 @@ import stat
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 try:
     import tomllib
@@ -143,9 +143,10 @@ def render_schema():
 
 
 def run_repo(root, check):
-    if not check:
-        (root / SCHEMA_REL).parent.mkdir(parents=True, exist_ok=True)
-    drifted = reconcile(root / SCHEMA_REL, render_schema(), check)   # fail-closes (exit 2) on I/O error
+    # make_parents: the schema's directory is created inside reconcile, after its directory probe, so a
+    # .aiqt/ that resolves outside the repository is refused before anything is made there. reconcile
+    # fail-closes (exit 2) on an I/O error too.
+    drifted = reconcile(root / SCHEMA_REL, render_schema(), check, root, make_parents=True)
     if not check:
         print("wrote {}".format(SCHEMA_REL))
         return 0
@@ -723,8 +724,8 @@ def _fdopen_vectors(base):
     def candidate(fns):
         return lambda dfd: fns["_write_candidate"](dfd, "candidate text\n")
 
-    def flipped(name, fd_name, mode):
-        source = inspect.getsource(globals()[name])
+    def flipped(target, fd_name, mode):
+        source = inspect.getsource(target)
         lines = [line for line in source.splitlines(True) if "closefd=False) as fh:" in line]
         close = "_close_fd_yielding({})".format(fd_name)
         if len(lines) != 1 or source.count(close) != 1:
@@ -740,7 +741,7 @@ def _fdopen_vectors(base):
         # The reverted writer is written to a scratch module and loaded over a copy of this module's globals.
         flip_dir = base.with_name(base.name + "-flips")
         flip_dir.mkdir(exist_ok=True)
-        flip_path = flip_dir / "{}_{}.py".format(name.lstrip("_"), mode.lower())
+        flip_path = flip_dir / "{}_{}.py".format(target.__name__.lstrip("_"), mode.lower())
         flip_path.write_text(source.replace(line, new).replace(close, "pass"), encoding="utf-8")
         spec = importlib.util.spec_from_file_location("_crosswalk_fdopen_flip_" + flip_path.stem, flip_path)
         reverted = importlib.util.module_from_spec(spec)
@@ -750,15 +751,15 @@ def _fdopen_vectors(base):
 
     failures = []
     runs = 0
-    for label, writer, name, fd_name in (("_write_payload", payload, "_write_payload", "tfd"),
-                                         ("_write_candidate", candidate, "_write_candidate", "fd")):
+    for label, writer, target, fd_name in (("_write_payload", payload, _write_payload, "tfd"),
+                                           ("_write_candidate", candidate, _write_candidate, "fd")):
         for fault_label, fault in (("EARLY", early), ("LATE", late)):
             problems = run(writer(globals()), fault)
             runs += 1
             if problems:
                 failures.append("fdopen vector {} {}: {}".format(label, fault_label, ", ".join(problems)))
         for mode, red_fault, red_by in (("PREFIX", "EARLY", "OPEN"), ("EXCEPT", "LATE", "RAISED")):
-            fns = flipped(name, fd_name, mode)
+            fns = flipped(target, fd_name, mode)
             if fns is None:
                 failures.append("fdopen flip {} {}: target not found once".format(label, mode))
                 continue
@@ -884,11 +885,36 @@ def self_test():
         quiet(run_repo, good, False)
         if (good / SCHEMA_REL).read_text(encoding="utf-8") != first:
             failures.append("REPO mode is not deterministic")
+        # (a2) A tree with no .aiqt/ yet: write mode makes the schema's directories (make_parents, after the
+        #      directory probe) and writes it, exit 0.
+        fresh = tmp / "fresh"
+        fresh.mkdir()
+        got = quiet(run_repo, fresh, False)
+        if got != 0 or not (fresh / SCHEMA_REL).is_file():
+            failures.append("REPO generate in a tree without .aiqt/ expected exit 0 with the schema written there "
+                            "(its directories made after the probe), got exit {}".format(got))
 
         # (b) mutated schema -> exit 1.
         (good / SCHEMA_REL).write_text(first + "# tamper\n", encoding="utf-8")
         if quiet(run_repo, good, True) != 1:
             failures.append("a mutated schema reference expected exit 1 (drift)")
+
+        # (b2) .aiqt/ above the schema reference symlinked outside the root fails closed (exit 2) in --check and
+        #      write mode with the file there untouched; symlinked inside the root, it is read and rewritten. One
+        #      symlinked outside the root to an empty directory is exit 2 in write mode with nothing made there
+        #      (the schema's directory is created only after the probe).
+        def build_repo(base):
+            (base / ".aiqt" / "core" / "migration").mkdir(parents=True)
+        failures.extend(linked_dir_failures(tmp, "aiqt", build_repo, run_repo, ".aiqt", SCHEMA_REL))
+        bare, held = tmp / "bare-linked", tmp / "bare-held"
+        bare.mkdir()
+        held.mkdir()
+        (bare / ".aiqt").symlink_to(held)
+        got = quiet(run_repo, bare, False)
+        made = sorted(p.name for p in held.iterdir())
+        if got != "raised SystemExit(2)" or made:
+            failures.append("a .aiqt/ symlinked outside the root to an empty directory expected exit 2 with nothing "
+                            "made there, got exit {} and {}".format(got, made))
 
         # (c) ADOPTER archive-first: raw bytes under the sha256 dir name.
         legacy = tmp / "legacy"

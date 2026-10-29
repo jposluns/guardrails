@@ -70,7 +70,9 @@ following where sections 6 and 7 leave a gap:
     worklogs, D1) plus the
     `[[release]]` / `[[summary]]` (version.toml) or `[[entry]]` (worklog.toml) arrays of tables, matching
     Appendix B/C; unknown top-level keys and unknown row keys are fail-closed findings (closed keyset,
-    spec 8.3 discipline applied to the ledgers). SemVer is validated to SemVer 2.0.0 precedence including
+    spec 8.3 discipline applied to the ledgers); the one optional release-row key, `imported` (spec 6.1,
+    14.3), is admitted only as exactly true on an empty span, and the one optional summary-row key,
+    `imported`, only as exactly true on a published or superseded summary covering imported releases. SemVer is validated to SemVer 2.0.0 precedence including
     pre-release ordering; build metadata is accepted and ignored for precedence, per SemVer 2.0.0.
   - SPAN TILING is defined here as: the non-empty release spans, taken in release-row order, start at WL-1
     and each next non-empty span starts at the previous span's end + 1 (contiguous, non-overlapping, in ID
@@ -128,7 +130,13 @@ WL_NAMESPACE = "WL"                       # the worklog type's namespace (spec 8
 VERSION_TOP_KEYS = frozenset({"schema", "release", "summary"})
 WORKLOG_TOP_KEYS = frozenset({"schema", "entry"})
 RELEASE_KEYS = frozenset({"version", "date", "worklog_span", "coverage_digest"})
+# The optional release-row keys (spec 6.1): `imported` marks a historical release recorded under spec 14.3.
+# validate_version admits it under the value and span rules of _imported_row_findings.
+RELEASE_OPTIONAL_KEYS = frozenset({"imported"})
 SUMMARY_KEYS = frozenset({"covers", "status", "digest", "superseded_by"})
+# The optional summary-row keys (spec 6.1): `imported` marks a summary digest resting on imported provenance
+# (spec 14.3). _validate_summaries admits it under the rules of _imported_summary_findings.
+SUMMARY_OPTIONAL_KEYS = frozenset({"imported"})
 
 SUMMARY_STATUSES = ("working", "published", "superseded")
 UNRELEASED = "unreleased"                 # the reserved covers token for the working tail (spec 6.1)
@@ -299,13 +307,15 @@ def _canonical(value, _depth=0):
     (spec 8.7 permits a finite float in a registered extension; M2). An unexpected type fails CLOSED
     (ReleaseError) rather than serializing lossily, so the digest can never be computed over a value the
     canonicalization does not fully cover. `_depth` is the recursion level, bounded by FIX 2 below."""
-    # FIX 2 (defence-in-depth for a currently-unreachable-from-TOML input): a Python structure nested
-    # deeper than _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled
-    # RecursionError. Such depth cannot arrive via tomllib (its own parser recursion guard fires first at
-    # every recursion limit), so this is unreachable from parsed TOML; the bound is here so the
-    # fail-closed posture never rests on tomllib's limit. Over-depth maps to the module's controlled
-    # ReleaseError, never a RecursionError. The bound is far above any real worklog nesting, so it changes
-    # no output for a real (shallow) input.
+    # FIX 2 (a fail-closed bound on an input parsed TOML can produce): a Python structure nested deeper than
+    # _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled RecursionError.
+    # tomllib's recursion guard covers only its recursive productions (inline arrays and inline tables);
+    # it builds a dotted table header or dotted key ([a.b.c ...]) iteratively, so parsed TOML can carry a
+    # table nested far deeper than any recursion limit (100,000 levels from one header; CPython 3.14.8 and
+    # later refuse a key of more than 1,000 dotted parts, so there one header nests at most 1,000 levels,
+    # still ten times this bound), and this bound is reachable from parsed TOML, not only from a hand-built
+    # structure. Over-depth maps to the module's controlled ReleaseError, never a RecursionError. The bound is
+    # far above any real worklog nesting, so it changes no output for a real (shallow) input.
     if _depth > _MAX_CANONICAL_DEPTH:
         raise ReleaseError("cannot canonicalize a worklog value nested deeper than {} levels (a real "
                            "worklog entry nests only a handful of levels)".format(_MAX_CANONICAL_DEPTH))
@@ -561,13 +571,58 @@ def released_end(releases):
 
 # --- version.toml validation (spec 6.1) --------------------------------------------------------------
 
+def _imported_row_findings(row, where):
+    """The findings for the optional `imported` flag of one release-row table (spec 6.1, 14.3); empty
+    when the row carries no flag or carries it legally. A present flag is a finding unless its value is
+    exactly the boolean true (an integer 1 or any other truthy value is not), and unless the worklog_span
+    of the row is empty (a pre-migration release has no worklog entries). validate_version and the doctor
+    prior-row check share it, so both apply one rule."""
+    if "imported" not in row:
+        return []
+    findings = []
+    value = row.get("imported")
+    if not (type(value) is bool and value):
+        findings.append("{}: imported must be exactly true when present, not {} (spec 6.1)".format(
+            where, _safe_display(value)))
+    if "worklog_span" in row and row.get("worklog_span") != []:
+        findings.append("{}: an imported row must carry an empty worklog_span; a pre-migration release has "
+                        "no worklog entries (spec 6.1/14.3)".format(where))
+    return findings
+
+
+def _imported_prefix_findings(releases):
+    """The findings for the position of imported release rows (spec 6.1, 14.3): imported-flagged rows
+    form a prefix of the ledger, before any witnessed row. One finding for each imported row that comes
+    after the first row without the flag; empty when every imported row leads. `releases` is the whole
+    [[release]] list, so each row is numbered by its ledger position; a non-table row is skipped here (it
+    is already a finding of validate_version) and neither ends nor extends the prefix. A row counts as
+    imported only when its flag is exactly true (any other value is already a finding of
+    _imported_row_findings and ends the prefix like a witnessed row)."""
+    findings = []
+    witnessed = None                      # the 1-based position of the first row without the flag
+    for i, row in enumerate(releases):
+        if not isinstance(row, dict):
+            continue
+        imported = row.get("imported") is True
+        if not imported and witnessed is None:
+            witnessed = i + 1
+        elif imported and witnessed is not None:
+            findings.append("release #{}: an imported row must come before every witnessed row; release #{} "
+                            "is witnessed (imported rows form a prefix of the ledger, spec 6.1)".format(
+                                i + 1, witnessed))
+    return findings
+
+
 def validate_version(data):
     """Validate a parsed version.toml (spec 6.1). Returns a VersionValidation. CANNOT-EVALUATE when the
     input is not a table; INVALID when a well-formed table violates the ledger schema; VALID otherwise.
     Structural only: it validates the release rows (version SemVer + uniqueness + monotonicity, date,
     span shape + tiling, digest format) and the summary rows (covers token, status, digest presence,
     superseded_by), but leaves the changelog FACTS gates (tile-the-ledger-exactly, heading 1:1, freeze
-    recompute) to U5 and the coverage-digest recompute to `check_frozen_coverage`."""
+    recompute) to U5 and the coverage-digest recompute to `check_frozen_coverage`. The optional
+    `imported` release-row flag (spec 6.1, 14.3) is graded by _imported_row_findings, and its position
+    (imported rows form a prefix of the ledger) by _imported_prefix_findings; the optional `imported`
+    summary-row flag is graded by _imported_summary_findings."""
     if not isinstance(data, dict):
         return VersionValidation(CANNOT_EVALUATE, ["version.toml is not a table"])
 
@@ -596,13 +651,14 @@ def validate_version(data):
         return VersionValidation(INVALID, findings + ["[[summary]] is not an array of tables"])
 
     ledger_versions = []                  # released version strings, in row order (for covers-token lookup)
+    imported_versions = set()             # the versions of imported-flagged rows (for the summary flag)
     prev_key = None
     for i, row in enumerate(releases):
         where = "release #{}".format(i + 1)
         if not isinstance(row, dict):
             findings.append("{} is not a table".format(where))
             continue
-        row_extra = set(row) - RELEASE_KEYS
+        row_extra = set(row) - RELEASE_KEYS - RELEASE_OPTIONAL_KEYS
         if row_extra:
             findings.append("{}: unknown key(s): {}".format(where, ", ".join(_sorted_key_names(row_extra))))
         for req in ("version", "date", "worklog_span", "coverage_digest"):
@@ -623,6 +679,8 @@ def validate_version(data):
             prev_key = key if (prev_key is None or prev_key < key) else prev_key
         if "version" in row:
             ledger_versions.append(version)
+            if row.get("imported") is True and isinstance(version, str):
+                imported_versions.add(version)
 
         if "date" in row and not _valid_timestamp(row.get("date")):
             findings.append("{}: date must be an RFC 3339 UTC timestamp (spec 6.1)".format(where))
@@ -630,11 +688,14 @@ def validate_version(data):
             _parse_span(row.get("worklog_span"), findings, where)
         if "coverage_digest" in row and not _valid_digest(row.get("coverage_digest")):
             findings.append("{}: coverage_digest must be 'sha256:<64 hex>' (spec 6.1)".format(where))
+        findings.extend(_imported_row_findings(row, where))
 
     # Spans must tile the released worklog exactly (contiguous, non-overlapping, from WL-1; spec 6.1).
     _tile_releases([r for r in releases if isinstance(r, dict)], findings)
+    # Imported rows sit only as a prefix of the ledger, before any witnessed row (spec 6.1).
+    findings.extend(_imported_prefix_findings(releases))
 
-    _validate_summaries(summaries, ledger_versions, findings)
+    _validate_summaries(summaries, ledger_versions, imported_versions, findings)
 
     return VersionValidation(INVALID if findings else VALID, findings, releases, summaries)
 
@@ -679,9 +740,46 @@ def _covers_range(parsed, ledger_versions):
     return None
 
 
-def _validate_summaries(summaries, ledger_versions, findings):
+def _imported_summary_findings(row, where, parsed, ledger_versions, imported_versions):
+    """The findings for the optional `imported` flag of one summary-row table (spec 6.1, 14.3); empty
+    when the row carries no flag or carries it legally. A present flag is a finding unless its value is
+    exactly the boolean true (an integer 1 or any other truthy value is not), unless the row's status is
+    published or superseded, unless covers is not 'unreleased', and unless every version the row covers
+    is an imported-flagged release row. `parsed` is the row's resolved covers token, or None when covers
+    is absent or malformed (already a finding of _validate_summaries). Removing the flag from an existing
+    row is a curator act (spec 6.1), so no rule here compares against an earlier ledger."""
+    if "imported" not in row:
+        return []
+    findings = []
+    value = row.get("imported")
+    if not (type(value) is bool and value):
+        findings.append("{}: imported must be exactly true when present, not {} (spec 6.1)".format(
+            where, _safe_display(value)))
+    status = row.get("status")
+    if status not in ("published", "superseded"):
+        findings.append("{}: an imported summary must be published or superseded, not {} (spec 6.1)".format(
+            where, _safe_display(status)))
+    if parsed is not None:
+        if parsed[0] == "unreleased":
+            findings.append("{}: an imported summary must not cover 'unreleased'; the working tail rests on "
+                            "no imported release (spec 6.1)".format(where))
+        else:
+            lo, hi = _covers_range(parsed, ledger_versions)
+            # A version may be an unhashable malformed value (already a release-row finding); gate the set
+            # membership on isinstance(str) so it reads as not imported rather than raising TypeError.
+            witnessed = [v for v in ledger_versions[lo:hi + 1]
+                         if not (isinstance(v, str) and v in imported_versions)]
+            if witnessed:
+                findings.append("{}: an imported summary must cover only imported release rows; {} not "
+                                "imported (spec 6.1/14.3)".format(
+                                    where, ", ".join(_safe_display(v) for v in witnessed)))
+    return findings
+
+
+def _validate_summaries(summaries, ledger_versions, imported_versions, findings):
     """Validate the [[summary]] rows structurally (spec 6.1). See the summary-row ambiguity note; the
-    tile-the-ledger-exactly and heading-1:1 FACTS gates are U5's."""
+    tile-the-ledger-exactly and heading-1:1 FACTS gates are U5's. `imported_versions` is the set of
+    versions on imported-flagged release rows, read by _imported_summary_findings."""
     seen_covers = set()
     seen_unreleased = False
     # Pre-pass: map each well-formed covers token to its parsed (kind, detail), so a superseded row's
@@ -698,12 +796,13 @@ def _validate_summaries(summaries, ledger_versions, findings):
         if not isinstance(row, dict):
             findings.append("{} is not a table".format(where))
             continue
-        row_extra = set(row) - SUMMARY_KEYS
+        row_extra = set(row) - SUMMARY_KEYS - SUMMARY_OPTIONAL_KEYS
         if row_extra:
             findings.append("{}: unknown key(s): {}".format(where, ", ".join(_sorted_key_names(row_extra))))
 
         covers = row.get("covers")
         kind = None
+        resolved = None                   # the parsed covers token once it resolves (for the imported flag)
         if "covers" not in row:
             findings.append("{}: missing required field: covers".format(where))
         else:
@@ -712,6 +811,7 @@ def _validate_summaries(summaries, ledger_versions, findings):
                 findings.append("{}: {}".format(where, err))
             else:
                 kind = parsed[0]
+                resolved = parsed
                 if covers in seen_covers:
                     findings.append("{}: covers {!r} is duplicated across summary rows".format(where, covers))
                 seen_covers.add(covers)
@@ -794,6 +894,9 @@ def _validate_summaries(summaries, ledger_versions, findings):
         if kind == "unreleased" and status is not None and status != "working":
             findings.append("{}: the 'unreleased' summary is always working, not {} (spec 6.1)".format(
                 where, _safe_display(status)))
+
+        # The optional imported flag rests a summary digest on imported provenance (spec 6.1, 14.3).
+        findings.extend(_imported_summary_findings(row, where, resolved, ledger_versions, imported_versions))
 
 
 # --- worklog.toml validation (spec 6.2) --------------------------------------------------------------
@@ -904,7 +1007,12 @@ def release_cut(version_data, worklog_data, new_version, date,
         changes the recomputed coverage digest, so the cut returns INVALID rather than certifying a cut
         over a rewritten frozen span (defense-in-depth, spec 6.2/13);
       - the unreleased tail is not a contiguous run from released_end+1 to the last worklog id (a gap in
-        the worklog would leave a span that cannot tile).
+        the worklog would leave a span that cannot tile). A number that an id reservation holds but no
+        entry carries is such a gap too: the cut reads no reservation, and no span can cover a number
+        without an entry (spec 6.1), so it refuses that tail even where doctor grades the store VALID
+        (doctor treats an orphaned reservation's number as issued, spec 8.2, and steps over it when it
+        grades deletion and contiguity). A reserved number above the last entry leaves the tail cuttable
+        only until a higher entry is published.
 
     The new release row covers [released_end+1 .. last worklog id] (or [] when the tail is empty, spec 6.1
     / 14.3) with the tail's coverage digest. After the cut the new unreleased tail is EMPTY by construction
@@ -918,7 +1026,10 @@ def release_cut(version_data, worklog_data, new_version, date,
 
     `registered_vendors` and `registered_kinds` are the manifest's registered x-<vendor> extensions and
     additional worklog change kinds (spec 6.2, 8.7); they are threaded into validate_worklog so a worklog
-    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6)."""
+    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6).
+
+    A cut follows imported historical rows (spec 6.1, 14.3) like any other release row; the row the cut
+    appends never carries the flag (spec 6.1: a witnessed release cut MUST NOT set it)."""
     vv = validate_version(version_data)
     if vv.status == CANNOT_EVALUATE:
         return CutResult(CANNOT_EVALUATE, ["cannot cut: version.toml does not evaluate"] + vv.findings)
@@ -996,7 +1107,9 @@ def release_cut(version_data, worklog_data, new_version, date,
         # SECA-resource-bounds; fail-closed to INVALID on a gap).
         if tail[0] != end + 1 or tail[-1] - end != len(tail):
             return CutResult(INVALID, ["cannot cut: the unreleased tail WL-{}..WL-{} is not contiguous "
-                                       "(a gap would break span tiling, spec 6.1)".format(end + 1, tail[-1])])
+                                       "(a gap would break span tiling, spec 6.1; a number an id reservation "
+                                       "holds but no entry carries is a gap too, even where doctor grades the "
+                                       "store VALID)".format(end + 1, tail[-1])])
         span_value = ["WL-{}".format(tail[0]), "WL-{}".format(tail[-1])]
         span_parsed = (tail[0], tail[-1])
 
@@ -1829,6 +1942,53 @@ def self_test():
     check("cut-interior-gap-tail-invalid", gap_cut.status == INVALID)
     check("cut-interior-gap-tail-named", any("not contiguous" in f for f in gap_cut.findings))
 
+    # The cut reads no id reservation, so a number an orphaned reservation holds (spec 8.2: issued, never
+    # reused) is a gap like any other, though doctor steps over it when grading deletion and contiguity.
+    # These pin the refusal wherever such a number stands below the highest entry (each turns VALID if the
+    # contiguity refusal is dropped or made to accept a reserved gap), and the acceptance while it stands
+    # above the highest entry.
+    cut_date = "2026-07-05T00:00:00Z"
+    # WL-1 reserved, never published; WL-2 and WL-3 present over an empty ledger.
+    start_cut = release_cut({"schema": 1, "release": []}, {"schema": 1, "entry": [entry(2), entry(3)]},
+                            "1.0.0", cut_date)
+    check("cut-reserved-start-gap-invalid", start_cut.status == INVALID and start_cut.version_data is None
+          and any("tail WL-1..WL-3 is not contiguous" in f for f in start_cut.findings))
+    # WL-1 and WL-2 released, WL-3 reserved, WL-4 present: the tail starts above the released end.
+    released12 = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-2"],
+         "coverage_digest": compute_span_digest({1: entry(1), 2: entry(2)}, (1, 2))}]}
+    hole_worklog = {"schema": 1, "entry": [entry(1), entry(2), entry(4)]}
+    hole_cut = release_cut(released12, hole_worklog, "1.1.0", cut_date)
+    check("cut-reserved-interior-gap-invalid", hole_cut.status == INVALID and hole_cut.version_data is None
+          and any("tail WL-3..WL-4 is not contiguous" in f for f in hole_cut.findings))
+    # WL-3 reserved at the top of the tail: the cut covers WL-1..WL-2 and leaves WL-3 to a later span; once
+    # WL-4 is published WL-3 stands below the highest entry and the next cut refuses.
+    top_cut = release_cut({"schema": 1, "release": []}, {"schema": 1, "entry": [entry(1), entry(2)]},
+                          "1.0.0", cut_date)
+    check("cut-reserved-top-accepted", top_cut.status == VALID and top_cut.frozen_span == ["WL-1", "WL-2"])
+    late_cut = (release_cut(top_cut.version_data, hole_worklog, "1.1.0", cut_date)
+                if top_cut.version_data is not None else None)
+    check("cut-reserved-top-then-refused", late_cut is not None and late_cut.status == INVALID
+          and late_cut.version_data is None
+          and any("tail WL-3..WL-4 is not contiguous" in f for f in late_cut.findings))
+    check("cut-refusal-names-reservation", all(
+        any("a number an id reservation holds but no entry carries is a gap too, even where doctor grades "
+            "the store VALID" in f for f in r.findings) for r in (start_cut, hole_cut, gap_cut)))
+    # No release row can stand over the hole either: a span covering WL-3 cannot be digested, and a stored
+    # row claiming it is reported by the frozen-coverage check.
+    by_hole, _hole_findings = _entries_by_id(hole_worklog)
+    try:
+        compute_span_digest(by_hole, (3, 4))
+        hole_digested = True
+    except ReleaseError:
+        hole_digested = False
+    over_hole = {"schema": 1, "release": released12["release"] + [
+        {"version": "1.1.0", "date": cut_date, "worklog_span": ["WL-3", "WL-4"],
+         "coverage_digest": "sha256:" + "0" * 64}]}
+    check("cut-span-over-hole-undigestable", not hole_digested and any(
+        "cannot recompute coverage digest" in f and "WL-3" in f
+        for f in check_frozen_coverage(over_hole, by_hole)))
+
     # --- retro hardening (opf-hardening branch): three whole-file adversarial-QA findings ------------
     # NF-1 (fail-closed soundness): _count_expected_absent's len(expected_ids) raises OverflowError, not
     # TypeError, for a range with >= 2**63 members (a spoofed 19-digit high-water id). Before the fix
@@ -1979,6 +2139,161 @@ def self_test():
                   and any("duplicate worklog id" in f for f in _long_v.findings) == (_limit != 640))
     finally:
         sys.set_int_max_str_digits(_prev_wl_limit)
+
+    # --- the optional imported flag (spec 6.1, 14.3) -----------------------------------------------------
+    # Admitted only as exactly true on an empty span. Each rule is pinned at its boundary: true and [] just
+    # inside; false, 1, 1.0 and "true" just outside the value rule; WL-1..WL-1, the smallest non-empty span,
+    # just outside the span rule.
+    _imp_empty = coverage_digest([])
+
+    def imp_row(version, **over):
+        r = {"version": version, "date": "2025-01-01T00:00:00Z", "worklog_span": [],
+             "coverage_digest": _imp_empty, "imported": True}
+        r.update(over)
+        return r
+
+    imp_ver = {"schema": 1, "release": [imp_row("0.9.0")]}
+    check("rel-imported-accepted", validate_version(imp_ver).status == VALID)
+    for _imp_label, _imp_value in (("false", False), ("int1", 1), ("float1", 1.0), ("string", "true")):
+        _imp_bad = validate_version({"schema": 1, "release": [imp_row("0.9.0", imported=_imp_value)]})
+        check("rel-imported-{}-refused".format(_imp_label),
+              _imp_bad.status == INVALID and any("exactly true" in f for f in _imp_bad.findings))
+    _imp_span = validate_version({"schema": 1, "release": [
+        imp_row("0.9.0", worklog_span=["WL-1", "WL-1"], coverage_digest=compute_span_digest(by_id, (1, 1)))]})
+    check("rel-imported-nonempty-span-refused",
+          _imp_span.status == INVALID and len(_imp_span.findings) == 1
+          and "empty worklog_span" in _imp_span.findings[0])
+    # An imported row covers no entries, so its stored digest must be the empty-coverage constant; any other
+    # well-formed digest is a frozen-coverage mismatch (check_frozen_coverage, unchanged).
+    _imp_dig = {"schema": 1, "release": [imp_row("0.9.0", coverage_digest="sha256:" + "0" * 64)]}
+    check("rel-imported-digest-must-be-empty-coverage",
+          validate_version(_imp_dig).status == VALID
+          and bool(check_frozen_coverage(_imp_dig, by_id)) and not check_frozen_coverage(imp_ver, by_id))
+    # The flag MUST NOT be added to or removed from an existing row (spec 6.1): the canonical row comparison
+    # reads either change as a rewrite.
+    _imp_plain = imp_row("0.9.0")
+    del _imp_plain["imported"]
+    _af_add, _af_drop = [], []
+    _verify_append_only([_imp_plain], [imp_row("0.9.0")], _af_add)
+    _verify_append_only([imp_row("0.9.0")], [_imp_plain], _af_drop)
+    check("append-only-imported-flag-added-detected", bool(_af_add))
+    check("append-only-imported-flag-removed-detected", bool(_af_drop))
+    # A witnessed cut follows imported historical rows, never sets the flag on the row it appends, and keeps
+    # the flag on every earlier row.
+    imp_mixed = {"schema": 1, "release": [imp_row("0.8.0"), imp_row("0.9.0"), dict(vok["release"][0])]}
+    _imp_cut = release_cut(imp_mixed, worklog, "1.1.0", "2026-06-15T00:00:00Z")
+    check("cut-after-imported-rows-valid",
+          _imp_cut.status == VALID and _imp_cut.frozen_span == ["WL-3", "WL-4"])
+    check("cut-never-sets-imported-flag",
+          _imp_cut.status == VALID and "imported" not in _imp_cut.version_data["release"][-1]
+          and [r.get("imported") for r in _imp_cut.version_data["release"]] == [True, True, None, None])
+    # Imported rows form a prefix of the ledger, before any witnessed row (spec 6.1). The rule is pinned at
+    # its boundary: an imported row just after the first witnessed row is refused, and so is one after an
+    # interleaved witnessed row; every imported row before the first witnessed row, or a ledger of imported
+    # rows only, is valid.
+    _imp_wit = dict(vok["release"][0])
+
+    def imp_prefix(rows):
+        return validate_version({"schema": 1, "release": rows})
+
+    def prefix_findings(v):
+        return [f for f in v.findings if "prefix of the ledger" in f]
+
+    _imp_after = imp_prefix([_imp_wit, imp_row("1.1.0")])
+    check("rel-imported-after-witnessed-refused",
+          _imp_after.status == INVALID and len(prefix_findings(_imp_after)) == 1
+          and prefix_findings(_imp_after)[0].startswith("release #2:"))
+    _imp_inter = imp_prefix([imp_row("0.9.0"), _imp_wit, imp_row("1.1.0")])
+    check("rel-imported-interleaved-refused",
+          _imp_inter.status == INVALID and len(prefix_findings(_imp_inter)) == 1
+          and prefix_findings(_imp_inter)[0].startswith("release #3:"))
+    check("rel-imported-prefix-valid",
+          imp_prefix([imp_row("0.8.0"), imp_row("0.9.0"), _imp_wit]).status == VALID)
+    check("rel-all-imported-valid",
+          imp_prefix([imp_row("0.8.0"), imp_row("0.9.0")]).status == VALID)
+    # Every late imported row is reported, not only the first; and a flag that is truthy but not exactly
+    # true ends the prefix like a witnessed row. Each vector is also run against the weakened rule it
+    # guards (report only the first late row; count a truthy flag as imported), where it must not hold.
+    _imp_two = [_imp_wit, imp_row("1.1.0"), imp_row("1.2.0")]
+    _imp_int = [imp_row("0.8.0", imported=1), imp_row("0.9.0")]
+
+    def first_late_only(releases):
+        return _imported_prefix_rule(releases)[:1]
+
+    def truthy_counts(releases):
+        return _imported_prefix_rule([dict(r, imported=True) if isinstance(r, dict) and r.get("imported")
+                                      else r for r in releases])
+
+    def prefix_starts(rows):
+        return [f.split(":")[0] for f in prefix_findings(imp_prefix(rows))]
+
+    _imported_prefix_rule = _imported_prefix_findings
+    _two, _int = prefix_starts(_imp_two), prefix_starts(_imp_int)
+    check("rel-imported-every-late-row-reported", _two == ["release #2", "release #3"])
+    check("rel-imported-truthy-flag-ends-prefix", _int == ["release #2"])
+    _weakened = {}
+    for _weak_name, _weak in (("first-late-only", first_late_only), ("truthy-counts", truthy_counts)):
+        globals()["_imported_prefix_findings"] = _weak
+        try:
+            _weakened[_weak_name] = (prefix_starts(_imp_two), prefix_starts(_imp_int))
+        finally:
+            globals()["_imported_prefix_findings"] = _imported_prefix_rule
+    check("rel-imported-every-late-row-red-when-weakened", _weakened["first-late-only"][0] != _two)
+    check("rel-imported-truthy-flag-red-when-weakened", _weakened["truthy-counts"][1] != _int)
+    # Rows are numbered by ledger position: a non-table row is skipped by the rule (it is its own finding)
+    # but still counts, so the late imported row of [witnessed, 'x', imported] is release #3, and the
+    # witnessed row it follows is release #1. A non-table row neither ends nor extends the prefix.
+    _imp_gap = imp_prefix([_imp_wit, "x", imp_row("1.1.0")])
+    check("rel-imported-numbered-by-ledger-position",
+          prefix_findings(_imp_gap) == [
+              "release #3: an imported row must come before every witnessed row; release #1 is witnessed "
+              "(imported rows form a prefix of the ledger, spec 6.1)"]
+          and "release #2 is not a table" in _imp_gap.findings)
+    check("rel-imported-non-table-keeps-prefix",
+          prefix_findings(imp_prefix([imp_row("0.8.0"), "x", imp_row("0.9.0"), _imp_wit])) == [])
+    # The optional imported summary-row flag (spec 6.1, 14.3): admitted only as exactly true, on a published
+    # or superseded row, never covering 'unreleased', and covering only imported release rows. Each rule is
+    # pinned at its boundary: true, published and superseded, 0.9.0 and 0.8.0..0.9.0 just inside; 1 and
+    # false just outside the value rule; working just outside the status rule; 'unreleased' outside the
+    # covers rule; the witnessed 1.0.0 alone, or one witnessed version at the top of a range, just outside
+    # the imported-coverage rule.
+    _sum_digest = "sha256:" + "a" * 64
+
+    def sum_row(**over):
+        r = {"covers": "0.9.0", "status": "published", "digest": _sum_digest, "imported": True}
+        r.update(over)
+        return {k: v for k, v in r.items() if v is not None}
+
+    def sum_ver(*rows):
+        return validate_version({"schema": 1, "release": [imp_row("0.8.0"), imp_row("0.9.0"), _imp_wit],
+                                 "summary": list(rows)})
+
+    def sum_only(v, text):
+        return v.status == INVALID and len(v.findings) == 1 and text in v.findings[0]
+
+    check("sum-imported-accepted",
+          sum_ver(sum_row()).status == VALID
+          and sum_ver(sum_row(covers="0.8.0", status="superseded", superseded_by="0.8.0..0.9.0"),
+                      sum_row(covers="0.8.0..0.9.0")).status == VALID)
+    check("sum-imported-int-1-refused", sum_only(sum_ver(sum_row(imported=1)), "exactly true"))
+    check("sum-imported-false-refused", sum_only(sum_ver(sum_row(imported=False)), "exactly true"))
+    check("sum-imported-working-refused",
+          sum_only(sum_ver(sum_row(status="working", digest=None)), "must be published or superseded"))
+    # An 'unreleased' row is always working, so it is given a published status here: the working-tail
+    # finding fires as before, and the covers rule must add its own finding beside it.
+    _sum_unrel = sum_ver(sum_row(covers="unreleased"))
+    check("sum-imported-unreleased-refused",
+          _sum_unrel.status == INVALID
+          and any("must not cover 'unreleased'" in f for f in _sum_unrel.findings))
+    check("sum-imported-covers-witnessed-refused",
+          sum_only(sum_ver(sum_row(covers="1.0.0")), "cover only imported release rows; '1.0.0' not"))
+    check("sum-imported-range-mixed-refused",
+          sum_only(sum_ver(sum_row(covers="0.9.0..1.0.0")), "cover only imported release rows; '1.0.0' not"))
+    # Admitting the optional key leaves the summary keyset closed: any other key is still refused, beside a
+    # legal flag or without one.
+    check("sum-other-unknown-key-still-refused",
+          sum_only(sum_ver(sum_row(extra=True)), "unknown key(s): extra")
+          and sum_only(sum_ver(sum_row(imported=None, extra=True)), "unknown key(s): extra"))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

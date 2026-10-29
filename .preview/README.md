@@ -185,10 +185,10 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `9687140625e12fe271c20a876f01642f5cdd374197ad12850f24078cd0eb9660` | [pattern-self-match.py](pattern-self-match.py) |
+| `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `81abec162f22302fafb00a0d05ec10af4483f1cc0ab9070c4eb4f4d092cea4fb` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -353,7 +353,9 @@ fails and report it; do not work around a failed check.
    checks report `SKIPPED` until the reference files are available; skipped is not a pass. The
    `record-remove-check.py` differential check and the `pattern-self-match.py` check that bash accepts
    its deny examples also report `SKIPPED, no trusted bash` when they cannot find a trusted root-owned
-   `/usr/bin/bash` or `/bin/bash`.
+   `/usr/bin/bash` or `/bin/bash`. The `pattern-self-match.py` check that the account name of the user
+   running its self-test selects that user reports `SKIPPED` when the user database gives no such name
+   made only of the characters its patterns may use, or gives one of digits alone.
    The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
    `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
    for byte with the gate's, and a sample of policies and its scope test with the gate. The hook's self-test
@@ -500,6 +502,58 @@ section of its opening docstring. Read that section before relying on a hook; in
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
+  Its refusals are capped: within one continuous run of turn ends with no observed new turn it refuses at
+  most three times, after which each violating stop is allowed with a cap warning; a stop that carries
+  neither `stop_hook_active` nor a `transcript_path` is outside the cap (nothing can key a counter to
+  bound it) and is refused every time. One UNREADABLE read of its own state file can put a host that
+  omits `stop_hook_active` into that capped-allow mode for the rest of the transcript, until a stop
+  carries `stop_hook_active` false. An externally deleted state file triggers that mode only under a
+  `stop_hook_active` true, which a host that omits the field never sends; where the field is absent, a
+  deletion instead reads as a fresh count that can restart the refusals, and a deletion or pruning of
+  the state file after the capped-allow mode began ends it early. A refusal that names a final message
+  not yet in the transcript stores that message hash, at most eight, the oldest evicted when a ninth is
+  stored, so the late arrival is passed over once instead of refused again when it is read from the
+  transcript; only an actual refusal stores a hash (a violating stop allowed at the cap or fail-open
+  stores none, including a refusal that fails open because its raised count could not be recorded: its
+  warning names the violation, and the message is checked like any other record when a later stop of
+  the same turn reads it, but not at all when a new genuine user message follows it before a stop reads
+  it), and only once that refusal has been written: the hash is stored after the hook writes its
+  refusal to standard output and only when that write succeeded locally, which does not prove the
+  host received it, so a refusal whose write failed stores none and its message is checked in the
+  same way; a hook killed between the write and storing the hash stores none either, so that message
+  is checked once more in the same way and can be refused again within the cap; the hook writes that
+  refusal while it still holds the transcript's state lock, so while the write is blocked (a reader
+  of standard output that has stalled) every other stop of the same transcript is allowed unchecked
+  with the warning that another evaluation holds the lock;
+  the stored hashes are spent by count at the earliest matching transcript records of a
+  scan, one hash per record, so no more records are ever passed over than refusals stored a hash: a
+  later stop that supplies a stored message as its own final message is refused again (that refused
+  final spends a hash itself only when it is also the last transcript record and the stored hashes
+  outnumber the earlier matching records of its scan; supplied before its arrival it spends nothing,
+  and the new refusal stores a further hash for the arrival still owed), a verbatim repeat read from
+  the transcript as the turn's final record is refused once the
+  stored hashes are spent, and no hash a scan spent is kept for later, so a repeat of a refused final
+  message beyond the stored count is never passed over as that final; a verbatim repeat that is NOT
+  the final record of its scan is, with `stop_hook_active` true, refused only together with a refused
+  final message (a clean final message then ends the stop without re-refusing older records), while
+  with the field false or absent such a repeat is refused on its own (within the refusal cap, and
+  only when the stop can save its new boundary: where that save fails or the state cannot be locked,
+  only the final message can be refused, and only with the field false; older violations found there
+  are still counted in that refusal or in the warning of the allow, which names only the first
+  violation, the final message's when it has one; a transcript read that fails part-way is not
+  covered: no boundary can be persisted, and the older violations that read found are dropped with no
+  warning, a known gap; and a stop that finds the lock held
+  by another evaluation is allowed unchecked); after a failed read of the
+  stored state older records are not checked at all, so such a repeat can
+  pass; a transient failed read of that stored
+  state on a stop whose transcript is readable keeps the stored hashes only through a re-read,
+  reconciled against one rescan from the stored boundary (an entry whose message has arrived there is
+  consumed, a new user message there invalidates the list, and the boundary and the list are saved
+  together from that same rescan), while a rescan that is unreadable or truncated keeps the stored
+  boundary and list untouched (such a stop records no new hash of its own, so its refused final can be
+  reported once more, at its late arrival or, already in the transcript, when a later stop re-reads it
+  past the unmoved boundary), and when the state is still unreadable at the re-read the
+  stored entries are all lost, so every late-arriving message they excused is reported once more.
 - **`future-stamp-write.py`** checks only folders you declare, and only ISO-like timestamp literals. A
   time in a quote or code span in a record, a time built from parts, or one just after a scheduling word
   passes, and some table layouts give false positives or misses, which the file lists.
@@ -639,8 +693,14 @@ section of its opening docstring. Read that section before relying on a hook; in
 - **`pattern-self-match.py`** denies only its closed set of shapes, and each deny rests on premises
   observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
   the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps
-  matches. A shell function or alias that shadows a command word the hook accepts (`kill`, `pkill`,
-  `pgrep`, `xargs`, `echo`, `sleep`, `ls`, `date`, `pwd`, `true` or `:`), an alias named for a reserved
+  matches. A denied shape may also select processes with `-u`, `--euid`, `-U` or `--uid` when the value is
+  the user id the hook itself runs as (effective for `-u` and `--euid`, real for `-U` and `--uid`) or that
+  id's account name. Such a deny assumes the Bash tool's shell runs as the same user as the hook, which was
+  not observed for the hook's own process. A name is compared with the account name of the hook's own user
+  id, read at most once per hook process; the value itself is never looked up, but a slow user database (a
+  directory service) can delay the hook. A shell function or alias that shadows a command word the hook
+  accepts (`kill`, `pkill`, `pgrep`, `xargs`, `echo`, `sleep`, `ls`, `date`, `pwd`, `true` or `:`), an
+  alias named for a reserved
   word (`for`, `while`, `until`, `do`, `done`, `if`, `then`, `fi`, `case`, `esac` or `!`; one named for a
   loop word turned the loop into a syntax error in bash 5.3.9, and one named `!` ended an
   `until ! pgrep ...` loop at once), or shell state set before the command (an `IFS`
@@ -656,12 +716,21 @@ section of its opening docstring. Read that section before relying on a hook; in
   gets a note at most:
   compound commands, other `&&` and `||` lists, `ps | grep` pipelines, `sudo` or `exec` prefixes,
   `killall`, `pidof`, nested shell strings, other redirections, `printf`, `cd`, an `echo` with an option,
+  another user's id or name after `-u` or `-U` (or a variable or substitution there, such as `$USER` or
+  `$(id -u)`), other selection options such as `-P`, `-g` or `-s`,
   a pattern holding a blank, an all-caps loop variable, and sleeps that add up to more than 60 seconds
   before the shape or in a `for` loop shape's body (a `while` or `until` wait loop's body is not counted:
   its `pgrep` runs first). A
   pattern built when the command runs (holding `$` or a backtick) gets nothing. Its notes come from an
   approximate reading of the words, so some are missed or given wrongly, and a matcher word counts even
-  as an argument. Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to
+  as an argument. For `pgrep` and `pkill` it also looks for the pattern past the value of each option
+  that takes one, and passes over exactly these value spellings: one word as Python's `shlex` reads it,
+  other than an operator or a matcher name (`-u NAME`, `-u "$USER"`, `-u "$(id -u)"`), and an unquoted
+  `$(...)` or `$((...))` that is the whole value, through the `)` that balances it, nested ones included
+  (`-u $((UID))`, `-u $(echo $(id -u) )`); a `$(...)` value is also read a second way, through its first
+  `)`. After any other spelling (a backtick substitution holding a blank, a substitution joined to other
+  text in one word, or one holding a `(` or `)` that does not pair up) the pattern can be missed.
+  Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to
   you, has not been checked.
 
 `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` also allow commands over 64 KiB or

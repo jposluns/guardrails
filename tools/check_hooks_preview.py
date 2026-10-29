@@ -859,7 +859,7 @@ def self_test_main():
         text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         row_end = text.index("\n", text.index("| `clock-inject.py` |"))
         (r / PREVIEW_DIR / README_NAME).write_text(
-            text[:row_end] + " | " + phantom + " |" + text[row_end:], encoding="utf-8")
+            text[:row_end] + "\u2028| " + phantom + " |" + text[row_end:], encoding="utf-8")
         case("README line separator U+2028", 2, r, needle="is not a line break")
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("fixture construction failed: {}".format(exc))

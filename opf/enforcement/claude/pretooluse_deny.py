@@ -12,13 +12,13 @@ own hook dispatcher carries), re-verified at build time for this pack member. Wa
 for denial here: every protected operation takes a structured DENY decision or a blocking error, never an
 advisory note.
 
-Installation (per user or per project; `install-pack` wires this automatically once it ships, and the
-adoption `enable-hook` op writes exactly this registration through its structured JSON merge): register
-one PreToolUse group in `.claude/settings.json` whose matcher is "*" (match-all: a narrower matcher would
-silently exempt tools) and whose single command entry launches this file isolated:
+Installation (per project): an adoption plan plants this file at opf/enforcement/claude/pretooluse_deny.py,
+where it must live (it derives the trees it guards from its own path), and registers it in
+`.claude/settings.json`, planting the pack's reviewed settings.opf.json there or merging the same group into
+an existing file through the `enable-hook` op's structured JSON merge: one PreToolUse group whose matcher is
+"*" (match-all: a narrower matcher would silently exempt tools) and whose single command entry is
 
-    hooks . PreToolUse : one group, matcher "*", with one hooks entry of type "command" whose command is
-    python3 -I <absolute path to>/pretooluse_deny.py
+    python3 -I "$CLAUDE_PROJECT_DIR"/opf/enforcement/claude/pretooluse_deny.py
 
 I/O contract (doc-confirmed, above): the tool-call payload arrives as JSON on stdin, carrying
 hook_event_name, tool_name, tool_input and the session cwd. A decision goes to stdout on exit 0 as a JSON
@@ -51,7 +51,7 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
   R5 Bash writes. EVERY Bash command is first classified PROVABLY PLAIN or not by ONE strict
-     classifier (D-DISCARD-SOUND-RULE; the shared plain-command specification, QA round 7, revised
+     classifier (sound-lexing rule dropped; the shared plain-command specification, QA round 7, revised
      2026-10-06), decided on the RAW command string before any lexing: (1) every character is
      printable ASCII (no tab, newline, carriage return, NUL or non-ASCII character, so no Unicode
      digit, homoglyph or invisible character); (2) no dollar sign, backquote, backslash, semicolon,
@@ -95,7 +95,7 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      directory-plus-basename target is such a directory (cp -r src/docs .); a tilde-headed
      spelling is judged in BOTH readings, literal under the cwd (bash keeps a quoted tilde
      literal) and expanded; and an absolute GIT_TRACE* value is one more inherited
-     spelling. Round 10 (D-RESCOPES-A) stops parsing toward completeness: every
+     spelling. Round 10 decided to stop parsing toward completeness: every
      directory-plus-basename join is container-checked even when another word already resolves
      to it (no dedupe across the two checks, so a cp backup suffix or a second operand spelling
      the joined directory no longer hides it); and git is read only through a small allowlisted
@@ -670,11 +670,11 @@ INLINE_RUNNERS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", 
 # or runs a command string, and the options that name a command to run (rebase -x and clone -u are
 # matched on their own subcommands).
 GIT_VALUE_GLOBALS = frozenset(("-C", "--git-dir", "--work-tree"))
-# The SMALL allowlisted git global-option grammar (round 10, D-RESCOPES-A): the subcommand is
-# recognized only past these global options (a value global as a separate word, or --git-dir= and
-# --work-tree= glued); any other global option (git 2.53 accepts --attr-source <tree-ish> and
-# --shallow-file <file> as separate words, and a value word would otherwise be read as the
-# subcommand) makes the command NOT plain.
+# The SMALL allowlisted git global-option grammar (round 10, no parsing toward completeness): the
+# subcommand is recognized only past these global options (a value global as a separate word, or
+# --git-dir= and --work-tree= glued); any other global option (git 2.53 accepts --attr-source
+# <tree-ish> and --shallow-file <file> as separate words, and a value word would otherwise be read
+# as the subcommand) makes the command NOT plain.
 GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
                               "--no-replace-objects", "--version"))
 # The git subcommands that rewrite the working tree or the index (round 11): in a BOUND product (a

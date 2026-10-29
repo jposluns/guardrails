@@ -1335,11 +1335,10 @@ def vector_failures(python):
         timer.start()
         return timer
 
-    def recording_popen(made):
-        """A subclass of the CURRENT subprocess.Popen (so a vector's own patch class is chained,
-        not displaced) that retains every spawned handle in made, for watchdogs that must own
-        what they stop."""
-        outer_cls = subprocess.Popen
+    def recording_popen(made, outer_cls):
+        """A subclass of outer_cls, the CURRENT subprocess.Popen its caller saved to restore (so a
+        vector's own patch class is chained, not displaced), that retains every spawned handle in
+        made, for watchdogs that must own what they stop."""
 
         class Recorder(outer_cls):
             def __init__(self, *args, **kwargs):
@@ -1360,7 +1359,7 @@ def vector_failures(python):
         # the survivor scan inside it is an extra observation, not the enforcement.
         made = []
         saved_outer_cls = subprocess.Popen
-        subprocess.Popen = recording_popen(made)
+        subprocess.Popen = recording_popen(made, saved_outer_cls)
         timer = handle_watchdog(30.0, made)
         began = time.monotonic()
         try:
@@ -1553,7 +1552,7 @@ def vector_failures(python):
             globals()["_own_exit"] = interrupting_own_exit
         route_made = []
         saved_route_cls = subprocess.Popen
-        subprocess.Popen = recording_popen(route_made)
+        subprocess.Popen = recording_popen(route_made, saved_route_cls)
         route_watchdog = handle_watchdog(30.0, route_made)
         try:
             try:
@@ -1634,8 +1633,9 @@ def vector_failures(python):
     # A monitoring fault keeps the streams captured before it: the monitor Hung carries them, so the
     # caller can judge that evidence; the stop still kills and reaps the real child.
     seeded_made = []
+    saved_popen_cls = subprocess.Popen  # the class subclassed below, and restored after the run
 
-    class SeededTimeout(subprocess.Popen):
+    class SeededTimeout(saved_popen_cls):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             seeded_made.append(self)
@@ -1651,7 +1651,6 @@ def vector_failures(python):
         if value is None:
             raise RuntimeError("injected monitoring fault")
         return value
-    saved_popen_cls = subprocess.Popen
     subprocess.Popen = SeededTimeout
     seeded_watchdog = handle_watchdog(30.0, seeded_made)
     try:
@@ -1675,8 +1674,9 @@ def vector_failures(python):
     # A fault in a LATER communicate call keeps the streams an earlier poll captured: the held state,
     # never an exception chain (the later fault carries no TimeoutExpired), feeds the monitor Hung.
     second_made = []
+    saved_popen_cls = subprocess.Popen  # the class subclassed below, and restored after the run
 
-    class SecondFault(subprocess.Popen):
+    class SecondFault(saved_popen_cls):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             second_made.append(self)
@@ -1689,7 +1689,6 @@ def vector_failures(python):
                                                 stderr=b"FAIL: seeded diagnostic\n")
             raise OSError("injected second-communicate fault")
 
-    saved_popen_cls = subprocess.Popen
     subprocess.Popen = SecondFault
     second_watchdog = handle_watchdog(30.0, second_made)
     try:
@@ -1720,8 +1719,9 @@ def vector_failures(python):
                        last_fault_poll):
         faulted_polls = []
         made_procs = []
+        saved_cls = subprocess.Popen  # the class subclassed below, and restored after the run
 
-        class MidReadFault(subprocess.Popen):
+        class MidReadFault(saved_cls):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 made_procs.append(self)
@@ -1752,7 +1752,6 @@ def vector_failures(python):
         # vector for the full 3600 s budget. It stops the child through the handle MidReadFault
         # retains; the survivor scan inside it is an extra observation.
         watchdog = handle_watchdog(30.0, made_procs)
-        saved_cls = subprocess.Popen
         subprocess.Popen = MidReadFault
         try:
             try:
@@ -1803,8 +1802,9 @@ def vector_failures(python):
     # fault that fires once both pipes are readable, before any read, would otherwise lose every
     # byte the child wrote (nothing reached Popen's buffers or any timeout snapshot).
     reader_fault_procs = []
+    saved_cls = subprocess.Popen  # the class subclassed below, and restored after the run
 
-    class ReaderFault(subprocess.Popen):
+    class ReaderFault(saved_cls):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             reader_fault_procs.append(self)
@@ -1819,7 +1819,6 @@ def vector_failures(python):
             raise OSError("injected reader fault after both pipes were readable")
 
     watchdog = handle_watchdog(30.0, reader_fault_procs)
-    saved_cls = subprocess.Popen
     subprocess.Popen = ReaderFault
     try:
         try:
@@ -1866,7 +1865,7 @@ def vector_failures(python):
             budget_ticks = iter((0.0,))
             made = []
             saved_outer = subprocess.Popen
-            subprocess.Popen = recording_popen(made)
+            subprocess.Popen = recording_popen(made, saved_outer)
             watchdog = handle_watchdog(60.0, made)
             try:
                 try:
@@ -1944,7 +1943,7 @@ def vector_failures(python):
             return 0.0
         closed_made = []
         saved_closed_cls = subprocess.Popen
-        subprocess.Popen = recording_popen(closed_made)
+        subprocess.Popen = recording_popen(closed_made, saved_closed_cls)
         closed_watchdog = handle_watchdog(30.0, closed_made)
         try:
             try:
@@ -2373,7 +2372,7 @@ def vector_failures(python):
         def blind_alive(tok, opener=None):
             blind_scans.append(tok)
             return None
-        subprocess.Popen = recording_popen(expiry_made)
+        subprocess.Popen = recording_popen(expiry_made, saved_expiry_cls)
         globals()["_alive_with"] = blind_alive
         expiry_watchdog = handle_watchdog(6.0, expiry_made)
         expiry_began = time.monotonic()
@@ -3359,5 +3358,66 @@ def _self_test_main(argv):
     return 0
 
 
+def main():
+    """The __main__ entry, run after the child-status guard: the --self-test CLI (_self_test_main)."""
+    return _self_test_main(sys.argv[1:])
+
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. The --self-test vectors launch children
+# and read their exit statuses, so under an ignored SIGCHLD a failing child would read as a pass; the guard
+# runs at the entry line, before main() runs them. Importing this module runs no guard: an importer's own
+# entry guards its process.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(_self_test_main(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("_load_bound.py") or main())

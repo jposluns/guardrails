@@ -7,8 +7,11 @@ coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), and the
-                            MAP_KEYS read refusal exits 2 with empty stdout under each stderr condition
+  gen_rules.py --self-test  assert an invalid-UTF-8 generated target, a source path that is not a
+                            directory or a symlink to a directory inside the root, and a .claude/, a
+                            .claude/rules or a family directory symlinked outside the root fail closed
+                            (exit 2), and the MAP_KEYS read refusal exits 2 with empty stdout under each
+                            stderr condition
 """
 import sys
 
@@ -30,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_present, map_keys  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, dir_present, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -38,7 +41,7 @@ CIA_FACETS = {"SECC", "SECI", "SECA", "SECP"}  # SECC=Confidentiality SECI=Integ
 # The global known-facet set: any rule may carry ANY of these as a `secondary` tag, cross-family (an aiqt
 # rule may tag a security facet and vice versa). Security codes are namespaced (SEC*) so none collides with
 # an AIQT facet (e.g. SECI vs the AIQT INTEG). The secondary element rules (known-facet, differs-from-
-# primary, no-repeat) come from the Architect's recorded decision (design-of-record: secondary = any known
+# primary, no-repeat) come from the maintainer's recorded decision (design-of-record: secondary = any known
 # facet), NOT spec section 4, which only types `secondary` as a sequence of facet-code strings.
 KNOWN_FACETS = set().union(*TIER_FACETS.values()) | CIA_FACETS
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
@@ -122,27 +125,31 @@ def _value(v):
 
 
 def parse_source(path):
-    text = path.read_text(encoding="utf-8")
+    return parse_source_text(path.read_text(encoding="utf-8"), path.name)
+
+
+def parse_source_text(text, name):
+    """The frontmatter of a rule source's text, already read; name labels every error."""
     if not text.startswith("---\n"):
-        raise ValueError("{}: no frontmatter".format(path.name))
+        raise ValueError("{}: no frontmatter".format(name))
     end = text.find("\n---\n", 4)
     if end == -1:
-        raise ValueError("{}: unterminated frontmatter".format(path.name))
+        raise ValueError("{}: unterminated frontmatter".format(name))
     fm = {}
     for line in text[4:end].splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
+            raise ValueError("{}: bad frontmatter line {!r}".format(name, line))
         key, val = line.split(":", 1)
         key = key.strip()
         if key in fm:
-            raise ValueError("{}: duplicate key {}".format(path.name, key))
+            raise ValueError("{}: duplicate key {}".format(name, key))
         try:
             fm[key] = _value(val.strip())
         except ValueError as exc:
-            raise ValueError("{}: {}".format(path.name, exc))
+            raise ValueError("{}: {}".format(name, exc))
     return fm
 
 
@@ -246,9 +253,18 @@ def run(root, check):
     out_dir = root / ".claude" / "rules"
     desired = {}
     try:
-        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
-        # not read as an absent corpus (which would delete every generated file as an orphan below).
-        if dir_present(src_dir):
+        # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that is
+        # there but cannot be read as a directory, must fail closed as exit 2, not read as an absent corpus
+        # (which would delete every generated file as an orphan below). A symlink to a directory inside the
+        # root is read.
+        # Then dir_present, bound beneath root, judges every component above it the same way, so a
+        # .aiqt that is dangling, not a directory or a symlink resolving outside the root fails closed
+        # too, never read as an absent corpus.
+        _present, problem = dir_or_absent(src_dir, root)
+        if problem is not None:
+            print("error: {} {} (cannot evaluate)".format(src_dir, problem))
+            return 2
+        if dir_present(src_dir, root=root):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
@@ -263,6 +279,20 @@ def run(root, check):
     def _raise(exc):
         raise exc
     try:
+        # dir_chain_or_absent (not is_dir, dir_present or dir_or_absent), before the first read, write or delete
+        # under out_dir: .claude/rules and each family directory in it (the directory holding every generated
+        # rule) are judged at every component under the root (.claude/ too), so one at any depth that is there
+        # but cannot be read as a directory (a regular file, or a symlink that is dangling, whose target is not
+        # a directory or resolves outside the root) is exit 2 with nothing written or deleted, never followed
+        # out of the repository, and an unreadable parent raises (exit 2 below), never skipping the orphan
+        # scan. A symlink to a directory inside the root is read. A family absent here can only be created
+        # below, holding desired files alone.
+        probed = {}
+        for path in (out_dir, out_dir / "aiqt", out_dir / "security"):
+            probed[path], problem = dir_chain_or_absent(path, root)
+            if problem is not None:
+                print("error: {} {} (cannot evaluate)".format(path, problem))
+                return 2
         for rel, content in sorted(desired.items()):
             target = out_dir / rel
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -273,7 +303,7 @@ def run(root, check):
                     target.write_text(content, encoding="utf-8")
         for family in ("aiqt", "security"):
             fam_dir = out_dir / family
-            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed, not skip the orphan scan
+            if probed[fam_dir]:
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
                     for fn in sorted(f for f in filenames if f.endswith(".md")):
                         f = Path(dirpath) / fn
@@ -405,6 +435,66 @@ def self_test_main():
         target.write_bytes(b"\xff\xfe not utf-8")
         if run_quiet(tmp, check=True) != 2:
             failures.append("invalid-UTF-8 generated target expected exit 2 (fail-closed)")
+        # A source path that is there but is not a directory is exit 2 in write mode with the generated
+        # target kept, never read as an absent corpus that prunes every generated file as an orphan.
+        nondir = tmp / "nondir"
+        kept = nondir / ".claude" / "rules" / _RULE_REL
+        kept.parent.mkdir(parents=True)
+        kept.write_text(_RULE_SRC, encoding="utf-8")
+        (nondir / ".aiqt" / "core").mkdir(parents=True)
+        (nondir / ".aiqt" / "core" / "rules").write_text("not a directory\n", encoding="utf-8")
+        if run_quiet(nondir, check=False) != 2 or not kept.exists():
+            failures.append("a source path that is a regular file expected exit 2 with the generated "
+                            "target kept")
+        # A source path that is a symlink: to a directory inside the root holding the rule, it is read (--check
+        # exit 0, the generated target in sync); dangling, to a regular file inside the root, or to an empty
+        # directory outside the root, it is exit 2 in write mode with the generated target kept, never read as
+        # an absent corpus or followed to one that prunes it as an orphan.
+        (tmp / "outside").mkdir()
+        for shape, check, want in (("in-root", True, 0), ("dangling", False, 2), ("to-file", False, 2),
+                                   ("outside", False, 2)):
+            linked = tmp / ("linked-" + shape)
+            kept = linked / ".claude" / "rules" / _RULE_REL
+            kept.parent.mkdir(parents=True)
+            kept.write_text(_RULE_SRC, encoding="utf-8")
+            (linked / "shared" / "rules").mkdir(parents=True)
+            (linked / "shared" / "rules" / "gen-rules-selftest-target.md").write_text(_RULE_SRC, encoding="utf-8")
+            (linked / "shared" / "file.txt").write_text("not a directory\n", encoding="utf-8")
+            (linked / ".aiqt" / "core").mkdir(parents=True)
+            target = {"in-root": Path("..", "..", "shared", "rules"), "dangling": Path("absent"),
+                      "to-file": Path("..", "..", "shared", "file.txt"), "outside": tmp / "outside"}[shape]
+            (linked / ".aiqt" / "core" / "rules").symlink_to(target)
+            got = run_quiet(linked, check=check)
+            if got != want or not kept.exists():
+                failures.append("a source path that is a symlink {} expected exit {} with the generated target "
+                                "kept, got {}".format(shape, want, got))
+        # The .claude/ directory above the read tree, the read tree, or a family directory in it, that is a
+        # symlink to a directory holding a planted orphan and lacking the generated rule, in write mode: outside
+        # the root, it is exit 2 with the orphan kept and the rule not written there, never followed to prune or
+        # write out of the repository; inside the root, it is read (exit 0, the orphan pruned and, but for the
+        # security family, the rule written there).
+        for linked_rel, sub in ((".claude", ("rules", "aiqt")), (".claude/rules", ("aiqt",)),
+                                (".claude/rules/aiqt", ()), (".claude/rules/security", ())):
+            for where, want in (("outside", 2), ("in-root", 0)):
+                out = tmp / ("out-" + linked_rel.lstrip(".").replace("/", "-") + "-" + where)
+                (out / ".aiqt" / "core" / "rules").mkdir(parents=True)
+                (out / ".aiqt" / "core" / "rules" / "gen-rules-selftest-target.md").write_text(
+                    _RULE_SRC, encoding="utf-8")
+                link = out / linked_rel
+                link.parent.mkdir(parents=True, exist_ok=True)
+                held = tmp / ("held-" + out.name) if where == "outside" else out / "shared" / "held"
+                fam = held.joinpath(*sub)
+                fam.mkdir(parents=True)
+                (fam / "zz-planted-orphan.md").write_text("planted\n", encoding="utf-8")
+                link.symlink_to(held if where == "outside" else os.path.relpath(held, link.parent))
+                got = run_quiet(out, check=False)
+                kept = (fam / "zz-planted-orphan.md").exists()
+                wrote = (fam / Path(_RULE_REL).name).exists()
+                if (got, kept, wrote) != (want, want == 2, want == 0 and linked_rel != ".claude/rules/security"):
+                    failures.append("a {} that is a symlink {} expected exit {} with the orphan {} there, "
+                                    "got exit {}, orphan kept {}, rule written {}".format(
+                                        linked_rel, where, want, "kept and nothing written" if want == 2
+                                        else "pruned", got, kept, wrote))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     failures.extend(_map_keys_refusal_failures())
@@ -415,7 +505,11 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
-          "UnicodeDecodeError traceback (guards the widened reconcile arm); the MAP_KEYS read refusal "
+          "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a regular "
+          "file or a symlink that is dangling, to a regular file or to a directory outside the root exits 2 "
+          "with the generated target kept, and one symlinked to a directory inside the root is read; a "
+          ".claude/, .claude/rules or family directory symlinked outside the root exits 2 in write mode with nothing "
+          "written or deleted there, and one symlinked inside the root is read; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}).".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS)))
     return 0

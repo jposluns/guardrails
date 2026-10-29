@@ -73,6 +73,10 @@ from _release_schema import SchemaError       # noqa: E402  (round-2 findings 4)
 
 RELEASES_REL = ".aiqt/core/releases.toml"
 MANIFEST_REL = ".aiqt/manifest.toml"
+# The LIVE generator the fixture helpers launch against a --root fixture, addressed absolutely from
+# this file's own directory: the launch must not depend on the caller's working directory (a self-test
+# run from outside the repository root reached a path that did not exist and failed as fixture setup).
+GEN_MANIFEST_PATH = str(Path(__file__).resolve().parent / "gen_manifest.py")
 FAMILIES = ("claude", "codex", "gemini")
 # The keys this gate validates for a release-order row: the four anchor fields plus the three attestation
 # fields a row gains once QA'd. A self-test binds this to gen_manifest.RELEASE_ROW_ALLOWED so the full
@@ -428,9 +432,12 @@ def _pin_fixture_version(repo, failures, env, version="1.0.0"):
     correctly fails ("tag points at a tree whose manifest release-version is ..."), masking the fixture's
     intended assertion. Writes VERSION + the changelog source at `version`, git-inits and stages the tree
     under the caller's neutralized `env`, then regenerates the fixture manifest via gen_manifest --root
-    (gen_manifest enumerates the tracked surface via `git ls-files`, so the tree is init + add'd first). A
+    (gen_manifest enumerates the tracked surface via `git ls-files`, so the tree is init + add'd first;
+    the generator is launched by its absolute path, GEN_MANIFEST_PATH, so the self-test does not depend
+    on the caller's working directory). A
     gen_manifest FAILURE is a real fixture-setup failure that FAILS the self-test (never a silent pass): it
-    appends to `failures` (which makes self_test_main return nonzero) and returns False. Returns True on
+    appends to `failures` (which makes self_test_main return nonzero, with the child's stderr retained in
+    the failure entry) and returns False. Returns True on
     success, with the tree staged and the regenerated manifest ready for the caller to commit."""
     (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
     (repo / "changelog.toml").write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
@@ -439,26 +446,32 @@ def _pin_fixture_version(repo, failures, env, version="1.0.0"):
             failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
                             "version pinning; the archive-backed case cannot be normalized".format(repo.name))
             return False
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
-                      capture_output=True, env=env).returncode != 0:
+    gen = subprocess.run(["python3", GEN_MANIFEST_PATH, "--root", str(repo)],
+                         capture_output=True, env=env)
+    if gen.returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
                         "gen failure FAILS the self-test rather than silently passing as the intended "
-                        "assertion".format(repo.name, version))
+                        "assertion (stderr: {})".format(
+                            repo.name, version, gen.stderr.decode("utf-8", "replace").strip()[-300:]))
         return False
     return True
 
 
 def _regen_fixture_manifest(root, case, failures, env):
-    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP, failing CLOSED on a
+    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP (launched by its
+    absolute path, GEN_MANIFEST_PATH, as _pin_fixture_version does), failing CLOSED on a
     nonzero gen exactly as _pin_fixture_version does. A setup gen-failure is a real fixture-setup failure:
-    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` and returns
+    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` (the child's
+    stderr retained) and returns
     False, so the affected fixture does NOT proceed to its verdict assertion, where a coincidental exit
     could otherwise be misread (or misattributed to the behaviour under test) as the intended gate verdict.
     Returns True only when the manifest was actually regenerated."""
-    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
-                      capture_output=True, env=env).returncode != 0:
+    gen = subprocess.run(["python3", GEN_MANIFEST_PATH, "--root", str(root)],
+                         capture_output=True, env=env)
+    if gen.returncode != 0:
         failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
-                        "the self-test rather than silently passing as the intended assertion".format(case))
+                        "the self-test rather than silently passing as the intended assertion "
+                        "(stderr: {})".format(case, gen.stderr.decode("utf-8", "replace").strip()[-300:]))
         return False
     return True
 
@@ -2293,7 +2306,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                 failures.append("(finding 4) a release tag whose annotated object targets a tree must fail "
                                 "closed exit 2 (it cannot peel to a commit), not a clean audit")
 
-            # (finding 6) THE ATTESTATION-COMMIT MODEL (Architect-approved): tag the pre-attestation release
+            # (finding 6) THE ATTESTATION-COMMIT MODEL (maintainer-approved): tag the pre-attestation release
             # tree (immutable ROOT), then in a FOLLOW-UP commit append the attestation row AND regenerate the
             # branch-integrity manifest/root/snippet. Confirm gen_manifest --check AND check_manifest are
             # GREEN on that attestation commit (the required commit merges through the normal gates), and
@@ -2365,7 +2378,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                         # was actually regenerated; a setup gen-failure is recorded DISTINCTLY above and must
                         # NOT be misattributed here as a finding-6 non-green result.
                         if base_ok:
-                            gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
+                            gmc = subprocess.run(["python3", GEN_MANIFEST_PATH, "--check", "--root",
                                                   str(ac)], capture_output=True)
                             cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
                                                  capture_output=True)
