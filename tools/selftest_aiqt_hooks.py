@@ -2526,6 +2526,12 @@ _PTS_DENY_ROWS = (
     ("(pts-d18) redirect on the push", "git push origin br 2>&1; step"),
     ("(pts-d19) second push after ';'", "git push origin a; git push origin b"),
     ("(pts-d20) push inside the step chain", "true && git push origin br; step"),
+    ("(pts-d21) push in the step's argument substitution", "step $(git push origin br)"),
+    ("(pts-d22) push in a quoted substitution, then ';'", 'echo "$(git push origin br)"; step'),
+    ("(pts-d23) push in the step's backquote argument", "step `git push origin br`"),
+    ("(pts-d24) step after the push inside a quoted substitution", 'x="$(git push origin br; step)"'),
+    ("(pts-d25) export's status is its own, then '&&'", "export x=$(git push origin br) && step"),
+    ("(pts-d26) push in a nested quoted substitution, then ';'", 'echo "$(echo "$(git push origin br)")"; step'),
 )
 _PTS_ALLOW_ROWS = (
     ("(pts-a1) push alone", "git push origin br"),
@@ -2542,6 +2548,11 @@ _PTS_ALLOW_ROWS = (
     ("(pts-a12) quoted separator", "git push origin 'br;x'"),
     ("(pts-a13) push only in quoted prose", "echo 'git push; step'"),
     ("(pts-a14) unbalanced quote, no separator after push", 'git push origin "br'),
+    ("(pts-a15) assignment from a substitution alone", "x=$(git push origin br)"),
+    ("(pts-a16) quoted assignment, its status the push's, then '&&'", 'x="$(git push origin br)" && step'),
+    ("(pts-a17) push only in a single-quoted '$('", "echo '$(git push origin br)'; step"),
+    ("(pts-a18) commit message from a here-document substitution",
+     'git commit -m "$(cat <<EOF\nfix: retry git push; then step\nEOF\n)"'),
 )
 # Rows the lexer reads where bash still gates the step on the push: the disclosed over-deny.
 _PTS_OVERDENY_ROWS = (
@@ -2554,12 +2565,27 @@ _PTS_FALLBACK_ROWS = (
     ("(pts-f1) here-string, then ';'", "git push origin br <<<x; step", "deny"),
     ("(pts-f2) here-string, then '&&' (over-deny)", "git push origin br <<<x && step", "deny"),
     ("(pts-f3) here-string, no separator", "git push origin br <<<x", "allow"),
+    # An unquoted here-document body is data to bash, except the substitutions it expands.
+    ("(pts-f4) unquoted here-document body naming a push and ';'", "cat <<EOF\ngit push origin br; step\nEOF",
+     "allow"),
+    ("(pts-f5) commit message on stdin naming a push", "git commit -F - <<EOF\nfix: retry git push on timeout\nEOF",
+     "allow"),
+    ("(pts-f6) here-document to a file naming a push", "cat > /dev/null <<EOF\nNext: git push; then step\nEOF",
+     "allow"),
+    ("(pts-f7) unquoted body substitution runs a push, then ';'", "cat <<EOF\n$(git push origin br; step)\nEOF",
+     "deny"),
+    ("(pts-f8) step on the line after a here-document the push reads", "git push origin br <<EOF\nx\nEOF\nstep",
+     "deny"),
 )
 _PTS_BASH = "/usr/bin/bash"
 # The allow and over-deny rows the oracle runs: those with a step written after the push (a step before the
 # push, or a command with no push, runs its step whatever a push does).
-_PTS_ORACLE_ALLOW_IDS = frozenset(("(pts-a2)", "(pts-a6)", "(pts-a7)", "(pts-a10)", "(pts-o1)", "(pts-o2)",
-                                   "(pts-o3)"))
+_PTS_ORACLE_ALLOW_IDS = frozenset(("(pts-a2)", "(pts-a6)", "(pts-a7)", "(pts-a10)", "(pts-a16)", "(pts-a18)",
+                                   "(pts-o1)", "(pts-o2)", "(pts-o3)"))
+# The fallback rows the oracle runs, each with whether bash runs its step after a failing push (pts-f2 is the
+# fallback's over-deny: bash gates its step).
+_PTS_ORACLE_FALLBACK = {"(pts-f1)": True, "(pts-f2)": False, "(pts-f4)": False, "(pts-f5)": False,
+                        "(pts-f6)": False, "(pts-f7)": True, "(pts-f8)": True}
 
 
 def _pts_oracle_runs(failures, tmp):
@@ -2575,12 +2601,16 @@ def _pts_oracle_runs(failures, tmp):
     bindir.mkdir(parents=True)
     (bindir / "git").write_text("#!" + _PTS_BASH + "\nexit 1\n", encoding="utf-8")
     (bindir / "step").write_text("#!" + _PTS_BASH + "\necho ran >> \"$PTS_RECORD\"\n", encoding="utf-8")
+    (bindir / "cat").write_text("#!" + _PTS_BASH + "\nwhile IFS= read -r line; do :; done\n", encoding="utf-8")
     os.chmod(str(bindir / "git"), 0o755)
     os.chmod(str(bindir / "step"), 0o755)
+    os.chmod(str(bindir / "cat"), 0o755)
     record = root / "record.txt"
     rows = ([(label, command, True) for label, command in _PTS_DENY_ROWS if "step" in command]
             + [(label, command, False) for label, command in _PTS_ALLOW_ROWS + _PTS_OVERDENY_ROWS
-               if label.split(")")[0] + ")" in _PTS_ORACLE_ALLOW_IDS])
+               if label.split(")")[0] + ")" in _PTS_ORACLE_ALLOW_IDS]
+            + [(label, command, _PTS_ORACLE_FALLBACK[label.split(")")[0] + ")"])
+               for label, command, _want in _PTS_FALLBACK_ROWS if label.split(")")[0] + ")" in _PTS_ORACLE_FALLBACK])
     for label, command, must_run in rows:
         if record.exists():
             record.unlink()
@@ -2601,7 +2631,8 @@ def _pts_oracle_runs(failures, tmp):
 def _test_push_then_step(failures, tmp):
     """Direct checks of push_then_step: each deny and allow row, the over-deny and fallback rows, the fail-closed
     payloads, the wiring, a revert flip (with the finding and the fallback probe patched out, every deny row
-    must stop denying, so the rows discriminate) and the real-bash oracle. No row's command is executed here
+    must stop denying, and with both patched to always find, every allow row must deny, so the rows
+    discriminate both ways) and the real-bash oracle. No row's command is executed here
     except under the oracle's fixtures, which run no real git."""
     handler = aiqt_hooks.push_then_step
     for label, command in _PTS_DENY_ROWS + _PTS_OVERDENY_ROWS:
@@ -2643,9 +2674,10 @@ def _test_push_then_step(failures, tmp):
         failures.append("(pts-wiring) push_then_step handler/event wiring is missing or wrong")
 
     # Revert flip: with the handler's finding and fallback probe patched out (the deny logic removed), every
-    # deny row and fallback deny row must stop denying.
+    # deny row and fallback deny row must stop denying; with both patched to always find (an always-deny
+    # handler), every allow row and fallback allow row must deny, so the allow rows catch an over-deny.
     finding, probe = aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE
-    aiqt_hooks._push_step_finding = lambda segments: None
+    aiqt_hooks._push_step_finding = lambda segments, depth=0, cache=None: (None, False)
     aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"(?!)")
     try:
         for label, command in _PTS_DENY_ROWS + tuple((lab, cmd) for lab, cmd, want in _PTS_FALLBACK_ROWS
@@ -2653,6 +2685,13 @@ def _test_push_then_step(failures, tmp):
             if _decision(handler, command) == "deny":
                 failures.append("{} (pts-flip): still denies with the deny logic removed, so the row does not "
                                 "discriminate".format(label))
+        aiqt_hooks._push_step_finding = lambda segments, depth=0, cache=None: ("a forced finding", True)
+        aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"")
+        for label, command in _PTS_ALLOW_ROWS + tuple((lab, cmd) for lab, cmd, want in _PTS_FALLBACK_ROWS
+                                                       if want == "allow"):
+            if _decision(handler, command) != "deny":
+                failures.append("{} (pts-flip-deny): still allows under an always-deny handler, so the row does "
+                                "not catch an over-deny".format(label))
     finally:
         aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
 
