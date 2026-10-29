@@ -2371,8 +2371,8 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 13
 end-line = 16
-canonical-text = "A verifier's output counts as a verdict only when the verifier delivered one. Completeness has one\ncriterion: the delivery carries positive evidence of a finished verdict that the verification agreed on\nin advance, whether a completion marker the verifier emits, the explicit verdict the verification asked\nfor, or both."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A verifier's output counts as a verdict only if the verifier delivered one. Completeness has one test:\nthe delivery carries the positive evidence, agreed in advance by the verification, of a finished\nverdict, whether a completion marker the verifier emits, the explicit verdict the verification asked\nfor, or both."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.2"
@@ -2380,53 +2380,53 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 16
 end-line = 17
-canonical-text = "A delivery lacking that evidence, or truncated, empty, or errored, counts as no verdict,\nnever a pass, a vote, or a finding-free result."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A delivery lacking that agreed evidence, or truncated, empty, or errored, counts as no\nverdict, never a pass, a vote, or a finding-free result."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.3"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 20
-end-line = 22
-canonical-text = "Completeness is never inferred from output length or volume or from the absence of a reported problem,\nbecause a run cut off before its verdict is indistinguishable from a clean one when judged by silence or\nsize."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+end-line = 21
+canonical-text = "Completeness is never inferred from output length, volume, or a reported problem's absence: a run cut\noff before its verdict is indistinguishable from a clean one judged by silence or size."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.4"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 20
-end-line = 22
-canonical-text = "Completeness is never inferred from output length or volume or from the absence of a reported problem,\nbecause a run cut off before its verdict is indistinguishable from a clean one when judged by silence or\nsize."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+end-line = 21
+canonical-text = "Completeness is never inferred from output length, volume, or a reported problem's absence: a run cut\noff before its verdict is indistinguishable from a clean one judged by silence or size."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.5"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 22
+start-line = 21
 end-line = 23
-canonical-text = "A delivery failing this test is re-dispatched and contributes nothing; it alone does not justify\nreducing the verifier panel, since one failed delivery does not show a verifier family is unavailable."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A delivery\nfailing this test is re-dispatched and contributes nothing; it alone does not justify reducing the\npanel, since one failed delivery is not evidence that a verifier family is unavailable."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.6"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 22
+start-line = 21
 end-line = 23
-canonical-text = "A delivery failing this test is re-dispatched and contributes nothing; it alone does not justify\nreducing the verifier panel, since one failed delivery does not show a verifier family is unavailable."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A delivery\nfailing this test is re-dispatched and contributes nothing; it alone does not justify reducing the\npanel, since one failed delivery is not evidence that a verifier family is unavailable."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.7"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 22
+start-line = 21
 end-line = 23
-canonical-text = "A delivery failing this test is re-dispatched and contributes nothing; it alone does not justify\nreducing the verifier panel, since one failed delivery does not show a verifier family is unavailable."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A delivery\nfailing this test is re-dispatched and contributes nothing; it alone does not justify reducing the\npanel, since one failed delivery is not evidence that a verifier family is unavailable."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.8"
@@ -2434,8 +2434,8 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
-canonical-text = "A\nrequired family is dropped from the panel only when it is genuinely unreachable, on the terms the\nverifier-diversity rule sets, and that reduction is recorded and re-run when the family returns."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A required\nfamily leaves the panel only if genuinely unreachable, on the verifier-diversity rule's terms, and that\nreduction is recorded and re-run when the family returns."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.9"
@@ -2443,8 +2443,8 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
-canonical-text = "A\nrequired family is dropped from the panel only when it is genuinely unreachable, on the terms the\nverifier-diversity rule sets, and that reduction is recorded and re-run when the family returns."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A required\nfamily leaves the panel only if genuinely unreachable, on the verifier-diversity rule's terms, and that\nreduction is recorded and re-run when the family returns."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.10"
@@ -2452,8 +2452,8 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
-canonical-text = "A\nrequired family is dropped from the panel only when it is genuinely unreachable, on the terms the\nverifier-diversity rule sets, and that reduction is recorded and re-run when the family returns."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A required\nfamily leaves the panel only if genuinely unreachable, on the verifier-diversity rule's terms, and that\nreduction is recorded and re-run when the family returns."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.11"
@@ -2461,8 +2461,8 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 18
 end-line = 19
-canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even when its retained\nprefix appears complete."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even if its retained\nprefix looks complete."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.12"
@@ -2470,17 +2470,17 @@ corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 26
 end-line = 32
-canonical-text = "The same fail-closed posture holds when the verifier cannot read or access a required input it should\ncover: it emits no permissive verdict over the gap but UNVERIFIABLE, the cannot-evaluate outcome\nguard-input-soundness names, identifying the unread input; this is a terminal fail-closed result, not the\ntransient degraded delivery above that a re-dispatch can cure, so it counts as not-passed, resolved by\nfixing the input, never a clean, passing, or finding-free verdict. A clean verdict over an input the\nverifier never read is the same false-clean this rule guards against, meeting the posture\ncheck-fails-closed-on-unreadable requires of a gate that cannot read its own input."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+canonical-text = "The same fail-closed posture holds when the verifier cannot read or access a required input it should\ncover: it emits no permissive verdict over the gap but UNVERIFIABLE, the cannot-evaluate outcome\nguard-input-soundness names, identifying the unread input. Terminal and fail-closed, not a transient\ndegraded delivery a re-dispatch can cure, it counts as not-passed, resolved by fixing the input, never a\nclean, passing, or finding-free verdict. A clean verdict over a required input the verifier never read\nis the false-clean this rule guards against, meeting the posture check-fails-closed-on-unreadable\nrequires of a gate unable to read its input."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdlv.13"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 33
-end-line = 35
-canonical-text = "A worker run ending in a safety refusal or provider content stop is a refusal, not a delivery, whatever\nstatus line comes with it; the item is parked and reported to the maintainer, its request never\nreworded, narrowed, split or reframed to get past the refusal."
-source-digest = "3e5b2e81eaecd4a9c77c86c231f505114e082ba828e4262ff567cbbf29df782f"
+end-line = 36
+canonical-text = "A worker run ending in a safety refusal or provider content stop, known by the provider's stop or result\nsignal, not by matching output text, counts as a refusal, not a delivery, whatever its status line: the\nstep needing it is held and the refusal reported to the maintainer, never routed around by rewording,\nnarrowing, splitting or reframing."
+source-digest = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
 
 [[clause]]
 clause-id = "vrfdiv.1"
