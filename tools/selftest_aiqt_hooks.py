@@ -23801,6 +23801,77 @@ def _main_isolated(monitor):
                 ("a backslash-newline before an element assignment's '=' and an absolute '>'",
                  "a[0]\\\n=1; echo hi > {}/out.txt".format(rp))):
             bcmd("(ap-c112) {} allows".format(_ar_label), _ar_cmd, "allow")
+        # Bash removes a backslash-newline before it reads '((', '$((', '))', '$(', '${' or a '${...}' name and
+        # operator, so the reader gives up at one there and the fail-closed scan reads on from it. Bash writes
+        # out.txt for every deny in this loop, and each fails with its own give-up reverted.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline inside a '((' command", "(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '((' command on a second line",
+                 "true\n(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '$(('", "echo $(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '$((' before a '$[...]'",
+                 "echo $(\\\n( '$(echo a > out.txt)' + $[1] ))"),
+                ("a backslash-newline inside a double-quoted '$(('", 'echo "$(\\\n( \'$(echo a > out.txt)\' ))"'),
+                ("a backslash-newline inside a '$((' in an 'a[...]=1' subscript",
+                 "a[$(\\\n( '$(echo a > out.txt)' ))]=1"),
+                ("a backslash-newline inside the '))' of a '$((...))'", "echo $(( '$(echo a > out.txt)' )\\\n)"),
+                ("a backslash-newline inside the '))' of a double-quoted '$((...))'",
+                 'echo "$(( \'$(echo a > out.txt)\' )\\\n)"'),
+                ("a backslash-newline after a '${...}' name", "x=abc; echo ${x\\\n:'$(echo a > out.txt)'}"),
+                ("a backslash-newline before a '${...}' name", "x=abc; echo ${\\\nx:'$(echo a > out.txt)'}"),
+                ("a backslash-newline before a '${...}' subscript", "a=(1); echo ${a\\\n['$(echo a > out.txt)']}"),
+                ("a backslash-newline after a '${#...}' '#'", "a=(1); echo ${#\\\na['$(echo a > out.txt)']}"),
+                ("a backslash-newline after a '${@...}' name", "set -- a b; echo ${@\\\n:'$(echo a > out.txt)'}"),
+                ("a backslash-newline between '$' and '{' before an offset",
+                 "x=abc; echo $\\\n{x:'$(echo a > out.txt)'}"),
+                ("a backslash-newline between '$' and '{' before a subscript",
+                 "a=(1); echo $\\\n{a['$(echo a > out.txt)']}")):
+            bcmd("(ap-c113) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # The same give-ups on shapes not run under bash (each fails with its own give-up reverted): a '$('
+        # or '$[' joined across a backslash-newline, and one before an offset after a '${...}' subscript.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline between '$' and '(' in a double-quoted string", 'echo "$\\\n(echo a > out.txt)"'),
+                ("a backslash-newline between '$' and '['", "echo $\\\n[ '$(echo a > out.txt)' ]"),
+                ("a backslash-newline after a '${...}' subscript before an offset",
+                 "a=(abc); echo ${a[0]\\\n:'$(echo a > out.txt)'}")):
+            bcmd("(ap-c113b) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline in a subshell's text", "(\\\necho hi )"),
+                ("a backslash-newline in a '$(...)' text", "echo $(\\\necho hi )"),
+                ("a backslash-newline after a '${...}' offset's ':'", "x=abc; echo ${x:\\\n1}"),
+                ("a give-up at a backslash-newline before an absolute '>'",
+                 "(\\\n( 1 )); echo hi > {}/out.txt".format(rp))):
+            bcmd("(ap-c113c) {} allows".format(_ar_label), _ar_cmd, "allow")
+        # Known misses the residue discloses (NOT YET JUDGED): a value bash evaluates as arithmetic after quote
+        # removal, in a command's argument or in an assignment to an integer-attribute variable, and a $'...'
+        # escape in arithmetic text that changes what runs. Each allows though bash may truncate out.txt, so a
+        # later fix shows up here as a row change.
+        for _ar_label, _ar_cmd in (
+                ("an integer-attribute variable's assigned value", "declare -i x; x='a[$(echo a > out.txt)]'"),
+                ("a typeset -i variable's assigned value", "typeset -i x; x='a[$(echo a > out.txt)]'"),
+                ("an integer-attribute variable's appended value", "declare -i x=1; x+='a[$(echo a > out.txt)]'"),
+                ("a test -v argument", "test -v 'a[$(echo a > out.txt)]'"),
+                ("a '[ -v' argument", "[ -v 'a[$(echo a > out.txt)]' ]"),
+                ("a '[[ -v' argument", "[[ -v 'a[$(echo a > out.txt)]' ]]"),
+                ("a '[[ ... -lt ... ]]' operand", "[[ 'a[$(echo a > out.txt)]' -lt 1 ]]"),
+                ("a quoted local element assignment", "f() { local 'a[$(echo a > out.txt)]=1'; }; f"),
+                ("a quoted typeset element assignment", "typeset 'a[$(echo a > out.txt)]=1'"),
+                ("a quoted declare -a element assignment", "declare -a 'a[$(echo a > out.txt)]=1'"),
+                ("a declare -i value", "declare -i x='a[$(echo a > out.txt)]'"),
+                ("a local -i value", "f() { local -i x='a[$(echo a > out.txt)]'; }; f"),
+                ("a wait -n -p name", "wait -n -p 'v[$(echo a > out.txt)]'"),
+                ("a let argument", "let 'a[$(echo a > out.txt)]'"),
+                ("a '[[ ... -eq ... ]]' operand", "[[ 'a[$(echo a > out.txt)]' -eq 1 ]]"),
+                ("an unset argument", "unset 'a[$(echo a > out.txt)]'"),
+                ("a read name", "read 'a[$(echo a > out.txt)]' < /dev/null"),
+                ("a printf -v name", "printf -v 'a[$(echo a > out.txt)]' x"),
+                ("a quoted declare element assignment", "declare 'a[$(echo a > out.txt)]=1'"),
+                ("a $'\\c\\' escape in '$((...))'", "echo $(( $'\\c\\$(echo a > out.txt)' ))"),
+                ("a $'\\c\\' escape in an 'a[...]=1' subscript", "a[$'\\c\\$(echo a > out.txt)']=1"),
+                ("a $'\\c\\' escape in a '${...}' subscript", "echo ${a[$'\\c\\$(echo a > out.txt)']}"),
+                ("a $'\\x3e' escape in '$((...))'", "echo $(( $'$(echo a \\x3e out.txt)' ))"),
+                ("a $'\\x24' escape in '$((...))'", "echo $(( $'\\x24(echo a > out.txt)' ))")):
+            bcmd("(ap-c114) {} allows (disclosed known miss)".format(_ar_label), _ar_cmd, "allow")
         # the deny names the target and asks for an absolute one.
         _pt_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": 'echo "$(echo a > out.txt)"'}})
