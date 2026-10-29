@@ -200,12 +200,11 @@ def _checks():
     if "tracking and rendering are pending." not in opf:
         _cant("D2a success wording changed at source; re-verify the D2a/D2b boundary")
 
-    # C-SPEC-VERSION: the base spec_version the schema-compat obligation targets. Re-verified at 1.2.0 for
-    # OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 5): the bump admits the managed init.toml provenance as a
-    # C-CONTAINMENT leaf. For a 1.1.0 store, the upgrade schema delta changes only spec_version;
-    # declared views are then regenerated, so a stale committed view can change.
-    if not _has_line(store, 'SUPPORTED_SPEC_VERSION = "1.2.0"'):
-        _cant("_opf_store.py SUPPORTED_SPEC_VERSION changed; re-verify the schema-compat boundary")
+    # C-SPEC-VERSION: the base spec_version the schema-compat obligation targets. Re-verified at 2.0.0,
+    # the only base this tooling accepts (homes 2 is its baseline): a store declaring any other
+    # spec_version is refused, never upgraded, so a change to this line re-opens the boundary.
+    if not _has_line(store, 'SPEC_VERSION = "2.0.0"'):
+        _cant("_opf_store.py SPEC_VERSION changed; re-verify the schema-compat boundary")
 
     # C-CHECKER-ROSTER: the required-checks authority the coupled success contract depends on.
     if "REQUIRED_CHECKS" not in check:

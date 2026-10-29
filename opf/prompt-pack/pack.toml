@@ -17,24 +17,24 @@
 # that the gate also parses and checks (validate_examples). No writer consumes them in this release;
 # `opf record import --batch` does not exist, and the procedure marks that step not yet executable.
 format = "opf.prompt-pack/v1"
-version = "0.7.0"
-digest = "sha256:b988a50b5a0be8ec231675064ea2af37a84c74b330d2f511ea287ed86cbc039e"
+version = "0.7.2"
+digest = "sha256:8ccdca6469da108e2cad87970e63bec20c9e026f80e55c954ef33d4e91f0c9c1"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "29b030d481d602a2c4adfff514033004de0c6d9a376149fe15492ff2676a48d0"
+sha256 = "3a97083c9cd167129fcf66ff1fe2823103bf64ddd8dbdaabe1ba7330db0fcc06"
 
 [[members]]
 path = "adopt/clean-start.md"
-sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
+sha256 = "02ef9143f2bd829546ec306c23cf035e71f73a9d5307e5db285aeca4913a4bcf"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "7c915b106b31e31bbd9b0ec8e712af73351e1bd61742e973ee3b469018f8ad8b"
+sha256 = "f3fe2d0fb62f8669e7bafa759ed4e06977036d7ce31a8425a13203886a41a39e"
 
 [[members]]
 path = "import/SKILL.md"
-sha256 = "2557ac6f3307e3b520647b540a2108f2a8079c7dab8e4c40393b28bd154c62b6"
+sha256 = "d7e8dc06a08b531e3a7e7919da737d47f0321a35172fc7faff9233198b7df8eb"
 
 [[members]]
 path = "import/examples/autonomous_decision.batch.toml"

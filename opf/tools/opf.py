@@ -21,8 +21,8 @@ over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NO
 with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
 repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
-recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
-every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
+recognized verb, but no store upgrade is defined for base 2.0.0: `opf upgrade` refuses every argument
+list on every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
 `import`'s former
 modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
 (--decisions FILE | --interactive) | --apply <run-id>)`, are RETIRED (spec 14.1) and their engine is
@@ -31,17 +31,21 @@ pointer to adoption and the prompt pack, parsing no argument, reading no input f
 
 `init` HAS landed: `opf init [--root DIR] [--recover]` creates validated store sources, a pointer, and a
 starter `CHANGELOG.md` under the shared init operation mutex and the spec 5.7 lease, without rendering or
-git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`.
+git writes beyond the operation-lock home, refusing an existing root `CHANGELOG.md` or `VERSION`. It also
+writes `.working/.gitignore` (spec 4.2) after inspecting git's effective ignore rules and index; that
+inspection is cannot-evaluate (exit 2, nothing written) while the environment carries a runtime git
+configuration override (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_COUNT and its pairs,
+GIT_CONFIG_PARAMETERS or GIT_CONFIG; GIT_CONFIG_NOSYSTEM is allowed): unset them and retry.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
 `record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, `receipt-repair`, and
 `worklog-append` author one change (with its own worklog entry, and for done-with-receipt the one-to-one done
 receipt) through one journaled publication, then render and require doctor VALID, leaving the change
 uncommitted. `receipt-repair BI-ID --actor maintainer[:ID] --reason S` adds the missing receipt of an item a
-committed reviewed edit put at done, claiming its id through a homes-2 id reservation; it refuses at homes 1,
-so while this build activates homes 1 only it refuses on every store (exit 2, recording nothing; like every
-subcommand, on a homes-1 store it first reconciles any interrupted earlier run, and that recovery, where one
-is needed, writes the store before the run refuses).
+committed reviewed edit put at done, claiming its id through a homes-2 id reservation. Every subcommand
+admits only a store whose manifest declares spec_version 2.0.0 with homes = 2: a readable manifest
+declaring anything else refuses (exit 2) before any reconciliation or write, and below 2.0.0 the refusal
+states the spec 9.2 hand step, above it asks for newer tooling.
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.
@@ -50,15 +54,14 @@ delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--r
 `adopt` HAS landed (OPF-ADOPT K9a, the read-only half): `opf adopt plan --inputs FILE [--root DIR]`
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
 nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply -- and
-`opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles and
-the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
-`opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
-and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed.
-`opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
-alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
-own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
-safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+`opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles; with
+none present it reports that no adoption run exists, and every report says the .aiqt adoption journal is
+not read, so its state is unknown). The stage driver adds `opf adopt approve --inputs FILE --plan FILE
+--actor NAME`, the one approval, printed and writing nothing. On base 2.0.0, the only base this build
+implements, the adoption journal is a homes-1 location under .aiqt and is not read, so
+`opf adopt apply --inputs FILE --plan FILE --approval FILE` and `opf adopt reconcile [--root DIR]` refuse
+with exit 2 before the root is resolved or anything is read or written: nothing is applied and no
+interrupted adoption transaction is recovered until the journal moves to its homes-2 home. `complete` is
 recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -18774,14 +18777,12 @@ def _init_main(rest):
         stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
-        # The one bootstrap builder the init operation also uses, over the manifest model of the
-        # homes generation this tooling activates. A generation-2 model adds .working/.gitignore as
-        # the FIRST payload, so its ignore rules exist before any store file (spec 4.2).
-        model = _opf_init._manifest_model(homes2=_opf_store.SUPPORTED_HOMES >= 2)
-        gitignore = None
-        if _opf_store.homes_generation(model) == 2:
-            gitignore = working + "/.gitignore"
-            payloads[gitignore] = _opf_store.render_homes_gitignore().encode("utf-8")
+        # The one bootstrap builder the init operation also uses, over the spec_version 2.0.0,
+        # homes 2 manifest model. .working/.gitignore is the FIRST payload, so its ignore rules
+        # exist before any store file (spec 4.2).
+        model = _opf_init._manifest_model()
+        gitignore = working + "/.gitignore"
+        payloads[gitignore] = _opf_store.render_homes_gitignore().encode("utf-8")
         for name, text in _opf_init.bootstrap_documents(model).items():
             payloads[machine + "/" + name] = text.encode("utf-8")
         payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
@@ -18803,9 +18804,8 @@ def _init_main(rest):
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
-        if gitignore is not None:
-            stage = "inspecting-the-homes-gitignore"
-            _init_homes_gitignore_inspect(root, payloads[gitignore])
+        stage = "inspecting-the-homes-gitignore"
+        _init_homes_gitignore_inspect(root, payloads[gitignore])
         stage = "checking-git-history-for-a-prior-store"
         _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
@@ -18832,9 +18832,8 @@ def _init_main(rest):
                 raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
             _init_untracked(git, repo, root, index_paths)
             _init_unignored(git, repo, root, set(directories) | set(payloads))
-            if gitignore is not None:
-                stage = "inspecting-the-homes-gitignore"
-                _init_homes_gitignore_inspect(root, payloads[gitignore])
+            stage = "inspecting-the-homes-gitignore"
+            _init_homes_gitignore_inspect(root, payloads[gitignore])
             stage = "checking-git-history-for-a-prior-store"
             _init_no_prior_store(git, repo, root)
             _init_same_root(root, root_fd)
@@ -18883,9 +18882,8 @@ def _init_main(rest):
                 raise RuntimeError("local pointer appeared during publication")
             _init_same_root(root, root_fd)
             _init_untracked(git, repo, root, index_paths)
-            if gitignore is not None:
-                stage = "verifying-the-homes-gitignore"
-                _init_homes_gitignore_verify(root)
+            stage = "verifying-the-homes-gitignore"
+            _init_homes_gitignore_verify(root)
             stage = "releasing-the-init-operation-mutex"
             _opf_oplock.release_init_holder(back)
         finally:
@@ -19099,16 +19097,16 @@ def _cmd_init(rest):
         return EXIT_MALFORMED
 
 
-# --- opf upgrade: this tooling defines no store upgrade ------------------------------------------------
+# --- opf upgrade: no store upgrade is defined for base 2.0.0 -------------------------------------------
 
-# The refusal opf upgrade prints for every argument list. It names no store format, version or migration
-# route, because this tooling has none to offer.
-UPGRADE_NONE = "this tooling defines no store upgrade; nothing was read or written"
+# The refusal opf upgrade prints for every argument list. It names the one base version this tooling
+# implements and no migration route, because base 2.0.0 defines none to offer.
+UPGRADE_NONE = "no store upgrade is defined for base 2.0.0; nothing was read or written"
 
 
 def _cmd_upgrade(rest):
-    """`opf upgrade ...`: the store-schema upgrade verb. This tooling defines no store upgrade, so the verb
-    prints UPGRADE_NONE and exits 2 for EVERY argument list, whether none, `--help`, `--root DIR` or any
+    """`opf upgrade ...`: the store-schema upgrade verb. No store upgrade is defined for base 2.0.0, so the
+    verb prints UPGRADE_NONE and exits 2 for EVERY argument list, whether none, `--help`, `--root DIR` or any
     other token. No argument is parsed or validated, the root is never resolved, nothing is read and
     nothing is written, so a NOT-ADOPTED root refuses the same way (an upgrade is a REQUESTED operation,
     so its refusal is fail-closed, never the NOT-APPLICABLE exit 0 that doctor and render report on a
@@ -19580,14 +19578,13 @@ def _cmd_adopt(rest):
     vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
     READ-ONLY subcommands, the stage driver adds `approve` and `apply`, `reconcile` runs the journal-only
     recovery, and `complete` refuses fail-closed (exit 2) until the completion stage lands, so a stub can
-    never read as a passing operation. plan, approve and apply each refuse over a non-clean adoption
-    journal (an open transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything
-    else is read; `reconcile` is how that journal is made clean again. On base 2.0.0
-    (_opf_adopt_apply.adoption_journal_fenced; never at this build's SUPPORTED_HOMES 1) that journal,
-    a homes-1 location under .aiqt, is not read: apply refuses with exit 2 before it reads its inputs
-    and reconcile before any .aiqt access; plan, approve and status report its unknown state as
-    cannot-evaluate (exit 2, _opf_adopt_apply.JOURNAL_UNREAD) before they read any file, so approve
-    issues no approval there.
+    never read as a passing operation. On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced; the only
+    base this build implements) the adoption journal, a homes-1 location under .aiqt, is not read: apply
+    and reconcile refuse with exit 2 (_opf_adopt_apply.ADOPTION_FENCE) once their arguments parse, before
+    the root is resolved or any input or .aiqt path is read; plan, approve and status run without it, so
+    none of them refuses over an open transaction or a held lock there, and status says the journal is not
+    read (_opf_adopt_apply.JOURNAL_UNREAD). The apply and reconcile entries below therefore describe their
+    engine bodies, which no CLI call reaches on base 2.0.0.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
@@ -19611,20 +19608,25 @@ def _cmd_adopt(rest):
           re-derive the plan from the worksheet over the live tree (a moved revision, a changed observation
           or a changed worksheet refuses into a fresh plan), and print the
           approval on stdout, attributed to NAME at the clock instant, binding the plan's plan_digest and
-          inventory_digest (_opf_adopt_apply.capture_approval). Exit 0: the approval TOML on stdout. Exit
+          inventory_digest (_opf_adopt_apply.capture_approval, which on base 2.0.0 does not read the
+          adoption journal). Exit 0: the approval TOML on stdout. Exit
           2: every refusal or cannot-evaluate.
-      apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
-          (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
+      apply --inputs FILE --plan FILE --approval FILE [--root DIR] : on base 2.0.0, the fence refusal
+          above (exit 2), and nothing else. The engine body, the apply stage
+          (_opf_adopt_apply.run_apply), would admit only a plan whose approval binds it, re-derive it over the
           live tree and its observed revision, then in the run's one journaled base transaction persist the
           plan, the approval and the sealed planning inventory re-derivation reproves (the bytes the plan's
           inventory_digest binds, which the completion check reads) in its evidence bundle, dispatch every
           plan op in the apply stage and compose
           the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
-          stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
-          written, which in this build is every plan. Exit 0: applied
-          (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
-      reconcile [--root DIR] : the EXPLICIT recovery of an interrupted adoption transaction
-          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE: the store is never
+          stage. An op or the receipt stage not yet landed would refuse the whole apply before anything
+          is written, which in this build is every plan. Its exit 0 would mean applied (completion and
+          retirement follow). Exit 2: every refusal or cannot-evaluate, the fence included; exit 1 is not
+          used.
+      reconcile [--root DIR] : on base 2.0.0, the fence refusal above (exit 2): nothing is recovered,
+          read or written. The engine body is the EXPLICIT recovery of an interrupted adoption transaction
+          (_opf_adopt_apply.reconcile_report) from the adoption journal ALONE, described from here to the
+          end of this entry in the present tense of that body: the store is never
           resolved (spec 14.2), and no reconcile-first gate runs (this IS the reconcile). Each open
           transaction rolls FORWARD when every poststate already verifies, else BACK from its durable
           preimages, under the journal lock, and a confirmed-dead run's journal lock is broken only
@@ -19657,16 +19659,15 @@ def _cmd_adopt(rest):
           not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
-          validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
-          journal_state), both read contained and no-follow. Exit 0: clean (each verified run listed, or
-          "no adoption run exists"). Exit 1: a finding (an open transaction or a held lock in the
-          journal, a bundle the validator grades INVALID, or a directory at the evidence home that is not
-          a run id). Exit 2: cannot-evaluate (a symlinked, dangling or wrong-type root or home, evidence-
-          home entry or journal entry -- a journal entry other than a transaction directory or a
-          regular, singly-linked `lock` / `lock.break` -- a root reached through a symlink, `..` included, a foreign
-          plan digest, a wrong phase, a missing or unproven plan.toml, unless an earlier finding
-          (no inventory, or a legacy-format inventory) ends verification first, or an unreadable
-          journal or bundle). Like
+          validator), read contained and no-follow. The adoption journal (_opf_adopt_apply.JOURNAL_REL)
+          is not read on base 2.0.0, and a line on stdout says so (_opf_adopt_apply.JOURNAL_UNREAD), so
+          its state is never reported clean. Exit 0: clean (each verified run listed, or "no adoption
+          run exists"). Exit 1: a finding (a bundle the validator grades INVALID, or a directory at the
+          evidence home that is not a run id). Exit 2: cannot-evaluate (a symlinked, dangling or
+          wrong-type root, home or evidence-home entry, a root reached through a symlink, `..`
+          included, a foreign plan digest, a wrong phase, a missing or unproven plan.toml, unless an
+          earlier finding (no inventory, or a legacy-format inventory) ends verification first, or an
+          unreadable bundle). Like
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
           subcommand requires store resolution (unlike import D7).
 
@@ -19738,6 +19739,12 @@ def _cmd_adopt(rest):
         if flag in takes and flag not in given:
             print("opf adopt {}: {} {}".format(sub, flag, need), file=sys.stderr)
             return EXIT_MALFORMED
+    # On base 2.0.0 (adoption_journal_fenced) apply and reconcile refuse HERE, before the root is resolved:
+    # resolution stats and resolves the path the operator spelled, so a --root naming .aiqt (R/.aiqt/..)
+    # would otherwise be reached before the refusal. Nothing is read or written.
+    if sub in ("apply", "reconcile") and _opf_adopt_apply.adoption_journal_fenced():
+        print("opf adopt {}: cannot evaluate: {}".format(sub, _opf_adopt_apply.ADOPTION_FENCE), file=sys.stderr)
+        return EXIT_MALFORMED
     inputs_file = given.get("--inputs")
     try:
         # The EFFECTIVE root is what the operator's traversal names: the --root value, or the current
@@ -19829,11 +19836,8 @@ def _cmd_adopt(rest):
     if sub == "plan":
         import datetime
         try:
-            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so the
-            # reconcile-first gate cannot pass over its unknown state: cannot-evaluate.
-            if _opf_adopt_apply.adoption_journal_fenced():
-                raise _opf_adopt_apply.AdoptApplyError(_opf_adopt_apply.JOURNAL_UNREAD)
-            _opf_adopt_apply.require_clean_journal(root_abs)
+            # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so plan runs
+            # no reconcile-first gate; the planner itself never reads that journal.
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
             res = _opf_adopt_plan.plan(
@@ -19850,8 +19854,7 @@ def _cmd_adopt(rest):
                 print("opf adopt plan: unresolved source disposition: {}".format(source), file=sys.stderr)
             return _adopt_exit(res.status)
         except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
-            # A fail-closed --inputs read error or a non-clean or unread adoption journal: cannot-evaluate
-            # (exit 2), never a silent skip.
+            # A fail-closed --inputs read error: cannot-evaluate (exit 2), never a silent skip.
             print("opf adopt plan: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
@@ -19862,13 +19865,8 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
-            # On base 2.0.0 (adoption_journal_fenced) apply refuses with the fence and approve is
-            # cannot-evaluate over the unread .aiqt adoption journal, each before it reads its inputs, so
-            # nothing was read or written and no approval issues over a journal state that is unknown.
-            if _opf_adopt_apply.adoption_journal_fenced():
-                raise _opf_adopt_apply.AdoptApplyError(
-                    _opf_adopt_apply.ADOPTION_FENCE if sub == "apply" else _opf_adopt_apply.JOURNAL_UNREAD)
-            _opf_adopt_apply.require_clean_journal(root_abs)
+            # On base 2.0.0 (adoption_journal_fenced) apply refused with the fence before root resolution
+            # above, so only approve reaches here there; it runs without the .aiqt adoption journal.
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
             if sub == "approve":
@@ -19892,20 +19890,15 @@ def _cmd_adopt(rest):
                   "2".format(sub, exc), file=sys.stderr)
             return EXIT_MALFORMED
 
-    # sub == "status": the read-only state report over the two adoption homes; ZERO writes. Both homes
-    # are read ONLY through the engine's contained, no-follow primitives bound to ONE product-root fd (a
+    # sub == "status": the read-only state report over the adoption evidence home; ZERO writes. The home
+    # is read ONLY through the engine's contained, no-follow primitives bound to ONE product-root fd (a
     # symlinked root or ancestor refuses, a `..` after a symlink included), the same ones verify_bundle
-    # and journal_clean_or_refuse use; the journal's lock and entries are read beneath the one journal-
-    # root fd opened from it, never by re-resolving a path: a symlinked, dangling or wrong-type home or
-    # entry is cannot-evaluate, never followed, skipped or read as absent. A bundle is reported only when
-    # the engine's own bundle validator grades it VALID, and the journal is read only through the engine's
-    # own classification (journal_state).
+    # uses: a symlinked, dangling or wrong-type home or entry is cannot-evaluate, never followed, skipped
+    # or read as absent. A bundle is reported only when the engine's own bundle validator grades it VALID.
+    # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced): status says so on
+    # every report it prints, so the journal's unknown state is never reported clean.
     adopt, journal = _opf_adopt_apply, _opf_adopt_apply._journal
     try:
-        # On base 2.0.0 the .aiqt adoption journal is not read (adoption_journal_fenced), so its state is
-        # unknown: status is cannot-evaluate before it reads either home, never clean over an unread journal.
-        if adopt.adoption_journal_fenced():
-            raise adopt.AdoptApplyError(adopt.JOURNAL_UNREAD)
         journal.require_containment()
         root_fd = adopt._open_product_root(root_abs)
         try:
@@ -19951,21 +19944,12 @@ def _cmd_adopt(rest):
             finally:
                 if dfd is not None:
                     _opf_store._close_fd_exc_safe(dfd)
-            owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
         finally:
             _opf_store._close_fd_exc_safe(root_fd)
-        journal_rel = adopt.JOURNAL_REL
-        if owner is not None:
-            findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
-                            "(run `opf adopt reconcile` once no adoption run is live)".format(
-                                journal_rel, owner.get("pid")))
-        if opened:
-            findings.append("the adoption journal at {} holds interrupted transaction(s) {} -- an "
-                            "adoption transaction did not complete (run `opf adopt reconcile`)".format(
-                                journal_rel, ", ".join(opened)))
         for run_id in runs:
             print("opf adopt status: adoption run {}: evidence bundle at {}/{}".format(
                 run_id, evidence_rel, run_id))
+        print("opf adopt status: {}".format(adopt.JOURNAL_UNREAD))
         for f in findings:
             print("opf adopt status: FINDING: {}".format(f), file=sys.stderr)
         if findings:
@@ -19983,8 +19967,8 @@ def _cmd_adopt(rest):
 
 
 def _upgrade_self_test():
-    """`opf upgrade` defines no store upgrade: through main(), every argument list below prints exactly the
-    refusal pinned here as a literal (so a reverted, extended or version-naming message is red) on stderr,
+    """`opf upgrade` defines no store upgrade for base 2.0.0: through main(), every argument list below prints
+    exactly the refusal pinned here as a literal (so a reverted or extended message is red) on stderr,
     nothing on stdout, and exits 2, over a NOT-ADOPTED root and over a root holding a store manifest alike,
     and both fixture trees stay byte-identical. `upgrade` stays a KNOWN_VERBS name. Fails without the
     refusal: the removed engine reported NOT APPLICABLE at exit 0 over a NOT-ADOPTED root. Called by
@@ -19994,7 +19978,7 @@ def _upgrade_self_test():
     import shutil
     import tempfile
 
-    want = "opf upgrade: this tooling defines no store upgrade; nothing was read or written\n"
+    want = "opf upgrade: no store upgrade is defined for base 2.0.0; nothing was read or written\n"
     failures = []
 
     def snapshot(top):
@@ -20834,16 +20818,16 @@ def _cli_self_test():
             flip: reverting the adopt dispatch routes it to the fail-closed KNOWN_VERBS branch (returning
             2 where 0/1 is expected -- the wiring discriminator), and a subcommand that writes flips the
             byte-identical snapshot red. Vectors: `status` over a clean root -> 0 + the no-adoption-run
-            message, byte-identical; `status` over a root with an OPEN adoption-journal transaction -> 1
-            (finding), byte-identical (status reports, never reconciles); `status` over a completed engine
+            message, byte-identical; on base 2.0.0 the adoption journal is not read, so `status` over a
+            root with an OPEN adoption-journal transaction, a held journal lock, or a symlinked, dangling or
+            wrong-type journal home or entry (a hardlinked lock.break included) -> 0 + the journal-not-read
+            line, byte-identical, the journal never opened or enumerated; `status` over a completed engine
             transaction or a nothing-opened entry -> 0, over a run-id directory the bundle validator grades
-            INVALID -> 1, and over a symlinked, dangling or wrong-type root, home or entry (a journal entry
-            included), a hardlinked lock.break, or a `--root DIR/link/..` -> 2; with the journal path
-            swapped for a symlink after its contained open, the product's own lock state (never the
-            decoy's); with the evidence home swapped right after its listing, the ORIGINAL home's findings
-            (read through the held home descriptor, K9a fix 4); with a transaction directory swapped for
-            an empty decoy after the journal enumeration, still the interrupted-transaction finding
-            (classified through the held txn descriptor, K9a fix 4); an unresolvable cwd -> 2;
+            INVALID -> 1, and over a symlinked, dangling or wrong-type root, evidence home or evidence entry,
+            or a `--root DIR/link/..` -> 2; with the evidence home swapped right after its listing, the
+            ORIGINAL home's findings (read through the held home descriptor, K9a fix 4); `reconcile` and
+            `apply` -> 2 with the base 2.0.0 fence, apply before it reads its inputs; `approve` reads its
+            inputs and approves without the journal; an unresolvable cwd -> 2;
             `plan` with a missing, FIFO, oversized, symlinked, symlinked-parent or hardlinked
             worksheet -> 2 (the bounded, single-link, fail-closed read boundary); `plan` with a STALE (well-formed, non-matching) observation
             digest -> 2 (the inventory binding refuses BEFORE any op validation), byte-identical; `plan`
@@ -20931,88 +20915,97 @@ def _cli_self_test():
                           "({})".format(exc), file=sys.stderr)
                     return EXIT_MALFORMED
 
-                # status over a CLEAN root -> 0 + the no-adoption-run message, and the tree byte-unchanged.
-                before = tree_snapshot(clean)
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    rc = main(["adopt", "status", "--root", clean])
-                if rc != EXIT_OK or "no adoption run exists" not in buf.getvalue():
-                    failures.append("adopt status over a clean root: rc={!r} (expected 0 + the "
-                                    "no-adoption-run message)".format(rc))
-                if tree_snapshot(clean) != before:
-                    failures.append("adopt status mutated the product root (status must be a pure read)")
-
-                # status over adoption-journal DEBRIS -> 1 (an interrupted transaction is a finding), and
-                # the tree byte-unchanged (status reports, never reconciles).
-                before = tree_snapshot(debris)
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    rc = main(["adopt", "status", "--root", debris])
-                if rc != EXIT_FINDING or "interrupted transaction(s) txn" not in buf.getvalue():
-                    failures.append("adopt status over journal debris: rc={!r} (expected 1 + the journal "
-                                    "finding)".format(rc))
-                if tree_snapshot(debris) != before:
-                    failures.append("adopt status (journal debris) mutated the product root")
-
-                # On base 2.0.0 (_opf_adopt_apply.adoption_journal_fenced, SUPPORTED_HOMES raised to 2
-                # inside the vector and restored in a finally) the .aiqt adoption journal is not read, so
-                # its state is unknown: status and plan are cannot-evaluate over the debris and over the
-                # clean root alike (red when status reports clean, exit 0 and the no-adoption-run message,
-                # or plan goes on to its worksheet; red when either still reads the journal: the journal
-                # finding or the reconcile-first refusal). Status refuses before it reads the evidence home
-                # too (red when it reports the malformed home's not-a-directory instead). reconcile and
-                # apply refuse with the fence, and approve is cannot-evaluate, apply and approve before they
-                # read their inputs (the worksheet and artefact reads are recorded: red when either reads
-                # any of them first, or approve prints an approval). Every root stays byte-identical.
+                # On base 2.0.0, the only base this build implements (_opf_adopt_apply.adoption_journal_fenced),
+                # the .aiqt adoption journal is not read: status, plan and approve run without it. Status
+                # over the debris and over the clean root alike exits 0 with the no-adoption-run message and
+                # the journal-not-read line (red when it reports the debris's interrupted transaction, exit
+                # 1, or refuses over the unread journal, exit 2); it still reads the evidence home (red when
+                # the malformed home's not-a-directory refusal goes missing). Plan goes on to its worksheet
+                # over the debris (red on the reconcile-first refusal or the unread-journal refusal), and so
+                # does approve (its worksheet and artefact reads are recorded: red when it refuses before
+                # them). reconcile and apply refuse with the fence, apply before it reads its inputs (red when
+                # it reads any of them first). Every verb here is a pure read: every root stays byte-identical.
                 from unittest import mock
                 this = sys.modules[__name__]
                 missing = os.path.join(abase, "no-such-worksheet.toml")
                 fenced = {}
                 read = []
+                debris_before = tree_snapshot(debris)
                 clean_before = tree_snapshot(clean)
                 badhome_before = tree_snapshot(badhome)
-                saved_homes = _opf_store.SUPPORTED_HOMES
-                try:
-                    _opf_store.SUPPORTED_HOMES = 2
-                    for where, at in (("journal debris", debris), ("a clean root", clean)):
-                        fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
-                        fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
-                    fenced["status", "a malformed evidence home"] = run_adopt(
-                        ["adopt", "status", "--root", badhome])
-                    fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
-                    for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
-                        with mock.patch.object(this, "_adopt_read_inputs",
-                                               lambda path, sub=sub: read.append((sub, path)) or {}), \
-                                mock.patch.object(this, "_adopt_read_bounded",
-                                                  lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
-                            fenced[sub, "journal debris"] = run_adopt(
-                                ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
-                finally:
-                    _opf_store.SUPPORTED_HOMES = saved_homes
-                unread = "cannot evaluate: " + _opf_adopt_apply.JOURNAL_UNREAD
+                for where, at in (("journal debris", debris), ("a clean root", clean)):
+                    fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
+                    fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
+                fenced["status", "a malformed evidence home"] = run_adopt(
+                    ["adopt", "status", "--root", badhome])
+                fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
+                for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
+                    with mock.patch.object(this, "_adopt_read_inputs",
+                                           lambda path, sub=sub: read.append((sub, path)) or {}), \
+                            mock.patch.object(this, "_adopt_read_bounded",
+                                              lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
+                        fenced[sub, "journal debris"] = run_adopt(
+                            ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
+                # apply and reconcile refuse before the root is resolved: over a --root that crosses the
+                # debris's .aiqt (R/.aiqt/..) neither stats, opens, lists nor resolves a path naming .aiqt
+                # before the fence (red when root resolution runs first: its realpath and its `..` walk
+                # both reach R/.aiqt).
+                touched = []
+
+                def tracing(real, name):
+                    def traced(path, *args, **kwargs):
+                        if isinstance(path, (str, bytes, os.PathLike)) and ".aiqt" in os.fsdecode(path):
+                            touched.append((name, os.fsdecode(path)))
+                        return real(path, *args, **kwargs)
+                    return traced
+                through_aiqt = os.path.join(debris, ".aiqt", "..")
+                for sub, flags in (("apply", ["--inputs", missing, "--plan", missing, "--approval", missing]),
+                                   ("reconcile", [])):
+                    del touched[:]
+                    with mock.patch.object(os, "lstat", tracing(os.lstat, "lstat")), \
+                            mock.patch.object(os, "stat", tracing(os.stat, "stat")), \
+                            mock.patch.object(os, "open", tracing(os.open, "open")), \
+                            mock.patch.object(os, "listdir", tracing(os.listdir, "listdir")), \
+                            mock.patch.object(os.path, "realpath", tracing(os.path.realpath, "realpath")):
+                        rc, out = run_adopt(["adopt", sub] + flags + ["--root", through_aiqt])
+                    said = "opf adopt {}: cannot evaluate: {}\n".format(sub, _opf_adopt_apply.ADOPTION_FENCE)
+                    if rc != EXIT_MALFORMED or out != said or touched:
+                        failures.append("adopt {} over --root R/.aiqt/.. on base 2.0.0: rc={!r} (expected 2 + "
+                                        "exactly the fence, with no .aiqt path reached first): {!r}; "
+                                        "reached {!r}".format(sub, rc, out, touched))
+                unread = "opf adopt status: " + _opf_adopt_apply.JOURNAL_UNREAD
                 fence = "cannot evaluate: " + _opf_adopt_apply.ADOPTION_FENCE
-                for sub, where, want, needle, refused in (
-                        ("status", "journal debris", EXIT_MALFORMED, unread, "interrupted transaction"),
-                        ("status", "a clean root", EXIT_MALFORMED, unread, "no adoption run exists"),
-                        ("plan", "journal debris", EXIT_MALFORMED, unread, "reconcile"),
-                        ("plan", "a clean root", EXIT_MALFORMED, unread, "--inputs worksheet"),
-                        ("status", "a malformed evidence home", EXIT_MALFORMED, unread, "is not a directory"),
-                        ("reconcile", "journal debris", EXIT_MALFORMED, fence, "nothing to reconcile"),
-                        ("apply", "journal debris", EXIT_MALFORMED, fence, "reconcile"),
-                        ("approve", "journal debris", EXIT_MALFORMED, unread, "approved_at")):
+                gate = (_opf_adopt_apply.JOURNAL_UNREAD, "must be reconciled")
+                for sub, where, want, needles, refused in (
+                        ("status", "journal debris", EXIT_OK, (unread, "no adoption run exists"),
+                         ("interrupted transaction", "cannot evaluate")),
+                        ("status", "a clean root", EXIT_OK, (unread, "no adoption run exists"),
+                         ("cannot evaluate",)),
+                        ("plan", "journal debris", EXIT_MALFORMED, ("--inputs worksheet not found",), gate),
+                        ("plan", "a clean root", EXIT_MALFORMED, ("--inputs worksheet not found",), gate),
+                        ("status", "a malformed evidence home", EXIT_MALFORMED, ("is not a directory",),
+                         (unread,)),
+                        ("reconcile", "journal debris", EXIT_MALFORMED, (fence,), ("nothing to reconcile",)),
+                        ("apply", "journal debris", EXIT_MALFORMED, (fence,), ("reconcile",)),
+                        ("approve", "journal debris", EXIT_MALFORMED, ("opf adopt approve: cannot evaluate: ",),
+                         gate + ("approved_at",))):
                     rc, out = fenced[sub, where]
-                    if rc != want or needle not in out or refused in out:
+                    if (rc != want or not all(needle in out for needle in needles)
+                            or any(word in out for word in refused)):
                         failures.append("adopt {} over {} on base 2.0.0: rc={!r} (expected {} + {!r}, without "
-                                        "{!r}): {!r}".format(sub, where, rc, want, needle, refused, out))
-                if read:
-                    failures.append("adopt on base 2.0.0 read {!r} before its fence refused".format(read))
-                if (tree_snapshot(debris) != before or tree_snapshot(clean) != clean_before
+                                        "{!r}): {!r}".format(sub, where, rc, want, needles, refused, out))
+                if [entry for entry in read if entry[0] == "apply"]:
+                    failures.append("adopt apply on base 2.0.0 read {!r} before its fence refused".format(read))
+                if [entry[1] for entry in read if entry[0] == "approve"] != [missing, missing]:
+                    failures.append("adopt approve on base 2.0.0 did not read its worksheet and plan (it "
+                                    "refused before them): {!r}".format(read))
+                if (tree_snapshot(debris) != debris_before or tree_snapshot(clean) != clean_before
                         or tree_snapshot(badhome) != badhome_before):
                     failures.append("adopt on base 2.0.0 mutated a product root (journal debris, clean or the "
                                     "malformed evidence home)")
 
-                # status reads both homes through the ENGINE (K9a fix 1), each vector red on the K9a head:
-                # a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal
+                # status reads the evidence home through the ENGINE (K9a fix 1), and on base 2.0.0 not the
+                # journal: a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal
                 # entry is interrupted"); a nothing-opened entry is clean (was 1); a run-id directory the
                 # bundle validator grades INVALID is a finding (was 0, "evidence bundle"); and a symlinked,
                 # dangling or wrong-type root, home or entry is cannot-evaluate, never followed (was 0/1
@@ -21071,53 +21064,55 @@ def _cli_self_test():
                         fh.write("not a bundle\n")
                     status_vectors.append(("regular file with a run-id name", root, EXIT_MALFORMED,
                                            "cannot evaluate"))
-                    for label, rel, target in (
+                    for label, rel, target, *want_needle in (
                             ("symlinked evidence home", evidence_rel, outside),
                             ("symlinked .working ancestor, run-id bundle outside", ".working", outside),
                             ("symlinked .working ancestor, foreign dir outside", ".working", foreign),
                             ("dangling evidence home", evidence_rel, os.path.join(abase, "nowhere")),
                             ("symlinked evidence entry", evidence_rel + "/stray", stray),
-                            ("symlinked journal home", adopt_j_rel, outside),
-                            ("dangling journal home", adopt_j_rel, os.path.join(abase, "nowhere")),
-                            ("symlinked journal entry", adopt_j_rel + "/txn", stray)):
+                            # On base 2.0.0 the journal is not read, so a symlinked, dangling or wrong-type
+                            # journal home or entry is never reached: status reports the evidence home and
+                            # says the journal is not read (red when it reads the journal and refuses).
+                            ("symlinked journal home", adopt_j_rel, outside, EXIT_OK, unread),
+                            ("dangling journal home", adopt_j_rel, os.path.join(abase, "nowhere"), EXIT_OK,
+                             unread),
+                            ("symlinked journal entry", adopt_j_rel + "/txn", stray, EXIT_OK, unread)):
                         root = fresh_root("link-{}".format(len(status_vectors)))
                         os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                         os.symlink(target, os.path.join(root, rel))
-                        status_vectors.append((label, root, EXIT_MALFORMED, "cannot evaluate"))
+                        status_vectors.append((label, root) + (tuple(want_needle) or (EXIT_MALFORMED,
+                                                                                      "cannot evaluate")))
                     os.symlink(clean, os.path.join(abase, "rootlink"))
                     status_vectors.append(("symlinked --root", os.path.join(abase, "rootlink"),
                                            EXIT_MALFORMED, "cannot evaluate"))
-                    # K9a fix 2, each red on the fix-1 head: a wrong-type journal entry is cannot-evaluate
-                    # (was 0, skipped by the engine's enumeration) while the engine's own regular
-                    # lock.break stays clean; and a `--root DIR/link/..`, which the kernel resolves to
-                    # link's target's parent (here the debris root), refuses (was 0, abspath collapsed it
-                    # lexically onto DIR) while a `..` through a real directory still resolves.
+                    # On base 2.0.0 the journal is not read, so a wrong-type journal entry, a directory
+                    # named lock.break and a hardlinked lock.break, each cannot-evaluate through the
+                    # strict journal enumeration (the reconcile engine's vectors keep that tested), are
+                    # never reached: status exits 0 and says the journal is not read, beside the
+                    # engine's own regular lock.break (red when status reads the journal). A
+                    # `--root DIR/link/..`, which the kernel resolves to link's target's parent (here the
+                    # debris root), refuses (abspath would collapse it lexically onto DIR) while a `..`
+                    # through a real directory still resolves.
                     root = fresh_root("filejournalentry")
                     os.makedirs(os.path.join(root, adopt_j_rel))
                     with open(os.path.join(root, adopt_j_rel, "txn"), "w", encoding="utf-8") as fh:
                         fh.write("not a transaction\n")
-                    status_vectors.append(("regular-file journal entry", root, EXIT_MALFORMED,
-                                           "wrong-type entry is refused"))
+                    status_vectors.append(("regular-file journal entry", root, EXIT_OK, unread))
                     root = fresh_root("lockbreakdir")
                     os.makedirs(os.path.join(root, adopt_j_rel, "lock.break"))
-                    status_vectors.append(("directory named lock.break", root, EXIT_MALFORMED,
-                                           "wrong-type entry is refused"))
+                    status_vectors.append(("directory named lock.break", root, EXIT_OK, unread))
                     root = fresh_root("lockbreakfile")
                     os.makedirs(os.path.join(root, adopt_j_rel))
                     open(os.path.join(root, adopt_j_rel, "lock.break"), "w", encoding="utf-8").close()
                     status_vectors.append(("regular lock.break arbitration file", root, EXIT_OK,
                                            "no adoption run exists"))
-                    # K9a fix 4, red on the fix-3 head (which read this root as 0): a HARDLINKED
-                    # lock.break is a second name for a foreign inode, refused by the strict journal
-                    # enumeration's nlink==1 identity guard, never accepted as the engine's own file.
                     root = fresh_root("lockbreaklinked")
                     os.makedirs(os.path.join(root, adopt_j_rel))
                     victim = os.path.join(abase, "lockbreak-victim")
                     with open(victim, "w", encoding="utf-8") as fh:
                         fh.write("victim\n")
                     os.link(victim, os.path.join(root, adopt_j_rel, "lock.break"))
-                    status_vectors.append(("hardlinked lock.break arbitration file", root, EXIT_MALFORMED,
-                                           "hard links"))
+                    status_vectors.append(("hardlinked lock.break arbitration file", root, EXIT_OK, unread))
                     os.mkdir(os.path.join(debris, "child"))
                     root = fresh_root("dotdot")
                     os.symlink(os.path.join(debris, "child"), os.path.join(root, "link"))
@@ -21152,11 +21147,12 @@ def _cli_self_test():
                         failures.append("adopt status over a {}: rc={!r} (expected {} + {!r})".format(
                             label, rc, want, needle))
 
-                # the journal lock is read beneath the HELD contained journal-root fd (K9a fix 2), red on
-                # the fix-1 head, which re-opened the journal by PATH: the journal path is swapped for a
-                # symlink to a decoy right AFTER the contained open (a deterministic stand-in for a
-                # concurrent writer), so a held product lock is still reported (was 0, the empty decoy)
-                # and a decoy's lock never is (was 1, the decoy's pid).
+                # On base 2.0.0 status never opens the journal, so neither the product's held lock nor a
+                # decoy's is reported: the hook that would swap the journal path for a symlink to a decoy
+                # right AFTER its contained open never fires, and each root exits 0 saying the journal is not
+                # read (red when status opens the journal: the hook fires, and the held lock is reported).
+                # That the lock is read beneath the HELD journal-root fd stays tested on the reconcile
+                # engine (_opf_adopt_apply reconcile-lock-read-beneath-held-jr-fd).
                 def lock_record(pid):
                     owner = dict(uid=os.getuid(), pid=pid, session="self-test", utc="2026-01-01T00:00:00Z")
                     owner["pid-start"] = ""
@@ -21166,8 +21162,8 @@ def _cli_self_test():
                 race_results = []
                 try:
                     for label, product_pid, decoy_pid, want, needle in (
-                            ("held product lock, empty decoy", 1111, None, EXIT_FINDING, "(pid 1111)"),
-                            ("no product lock, decoy lock", None, 4242, EXIT_OK, "no adoption run exists")):
+                            ("held product lock, empty decoy", 1111, None, EXIT_OK, unread),
+                            ("no product lock, decoy lock", None, 4242, EXIT_OK, unread)):
                         root = fresh_root("race-{}".format(len(race_results)))
                         decoy = os.path.join(abase, "decoy-{}".format(len(race_results)))
                         os.makedirs(os.path.join(root, adopt_j_rel))
@@ -21197,10 +21193,10 @@ def _cli_self_test():
                           "({})".format(exc), file=sys.stderr)
                     return EXIT_MALFORMED
                 for label, (rc, out), want, needle, fired in race_results:
-                    if rc != want or needle not in out or not fired:
-                        failures.append("adopt status with the journal swapped after its contained open "
-                                        "({}): rc={!r}, fired={!r} (expected {} + {!r} with the swap "
-                                        "injected)".format(label, rc, bool(fired), want, needle))
+                    if rc != want or needle not in out or "(pid " in out or fired:
+                        failures.append("adopt status with a journal lock on base 2.0.0 ({}): rc={!r}, "
+                                        "fired={!r} (expected {} + {!r}, no lock reported and the journal "
+                                        "never opened)".format(label, rc, bool(fired), want, needle))
 
                 # K9a fix 4 (round-4 BLOCKER), red on the fix-3 head: the evidence home's directory
                 # identity is HELD from the status listing through EVERY bundle verification, so a home
@@ -21269,13 +21265,12 @@ def _cli_self_test():
                     failures.append("adopt status over the replacement home (now at the pathname): "
                                     "rc={!r} (expected 1 + the foreign-entry finding)".format(repl_rc))
 
-                # K9a fix 4 (round-4 BLOCKER), red on the fix-3 head: each journal transaction
-                # directory's identity is HELD from the journal enumeration through classification and
-                # its frame reads, so an interrupted transaction renamed aside right after the
-                # enumeration and replaced by an empty decoy directory of the same name is STILL
-                # classified from its own INTENT frames (exit 1, the interrupted-transaction finding),
-                # never reopened by name and read as nothing-opened (the fix-3 head exited 0 here,
-                # reporting that no adoption run exists). The hook asserts its swap actually fired.
+                # On base 2.0.0 status never enumerates the journal, so an interrupted transaction is not
+                # reported and the hook that would swap its directory for an empty decoy right after the
+                # enumeration never fires: exit 0, saying the journal is not read (red when status
+                # enumerates the journal: the hook fires, and the finding is reported). That a transaction is
+                # classified through its HELD directory descriptor stays tested on the reconcile engine
+                # (_opf_adopt_apply reconcile-swap-after-listing-refused-named).
                 try:
                     txnswap = fresh_root("txnswap")
                     os.makedirs(os.path.join(txnswap, adopt_j_rel))
@@ -21311,12 +21306,11 @@ def _cli_self_test():
                     ts_rc, ts_out = run_adopt(["adopt", "status", "--root", txnswap])
                 finally:
                     journal._journal_txn_dirs = real_txn_dirs
-                if (ts_rc != EXIT_FINDING or "interrupted transaction(s) txn" not in ts_out
-                        or not txn_swap_fired):
-                    failures.append("adopt status with the transaction directory swapped after the "
-                                    "journal enumeration: rc={!r}, fired={!r} (expected 1 + the "
-                                    "interrupted-transaction finding, classified through the held txn "
-                                    "descriptor)".format(ts_rc, bool(txn_swap_fired)))
+                if (ts_rc != EXIT_OK or unread not in ts_out or "interrupted transaction" in ts_out
+                        or txn_swap_fired):
+                    failures.append("adopt status over an interrupted transaction on base 2.0.0: rc={!r}, "
+                                    "fired={!r} (expected 0 + the journal-not-read line, no finding and the "
+                                    "journal never enumerated)".format(ts_rc, bool(txn_swap_fired)))
 
                 # root normalization sits INSIDE the fail-closed handling: an unresolvable current
                 # directory (os.getcwd raising, as it does once the cwd is deleted) is exit 2, never an
@@ -21579,16 +21573,15 @@ def _cli_self_test():
 
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
-                # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming what is unlanded (every plan op of the fixture, its plant-governance enforcement
-                # rows among them, has landed; the driver's mandatory receipt stage has not, so apply names
-                # that stage and no plan op), writing nothing, no journal and no bundle (the wiring
-                # discriminator: an unwired apply refuses with the not-yet-available message instead).
-                # Flips: an approval for a fresh plan
-                # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
-                # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
-                # (the planner itself never reads that journal, so without the gate it reports the
-                # worksheet's digest mismatch).
+                # the approval binding the plan's two digests on stdout, writing nothing, without the .aiqt
+                # adoption journal on base 2.0.0. apply -> 2 with the base 2.0.0 fence, for the approved
+                # plan and for a fresh plan of the same tree alike, writing nothing, no journal and no
+                # bundle (red when apply goes past the fence to the receipt-stage or binding refusal, which
+                # the _opf_adopt_apply engine vectors driver-apply-receipt-stage-unlanded-refused and
+                # driver-apply-approval-binding-flip-refused keep tested). Flips: a source edited after planning
+                # or a moved revision -> approve 2 into a fresh plan; an open adoption-journal transaction
+                # -> plan is not gated on it on base 2.0.0 (the planner never reads that journal), so it
+                # reports the worksheet's digest mismatch, never the reconcile-first refusal.
                 import hashlib
                 import _opf_adopt
                 import _opf_init
@@ -21668,22 +21661,13 @@ def _cli_self_test():
                                         "two digests; {})".format(rc, err.strip()))
                     with open(approval_path, "w", encoding="utf-8") as fh:
                         fh.write(approval_out)
-                    rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan_path,
-                                               "--approval", approval_path, "--root", adoptee])
-                    if rc != EXIT_MALFORMED or "not yet executable" not in err:
-                        failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
-                                        "refusal; {})".format(rc, err.strip()))
-                    # the plan's plant-governance rows dispatch to their landed handler, so the refusal names
-                    # the receipt stage alone and no plan op
-                    if (rc != EXIT_MALFORMED or "receipt stage" not in err or "plan op(s)" in err
-                            or "plant-governance" not in [row["op"] for row in plan_doc["ops"]]):
-                        failures.append("adopt apply over the routed enforcement rows: rc={!r} (expected 2 + "
-                                        "the receipt-stage refusal naming no plan op; {})".format(rc, err.strip()))
-                    rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
-                                               "--approval", approval_path, "--root", adoptee])
-                    if rc != EXIT_MALFORMED or "does not bind" not in err:
-                        failures.append("adopt apply with an approval for another plan: rc={!r} (expected 2 + "
-                                        "the binding refusal; {})".format(rc, err.strip()))
+                    fence_err = "opf adopt apply: cannot evaluate: {}\n".format(_opf_adopt_apply.ADOPTION_FENCE)
+                    for label, apply_plan in (("the approved plan", plan_path), ("another plan", plan2_path)):
+                        rc, out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", apply_plan,
+                                                  "--approval", approval_path, "--root", adoptee])
+                        if rc != EXIT_MALFORMED or out or err != fence_err:
+                            failures.append("adopt apply for {} on base 2.0.0: rc={!r} (expected 2 + exactly the "
+                                            "fence; {!r})".format(label, rc, out + err))
                     if tree_snapshot(adoptee) != before or os.path.exists(os.path.join(adoptee, ".aiqt")):
                         failures.append("adopt approve/apply mutated the stage fixture (each must write nothing "
                                         "in this build)")
@@ -21703,39 +21687,34 @@ def _cli_self_test():
                     if moved is None or rc != EXIT_MALFORMED or "revision moved" not in err:
                         failures.append("adopt approve after the revision moved: rc={!r} (expected 2 + the "
                                         "revision-drift refusal; {})".format(rc, err.strip()))
-                # plan over an open adoption-journal transaction (the debris root) -> 2, reconcile first.
+                # plan over an open adoption-journal transaction (the debris root) on base 2.0.0 -> 2 on the
+                # stale worksheet's digest mismatch: the journal is not read, so no reconcile-first refusal.
                 rc, _out, err = run_split(["adopt", "plan", "--inputs", stale, "--root", debris])
-                if rc != EXIT_MALFORMED or "must be reconciled" not in err:
-                    failures.append("adopt plan over an interrupted adoption transaction: rc={!r} (expected 2 + "
-                                    "the reconcile-first refusal; {})".format(rc, err.strip()))
+                if (rc != EXIT_MALFORMED or "inventory changed" not in err or "must be reconciled" in err
+                        or _opf_adopt_apply.JOURNAL_UNREAD in err):
+                    failures.append("adopt plan over an interrupted adoption transaction on base 2.0.0: rc={!r} "
+                                    "(expected 2 + the inventory-binding message, never the reconcile-first "
+                                    "or unread-journal refusal; {})".format(rc, err.strip()))
             finally:
                 shutil.rmtree(abase, ignore_errors=True)
             return None
 
         def _adopt_reconcile_leg():
-            """`opf adopt reconcile` end to end over product-root fixtures, judged on exit codes, the printed
-            outcome or named finding, and file snapshots. Every vector is red on the deferred head, which
-            refused each `adopt reconcile` with exit 2 and not-yet-available before any read. Recovery of
-            each interrupted state the journal leaves: a transaction interrupted before every op landed
-            (rolled back to the byte-identical prestate, with the store resolver and discovery patched to
-            raise, so a store resolution turns it red), one interrupted after every op landed but before
-            its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
-            (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
-            transaction that never published its INTENT (each lock released and named). The no-op: no
-            journal, a completed transaction, a store lease with nothing open, and a second reconcile after
-            a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
-            its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
-            malformed lock, a transaction with an invalid frame sequence and a stray journal entry beside no
-            transaction (journal-unclassifiable; red against a listing that skips the stray, which reads
-            nothing to reconcile), a store lease beside an open transaction (store-lease-held), and an
-            init-store reversal whose live creations are not the operation's own
-            (init-store-reversal-unproven). A fault after recovery began exits 2 as recovery-failed with
-            the partial state the journal records (the transaction open, no lock and no lease left), and a
-            second reconcile resumes it to the prestate. A product root that does not exist exits 2 as
-            cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
-            the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
-            reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
-            and 8e). Returns None on success or EXIT_MALFORMED on a harness error."""
+            """`opf adopt reconcile` on base 2.0.0 over product-root fixtures, judged on exit codes, the
+            printed output and file snapshots. The fixtures are each interrupted state the journal leaves (a
+            transaction interrupted before every op landed, one interrupted after every op landed but before
+            its COMPLETE frame, one whose rollback was itself interrupted, a dead run's journal lock beside
+            an open transaction and beside a transaction that never published its INTENT), each no-op state
+            (no journal, a completed transaction, a store lease with nothing open), each refusal state (a
+            live or malformed journal lock, an invalid frame sequence, a stray journal entry beside no
+            transaction, a store lease beside an open transaction, an init-store reversal whose live
+            creations are not the operation's own), a recovery that would fault after it began, and a
+            product root that does not exist. Over every one, reconcile exits 2 with exactly the base 2.0.0
+            fence (_opf_adopt_apply.ADOPTION_FENCE) and every file stays byte-identical; the fixtures are
+            first proved to reach the states they name, so no vector passes vacuously. The recovery,
+            no-op and refusal behaviour of each state rides the library self-test through the engine body
+            (_opf_adopt_apply._reconcile_report_engine, its reconcile-* vectors, sections 8d and 8e).
+            Returns None on success or EXIT_MALFORMED on a harness error."""
             from unittest import mock
             adopt = _opf_adopt_apply
             journal = adopt._journal
@@ -21764,9 +21743,6 @@ def _cli_self_test():
                         with open(p, "rb") as fh:
                             got[os.path.relpath(p, root)] = fh.read()
                 return got
-
-            def product(root):
-                return {rel: data for rel, data in snap(root).items() if not rel.startswith(".aiqt" + os.sep)}
 
             def journal_clean(root):
                 try:
@@ -21843,7 +21819,6 @@ def _cli_self_test():
             try:
                 try:
                     dead = dead_pid()
-                    before = product(fixture("prestate"))
                     back = interrupted("back", mid_archive)
                     forward = interrupted("forward", all_landed)
                     rip = interrupted("rip", mid_archive)
@@ -21853,9 +21828,10 @@ def _cli_self_test():
                         if point.startswith("after-restore-") and not rip_fired:
                             rip_fired.append(point)
                             raise _Interrupt(point)
+                    # the interrupted rollback is built through the engine body, past the base 2.0.0 fence
                     with mock.patch.object(journal, "_kill_point", kill_restore):
                         try:
-                            adopt.reconcile_report(rip)
+                            adopt._reconcile_report_engine(rip)
                         except (_Interrupt, adopt.AdoptApplyError):
                             pass
                     stale_open = interrupted("staleopen", mid_archive)
@@ -21891,7 +21867,6 @@ def _cli_self_test():
                     os.rename(os.path.join(unproven, j_rel, rid),
                               os.path.join(unproven, j_rel, rid + "." + adopt.INIT_STORE_PHASE))
                     failing = interrupted("recoveryfailed", mid_archive)
-                    failing_before = product(fixture("recoveryfailedprestate"))
                 except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the reconcile fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -21909,104 +21884,43 @@ def _cli_self_test():
                     failures.append("reconcile fixtures: rollback interrupt fired={!r}, dead pid={!r} (both "
                                     "needed)".format(bool(rip_fired), dead))
 
-                # recovery, each red on the deferred head; the rollback runs with the store resolver and
-                # discovery raising (spec 14.2: recovery never requires the tree to resolve as a store).
-                no_store = AssertionError("reconcile resolved the store")
-                with mock.patch.object(_opf_store, "resolve_store", side_effect=no_store), \
-                        mock.patch.object(_opf_store, "discover_machine_store", side_effect=no_store):
-                    rc, out = run(back)
-                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
-                        and product(back) == before and journal_clean(back)):
-                    failures.append("adopt reconcile over a transaction interrupted before every op landed: "
-                                    "rc={!r} (expected 0 + rolled-back, the byte-identical prestate, no store "
-                                    "resolution; {})".format(rc, out.strip()))
-                rc, out = run(forward)
-                if not (rc == EXIT_OK and "transaction {}: rolled-forward".format(rid) in out
-                        and journal_clean(forward)
-                        and adopt.verify_bundle(forward, rid).status == _opf_store.VALID
-                        and not os.path.exists(os.path.join(forward, ".working/TODO.md"))):
-                    failures.append("adopt reconcile over a transaction interrupted after every op landed: "
-                                    "rc={!r} (expected 0 + rolled-forward, its bundle VALID; {})".format(
-                                        rc, out.strip()))
-                rc, out = run(rip)
-                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
-                        and product(rip) == before and journal_clean(rip)):
-                    failures.append("adopt reconcile over an interrupted rollback: rc={!r} (expected 0 + "
-                                    "rolled-back, the byte-identical prestate; {})".format(rc, out.strip()))
-                for label, root, needle in (
-                        ("a dead run's lock beside an open transaction", stale_open,
-                         "transaction {}: rolled-back".format(rid)),
-                        ("a dead run's lock beside a transaction that never published its INTENT",
-                         stale_unopened, "is not resumed")):
-                    rc, out = run(root)
-                    if not (rc == EXIT_OK and needle in out and "released the adoption journal lock" in out
-                            and product(root) == before and journal_clean(root)):
-                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + {!r} + the released "
-                                        "lock named, the prestate, a clean journal; {})".format(
-                                            label, rc, needle, out.strip()))
-
-                # nothing to recover: exit 0 and every file, the journal included, byte-identical; a
-                # second reconcile after a recovery is the same no-op.
-                for label, root in (("no journal", empty), ("a completed transaction", done),
-                                    ("a store lease with nothing open", lease_only),
-                                    ("an already reconciled journal", back)):
-                    was = snap(root)
-                    rc, out = run(root)
-                    if rc != EXIT_OK or "nothing to reconcile" not in out or snap(root) != was:
-                        failures.append("adopt reconcile over {}: rc={!r} (expected 0 + nothing to reconcile, "
-                                        "byte-identical; {})".format(label, rc, out.strip()))
-
-                # each refusal: exit 2, its named finding, every file byte-identical.
-                for label, root, finding in (
-                        ("a live journal lock", live, adopt.RECONCILE_LOCK_HELD),
-                        ("a malformed journal lock", badlock, adopt.RECONCILE_UNCLASSIFIABLE),
-                        ("an invalid frame sequence", badseq, adopt.RECONCILE_UNCLASSIFIABLE),
-                        ("a stray journal entry beside no transaction", strayonly, adopt.RECONCILE_UNCLASSIFIABLE),
-                        ("a store lease beside an open transaction", leased, adopt.RECONCILE_STORE_LEASE_HELD),
-                        ("an init-store reversal whose live creations are not its own", unproven,
-                         adopt.RECONCILE_REVERSAL_UNPROVEN)):
-                    was = snap(root)
-                    rc, out = run(root)
-                    if rc != EXIT_MALFORMED or "REFUSED ({})".format(finding) not in out or snap(root) != was:
-                        failures.append("adopt reconcile over {}: rc={!r} (expected 2 + REFUSED ({}), "
-                                        "byte-identical; {})".format(label, rc, finding, out.strip()))
-
-                # a product root that does not exist: cannot evaluate (exit 2), never a REFUSED finding, and
-                # nothing created there (a contract pin, green on the build before it too).
+                # On base 2.0.0 reconcile is fenced (_opf_adopt_apply.ADOPTION_FENCE): over every fixture
+                # above, each journal state the recovery, no-op and refusal vectors of the engine drive, and
+                # over a product root that does not exist, `adopt reconcile` exits 2 with exactly the fence
+                # before any .aiqt access, never a recovery outcome, a nothing-to-reconcile report or a
+                # REFUSED finding, with the store resolver, discovery and every journal checkpoint raising,
+                # and every file stays byte-identical (red when the fence is removed: each root then
+                # recovers, reports nothing to reconcile or refuses by name). The recovery each fixture names
+                # stays tested through the engine body (_opf_adopt_apply._reconcile_report_engine, the
+                # reconcile-* vectors of the library self-test).
                 missing = os.path.join(rbase, "missing")
-                rc, out = run(missing)
-                if (rc != EXIT_MALFORMED or "cannot evaluate" not in out or "cannot open product root" not in out
-                        or "REFUSED" in out or os.path.lexists(missing)):
-                    failures.append("adopt reconcile over a product root that does not exist: rc={!r} (expected "
-                                    "2 + cannot evaluate, no REFUSED finding, nothing created; {})".format(
-                                        rc, out.strip()))
-
-                # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
-                # archive copy is discarded) exits 2 named, and the state is the journal's record of a
-                # PARTIAL recovery: the transaction still open, the archive copy gone, no journal lock and no
-                # store lease left; a second reconcile resumes it to the byte-identical prestate.
-                copy = os.path.join(failing, adopt.archive_rel(rid, ".working/TODO.md"))
-                fired = []
-
-                def restore_fault(point):
-                    if point.startswith("after-restore-") and not os.path.exists(copy) and not fired:
-                        fired.append(point)
-                        raise OSError(5, "injected EIO at " + point)
-                with mock.patch.object(journal, "_kill_point", restore_fault):
-                    rc, out = run(failing)
-                partial = (fired != [] and rc == EXIT_MALFORMED
-                           and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out and "PARTIAL" in out
-                           and not journal_clean(failing) and not os.path.exists(copy)
-                           and not os.path.exists(os.path.join(failing, j_rel, "lock"))
-                           and not any(rel.endswith("lease.toml") for rel in snap(failing))
-                           and product(failing) != failing_before)
-                rc2, out2 = run(failing)
-                if not (partial and rc2 == EXIT_OK and "transaction {}: rolled-back".format(rid) in out2
-                        and product(failing) == failing_before and journal_clean(failing)):
-                    failures.append("adopt reconcile over a recovery that faults after it began: rc={!r} then "
-                                    "{!r} (expected 2 + REFUSED (recovery-failed), the partial state the "
-                                    "journal records, then 0 + rolled-back to the prestate; {} / {})".format(
-                                        rc, rc2, out.strip(), out2.strip()))
+                fence_out = "opf adopt reconcile: cannot evaluate: {}\n".format(adopt.ADOPTION_FENCE)
+                no_store = AssertionError("reconcile resolved the store")
+                no_journal = AssertionError("reconcile reached a journal checkpoint")
+                for label, root in (
+                        ("a transaction interrupted before every op landed", back),
+                        ("a transaction interrupted after every op landed", forward),
+                        ("an interrupted rollback", rip),
+                        ("a dead run's lock beside an open transaction", stale_open),
+                        ("a dead run's lock beside a transaction that never published its INTENT", stale_unopened),
+                        ("no journal", empty), ("a completed transaction", done),
+                        ("a store lease with nothing open", lease_only),
+                        ("a live journal lock", live), ("a malformed journal lock", badlock),
+                        ("an invalid frame sequence", badseq),
+                        ("a stray journal entry beside no transaction", strayonly),
+                        ("a store lease beside an open transaction", leased),
+                        ("an init-store reversal whose live creations are not its own", unproven),
+                        ("a recovery that would fault after it began", failing),
+                        ("a product root that does not exist", missing)):
+                    was = snap(root) if os.path.lexists(root) else None
+                    with mock.patch.object(_opf_store, "resolve_store", side_effect=no_store), \
+                            mock.patch.object(_opf_store, "discover_machine_store", side_effect=no_store), \
+                            mock.patch.object(journal, "_kill_point", side_effect=no_journal):
+                        rc, out = run(root)
+                    now = snap(root) if os.path.lexists(root) else None
+                    if rc != EXIT_MALFORMED or out != fence_out or now != was:
+                        failures.append("adopt reconcile over {} on base 2.0.0: rc={!r} (expected 2 + exactly "
+                                        "the fence, byte-identical; {!r})".format(label, rc, out))
             finally:
                 shutil.rmtree(rbase, ignore_errors=True)
             return None
@@ -22102,21 +22016,20 @@ def _cli_self_test():
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred complete fail closed to exit 2; "
-              "reconcile -> 0 recovering an interrupted transaction from the journal alone (rolled back "
-              "with no store resolution, rolled forward, an interrupted rollback finished, a dead run's "
-              "lock released) or a byte-identical no-op with nothing to recover / 2 with a named finding "
-              "and nothing written on a live or malformed lock, an invalid frame sequence, a store "
-              "lease beside an open transaction or an unproven init-store reversal, and 2 recovery-failed "
-              "with the journal's partial state that a second reconcile resumes, malformed arguments named "
-              "by the parser; status -> 0 no-run or verified run / 1 open-transaction or invalid-"
-              "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
-              "another phase or plan digest than its own sealed plan's, or has no plan, "
+              "on base 2.0.0 the .aiqt adoption journal is not read: reconcile -> 2 with exactly the fence "
+              "over every journal state (interrupted, rolled-back mid-way, dead or live or malformed lock, "
+              "invalid frames, stray entry, store lease, unproven init-store reversal, no journal, a missing "
+              "root), byte-identical, malformed arguments named by the parser; status -> 0 no-run or "
+              "verified run, saying the journal is not read, over journal debris, locks and symlinked or "
+              "wrong-type journal entries alike / 1 invalid-bundle finding / 2 symlinked, dangling or "
+              "wrong-type evidence home or a bundle whose inventory names another phase or plan digest than "
+              "its own sealed plan's, or has no plan, "
               "plan -> 2 missing, FIFO, oversized "
-              "or symlinked worksheet, stale digest or an interrupted adoption transaction / 1 "
+              "or symlinked worksheet or stale digest, never gated on the journal / 1 "
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
-              "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
-              "the unlanded ops or an approval for another plan, each mutating nothing; an "
-              "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2; a helper "
+              "binding the plan's two digests, without the journal / 2 after a source edit or a moved "
+              "revision, and apply -> 2 with exactly the fence before it reads its inputs, each mutating "
+              "nothing; an unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2; a helper "
               "faulting while being imported -> 2 naming the helper and the cause, only the cause's type where "
               "describing the cause fails, or neither where its type cannot be named or its class's "
               "metaclass's mro() leaves out BaseException, an interrupt it raises escaping unchanged; the "
@@ -22585,7 +22498,24 @@ def _retained_close_offpath_self_test():
         # and a transaction refused at the store posture (nothing written).
         run_id = "adopt-20260101T000000Z-0123456789abcdef"
         expect("offpath-adopt-apply-verify-bundle", lambda: _opf_adopt_apply.verify_bundle(str(root), run_id))
-        expect("offpath-adopt-apply-reconcile", lambda: _opf_adopt_apply.reconcile(str(root)))
+        # Base 2.0.0 fences the public reconcile (adoption_journal_fenced): it refuses with ADOPTION_FENCE
+        # before the product root is opened, so it has no close position. Its engine body keeps the
+        # product-root closes and is swept on its own.
+        reconcile_positions, reconcile_survivors = sweep(lambda: _opf_adopt_apply.reconcile(str(root)))
+        try:
+            _opf_adopt_apply.reconcile(str(root))
+            reconcile_said = None
+        except _opf_adopt_apply.AdoptApplyError as exc:
+            reconcile_said = str(exc)
+        ran.append("offpath-adopt-apply-reconcile")
+        reconcile_ok = (reconcile_positions == 0 and not reconcile_survivors
+                        and reconcile_said == _opf_adopt_apply.ADOPTION_FENCE)
+        print("  {} offpath-adopt-apply-reconcile: {} close positions, fenced {!r}; surviving descriptors: {!r} "
+              "(first six)".format("PASS" if reconcile_ok else "FAIL", reconcile_positions, reconcile_said,
+                                   reconcile_survivors[:6]))
+        if not reconcile_ok:
+            failures.append("offpath-adopt-apply-reconcile")
+        expect("offpath-adopt-apply-reconcile-engine", lambda: _opf_adopt_apply._reconcile_engine(str(root)))
         expect("offpath-adopt-apply-default-store-probe",
                lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
         expect("offpath-adopt-apply-transaction-refusal",

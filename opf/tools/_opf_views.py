@@ -1948,11 +1948,10 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
             raise ViewsError("view {!r} is declared kind {!r} but this generator renders it as {!r} "
                              "(spec 10.1)".format(name, declared_kind, kind))
         scope, dest_rel = _spec_destination(name)
-        if _opf_store.homes_generation(manifest) >= 2:
-            try:
-                _opf_store.require_ordinary_target(dest_rel)
-            except ValueError as exc:
-                raise ViewsError(str(exc))
+        try:
+            _opf_store.require_ordinary_target(dest_rel)
+        except ValueError as exc:
+            raise ViewsError(str(exc))
         declared_target = tbl.get("target")
         if declared_target != dest_rel:
             raise ViewsError("view {!r} declares target {!r} but its spec destination is {!r}; a manifest "
@@ -2401,7 +2400,8 @@ def self_test():
     manifest = "\n".join([
         "[opf]",
         'standard = "opf"',
-        'spec_version = "1.2.0"',
+        'spec_version = "2.0.0"',
+        "homes = 2",
         'layout = "inline"',
         'posture = "required"',
         'import_status = "none"',
@@ -4283,7 +4283,8 @@ def self_test():
         version_only_manifest = "\n".join([
             "[opf]",
             'standard = "opf"',
-            'spec_version = "1.2.0"',
+            'spec_version = "2.0.0"',
+            "homes = 2",
             'layout = "inline"',
             'posture = "required"',
             'import_status = "none"',
@@ -4756,12 +4757,14 @@ def self_test():
                 ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
                 ("autonomous_decision", "AD"), ("block", "BL"),
                 ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
-            man = {"opf": {"standard": "opf", "spec_version": "1.2.0", "layout": "inline",
+            man = {"opf": {"standard": "opf", "spec_version": "2.0.0", "homes": 2, "layout": "inline",
                                   "posture": "required", "import_status": "none"},
                    "store": {"sync_target": ""}, "types": types, "vendors": {"registered": []},
                    "archive": {"period": "year"}, "views": views}
             cnt = {"schema": 1, "counters": {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
                                              "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 0, "PP": 0}}
+            # A homes-2 store carries a zero imported high-water per enabled type (spec 8.2).
+            cnt["counters"].update({"imported:" + t["namespace"]: 0 for t in types.values()})
             full_wl = {n: _wl(n) for n in (1, 2, 3, 4)}
             d12 = _opf_release.compute_span_digest(full_wl, (1, 2))
             d34 = _opf_release.compute_span_digest(full_wl, (3, 4))
@@ -4796,6 +4799,9 @@ def self_test():
                 "archive/2026/archive.toml": {"schema": 1, "moved": [], "worklog_moved": [
                     {"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]},
                 "archive/2026/worklog.toml": {"schema": 1, "entry": [_wl(1), _wl(2)]}}
+            # ... and an empty imported leaf per enabled type (spec 4.2).
+            machine.update({("worklog.imported.toml" if t == "worklog" else t + ".imported.index.toml"):
+                            {"schema": 1, ("entry" if t == "worklog" else "record"): []} for t in types})
             root = new_root()
             for rel, doc in machine.items():
                 p = root / WORKING_DIRNAME / "toml" / rel
@@ -4808,7 +4814,8 @@ def self_test():
                              "counters_high": cnt["counters"],
                              "records": {"BI-1": ("backlog_item", "done"), "BI-2": ("backlog_item", "open"),
                                          "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")},
-                             "digests": {"DN-1": _opf_check._record_digest(_dn(1, "BI-1"))}}}
+                             "digests": {"DN-1": _opf_check._record_digest(_dn(1, "BI-1"))},
+                             "imported": {}}}
             if mutate is not None:
                 mutate(root, _bi)
             return root, obs
@@ -4953,10 +4960,11 @@ def self_test():
             mdir = root / WORKING_DIRNAME / "toml"
             (mdir / "maintainer_decision.index.toml").write_text(
                 _opf_emit.emit({"schema": 1, "record": [_sep_decision]}), encoding="utf-8")
+            _sep_high = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
+                         "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 1, "PP": 0}
+            _sep_high.update({"imported:" + ns: 0 for ns in list(_sep_high)})
             (mdir / "counters.toml").write_text(
-                _opf_emit.emit({"schema": 1, "counters": {
-                    "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
-                    "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 1, "PP": 0}}), encoding="utf-8")
+                _opf_emit.emit({"schema": 1, "counters": _sep_high}), encoding="utf-8")
 
         _sep_root, _sep_obs = _gate_store(mutate=_add_sep_decision)
         _sep_view = _sep_root / WORKING_DIRNAME / "DECISIONS.toml"
@@ -5010,7 +5018,8 @@ def self_test():
                 self.unattributed = unattributed or []
 
         def _all_pass():
-            return {cid: "PASS" for cid in _oc_seam.REQUIRED_CHECKS}
+            # The whole doctor roster: the source gate reads DOCTOR_ROSTER, homes-2 and imported checks included.
+            return {cid: "PASS" for cid in _oc_seam.DOCTOR_ROSTER}
 
         def _seam_render(root, obs, post_result):
             """Force PRE=valid (source-sound, so Phase A proceeds) and POST=post_result across render's two

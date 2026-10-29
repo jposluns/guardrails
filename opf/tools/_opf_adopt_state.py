@@ -567,8 +567,10 @@ def grade_frozen(root_fd, path, hexdigest, budget=None):
 
 def self_test():
     """Fail-closed vectors over throwaway temporary product trees: the adoption bundles carry plans the real
-    planner froze and approvals the real capture produced, and every verdict is read from the C-CONTAINMENT
-    report the doctor itself builds. Every write lands under its own TemporaryDirectory."""
+    planner froze and approvals the real capture produced. Base 2.0.0 grades a store holding the adoption
+    home C-CONTAINMENT CANNOT-EVALUATE without calling this reader, so the doctor-level verdicts are read
+    from the C-CONTAINMENT report the doctor itself builds, and the admission, retirement and frozen-source
+    verdicts from this reader called directly. Every write lands under its own TemporaryDirectory."""
     _child_status_refusal_exit("_opf_adopt_state.py")
     try:
         _journal.require_containment()
@@ -821,11 +823,35 @@ def _self_test_checks():
                 os.close(fd)
             return rep
 
+        def admit(root, in_repo=True):
+            """This reader's own verdict on a fixture tree, read directly. Base 2.0.0 grades a store holding
+            the adoption home C-CONTAINMENT CANNOT-EVALUATE and never calls this reader (`_check_containment`
+            routes homes 2 around it), so the admission, retirement and frozen-source vectors read it here."""
+            fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                st = reader.adoption_state(fd, mrel, in_repo=in_repo)
+            finally:
+                os.close(fd)
+            return types.SimpleNamespace(runs=st.runs, registered=frozenset(st.registered), frozen=dict(st.frozen),
+                                         findings=list(st.findings), cannot=list(st.cannot))
+
         def named(msgs, path, *words):
             return any(repr(path) in m and all(w in m for w in words) for m in msgs)
 
-        def bounded(rep):
-            return sorted(p for p in sources if named(rep.migration_incomplete, p))
+        def bounded(st):
+            return sorted(p for p, src in st.frozen.items() if src.grade == "bounded")
+
+        def grade_of(st, path):
+            return st.frozen[path].grade if path in st.frozen else None
+
+        home_cannot = ("C-CONTAINMENT: the adoption home {}/ exists, and adoption grading on base 2.0.0 is not "
+                       "yet implemented (spec 4.2; lands with the adoption-journal move)".format(ADOPTION_HOME))
+        state_fn = reader.adoption_state
+
+        def spied():
+            calls = []
+            return calls, mock.patch.object(reader, "adoption_state",
+                                            lambda *a, **k: calls.append(a) or state_fn(*a, **k))
 
         def snapshot(root):
             return dict((str(p.relative_to(root)), p.read_bytes() if p.is_file() and not p.is_symlink() else None)
@@ -840,76 +866,69 @@ def _self_test_checks():
               RETIREMENT_PHASE == getattr(apply, "RETIREMENT_PHASE", RETIREMENT_PHASE)
               and apply.inventory_rel(rid, RETIREMENT_PHASE) == home + "/inventory-retirement.toml")
 
-        # S0 legacy: no adoption home -> one lstat, no bundle read, the legacy findings and residuals exactly.
+        # S0, base 2.0.0: a store without the adoption home. C-CONTAINMENT never calls this reader and reads no
+        # bundle; .working/archive and .working/imported are evidence roots (C-EVIDENCE-ENUM's), not walked
+        # here, so the findings are exactly the unregistered .working/ paths, and the residuals are unchanged.
         root = tree(adopted=())
         write(root, ".working/archive/stray.md", b"x\n")
         write(root, ".working/imported/x.txt", b"x\n")
-        seen, reads = [], []
-        lstat, read_live = _journal._lstat_contained, apply._read_live
-        with mock.patch.object(_journal, "_lstat_contained", lambda fd, rel: seen.append(rel) or lstat(fd, rel)), \
-                mock.patch.object(apply, "_read_live", lambda fd, rel: reads.append(rel) or read_live(fd, rel)):
+        reads = []
+        read_live = apply._read_live
+        calls, spy = spied()
+        with spy, mock.patch.object(apply, "_read_live", lambda fd, rel: reads.append(rel) or read_live(fd, rel)):
             rep = contain(root)
-        legacy = sorted((".working/MIG.md", ".working/MOVE.md", ".working/OLD.md", ".working/archive",
-                         ".working/imported", ".working/notes"))
-        check("legacy-not-adopting-one-lstat-no-read", seen == [ADOPTION_HOME] and reads == [])
-        check("legacy-findings-unchanged", rep.findings == [unregistered.format(p) for p in legacy]
+        legacy = sorted((".working/MIG.md", ".working/MOVE.md", ".working/OLD.md", ".working/notes"))
+        check("not-adopting-reader-never-called", calls == [] and reads == [])
+        check("not-adopting-findings", rep.findings == [unregistered.format(p) for p in legacy]
               and rep.cannot == [] and rep.triage == [])
         check("legacy-residuals-unchanged", rep.residuals == list(_opf_check._RESIDUALS))
         check("legacy-no-migration-incomplete", rep.migration_incomplete == [])
 
-        # S2 + S4: an admitted run registers its bundle, archive and Move root; its frozen sources are bounded.
+        # S2, base 2.0.0: a store holding an admitted bundle is C-CONTAINMENT CANNOT-EVALUATE, once, naming the
+        # adoption home. This reader is never called, nothing is bounded and no adopting residual is disclosed,
+        # so the frozen sources grade as the unregistered .working/ paths they are.
         root = tree()
-        rep = contain(root)
-        check("admitted-run-registered", rep.findings == [] and rep.cannot == [])
-        check("frozen-sources-bounded", bounded(rep) == sorted((old, note, mig, move)) and not named(
-            rep.migration_incomplete, keep))
-        check("adopting-residual-disclosed", rep.residuals == list(_opf_check._RESIDUALS)
-              + list(_opf_check._ADOPTING_RESIDUALS))
+        calls, spy = spied()
+        with spy:
+            rep = contain(root)
+        cannot = list(rep.cannot)   # read before result(), which routes every check not run to CANNOT
         result = rep.result()
-        check("store-validation-carries-migration-incomplete",
-              result.migration_incomplete == rep.migration_incomplete and len(result.migration_incomplete) == 4)
-        # bounded at a clean start as much as at a substantiated partial (spec 11). In an ADOPTING store the
-        # partial triage downgrade does not apply (ruling R-a; QA round 1): every unenumerated path stays a
-        # finding at required; the legacy triage posture is for legacy (non-adopting) stores only.
+        check("adopting-home-cannot-evaluate", cannot == [home_cannot] and calls == []
+              and rep.findings == [unregistered.format(p) for p in legacy]
+              and rep.migration_incomplete == [] and result.migration_incomplete == []
+              and rep.residuals == list(_opf_check._RESIDUALS))
+        # retired adopting-residual-disclosed: covered by adopting-home-cannot-evaluate (no adopting residual).
+        # retired store-validation-carries-migration-incomplete: covered by adopting-home-cannot-evaluate.
+        # S2 + S4, read directly: an admitted run registers exactly its listed files and its inventory; its
+        # frozen sources are bounded and the keep row is never frozen.
+        st = admit(root)
+        check("admitted-run-registered", st.runs == (rid,) and st.findings == [] and st.cannot == []
+              and set(listed(rid)) <= st.registered and not any(p in st.registered for p in sources))
+        check("frozen-sources-bounded", bounded(st) == sorted((old, note, mig, move)) and keep not in st.frozen)
+        # Under a partial status the adoption home is still CANNOT-EVALUATE and a stray is still graded.
         imp_rel = ".working/imports/{}/plan.toml".format(imp_run)
         write(root, imp_rel, b"x = 1\n")
         write(root, ".working/OTHER.md", b"x\n")
         rep = contain(root, status="partial")
-        check("bounded-under-partial", bounded(rep) == sorted((old, note, mig, move))
-              and not any(named(rep.triage, p) for p in sources))
-        check("adopting-partial-strays-still-findings", rep.triage == []
-              and named(rep.findings, ".working/OTHER.md", "unregistered")
-              and named(rep.findings, imp_rel, "unregistered"))
+        # retired bounded-under-partial: adoption_state takes no import status; frozen-sources-bounded covers it.
+        check("adopting-partial-still-cannot-evaluate", rep.cannot.count(home_cannot) == 1
+              and (named(rep.findings, ".working/OTHER.md", "unregistered")
+                   or named(rep.triage, ".working/OTHER.md")))
 
         # S2b (QA round 1): registration is at FILE level only; a stray beside the registered files under
-        # the bundle, the adoption archive and the Move root is graded, never silently covered.
+        # the bundle, the adoption archive and the Move root is never registered.
         root = tree()
         write(root, home + "/stray.md", b"x\n")
         write(root, apply._archive_root(rid) + "/stray.md", b"x\n")
         write(root, MOVED_ROOT + "/hide/evil.sh", b"evil\n")
-        rep = contain(root)
-        check("admitted-homes-strays-graded", named(rep.findings, home + "/stray.md", "unregistered")
-              and named(rep.findings, apply._archive_root(rid) + "/stray.md", "unregistered")
-              and any(MOVED_ROOT in m and "unregistered" in m for m in rep.findings)
-              and len(rep.findings) == 3 and rep.cannot == [])
-        # Once the retirement is recorded the registered destination sits beside the stray: the stray
-        # stays graded one by one, never silently covered by the Move root.
-        retire(root, rid)
-        rep = contain(root)
-        check("retired-move-root-stray-still-graded",
-              named(rep.findings, MOVED_ROOT + "/hide", "unregistered") and rep.cannot == [])
-        # QA round 6: a stray DIRECTLY beside the registered destination, in that destination's own
-        # directory, is graded by name at file level; the registered row beside it never covers it.
-        root = tree()
-        retire(root, rid)
-        for src in (old, note, move):
-            os.unlink(root / src)   # the retirement's pinned removals
-        os.rmdir(root / note.rsplit("/", 1)[0])
-        beside = moved.rsplit("/", 1)[0] + "/evil.sh"
-        write(root, beside, b"evil\n")
-        rep = contain(root)
-        check("retired-stray-beside-move-destination-graded",
-              named(rep.findings, beside, "unregistered") and len(rep.findings) == 1 and rep.cannot == [])
+        st = admit(root)
+        check("admitted-homes-strays-unregistered", st.runs == (rid,) and st.cannot == []
+              and not any(p in st.registered for p in (home + "/stray.md", apply._archive_root(rid) + "/stray.md",
+                                                       MOVED_ROOT + "/hide/evil.sh")))
+        # retired admitted-homes-strays-graded: the 2.0.0 evidence roots are C-EVIDENCE-ENUM's (check_opf_homes
+        # evidence-off-inventory-*); admitted-homes-strays-unregistered covers file-level registration.
+        # retired retired-move-root-stray-still-graded: covered by check_opf_homes evidence-stray-directory-*.
+        # retired retired-stray-beside-move-destination-graded: covered by check_opf_homes evidence-off-inventory-*.
 
         # S2c (QA rounds 3 and 4): the committed inventories the vectors verify are the ones the REAL
         # compose path derives. The base: an ApplyOps apply-stage shell over an empty scratch root
@@ -932,67 +951,53 @@ def _self_test_checks():
         check("derived-inventory-is-the-committed-inventory",
               apply.check_apply_ops(rid, None, shell.ops, shell.staged) == []
               and shell.staged[apply.inventory_rel(rid)] == (root / apply.inventory_rel(rid)).read_bytes())
-        rep = contain(root)
-        check("derived-inventory-admits", rep.findings == [] and rep.cannot == [])
+        st = admit(root)
+        check("derived-inventory-admits", st.runs == (rid,) and st.findings == [] and st.cannot == [])
 
-        # S3: every other path under the control area is still graded.
-        root = tree()
-        strays = (".working/imported/x.txt", ".working/archive/stray.md", ".working/imported/adoption/junk",
-                  ".working/imported/import/{}/f.toml".format(imp_run),
-                  apply.archive_rel(rid_b, "f.md"), ".working/imported/adoption/not-a-run/f.md")
-        for rel in strays:
-            write(root, rel, b"x\n")
-        rep = contain(root)
-        graded = (".working/imported/x.txt", ".working/archive/stray.md", ".working/imported/adoption/junk",
-                  ".working/imported/import", apply._archive_root(rid_b), ".working/imported/adoption/not-a-run")
-        check("control-area-strays-graded", all(named(rep.findings, p, "unregistered") for p in graded)
-              and len(rep.findings) == len(graded))
+        # retired control-area-strays-graded: the 2.0.0 evidence roots are C-EVIDENCE-ENUM's (check_opf_homes
+        # evidence-off-inventory-* and evidence-stray-directory-*), and not-adopting-findings pins that
+        # C-CONTAINMENT does not walk them.
+        # retired ancestor-sibling-graded: at 2.0.0 .working/notes is one unregistered entry, covered by
+        # adopting-home-cannot-evaluate.
 
-        # S4b: a sibling of a frozen source under its ancestor directory is graded one by one.
-        root = tree()
-        write(root, ".working/notes/stray.md", b"x\n")
-        rep = contain(root)
-        check("ancestor-sibling-graded", rep.findings == [unregistered.format(".working/notes/stray.md")]
-              and named(rep.migration_incomplete, note))
-
-        # S5: drift is a finding naming the path; S5b: even under a substantiated partial.
+        # S5: drift is the drifted grade naming the path; the other frozen sources stay bounded.
         root = tree()
         write(root, old, b"old rules, edited\n")
-        rep = contain(root)
-        check("drifted-source-finding", named(rep.findings, old, "drifted") and len(rep.findings) == 1
-              and named(rep.migration_incomplete, old, "unresolved"))
-        write(root, ".working/imports/{}/plan.toml".format(imp_run), b"x = 1\n")
-        rep = contain(root, status="partial")
-        check("drifted-under-partial-is-finding", named(rep.findings, old, "drifted")
-              and not named(rep.triage, old) and named(rep.migration_incomplete, mig))
+        st = admit(root)
+        check("drifted-source-finding", grade_of(st, old) == "drifted" and "plan digest" in st.frozen[old].detail
+              and bounded(st) == sorted((note, mig, move)) and st.cannot == [])
+        # retired drifted-under-partial-is-finding: adoption_state takes no import status; drifted-source-finding
+        # covers the grade.
 
-        # S6: a vanished frozen source before its retirement is a finding (ruling R-c).
+        # S6: a vanished frozen source before its retirement is the absent grade (ruling R-c).
         root = tree()
         os.unlink(root / old)
-        rep = contain(root)
-        check("vanished-source-finding", named(rep.findings, old, "vanished") and len(rep.findings) == 1
-              and named(rep.migration_incomplete, old, "unresolved"))
+        st = admit(root)
+        check("vanished-source-finding", grade_of(st, old) == "absent" and "vanished" in st.frozen[old].detail
+              and bounded(st) == sorted((note, mig, move)) and st.cannot == [])
 
         # S7: a symlinked or a hard-linked frozen source cannot be evaluated.
         root = tree()
         os.unlink(root / old)
         os.symlink("MIG.md", root / old)
-        rep = contain(root)
-        check("symlinked-source-cannot", rep.cannot != [] and not named(rep.migration_incomplete, old))
+        st = admit(root)
+        check("symlinked-source-cannot", named(st.cannot, old) and grade_of(st, old) not in ("bounded", None))
         root = tree()
         os.link(root / old, root / "second-name")
-        rep = contain(root)
-        check("hardlinked-source-cannot", named(rep.cannot, old) and not named(rep.migration_incomplete, old))
+        st = admit(root)
+        check("hardlinked-source-cannot", named(st.cannot, old) and grade_of(st, old) not in ("bounded", None))
 
         # S8: a path the plan does not enumerate is a finding (no blanket exemption while adopting).
         root = tree()
         write(root, ".working/OTHER.md", b"x\n")
         rep = contain(root)
-        check("unenumerated-path-finding", rep.findings == [unregistered.format(".working/OTHER.md")])
+        check("unenumerated-path-finding", rep.findings == [unregistered.format(p) for p in sorted(
+            legacy + [".working/OTHER.md"])] and rep.cannot == [home_cannot])
 
         # S9: a keep row is never frozen; without its [unmanaged] registration it is a finding.
-        rep = contain(tree(), model=legacy_manifest)
-        check("keep-row-not-frozen", rep.findings == [unregistered.format(keep)])
+        root = tree()
+        rep = contain(root, model=legacy_manifest)
+        check("keep-row-not-frozen", named(rep.findings, keep, "unregistered") and keep not in admit(root).frozen)
 
         # S10: a recorded retirement ends the bounded state of the retire AND move rows; a migrate source
         # stays bounded. Recorded means committed evidence only (QA rounds 2 and 4): a sealed retirement
@@ -1003,13 +1008,13 @@ def _self_test_checks():
         marker = apply.inventory_rel(rid, RETIREMENT_PHASE)
         root = tree()
         write(root, marker, emit_inv(rid, [], RETIREMENT_PHASE))
-        rep = contain(root)
-        check("retirement-marker-unproven-cannot", named(rep.cannot, marker) and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-marker-unproven-cannot", named(st.cannot, marker) and bounded(st) == [])
         os.unlink(root / old)
         os.unlink(root / note)
-        rep = contain(root)
-        check("unproven-retirement-never-hides-vanished-sources", named(rep.cannot, marker)
-              and bounded(rep) == [])
+        st = admit(root)
+        check("unproven-retirement-never-hides-vanished-sources", named(st.cannot, marker)
+              and bounded(st) == [])
         # A retire-only plan's record lists no files (the retirement-phase transaction of a plan without
         # a move row creates nothing but its own inventory): the SAME empty sealed marker reads as
         # retired at the unit seam once the plan carries no move row; the fixture plan always has one, so
@@ -1026,23 +1031,20 @@ def _self_test_checks():
         check("retire-only-plan-empty-record-retired", unit == (True, [marker]))
         root = tree()
         retire(root, rid)
-        rep = contain(root)
-        check("retired-retire-source-graded", named(rep.findings, old, "unregistered")
-              and named(rep.findings, ".working/notes", "unregistered")
-              and named(rep.findings, move, "unregistered") and bounded(rep) == [mig]
-              and rep.cannot == [])
-        # S4c: the ancestor of a frozen source that is gone is graded as one unregistered entry, even empty.
+        st = admit(root)
+        check("retired-retire-source-graded", sorted(st.frozen) == [mig] and bounded(st) == [mig]
+              and st.cannot == [] and st.findings == [])
+        # retired empty-ancestor-graded: at 2.0.0 .working/notes is one unregistered entry, covered by
+        # adopting-home-cannot-evaluate.
         os.unlink(root / note)
-        rep = contain(root)
-        check("empty-ancestor-graded", named(rep.findings, ".working/notes", "unregistered"))
         # S10b: a malformed or unreadable retirement inventory cannot be evaluated, never read as unretired.
         write(root, marker, b"not toml [\n")
-        rep = contain(root)
-        check("retirement-marker-malformed-cannot", named(rep.cannot, marker) and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-marker-malformed-cannot", named(st.cannot, marker) and bounded(st) == [])
         os.unlink(root / marker)
         os.symlink("inventory.toml", root / marker)
-        rep = contain(root)
-        check("retirement-marker-symlink-cannot", rep.cannot != [] and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-marker-symlink-cannot", named(st.cannot, marker) and bounded(st) == [])
         # S10c (QA rounds 2 and 4): each half of the retirement shape has its own failing vector. Half 1,
         # the member set: a marker that does not name the plan's Move destination, the base inventory
         # misplaced at the retirement name, and an old-shape marker that re-lists the archive preimages
@@ -1051,20 +1053,20 @@ def _self_test_checks():
         root = tree()
         retire(root, rid)
         write(root, marker, emit_inv(rid, [], RETIREMENT_PHASE))
-        rep = contain(root)
-        check("retirement-missing-destination-cannot", named(rep.cannot, marker, "destination")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-missing-destination-cannot", named(st.cannot, marker, "destination")
+              and bounded(st) == [])
         root = tree()
         write(root, marker, (root / apply.inventory_rel(rid)).read_bytes())
-        rep = contain(root)
-        check("retirement-marker-is-base-inventory-cannot", named(rep.cannot, marker)
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-marker-is-base-inventory-cannot", named(st.cannot, marker)
+              and bounded(st) == [])
         root = tree()
         write(root, marker, emit_inv(rid, [apply.inventory_row(
             apply.archive_rel(rid, src), sources[src]) for src in (old, note, move)], RETIREMENT_PHASE))
-        rep = contain(root)
-        check("retirement-preimage-shape-is-stale-cannot", named(rep.cannot, marker, "Move destination")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-preimage-shape-is-stale-cannot", named(st.cannot, marker, "Move destination")
+              and bounded(st) == [])
         # QA round 3, phase binding: a base inventory CRAFTED to also list a live archive preimage of the
         # move row admits, and copying it unchanged to the retirement name must still be CANNOT, never
         # retired: the retirement record's member set is exactly the plan's Move destinations, and a
@@ -1072,21 +1074,21 @@ def _self_test_checks():
         root = tree()
         write(root, apply.archive_rel(rid, move), sources[move])
         relist(root, rid, listed(rid) + [apply.archive_rel(rid, move)])
-        rep = contain(root)
-        check("crafted-base-with-preimages-admits", rep.findings == [] and rep.cannot == []
-              and bounded(rep) == sorted((old, note, mig, move)))
+        st = admit(root)
+        check("crafted-base-with-preimages-admits", st.findings == [] and st.cannot == []
+              and bounded(st) == sorted((old, note, mig, move)))
         write(root, marker, (root / apply.inventory_rel(rid)).read_bytes())
-        rep = contain(root)
-        check("retirement-marker-copied-crafted-base-cannot", named(rep.cannot, marker)
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-marker-copied-crafted-base-cannot", named(st.cannot, marker)
+              and bounded(st) == [])
         # The seal half has its own failing vector (QA round 3): a retirement marker whose bytes are not
         # the canonical emission of its own rows (a trailing comment) is CANNOT, never read as retired.
         root = tree()
         retire(root, rid)
         write(root, marker, (root / marker).read_bytes() + b"# note\n")
-        rep = contain(root)
-        check("retirement-marker-not-sealed-cannot", named(rep.cannot, marker, "sealed")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-marker-not-sealed-cannot", named(st.cannot, marker, "sealed")
+              and bounded(st) == [])
         # Half 2, one claim per path (codex round 4, QA round 5): a marker row whose path a base inventory
         # row also claims is a path claimed twice (spec 4.2). A digest contradiction (a crafted base
         # listing the destination at live but wrong bytes while the marker carries the plan digest), a
@@ -1096,26 +1098,26 @@ def _self_test_checks():
         write(root, moved, b"wrong moved bytes\n")
         relist(root, rid, listed(rid) + [moved])
         write(root, marker, emit_inv(rid, [apply.inventory_row(moved, sources[move])], RETIREMENT_PHASE))
-        rep = contain(root)
-        check("retirement-contradicts-base-cannot", named(rep.cannot, marker, "claimed twice")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-contradicts-base-cannot", named(st.cannot, marker, "claimed twice")
+              and bounded(st) == [])
         root = tree()
         write(root, moved, sources[move])
         relist(root, rid, listed(rid) + [moved])
         write(root, marker, emit_inv(rid, [dict(apply.inventory_row(moved, sources[move]),
                                                 size=len(sources[move]) + 100)], RETIREMENT_PHASE))
-        rep = contain(root)
-        check("retirement-size-contradiction-cannot", named(rep.cannot, marker, "claimed twice")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-size-contradiction-cannot", named(st.cannot, marker, "claimed twice")
+              and bounded(st) == [])
         root = tree()
         write(root, moved, sources[move])
         relist(root, rid, listed(rid) + [moved])
         write(root, marker, emit_inv(rid, [apply.inventory_row(moved, sources[move])], RETIREMENT_PHASE))
         for src in (old, note, move):
             os.unlink(root / src)
-        rep = contain(root)
-        check("retirement-path-claimed-twice-agreeing-cannot", named(rep.cannot, marker, "claimed twice")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-path-claimed-twice-agreeing-cannot", named(st.cannot, marker, "claimed twice")
+              and bounded(st) == [])
         # A row that is neither a recorded Move destination nor base-claimed is CANNOT (the shape allows
         # nothing else).
         root = tree()
@@ -1123,8 +1125,8 @@ def _self_test_checks():
         write(root, marker, emit_inv(rid, [
             apply.inventory_row(moved, sources[move]),
             apply.inventory_row(apply.archive_rel(rid, keep), sources[keep])], RETIREMENT_PHASE))
-        rep = contain(root)
-        check("retirement-foreign-row-cannot", named(rep.cannot, marker) and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-foreign-row-cannot", named(st.cannot, marker) and bounded(st) == [])
         # The recorded destination is live committed evidence (QA round 4): after the recorded
         # retirement its bytes must equal the retirement row and the moved source's plan digest, so tampered
         # bytes, a deleted destination, and a marker whose row is self-consistent with wrong live bytes
@@ -1132,32 +1134,32 @@ def _self_test_checks():
         root = tree()
         retire(root, rid)
         write(root, moved, b"evil\n")
-        rep = contain(root)
+        st = admit(root)
         check("retirement-destination-tampered-cannot",
-              any("does not match its retirement inventory row" in m and rid in m for m in rep.cannot)
-              and bounded(rep) == [])
+              any("does not match its retirement inventory row" in m and rid in m for m in st.cannot)
+              and bounded(st) == [])
         root = tree()
         retire(root, rid)
         os.unlink(root / moved)
-        rep = contain(root)
+        st = admit(root)
         check("retirement-destination-absent-cannot",
-              any("absent" in m and rid in m for m in rep.cannot) and bounded(rep) == [])
+              any("absent" in m and rid in m for m in st.cannot) and bounded(st) == [])
         root = tree()
         write(root, moved, b"evil\n")
         write(root, marker, emit_inv(rid, [apply.inventory_row(moved, b"evil\n")], RETIREMENT_PHASE))
-        rep = contain(root)
+        st = admit(root)
         check("retirement-destination-not-at-plan-digest-cannot",
-              named(rep.cannot, marker, "plan digest") and bounded(rep) == [])
+              named(st.cannot, marker, "plan digest") and bounded(st) == [])
         # Before a recorded retirement the Move destination does not exist (QA round 4): a file there,
         # with or without a crafted base row claiming it, is a premature-record finding and the run's
         # sources stay bounded.
         root = tree()
         write(root, moved, sources[move])
         relist(root, rid, listed(rid) + [moved])
-        rep = contain(root)
+        st = admit(root)
         check("crafted-base-moved-row-still-premature-finding",
-              named(rep.findings, moved, "before the recorded retirement")
-              and bounded(rep) == sorted((old, note, mig, move)) and rep.cannot == [])
+              named(st.findings, moved, "before the recorded retirement")
+              and bounded(st) == sorted((old, note, mig, move)) and st.cannot == [])
 
         def state_of(root):
             fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
@@ -1240,30 +1242,30 @@ def _self_test_checks():
                 return ok, shell.staged[marker_o]
 
             root = occ_tree()
-            rep = contain(root)
-            check("occupying-run-admits-before-retirement", rep.findings == [] and rep.cannot == []
-                  and bounded(rep) == [move])
+            st = admit(root)
+            check("occupying-run-admits-before-retirement", st.findings == [] and st.cannot == []
+                  and bounded(st) == [move])
             write(root, occ_dest, occ_sources[occ])
-            rep = contain(root)
+            st = admit(root)
             check("occupying-destination-premature-finding",
-                  named(rep.findings, occ_dest, "before the recorded retirement") and rep.cannot == [])
+                  named(st.findings, occ_dest, "before the recorded retirement") and st.cannot == [])
             root = occ_tree()
             ok, record_o = occ_retire(root, [(occ_dest, (root / occ_arch).read_bytes()),
                                              (moved, (root / move).read_bytes())])
             os.unlink(root / move)   # the relocation's pinned removal of the non-occupying source
             check("occupying-retirement-record-derived", ok and [r["path"] for r in tomllib.loads(
                 record_o.decode("utf-8"))["file"]] == sorted((occ_dest, moved)))
-            rep = contain(root)
+            st = admit(root)
             st_o = state_of(root)
-            check("occupying-retirement-reads-retired", rep.findings == [] and rep.cannot == []
-                  and bounded(rep) == [] and occ_dest in st_o.registered and moved in st_o.registered)
+            check("occupying-retirement-reads-retired", st.findings == [] and st.cannot == []
+                  and bounded(st) == [] and occ_dest in st_o.registered and moved in st_o.registered)
             # A record that omits the occupying move's destination is not the derived record: CANNOT.
             root = occ_tree()
             occ_retire(root, [(moved, (root / move).read_bytes())])
             os.unlink(root / move)
-            rep = contain(root)
+            st = admit(root)
             check("occupying-destination-omitted-cannot",
-                  named(rep.cannot, marker_o, repr(occ_dest), "Move destination") and bounded(rep) == [])
+                  named(st.cannot, marker_o, repr(occ_dest), "Move destination") and bounded(st) == [])
 
         # S10e (QA round 6): only a destination beneath the Move root is retained evidence. The real
         # planner freezes a plan whose moves name explicit destinations outside the store, one occupying
@@ -1304,18 +1306,18 @@ def _self_test_checks():
             write(root, base_x[1], frozen_x[2])
             write(root, occx_arch, x_sources[occ])
             relist(root, rid_x, base_x)
-            rep = contain(root)
-            check("explicit-destination-run-admits-before-retirement", rep.findings == [] and rep.cannot == []
-                  and bounded(rep) == [move] and named(rep.migration_incomplete, ext))
+            st = admit(root)
+            check("explicit-destination-run-admits-before-retirement", st.findings == [] and st.cannot == []
+                  and bounded(st) == sorted((ext, move)))
             write(root, ext_dest, x_sources[ext])
             write(root, occx_dest, x_sources[occ])
             retire(root, rid_x)   # the real retirement-phase shell: the one Move-root destination, sealed
             os.unlink(root / move)
             os.unlink(root / ext)
-            rep = contain(root)
+            st = admit(root)
             st_x = state_of(root)
-            check("explicit-destination-outside-store-reads-retired", rep.findings == []
-                  and rep.cannot == [] and rep.migration_incomplete == [] and moved in st_x.registered
+            check("explicit-destination-outside-store-reads-retired", st.findings == []
+                  and st.cannot == [] and st.frozen == {} and moved in st_x.registered
                   and ext_dest not in st_x.registered and occx_dest not in st_x.registered)
 
         # S10f (QA round 7): an EXPLICIT destination beneath the Move root is a Move destination like the
@@ -1357,35 +1359,34 @@ def _self_test_checks():
                 return root_
 
             root = cust_tree()
-            rep = contain(root)
-            check("move-root-explicit-destination-run-admits-before-retirement", rep.findings == []
-                  and rep.cannot == [] and bounded(rep) == [move] and named(rep.migration_incomplete, ext))
+            st = admit(root)
+            check("move-root-explicit-destination-run-admits-before-retirement", st.findings == []
+                  and st.cannot == [] and bounded(st) == sorted((ext, move)))
             write(root, cust_dest, c_sources[ext])
-            rep = contain(root)
+            st = admit(root)
             check("move-root-explicit-destination-premature-finding",
-                  named(rep.findings, cust_dest, "before the recorded retirement") and rep.cannot == [])
+                  named(st.findings, cust_dest, "before the recorded retirement") and st.cannot == [])
             root = cust_tree()
             retire(root, rid_c, [(cust_dest, c_sources[ext]), (moved, c_sources[move])])
             os.unlink(root / move)
             os.unlink(root / ext)
             beside_c = MOVED_ROOT + "/custom/evil.sh"
             write(root, beside_c, b"evil\n")
-            rep = contain(root)
+            st = admit(root)
             st_c = state_of(root)
             check("move-root-explicit-destination-reads-retired",
-                  named(rep.findings, beside_c, "unregistered") and len(rep.findings) == 1 and rep.cannot == []
-                  and rep.migration_incomplete == [] and cust_dest in st_c.registered
+                  st.findings == [] and st.cannot == [] and st.frozen == {} and cust_dest in st_c.registered
                   and moved in st_c.registered and beside_c not in st_c.registered)
 
-        # S11: every record case refuses admission; the run homes are then graded and nothing is bounded.
+        # S11: every record case refuses admission; the run then registers nothing and nothing is bounded.
         def record(name, mutate, verdict, *words):
             root = tree()
             mutate(root)
-            rep = contain(root)
-            msgs = rep.findings if verdict == "finding" else rep.cannot
+            st = admit(root)
+            msgs = st.findings if verdict == "finding" else st.cannot
             check("record-" + name, any(rid in m and all(w in m for w in words) for m in msgs)
-                  and named(rep.findings, ".working/imported", "unregistered") and bounded(rep) == []
-                  and (verdict == "cannot" or rep.cannot == []))
+                  and st.runs == () and st.registered == frozenset() and bounded(st) == []
+                  and (verdict == "cannot" or st.cannot == []))
 
         def drop(rel):
             return lambda root: os.unlink(root / rel)
@@ -1492,17 +1493,17 @@ def _self_test_checks():
         os.unlink(root / old)
         os.unlink(root / note)
         unit, why = unit_retired(root)
-        rep = contain(root)
+        st = admit(root)
         check("retirement-record-of-another-run-refused", unit is None and why is not None
-              and "names run" in why and named(rep.cannot, marker) and bounded(rep) == [])
+              and "names run" in why and named(st.cannot, marker) and bounded(st) == [])
         # 2: another phase's identity at the retirement name (an empty completion-phase record copied
         # onto it) refuses, never read as retired.
         root = tree()
         write(root, marker, emit_inv(rid, [], "completion"))
         unit, why = unit_retired(root)
-        rep = contain(root)
+        st = admit(root)
         check("retirement-record-of-another-phase-refused", unit is None and why is not None
-              and "another phase" in why and named(rep.cannot, marker) and bounded(rep) == [])
+              and "another phase" in why and named(st.cannot, marker) and bounded(st) == [])
         # 2a: a well-formed plan digest other than the proven plan's own at the retirement name (the
         # record of another plan) refuses, never read as retired: at the unit seam the retire-only plan's
         # empty record, and through the doctor the plan's own retirement shape re-emitted at that digest,
@@ -1518,28 +1519,28 @@ def _self_test_checks():
         doc_ret = tomllib.loads((root / marker).read_bytes().decode("utf-8"))
         write(root, marker, apply.emit_inventory(rid, [dict(r) for r in doc_ret["file"]], RETIREMENT_PHASE,
                                                  foreign_digest))
-        rep = contain(root)
-        check("retirement-record-foreign-plan-digest-cannot", named(rep.cannot, marker, "plan digest")
-              and bounded(rep) == [])
+        st = admit(root)
+        check("retirement-record-foreign-plan-digest-cannot", named(st.cannot, marker, "plan digest")
+              and bounded(st) == [])
         # 2b: the base inventory's identity binds it to the base phase: the base re-emitted with the
         # retirement-phase identity (the same rows at the same plan digest) refuses admission.
         root = tree()
         doc_base = tomllib.loads((root / inventory).read_bytes().decode("utf-8"))
         write(root, inventory, apply.emit_inventory(rid, [dict(r) for r in doc_base["file"]],
                                                     RETIREMENT_PHASE, pdig[rid]))
-        rep = contain(root)
+        st = admit(root)
         check("base-inventory-of-another-phase-refused",
-              any(rid in m and "another phase" in m for m in rep.findings)
-              and rep.cannot == [] and bounded(rep) == [])
+              any(rid in m and "another phase" in m for m in st.findings)
+              and st.cannot == [] and bounded(st) == [])
         # 3: a missing identity (the pre-ruling record shape) and a malformed one (an extra key) are
         # each CANNOT, at the retirement name and at the base.
         root = tree()
         write(root, marker, apply.emit_checked(dict(format=store.EVIDENCE_INVENTORY_FORMAT,
                                                     file=[])).encode("utf-8"))
         unit, why = unit_retired(root)
-        rep = contain(root)
+        st = admit(root)
         check("retirement-record-identity-missing-refused", unit is None and why is not None
-              and "identity" in why and named(rep.cannot, marker) and bounded(rep) == [])
+              and "identity" in why and named(st.cannot, marker) and bounded(st) == [])
         record("inventory-identity-missing", put(inventory, apply.emit_checked(dict(
             format=store.EVIDENCE_INVENTORY_FORMAT,
             file=[dict(r) for r in doc_base["file"]])).encode("utf-8")), "cannot", "identity")
@@ -1555,9 +1556,9 @@ def _self_test_checks():
         # Stale identity: a plan that does not describe this in-repo store cannot be evaluated.
         root = tree()
         for name, flag in (("not-in-repo", False), ("topology-unknown", None)):
-            rep = contain(root, in_repo=flag)
+            st = admit(root, in_repo=flag)
             check("identity-" + name + "-cannot", any(rid in m and "does not describe this store" in m
-                                                     for m in rep.cannot) and bounded(rep) == [])
+                                                     for m in st.cannot) and bounded(st) == [])
         fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
         try:
             st = reader.adoption_state(fd, ".working/other", in_repo=True)
@@ -1567,32 +1568,20 @@ def _self_test_checks():
                                                                      for m in st.cannot))
 
         # S12: one path frozen by two unretired admitted runs is ambiguous.
-        rep = contain(tree(adopted=(rid, rid_b)))
-        check("double-claim-cannot", named(rep.cannot, old, "more than one") and not named(
-            rep.migration_incomplete, old))
+        st = admit(tree(adopted=(rid, rid_b)))
+        check("double-claim-cannot", named(st.cannot, old, "more than one") and grade_of(st, old) != "bounded")
 
-        # S13: while adopting, an [unmanaged] declaration in the control area collides and covers nothing.
-        root = tree()
-        write(root, ".working/archive/stray.md", b"x\n")
-        model = dict(copy.deepcopy(manifest), unmanaged=dict(paths=[keep, ".working/archive"]))
-        rep = contain(root, model=model)
-        check("unmanaged-control-area-collides", named(rep.findings, ".working/archive", "covers nothing")
-              and named(rep.findings, ".working/archive/stray.md", "unregistered") and len(rep.findings) == 2)
-        model = dict(copy.deepcopy(manifest), unmanaged=dict(paths=[keep, home + "/notes"]))
-        rep = contain(root, model=model)
-        check("unmanaged-within-control-area-collides", named(rep.findings, home + "/notes", "covers nothing"))
+        # S13: the adopting [unmanaged] collision branch is homes 1 only.
+        # retired unmanaged-control-area-collides: base 2.0.0 never reaches that branch; adopting-home-cannot-evaluate.
+        # retired unmanaged-within-control-area-collides: likewise covered by adopting-home-cannot-evaluate.
         root = tree(adopted=())
         write(root, ".working/archive/stray.md", b"x\n")
         rep = contain(root, model=dict(copy.deepcopy(manifest), unmanaged=dict(paths=[keep, ".working/archive"])))
         check("legacy-unmanaged-archive-unchanged", not any("covers nothing" in m for m in rep.findings)
               and not named(rep.findings, ".working/archive/stray.md"))
 
-        # S14: a fault anywhere inside the reader is a named cannot-evaluate, never the legacy grading.
-        root = tree()
-        with mock.patch.object(reader, "adoption_state", side_effect=RuntimeError("injected")):
-            rep = contain(root)
-        check("reader-fault-cannot", any("adoption state cannot be read" in m and "injected" in m
-                                         for m in rep.cannot))
+        # retired reader-fault-cannot: base 2.0.0 never calls this reader (adopting-home-cannot-evaluate,
+        # not-adopting-reader-never-called), so no reader fault reaches C-CONTAINMENT.
 
         # S15: read-only and journal-free (QA round 2): the doctor opens no journal at all (committed
         # evidence only); journal_state, the partial-status surface, is never consulted, there is no
@@ -1631,9 +1620,11 @@ def _self_test_checks():
                     mock.patch.object(_opf_check, "_list_contained", spy_list), \
                     mock.patch.object(_journal, "_lstat_contained", spy_lstat), apply._composing():
                 rep = contain(root)
+                st = admit(root)
         except (apply.AdoptApplyError, AssertionError) as exc:
             effect = exc
-        check("read-only-no-effect", effect is None and rep.findings == [] and rep.cannot == [])
+        check("read-only-no-effect", effect is None and rep.cannot == [home_cannot]
+              and st.runs == (rid,) and st.findings == [] and st.cannot == [])
         check("journal-never-read", touched != [] and all(
             t != apply.JOURNAL_REL and not t.startswith(apply.JOURNAL_REL + "/") for t in touched))
         check("tree-unchanged", snapshot(root) == before)
@@ -1642,22 +1633,22 @@ def _self_test_checks():
         # clean, so every vector fails without its enforcement.
         root = tree()
         with mock.patch.object(reader, "RUN_CEILING", 0):
-            rep = contain(root)
-        check("run-ceiling-cannot", any("run" in m and "ceiling" in m for m in rep.cannot)
-              and bounded(rep) == [])
+            st = admit(root)
+        check("run-ceiling-cannot", any("run" in m and "ceiling" in m for m in st.cannot)
+              and bounded(st) == [])
         root = tree()
         with mock.patch.object(reader, "SOURCE_CEILING", 1):
-            rep = contain(root)
-        check("source-ceiling-cannot", any("frozen sources" in m and "ceiling" in m for m in rep.cannot)
-              and bounded(rep) == [])
+            st = admit(root)
+        check("source-ceiling-cannot", any("frozen sources" in m and "ceiling" in m for m in st.cannot)
+              and bounded(st) == [])
         root = tree(adopted=(rid, rid_b))
         reads = []
         real_read = apply._read_live
         with mock.patch.object(reader, "READ_CEILING", 8), \
                 mock.patch.object(apply, "_read_live",
                                   lambda fd, rel: reads.append(rel) or real_read(fd, rel)):
-            rep = contain(root)
-        check("read-ceiling-cannot", any("read ceiling" in m for m in rep.cannot))
+            st = admit(root)
+        check("read-ceiling-cannot", any("read ceiling" in m for m in st.cannot))
         # QA round 2: an exhausted budget refuses BEFORE reading, so the one crossing read is the last.
         check("exhausted-budget-stops-reading", len(reads) == 1)
         # QA rounds 3 and 4: bytes a FAILED read consumed count too, charged exactly: the first
@@ -1669,9 +1660,9 @@ def _self_test_checks():
                 mock.patch.object(_journal, "_MAX_PRODUCT_READ_BYTES", 16), \
                 mock.patch.object(apply, "_read_live",
                                   lambda fd, rel: failed_reads.append(rel) or real_read(fd, rel)):
-            rep = contain(root)
+            st = admit(root)
         check("failed-read-charges-budget", len(failed_reads) == 1
-              and any("exhausted" in m for m in rep.cannot))
+              and any("exhausted" in m for m in st.cannot))
         # QA round 4 (exact accounting, codex and claude): a refusal BEFORE the first byte charges
         # nothing, and a per-file-cap crossing charges exactly the bytes its chunk loop consumed (the
         # whole 10-byte file here), never the per-file cap.
@@ -1730,17 +1721,17 @@ def _self_test_checks():
                 spent[0] += held - budget[0]
 
         with mock.patch.object(reader, "_read_budgeted", metering):
-            rep = contain(root)
+            st = admit(root)
         exact = spent[0]
-        check("read-ceiling-metered-clean", rep.cannot == [] and exact > 0 and bounded(rep) != [])
+        check("read-ceiling-metered-clean", st.cannot == [] and exact > 0 and bounded(st) != [])
         for label, ceiling, admits in (("one-over", exact + 1, True), ("exact", exact, True),
                                        ("one-under", exact - 1, False)):
             with mock.patch.object(reader, "READ_CEILING", ceiling):
-                rep = contain(root)
+                st = admit(root)
             if admits:
-                ok = rep.cannot == [] and bounded(rep) != []
+                ok = st.cannot == [] and bounded(st) != []
             else:
-                ok = any("read ceiling" in m for m in rep.cannot)
+                ok = any("read ceiling" in m for m in st.cannot)
             check("read-ceiling-" + label + ("-admits" if admits else "-cannot"), ok)
 
         # S18 (QA rounds 1 and 4): the move row, frozen by the real planner: bounded, drifted and
@@ -1748,44 +1739,45 @@ def _self_test_checks():
         # destination does not exist, so a file there is a named premature finding; the destination is
         # registered, byte-verified, only through the recorded retirement inventory (S10).
         root = tree()
-        rep = contain(root)
-        check("move-source-bounded-no-premature-finding", rep.findings == [] and rep.cannot == []
-              and named(rep.migration_incomplete, move))
+        st = admit(root)
+        check("move-source-bounded-no-premature-finding", st.findings == [] and st.cannot == []
+              and grade_of(st, move) == "bounded")
         write(root, store.moved_dest(move), sources[move])
-        rep = contain(root)
+        st = admit(root)
         check("premature-move-destination-finding",
-              named(rep.findings, store.moved_dest(move), "before the recorded retirement")
-              and named(rep.migration_incomplete, move))
+              named(st.findings, store.moved_dest(move), "before the recorded retirement")
+              and grade_of(st, move) == "bounded")
         root = tree()
         write(root, move, b"to move, edited\n")
-        rep = contain(root)
-        check("moved-source-drift-finding", named(rep.findings, move, "drifted")
-              and named(rep.migration_incomplete, move, "unresolved"))
+        st = admit(root)
+        check("moved-source-drift-finding", grade_of(st, move) == "drifted" and st.cannot == []
+              and bounded(st) == sorted((old, note, mig)))
         root = tree()
         os.unlink(root / move)
-        rep = contain(root)
-        check("moved-source-vanished-finding", named(rep.findings, move, "vanished")
-              and named(rep.migration_incomplete, move, "unresolved"))
+        st = admit(root)
+        check("moved-source-vanished-finding", grade_of(st, move) == "absent" and st.cannot == []
+              and bounded(st) == sorted((old, note, mig)))
 
         # S19 (QA round 2, the ruling): the proof is committed evidence ONLY, so a clone, which carries
         # the bundle and the run archive but no machine-local journal (spec 4.2), grades exactly as the
         # original store, retirement included.
         root = tree()
-        original = contain(root)
+        original = admit(root)
         shutil.rmtree(root / ".aiqt")
-        cloned = contain(root)
-        check("clone-without-journal-grades-identically", original.findings == [] and original.cannot == []
-              and (cloned.findings, cloned.cannot, cloned.triage, cloned.migration_incomplete)
-              == (original.findings, original.cannot, original.triage, original.migration_incomplete))
+        cloned = admit(root)
+        check("clone-without-journal-grades-identically", original.runs == (rid,) and original.findings == []
+              and original.cannot == [] and bounded(original) == sorted((old, note, mig, move))
+              and cloned == original)
         root = tree()
         retire(root, rid)
         shutil.rmtree(root / ".aiqt")
-        rep = contain(root)
-        check("clone-retirement-recorded-from-evidence", rep.cannot == [] and bounded(rep) == [mig])
+        st = admit(root)
+        check("clone-retirement-recorded-from-evidence", st.cannot == [] and bounded(st) == [mig])
 
         # S16 (QA round 1): end to end through the real doctor engine: a real scaffolded store (opf init,
-        # opf render --write), real git observations, the adoption bundle with its COMMITTED transaction,
-        # and validate_store returns VALID carrying the bounded sources as migration_incomplete.
+        # opf render --write), real git observations, the adoption bundle with its COMMITTED transaction.
+        # On base 2.0.0 validate_store grades the adoption home C-CONTAINMENT CANNOT-EVALUATE, never VALID,
+        # and carries no migration_incomplete.
         import contextlib
         import io
         import _opf_observe
@@ -1847,12 +1839,12 @@ def _self_test_checks():
             if res.status == store.RESOLVED:
                 obs, _notes = _opf_observe.gather(res)
                 result = _opf_check.validate_store(res, observations=obs)
-        check("s16-end-to-end-doctor-valid", result is not None and result.status == store.VALID
-              and result.checks.get("C-CONTAINMENT") == "PASS" and len(result.migration_incomplete) == 4
-              and result.findings == [] and result.cannot_evaluate == [])
+        check("s16-end-to-end-doctor-adopting-cannot-evaluate", result is not None
+              and result.status != store.VALID and result.checks.get("C-CONTAINMENT") == "CANNOT-EVALUATE"
+              and home_cannot in result.cannot_evaluate and len(result.migration_incomplete) == 0)
         # QA round 3, end to end: with the machine-local journal tree removed and that removal committed,
-        # as in a clone that never carried it, the SAME real-doctor grading returns: admission never
-        # requires the journal, pinned through validate_store itself, not only contain().
+        # as in a clone that never carried it, the SAME real-doctor grading returns: the grading never
+        # depends on the journal, pinned through validate_store itself.
         clone_result = None
         if ok and result is not None:
             shutil.rmtree(e2e / apply.JOURNAL_REL.split("/")[0])
@@ -1861,11 +1853,10 @@ def _self_test_checks():
                 if res.status == store.RESOLVED:
                     obs, _notes = _opf_observe.gather(res)
                     clone_result = _opf_check.validate_store(res, observations=obs)
-        check("s16-journal-free-grades-identically", clone_result is not None
-              and clone_result.status == store.VALID
-              and clone_result.checks.get("C-CONTAINMENT") == "PASS"
-              and len(clone_result.migration_incomplete) == 4
-              and clone_result.findings == [] and clone_result.cannot_evaluate == [])
+        check("s16-journal-free-grades-identically", clone_result is not None and (
+            clone_result.status, clone_result.checks, clone_result.findings, clone_result.cannot_evaluate,
+            clone_result.migration_incomplete) == (result.status, result.checks, result.findings,
+                                                   result.cannot_evaluate, result.migration_incomplete))
 
     if failures:
         print("OPF-ADOPT-STATE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))

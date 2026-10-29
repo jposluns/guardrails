@@ -195,8 +195,8 @@ _ROUTE_ALLOWED_REFS = dict(
         "_opf_oplock.release_init_holder", "_opf_oplock.release_operation",
         "_opf_store.DEFAULT_MACHINE_SUBDIR", "_opf_store.LOCAL_POINTER_REL",
         "_opf_store.NOT_ADOPTED", "_opf_store.POINTER_REL",
-        "_opf_store.RESOLVED", "_opf_store.SUPPORTED_HOMES",
-        "_opf_store.WORKING_DIRNAME", "_opf_store._close_fd_exc_safe",
+        "_opf_store.RESOLVED", "_opf_store.WORKING_DIRNAME",
+        "_opf_store._close_fd_exc_safe",
         "_opf_store._journal", "_opf_store._journal._close_fd_quietly",
         "_opf_store._open_dir_nofollow", "_opf_store.homes_generation",
         "_opf_store.render_homes_gitignore",
@@ -908,13 +908,12 @@ def _init_route_violations(source):
 
 
 def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
-    """Plain `opf init` on homes generation 2 (spec 4.2), driven in process with both tooling gates
-    raised inside each vector (SUPPORTED_HOMES 2, SUPPORTED_SPEC_VERSION at IMPORTED_SPEC_VERSION) and
-    restored in a finally. The homes .gitignore inspection refuses the fixture's GIT_CONFIG_GLOBAL and
-    GIT_CONFIG_SYSTEM overrides, so those two are unset around each raised vector. The last vector
-    pins the shipped constants: the payload names, their order and their bytes are the ones the
-    per-document builders (build_manifest, build_counters, build_version, build_worklog and
-    build_index) produced before the shared bootstrap builder."""
+    """Plain `opf init` at the base 2.0.0, homes 2 baseline (spec 4.2), driven in process. The
+    fixture environment carries no GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM override, which the homes
+    .gitignore inspection refuses (_suite_isolated drops both). The last vector pins the shipped
+    constants: the payload names, their order and their bytes are the ones the per-document builders
+    (render_homes_gitignore, build_manifest, build_counters, build_version, build_worklog, build_index
+    and build_imported_leaf) produce one by one."""
     import tomllib
     from unittest import mock
     import _opf_check
@@ -928,20 +927,6 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
     working = _opf_store.WORKING_DIRNAME
     machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
     gitignore = working + "/.gitignore"
-
-    @contextlib.contextmanager
-    def gen2():
-        saved = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
-        env = {k: os.environ.pop(k, None) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")}
-        _opf_store.SUPPORTED_HOMES = 2
-        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-        try:
-            yield
-        finally:
-            _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
-            for key, value in env.items():
-                if value is not None:
-                    os.environ[key] = value
 
     def created_paths(output):
         rows = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
@@ -967,10 +952,9 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
         return real_create(root_fd, relpath, data)
 
     root = make_git("gen2-cli")
-    with gen2():
-        model = _opf_init._manifest_model(homes2=True)
-        roster = set(_opf_init_operation.bootstrap_source_roster(model))
-        rc, output = drive(root, ((opf, "_init_create", tracing_create),))
+    model = _opf_init._manifest_model()
+    roster = set(_opf_init_operation.bootstrap_source_roster(model))
+    rc, output = drive(root, ((opf, "_init_create", tracing_create),))
     paths = created_paths(output)
     leaves = {machine + "/" + name
               for name in _opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES)}
@@ -983,26 +967,25 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
           and machine + "/" + _opf_store.MANIFEST_NAME in creates[1:])
 
     # The same store, committed, then rendered and committed again (the order init's own hint
-    # gives), grades VALID under the raised gates with the homes-2 roster plus the four imported
-    # checks (red when the counters lose the model's imported rows: C-COUNTERS then finds each
+    # gives), grades VALID with the one doctor roster, the homes-2 and the four imported checks
+    # included (red when the counters lose the model's imported rows: C-COUNTERS then finds each
     # missing imported counter row).
     verdict = None
     if rc == EXIT_OK:
-        with gen2():
+        git_call(root, ["add", "-A"])
+        git_call(root, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"])
+        render_rc, _render_output = fd_capture(
+            lambda: opf.main(["render", "--write", "--root", str(root)]))
+        if render_rc == EXIT_OK:
+            # Render refuses an unsound store and writes nothing; only views it wrote commit.
             git_call(root, ["add", "-A"])
-            git_call(root, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"])
-            render_rc, _render_output = fd_capture(
-                lambda: opf.main(["render", "--write", "--root", str(root)]))
-            if render_rc == EXIT_OK:
-                # Render refuses an unsound store and writes nothing; only views it wrote commit.
-                git_call(root, ["add", "-A"])
-                git_call(root, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "render"])
-            resolution = _opf_store.resolve_store(root)
-            observations, _notes = _opf_observe.gather(resolution)
-            verdict = _opf_check.validate_store(resolution, observations=observations)
-            roster_checks = list(_opf_check.required_checks(2, True))
-            counters = tomllib.loads(
-                (root / machine / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))
+            git_call(root, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "render"])
+        resolution = _opf_store.resolve_store(root)
+        observations, _notes = _opf_observe.gather(resolution)
+        verdict = _opf_check.validate_store(resolution, observations=observations)
+        roster_checks = list(_opf_check.DOCTOR_ROSTER)
+        counters = tomllib.loads(
+            (root / machine / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))
     check("init-cli-gen2-doctor-valid",
           verdict is not None and render_rc == EXIT_OK and verdict.status == _opf_store.VALID
           and not verdict.findings and not verdict.cannot_evaluate
@@ -1018,8 +1001,7 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
 
     root = make_git("gen2-cli-held")
     before = _snapshot(root)
-    with gen2():
-        rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", held),))
+    rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", held),))
     check("init-cli-gen2-hold-refused",
           rc == EXIT_ERROR and _snapshot(root) == before
           and not (root / ".git" / "opf-oplock").exists()
@@ -1037,8 +1019,7 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
 
         root = make_git("gen2-cli-create-only-" + tag)
         before = _snapshot(root)
-        with gen2():
-            rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", answer),))
+        rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", answer),))
         check("init-cli-gen2-create-only-" + tag + "-refused",
               rc == EXIT_ERROR and _snapshot(root) == before
               and not (root / ".git" / "opf-oplock").exists()
@@ -1059,8 +1040,7 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
 
     root = make_git("gen2-cli-held-under-mutex")
     before = _snapshot(root)
-    with gen2():
-        rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", held_second),))
+    rc, output = drive(root, ((_opf_write_guard, "inspect_homes_gitignore", held_second),))
     check("init-cli-gen2-hold-refused-under-mutex",
           rc == EXIT_ERROR and len(calls) == 2 and _snapshot(root) == before
           and (root / ".git" / "opf-oplock").exists()
@@ -1073,9 +1053,8 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
         return ["synthetic-finding"]
 
     root = make_git("gen2-cli-ineffective")
-    with gen2():
-        rc, output = drive(root, ((_opf_write_guard, "verify_homes_gitignore_effective",
-                                   ineffective),))
+    rc, output = drive(root, ((_opf_write_guard, "verify_homes_gitignore_effective",
+                               ineffective),))
     check("init-cli-gen2-verify-refused",
           rc == EXIT_ERROR
           and inert("the installed .working/.gitignore is not effective: synthetic-finding") in output
@@ -1083,7 +1062,8 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
           and (root / gitignore).is_file())
 
     # The shipped constants: the created paths, in order, and their bytes are exactly the ones the
-    # per-document builders produce one by one, with no .gitignore and no imported leaf (red on any
+    # per-document builders produce one by one: .working/.gitignore first, then the manifest, the
+    # ledgers, the empty indexes and the empty imported leaves of the baseline types (red on any
     # default change: an added, dropped, reordered or re-encoded payload).
     expected = [(_opf_store.MANIFEST_NAME, _opf_init.build_manifest()),
                 (_opf_check.COUNTERS_NAME, _opf_init.build_counters()),
@@ -1091,7 +1071,11 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
                 (_opf_check.WORKLOG_NAME, _opf_init.build_worklog())]
     expected += [(name + _opf_check.INDEX_SUFFIX, _opf_init.build_index(name))
                  for name in _opf_init.INDEX_TYPES]
+    expected += [(name, _opf_init.build_imported_leaf(type_name))
+                 for type_name in sorted(_opf_store.BASELINE_TYPES)
+                 for name in _opf_store.imported_leaf_names((type_name,))]
     expected = [(machine + "/" + name, text.encode("utf-8")) for name, text in expected]
+    expected = [(gitignore, _opf_store.render_homes_gitignore().encode("utf-8"))] + expected
     expected += [(_opf_store.POINTER_REL, b'[store]\ntarget = "dir:."\n'),
                  ("CHANGELOG.md", b"# Changelog\n")]
     root = make_git("gen2-cli-default")
@@ -1099,8 +1083,7 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
     paths = created_paths(output)
     check("init-cli-default-unchanged",
           rc == EXIT_OK and paths == [path for path, _data in expected]
-          and all((root / path).read_bytes() == data for path, data in expected)
-          and not (root / gitignore).exists())
+          and all((root / path).read_bytes() == data for path, data in expected))
 
 
 def _suite(invoke):
@@ -1210,28 +1193,44 @@ def _suite_isolated(invoke):
             _opf_store.MANIFEST_NAME, _opf_check.COUNTERS_NAME,
             _opf_check.VERSION_NAME, _opf_check.WORKLOG_NAME,
         } | {name + _opf_check.INDEX_SUFFIX for name in index_types}
+        # Base 2.0.0 (spec 4.2, 8.2): one empty imported leaf per baseline type beside the sources,
+        # and the .working/.gitignore managed-block carrier beside the machine store.
+        imported_names = set(_opf_store.imported_leaf_names(_opf_store.BASELINE_TYPES))
 
         def valid_sources(root):
             machine = root / working / machine_name
             try:
-                if set(path.name for path in (root / working).iterdir()) != {machine_name}:
+                if (set(path.name for path in (root / working).iterdir())
+                        != {machine_name, ".gitignore"}):
                     return False
-                if set(path.name for path in machine.iterdir()) != source_names:
+                if ((root / working / ".gitignore").read_bytes()
+                        != _opf_store.render_homes_gitignore().encode("utf-8")):
                     return False
-                if any(not stat.S_ISREG((machine / name).lstat().st_mode) for name in source_names):
+                if set(path.name for path in machine.iterdir()) != source_names | imported_names:
+                    return False
+                if any(not stat.S_ISREG((machine / name).lstat().st_mode)
+                       for name in source_names | imported_names):
                     return False
                 docs = {
                     name: tomllib.loads((machine / name).read_text(encoding="utf-8"))
-                    for name in source_names
+                    for name in source_names | imported_names
                 }
+                for name in imported_names:
+                    rows = "entry" if name == _opf_store.IMPORTED_WORKLOG_NAME else "record"
+                    if docs[name] != {"schema": _opf_schema.SUPPORTED_SCHEMA, rows: []}:
+                        return False
                 if not good(_opf_store.validate_manifest(docs[_opf_store.MANIFEST_NAME])):
                     return False
                 # Spec 8.1: a fresh store carries no legacy_fragment (LF) counter, so the
-                # baseline roster is exact and any importer namespace is a finding.
+                # baseline roster is exact and any importer namespace is a finding; spec 8.2:
+                # each baseline namespace also carries its imported-series row at zero.
                 namespaces = frozenset(_opf_store.BASELINE_TYPES.values())
                 high, findings = _opf_schema.validate_counters(
-                    docs[_opf_check.COUNTERS_NAME], known_namespaces=namespaces)
-                if findings or high != {namespace: 0 for namespace in namespaces}:
+                    docs[_opf_check.COUNTERS_NAME], known_namespaces=namespaces,
+                    imported_namespaces=namespaces)
+                zero = {namespace: 0 for namespace in namespaces}
+                zero.update({_opf_schema.IMPORTED_PREFIX + namespace: 0 for namespace in namespaces})
+                if findings or high != zero:
                     return False
                 if not good(_opf_release.validate_version(docs[_opf_check.VERSION_NAME])):
                     return False
@@ -1323,6 +1322,12 @@ def _suite_isolated(invoke):
                 # Use the OPF-local allowlist before mutating os.environ, retaining PATH.
                 # The subprocess init must not inherit an unenumerated GIT_* selector.
                 fixture_env = dict(_opf_observe._scrubbed_env(), HOME=str(home))
+                # Plain init inspects the .working/.gitignore installation (spec 4.2), whose
+                # config-discovery probe refuses a GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM override.
+                # The isolated HOME and GIT_CONFIG_NOSYSTEM already keep the caller's global and
+                # system configuration out of every fixture git call.
+                for override in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+                    fixture_env.pop(override)
                 os.environ.clear()
                 os.environ.update(fixture_env)
                 os.chdir(base)
@@ -1372,8 +1377,9 @@ def _suite_isolated(invoke):
                     json.loads(line) for line in output.splitlines() if line.startswith("{")
                 ]
                 expected_paths = {
-                    working + "/" + machine_name + "/" + name for name in source_names
-                } | {_opf_store.POINTER_REL, "CHANGELOG.md"}
+                    working + "/" + machine_name + "/" + name
+                    for name in source_names | imported_names
+                } | {working + "/.gitignore", _opf_store.POINTER_REL, "CHANGELOG.md"}
                 check("completion enumerates created paths", any(
                     row.get("event") == "created"
                     and row.get("root") == str(clean)
@@ -7054,10 +7060,12 @@ def _suite_isolated(invoke):
                 # OPF-D2B round 9 / R9-1 companion: an INITIALIZED submodule at ".gitignore" in a FULL
                 # RECURSIVE clone, its directory chmod 000. git's O_RDONLY|O_NOFOLLOW open of the unreadable
                 # directory FAILS, so the per-entry check would fall back to the gitlink commit OID -- which is
-                # absent from the superproject's object DB (the submodule's objects live under .git/modules) --
-                # and the round-9 HEAD REFUSED. But it is a FULL clone (no promisor), so `git add` cannot
-                # lazy-fetch and stages the store (do_read_blob rejects the non-blob commit); the partial-clone
-                # gate returns [] and init PROCEEDS. DISCRIMINATOR: rc 2 against the ungated round-9 HEAD.
+                # absent from the superproject's object DB (the submodule's objects live under .git/modules).
+                # It is a FULL clone (no promisor), so the partial-clone gate returns [] and the availability
+                # check does not refuse. At base 2.0.0 init then inspects the .working/.gitignore it would
+                # create, and git check-ignore warns that it cannot read the root .gitignore: an ignore source
+                # git cannot read leaves the ignore answer unknown, so init refuses there, fail-closed, and
+                # writes nothing. The refusal names the inspection stage, never the unavailable blob.
                 r9_rec = base / "d2b-r9-recursive-chmod000"
                 git_call(base, ["-c", "protocol.file.allow=always", "clone", "--recurse-submodules",
                                 "file://" + str(r9_super_src), str(r9_rec)])
@@ -7068,8 +7076,14 @@ def _suite_isolated(invoke):
                     rc, output = run(r9_rec)
                 finally:
                     os.chmod(str(r9_rec_gi), 0o755)   # restore so cleanup can traverse the fixture
-                check("full-clone chmod-000 initialized submodule .gitignore proceeds (partial-clone gate)",
-                      rc == EXIT_OK and valid_sources(r9_rec))
+                check("full-clone chmod-000 initialized submodule .gitignore refused by the homes gitignore "
+                      "inspection, not the partial-clone gate",
+                      rc == EXIT_ERROR and "during inspecting-the-homes-gitignore:" in output
+                      and inert("wrote a diagnostic during the homes gitignore inspection") in output
+                      and inert("indexed .gitignore blob is unavailable") not in output)
+                check("full-clone chmod-000 initialized submodule .gitignore preserved",
+                      not (r9_rec / working).exists()
+                      and not (r9_rec / _opf_store.POINTER_REL).exists())
 
                 # OPF-D2B round 11 / R10-1 + R10-2: _is_partial_clone must match git 2.53.0's OWN promisor
                 # registration (repo_has_promisor_remote): git lazy-fetches a missing object iff ANY of

@@ -54,10 +54,16 @@ go-ahead is not the single adoption approval of section 5. The steps, from the p
 
 1. `opf init --root .` takes the shared init lock for the root, then creates the machine
    sources under `.working/toml/` (the manifest, the ID counters, the version ledger, the
-   worklog and the eleven typed indexes), the `.opf.toml` pointer, and a fresh heading-only
+   worklog, the eleven typed indexes, the eleven imported indexes beside them and the imported
+   worklog), `.working/.gitignore`, the `.opf.toml` pointer, and a fresh heading-only
    `CHANGELOG.md`, which is always created. It refuses rather than absorb an existing store,
    pointer, foreign `.working/` content, or an existing root `CHANGELOG.md` or `VERSION`; move
-   such a file aside or give it a disposition with `opf adopt`, then retry. While the sources
+   such a file aside or give it a disposition with `opf adopt`, then retry. It also refuses,
+   writing nothing, while the environment carries a runtime git configuration override
+   (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT` with its key and value pairs,
+   `GIT_CONFIG_PARAMETERS` or `GIT_CONFIG`; `GIT_CONFIG_NOSYSTEM` is allowed), because its
+   `.working/.gitignore` inspection could then disagree with the adopter's own git; unset them
+   and retry. While the sources
    are written, a `lease.toml` sits inside `.working/toml/` with an active record under
    `.git/`; on success both are gone and the lock is released. A crashed run can leave a stale
    record that makes a later init refuse until `opf init --recover` confirms the recorded

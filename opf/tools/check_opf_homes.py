@@ -3,7 +3,7 @@
 
 Checks documented topology against the constructor authority. Text checks protect the base 2.0.0
 contract with homes 2, adoption and import included, not runtime conformance to it: the reference
-tooling does not yet implement 2.0.0. No store is mutated or required to install a block.
+tooling makes no claim of conformance to 2.0.0. No store is mutated or required to install a block.
 The registered pins tile each registered section completely (the self-test proves the
 concatenation equality per section), so deleting any sentence in a tiled section turns the gate
 red. Residual: the default gate's pins are substring checks over normalized text, so added
@@ -59,10 +59,15 @@ red; each sentence of the disclosure page's retired fresh-only item, the quickst
 conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
 rows and counts, those three files' wording of the removed section 9.2 remedy adoption, and the
 disclosure and record-indexes pages' description of a store upgrade the reference tooling no longer
-defines, is searched over its whole file's normalized text and is red wherever it lands
+defines, and every surface's tooling-status sentences from before the tooling initialized and
+validated base 2.0.0 stores, is searched over its whole file's normalized text and is red wherever it lands
 (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
-deleted sentence restored there stays green.
+deleted sentence restored there stays green. Every file under opf/prompt-pack, each pack member and
+its manifest found by walking the directory, and the implementation prompt are searched the same way
+for every registered retired surface sentence and for the stems of the tooling-status sentences from
+before the tooling initialized and validated base 2.0.0 stores (status_retired_findings); other
+wording in those files stays unprotected.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D), and a
@@ -70,6 +75,13 @@ retired-text quotation entry (_Q) is not linted, since quoted text is not in for
 matches only a quotation block. Residual:
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
+
+The default entry also runs the retired gate name scan (retired_gate_name_findings): no .py module
+under opf/tools may spell a transitional alias of store.HOMES or store.SPEC_VERSION. Each line is
+NFKC-normalized before it is matched, as Python normalizes identifiers, so a fullwidth or
+mathematical-alphanumeric spelling is caught. Residual: it is a line scan, so a name built at run time
+(getattr, setattr, or a globals() key assembled from split or formatted strings) is outside it, and so
+is every file that is not a .py file.
 
 The default entry also guards the informative sections: a heading whose title or body holds
 "(informative)" or the declaration ("This appendix is informative", or section or subsection,
@@ -260,6 +272,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import html
 import re
 import tempfile
+import tomllib
 import unicodedata
 from pathlib import Path
 
@@ -273,6 +286,8 @@ ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt.html"
 ADOPT_GUIDE = SPEC.parents[1] / "site" / "adopt.md"
 RECORD_INDEXES = SPEC.parents[1] / "site" / "record-indexes.html"
 CORE_FILES = SPEC.parents[1] / "site" / "core-files.html"
+PROMPT_PACK = SPEC.parents[1] / "prompt-pack"
+IMPLEMENTATION_PROMPT = SPEC.parent / "OPF-IMPLEMENTATION-PROMPT.md"
 
 
 class _Descriptive(str):
@@ -336,7 +351,7 @@ _CONTRACT = {
         _D('Base spec 2.0.0, with [opf].homes = 2, is the only base version this specification defines.'),
         _D('It includes adoption, the imported series and import (sections 8, 11 and 14).'),
         'A writer MUST NOT accept a format that its doctor does not grade deterministically.',
-        _D('The reference tooling does not yet implement base 2.0.0 (section 16.1).'),
+        _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2 (section 16.1).'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
         _D('# optional 1:1 index mirrors (section 10.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
         _D('The per-record layout (section 9) additionally places one file per record under .working/toml/<type>/, with each <type>.index.toml acting as the registry.'),
@@ -1006,8 +1021,8 @@ _CONTRACT = {
         _D('A project that keeps its own store by hand, with its own checks over that store alone (section 1), is not an implementation under this section.'),
         "The base defines one implementation model and no implementation conformance classes: a declared scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind every implementation.",
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
-        _D('The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.'),
-        _D('The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification, and its opf upgrade and opf record refuse such a store.'),
+        _D('The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to this specification.'),
+        _D('Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; its opf adopt apply and reconcile refuse at base 2.0.0 until its adoption journal moves to its section 4.2 home, and it does not yet implement post-adoption import.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -1429,18 +1444,18 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # They are not specification sentences, so the section 2 keyword lint does not read them. The
 # quickstart, the disclosure page, the adopt page, the adoption guide, the record-indexes page
 # and the core-files page state the one implementation model, the 2.0.0 file baseline, the
-# reference tooling's grading of a 2.0.0 manifest with homes = 2, that it defines no store
-# upgrade, what its scaffold still writes, and where its 1.2.0 behaviour diverges from the
-# specification. The self-test pins
+# reference tooling's initialization and validation of base 2.0.0 stores with homes = 2, which
+# adoption subcommands run there without reading the adoption journal and which refuse, that it
+# defines no store upgrade, and what its scaffold writes. The self-test pins
 # this registry's shape, so dropping an entry turns the self-test red.
 _SURFACE = {
     QUICKSTART: (
         'Date: 2026-10-24 (UTC).',
         'Create .working/toml/ by hand with manifest.toml declaring standard = "opf", spec_version = "2.0.0" and homes = 2 in its [opf] table, plus counters.toml (with the imported counter row of each enabled type beside its clean row), version.toml, worklog.toml, the eleven baseline .index.toml files (worklog is the exempt ledger listed above, not an index), the eleven .imported.index.toml leaves, and worklog.imported.toml, all empty to start; specification sections 4, 8 and 9 give the full file baseline.',
-        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init scaffolds this store: base 2.0.0 with homes = 2.",
         'The specification defines one implementation model, with no conformance classes (OPF-SPEC section 16.1).',
-        'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
-        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling initializes and validates base 2.0.0 stores with homes = 2.',
+        'Its opf adopt plan, approve and status run at base 2.0.0 without reading the adoption journal, and status says the journal is not read; opf adopt apply and reconcile refuse at base 2.0.0 until the adoption journal moves to its specification section 4.2 home.',
         'This supersedes the earlier aiqt-opf token; the interim devprocess token and [devprocess] table are retired by the OPFiles rebrand.',
         "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: counters never restart, so record ids are never reissued).",
         'opf adopt is the path for re-adopting any prior ancestry.',
@@ -1448,30 +1463,33 @@ _SURFACE = {
     ),
     DISCLOSURE: (
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
-        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.",
+        'at base 2.0.0 they and opf adopt status run without reading the adoption journal, and status says the journal is not read.',
+        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0 until the adoption journal moves to its homes-2 home, and complete refuses with exit 2,',
         'A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).',
         'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
-        'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
-        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'The reference tooling initializes and validates base 2.0.0 stores with homes = 2, and it makes no claim of conformance to the specification.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
     ADOPT_PAGE: (
-        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
-        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init scaffolds a 2.0.0 store with homes = 2.",
+        "The reference tooling's opf init scaffolds this store: base 2.0.0 with homes = 2.",
         'It declares standard = "opf" (the exact discovery token) in its [opf] table, along with the base spec_version you conform to ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status.',
         'It holds the clean row and the imported counter row (the quoted key "imported:&lt;NS&gt;", at zero to start) of every enabled type.',
         'The imported leaves: one &lt;type&gt;.imported.index.toml beside each of those eleven indexes, plus worklog.imported.toml for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).',
-        'The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above.',
-        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'The reference tooling initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines, as described above.',
+        'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
+        'opf adopt apply and reconcile refuse with exit 2 at base 2.0.0 until the adoption journal moves to its homes-2 home, and complete refuses with exit 2,',
         'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
         'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
+        'The reference CLI runs investigation and planning today, and prints the approval without recording it; recording the approval, apply and completion are not executable yet, so the assistant stops there and reports.',
     ),
     ADOPT_GUIDE: (
-        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init scaffolds a 2.0.0 store with homes = 2.",
         'Create the machine store at .working/toml/: manifest.toml (the control document: an [opf] table declaring standard = "opf", the base spec_version ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status, plus a [types.] registration for every enabled type, the declared [views], and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), counters.toml (the per-namespace ID high-water marks), version.toml (the version and release ledger, numbers, dates, spans, and digests, never release prose), worklog.toml (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as .index.toml, empty to start, plus the imported leaves the standard requires in every store: one .imported.index.toml beside each of those indexes and worklog.imported.toml for the worklog, each empty to start, with the imported counter row of each enabled type (the quoted key "imported:", at zero) beside its clean row in counters.toml (OPF-SPEC.md sections 4.2 and 8.2).',
-        'It does not yet implement spec 2.0.0, the only base version the standard defines.',
-        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'It initializes and validates spec 2.0.0 stores with homes = 2, the only base version the standard defines.',
+        'At base 2.0.0, opf adopt plan, approve and status run without reading the adoption journal, and status says the journal is not read.',
+        'What it does not run yet: opf adopt apply and reconcile refuse with exit 2 at base 2.0.0 until the adoption journal moves to its homes-2 home, and complete refuses with exit 2,',
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
@@ -1482,12 +1500,12 @@ _SURFACE = {
         'The standard reserves the LF namespace unassigned and defines no legacy_fragment type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.',
         "Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.",
         'Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
-        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
+        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and its manifest declares a spec_version below 2.0.0, which the reference tooling refuses as a store, as the standard's section 9.2 validation does.",
     ),
     CORE_FILES: (
         'The base [opf] table carries the exact discovery token standard = "opf", the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:',
         'standard = "opf" spec_version = "2.0.0" homes = 2 layout = "inline"',
-        'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
+        'The reference tooling\'s scaffold writes spec_version = "2.0.0" with homes = 2.',
         '[opf] standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)',
     ),
 }
@@ -1497,13 +1515,19 @@ _SURFACE = {
 # unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
 # record-indexes page's wording of the removed section 9.2 remedy adoption, retired with it (spec
 # 9.2 defines no path for a manifest below 2.0.0), and the disclosure and record-indexes pages'
-# description of a store upgrade the reference tooling no longer defines. Each sentence present in
-# its file's normalized text is a finding.
+# description of a store upgrade the reference tooling no longer defines, and each surface's
+# tooling-status sentences from before the tooling initialized and validated base 2.0.0 stores (its
+# 1.2.0 scaffold and grading, the adoption subcommands that read or refused over the adoption
+# journal, and the adopt page's claim that approval did not run). Each sentence present in its
+# file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
         "the specification's section 9.2 remedy adoption starts a new store whose counters start at zero, so a number the old tree's records carried can appear again in the new store's own series",
         'under the specification, a tree whose manifest declares a spec_version below 2.0.0 is foreign content for adoption, so adoption over it is a first adoption (specification sections 9.2 and 14.1), never a re-adoption.',
+        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
+        'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
+        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
     ),
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
@@ -1516,6 +1540,30 @@ _SURFACE_RETIRED = {
         'a 1.2.0 store is one the section 9.2 validation refusals refuse, so an adoption over it is a first adoption under section 14.1, never a re-adoption.',
         "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
+        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.",
+        'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
+        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
+        'opf adopt approve, apply, complete, and reconcile refuse with exit 2,',
+    ),
+    ADOPT_PAGE: (
+        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        'The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above.',
+        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'It validates spec 1.2.0 stores in either layout,',
+        'opf adopt status reports adoption runs and the adoption journal and writes nothing.',
+        'opf adopt approve, apply, complete and reconcile refuse with exit 2, so no approval is recorded, nothing is applied, and nothing is retired.',
+        'The read-only plan and status subcommands run; approve, apply, complete, and reconcile refuse with exit 2 before reading anything.',
+        'reports any open transaction or held lock in the adoption journal.',
+        'The reference CLI runs investigation and planning today; approval, apply and completion are not executable yet, so the assistant stops there and reports.',
+    ),
+    ADOPT_GUIDE: (
+        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
+        'It does not yet implement spec 2.0.0, the only base version the standard defines.',
+        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
+        'It validates spec 1.2.0 stores in either layout,',
+        'opf adopt status, which reports adoption runs and the adoption journal and writes nothing.',
+        'What it does not run yet: opf adopt approve, apply, complete and reconcile refuse with exit 2,',
     ),
     RECORD_INDEXES: (
         'Importer-only (no module toggle)',
@@ -1524,6 +1572,10 @@ _SURFACE_RETIRED = {
         'one importer-only type, and two reserved names or namespaces',
         "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
+        "and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
+    ),
+    CORE_FILES: (
+        'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
     ),
 }
 
@@ -1543,6 +1595,60 @@ def surface_findings(texts=None):
         for fragment in _SURFACE_RETIRED.get(path, ()):
             if fragment in body:
                 findings.append("surface {} restores retired text: {}".format(path.name, fragment))
+    return findings
+
+
+# Retired tooling-status wording outside the registered surfaces: every file under opf/prompt-pack
+# (each pack member and the manifest, found by walking the directory, so a member added later is
+# covered without registering it) and the implementation prompt. Each registered retired surface
+# sentence, and each stem of the tooling-status sentences from before the tooling initialized and
+# validated base 2.0.0 stores, present in a file's normalized text is a finding.
+_STATUS_RETIRED_STEMS = (
+    "does not yet implement base 2.0.0",
+    "does not yet implement spec 2.0.0",
+    "still initializes and validates stores at base 1.2.0",
+)
+
+
+def _status_retired_paths():
+    return sorted(path for path in PROMPT_PACK.rglob("*") if path.is_file()) + [IMPLEMENTATION_PROMPT]
+
+
+def status_retired_findings(texts=None):
+    texts = {path: path.read_text(encoding="utf-8") for path in _status_retired_paths()} if texts is None else texts
+    fragments = tuple(dict.fromkeys(_STATUS_RETIRED_STEMS + tuple(
+        fragment for retired in _SURFACE_RETIRED.values() for fragment in retired)))
+    findings = []
+    for path, text in texts.items():
+        body = _surface_text(text)
+        for fragment in fragments:
+            if fragment in body:
+                findings.append("{} restores retired text: {}".format(
+                    path.relative_to(SPEC.parents[1]).as_posix(), fragment))
+    return findings
+
+
+# The transitional aliases of store.HOMES and store.SPEC_VERSION are retired: no module under opf/tools
+# may spell either name again, as a definition or as a read. Each name is built from two pieces, so
+# this module's own source never carries it and the scan covers this file like any other. Python
+# normalizes every identifier with NFKC, so a fullwidth or mathematical-alphanumeric spelling is the
+# same identifier: each line is NFKC-normalized before it is matched. What a line scan cannot see is
+# outside this gate: a name built at run time (getattr, setattr or a globals() key assembled from
+# split or formatted strings) never appears whole on any line, and only .py files are scanned.
+_RETIRED_GATE_NAMES = ("SUPPORTED_" + "HOMES", "SUPPORTED_" + "SPEC_VERSION")
+_TOOLS = Path(__file__).resolve().parent
+
+
+def retired_gate_name_findings(tools=None):
+    tools = _TOOLS if tools is None else tools
+    findings = []
+    for path in sorted(tools.rglob("*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            line = unicodedata.normalize("NFKC", line)
+            for name in _RETIRED_GATE_NAMES:
+                if name in line:
+                    findings.append("{}:{}: retired gate name {}; read store.{} instead".format(
+                        path.relative_to(tools).as_posix(), number, name, name[len("SUPPORTED_"):]))
     return findings
 
 
@@ -2414,10 +2520,6 @@ def boundary_self_test():
     homes = tuple(".working/" + name for name in ("imports", "imported", "archive", "staging", "journals"))
     legacy_root = homes[0]
 
-    def active():
-        # Homes 2 is activated only inside the fixture; shipped tooling grades every store as legacy.
-        return patch.object(store, "SUPPORTED_HOMES", 2)
-
     # Discovery precedes the manifest: a candidate under journals/ still fails closed as ambiguous.
     with patch.object(store, "_immediate_subdirs", return_value=["journals", "toml"]), \
             patch.object(store, "_read_toml_contained", return_value={"opf": {"standard": store.STANDARD_TOKEN}}):
@@ -2426,41 +2528,34 @@ def boundary_self_test():
     cls = doctor.classify_containment(manifest, machine)
     check("classifier-legacy-roster", lambda: cls.homes == 1 and cls.control_roots == (legacy_root,)
           and cls.evidence_roots == ())
-    check("classifier-declaration-inert", lambda: doctor.classify_containment(manifest2, machine).homes == 1)
-    # Latent activation is gated: raising SUPPORTED_HOMES activates only a store declaring both homes 2
-    # and spec_version 2.0.0, never a current-version store or a non-integer declaration.
-    with active():
-        check("activation-homes2-declared", lambda: store.homes_generation(manifest2) == 2)
-        for label, opf in (("current-version", {"homes": 2, "spec_version": "1.1.0"}),
-                           ("no-version", {"homes": 2}), ("boolean", {"homes": True, "spec_version": "2.0.0"}),
-                           ("string", {"homes": "2", "spec_version": "2.0.0"})):
-            check("activation-gated-" + label, lambda o=opf: store.homes_generation({"opf": o}) == 1)
-    with active():
-        check("classifier-activated-legacy", lambda: doctor.classify_containment(manifest, machine).homes == 1)
-        cls2 = doctor.classify_containment(manifest2, machine)
-        check("classifier-roster", lambda: cls2.homes == 2 and cls2.control_roots == homes)
-        check("evidence-roots-disjoint", lambda: cls2.evidence_roots ==
-              (".working/imported", ".working/archive") and cls2.archive_root not in cls2.evidence_roots)
-        for home in homes:
-            for operand in (home, home + "/child", ".working", "./" + home + "/"):
-                altered = dict(manifest2, unmanaged={"paths": [operand]})
-                check("unmanaged-collision-" + operand,
-                      lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
-                      and not doctor.classify_containment(m, machine).valid_unmanaged)
-        # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
-        # path only, so an [unmanaged] declaration of it collides like any managed path.
-        control = ".working/.gitignore"
-        check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
-        check("classifier-gitignore-legacy-stray",
-              lambda: not doctor.classify_containment(manifest, machine).managed_file(control))
-        check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
-              and not cls2.managed_file(".working/staging/.gitignore"))
-        altered = dict(manifest2, unmanaged={"paths": [control]})
-        check("unmanaged-collision-" + control,
-              lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
-              and not doctor.classify_containment(m, machine).valid_unmanaged)
-    check("classifier-gitignore-inert-declaration",
-          lambda: not doctor.classify_containment(manifest2, machine).managed_file(".working/.gitignore"))
+    # Homes 2 is graded only for a store declaring both homes 2 and spec_version 2.0.0, never an older
+    # version or a non-integer declaration.
+    check("activation-homes2-declared", lambda: store.homes_generation(manifest2) == 2)
+    for label, opf in (("current-version", {"homes": 2, "spec_version": "1.1.0"}),
+                       ("no-version", {"homes": 2}), ("boolean", {"homes": True, "spec_version": "2.0.0"}),
+                       ("string", {"homes": "2", "spec_version": "2.0.0"})):
+        check("activation-gated-" + label, lambda o=opf: store.homes_generation({"opf": o}) == 1)
+    check("classifier-activated-legacy", lambda: doctor.classify_containment(manifest, machine).homes == 1)
+    cls2 = doctor.classify_containment(manifest2, machine)
+    check("classifier-roster", lambda: cls2.homes == 2 and cls2.control_roots == homes)
+    check("evidence-roots-disjoint", lambda: cls2.evidence_roots ==
+          (".working/imported", ".working/archive") and cls2.archive_root not in cls2.evidence_roots)
+    for home in homes:
+        for operand in (home, home + "/child", ".working", "./" + home + "/"):
+            altered = dict(manifest2, unmanaged={"paths": [operand]})
+            check("unmanaged-collision-" + operand,
+                  lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+                  and not doctor.classify_containment(m, machine).valid_unmanaged)
+    # Homes 2 registers .working/.gitignore as a managed control file (spec 4.2) at that exact
+    # path only, so an [unmanaged] declaration of it collides like any managed path.
+    control = ".working/.gitignore"
+    check("classifier-gitignore-managed", lambda: cls2.managed_file(control))
+    check("classifier-gitignore-deeper-stray", lambda: not cls2.managed_file(machine + "/.gitignore")
+          and not cls2.managed_file(".working/staging/.gitignore"))
+    altered = dict(manifest2, unmanaged={"paths": [control]})
+    check("unmanaged-collision-" + control,
+          lambda m=altered: bool(doctor.classify_containment(m, machine).colliding)
+          and not doctor.classify_containment(m, machine).valid_unmanaged)
     for home in homes[1:]:
         for operand in (home, home + "/child"):
             check("unmanaged-legacy-valid-" + operand, lambda o=operand: doctor.classify_containment(
@@ -2576,49 +2671,48 @@ def boundary_self_test():
         check("legacy-journals-graded", lambda: graded(containment(), ".working/journals"))
         check("legacy-staging-not-partial", lambda: not containment(True).triage
               and any("no active" in message for message in containment(True).findings))
-        with active():
-            check("staging-steady-finding", lambda: any(stage in s for s in containment(model=manifest2).findings))
-            check("staging-substantiated-triage", lambda: bool(containment(True, manifest2).triage)
-                  and not containment(True, manifest2).findings)
-            del files[stage]
-            check("empty-run-grades", lambda: any(run in s for s in containment(model=manifest2).findings))
-            check("empty-run-not-partial", lambda: bool(containment(True, manifest2).findings)
-                  and not containment(True, manifest2).triage)
-            add(stage)
-            add(".working/staging/unknown/run/file")
-            check("unknown-kind-always-finding", lambda: any("invalid staging kind" in s
-                                                           for s in containment(True, manifest2).findings))
-            # The journal-only record kind (spec 4.2): a record staging run is NOT admitted by the
-            # homes-2 walk, exactly as any unknown kind (option ii, adding record to STAGING_KINDS,
-            # turns this red).
-            add(".working/staging/record/run/file")
-            check("record-staging-kind-invalid", lambda: any("invalid staging kind 'record'" in s
-                                                            for s in containment(True, manifest2).findings))
-            reset()
-            directories.add(".working/journals")
-            del listed[:]
-            check("journals-pruned", lambda: not containment(model=manifest2).findings
-                  and not containment(model=manifest2).cannot)
-            check("journals-never-listed", lambda: ".working/journals" not in listed)
-            check("evidence-absent-clean", lambda: not evidence().findings and not evidence().cannot)
-            bundle = ".working/imported/import/" + run
-            adoption = ".working/imported/adoption/" + adopt_run
-            source = bundle + "/sources/notes.txt"
-            moved = ".working/archive/moved/old/notes.txt"
-            receipt = adoption + "/receipt.toml"
-            plan = adoption + "/plan.toml"
-            preimage = ".working/archive/adoption/" + adopt_run + "/AGENTS.md"
-            members = (source, moved, receipt, preimage)
-            for path in members:
-                add(path, b"retained")
-            add(plan, plan_bytes)
-            for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
-                                     (adoption + "/inventory.toml",
-                                      adoc(row(receipt), row(preimage), row(plan, plan_bytes)))):
-                add(inventory, b"")
-                inventories[inventory] = built
-            check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
-            check("evidence-not-containment-graded", lambda: not containment(model=manifest2).findings)
+        check("staging-steady-finding", lambda: any(stage in s for s in containment(model=manifest2).findings))
+        check("staging-substantiated-triage", lambda: bool(containment(True, manifest2).triage)
+              and not containment(True, manifest2).findings)
+        del files[stage]
+        check("empty-run-grades", lambda: any(run in s for s in containment(model=manifest2).findings))
+        check("empty-run-not-partial", lambda: bool(containment(True, manifest2).findings)
+              and not containment(True, manifest2).triage)
+        add(stage)
+        add(".working/staging/unknown/run/file")
+        check("unknown-kind-always-finding", lambda: any("invalid staging kind" in s
+                                                       for s in containment(True, manifest2).findings))
+        # The journal-only record kind (spec 4.2): a record staging run is NOT admitted by the
+        # homes-2 walk, exactly as any unknown kind (option ii, adding record to STAGING_KINDS,
+        # turns this red).
+        add(".working/staging/record/run/file")
+        check("record-staging-kind-invalid", lambda: any("invalid staging kind 'record'" in s
+                                                        for s in containment(True, manifest2).findings))
+        reset()
+        directories.add(".working/journals")
+        del listed[:]
+        check("journals-pruned", lambda: not containment(model=manifest2).findings
+              and not containment(model=manifest2).cannot)
+        check("journals-never-listed", lambda: ".working/journals" not in listed)
+        check("evidence-absent-clean", lambda: not evidence().findings and not evidence().cannot)
+        bundle = ".working/imported/import/" + run
+        adoption = ".working/imported/adoption/" + adopt_run
+        source = bundle + "/sources/notes.txt"
+        moved = ".working/archive/moved/old/notes.txt"
+        receipt = adoption + "/receipt.toml"
+        plan = adoption + "/plan.toml"
+        preimage = ".working/archive/adoption/" + adopt_run + "/AGENTS.md"
+        members = (source, moved, receipt, preimage)
+        for path in members:
+            add(path, b"retained")
+        add(plan, plan_bytes)
+        for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
+                                 (adoption + "/inventory.toml",
+                                  adoc(row(receipt), row(preimage), row(plan, plan_bytes)))):
+            add(inventory, b"")
+            inventories[inventory] = built
+        check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
+        check("evidence-not-containment-graded", lambda: not containment(model=manifest2).findings)
         # Nothing reads a homes-1 store's evidence homes; its containment walk grades them as before.
         def legacy_reads_nothing():
             count = len(listed)
@@ -2630,212 +2724,208 @@ def boundary_self_test():
         check("evidence-legacy-reads-nothing", legacy_reads_nothing)
         check("evidence-legacy-contained", lambda: graded(containment(), ".working/imported")
               and graded(containment(), ".working/archive"))
-        with active():
-            for path in members:
-                files[path + ".stray"] = b"rogue"
-                check("evidence-off-inventory-" + path, lambda p=path: graded(evidence(), p + ".stray"))
-                del files[path + ".stray"]
-                del files[path]
-                check("evidence-missing-" + path, lambda p=path: graded(evidence(), p))
-                files[path] = b"tampered"
-                check("evidence-digest-" + path, lambda: any("mismatch" in s for s in evidence().findings))
-                files[path] = b"retained"
-                unreadable.add(path)
-                check("evidence-unreadable-" + path, lambda: bool(evidence().cannot))
-                unreadable.clear()
-            for extra in (".working/archive/empty-stray", bundle + "/empty", ".working/imported/other",
-                          ".working/imported/import/not-a-run", ".working/archive/adoption/" + run):
-                directories.add(extra)
-                check("evidence-stray-directory-" + extra, lambda: bool(evidence().findings)
-                      and not evidence().cannot)
-                directories.remove(extra)
-            orphan = ".working/imported/import/" + run.replace("0123", "4567")
-            add(orphan + "/file")
-            check("evidence-bundle-without-inventory", lambda: any("has no inventory" in s
-                                                                 for s in evidence().findings))
-            del files[orphan + "/file"]
-            directories.discard(orphan)
-            # A bundle its parent listed but that is gone when it is listed itself is a race, not an
-            # empty bundle: its claims are unknown, so the walk cannot evaluate rather than pass.
-            raced = ".working/imported/import/" + run.replace("0123", "89ab")
-            directories.add(raced)
-            vanished.add(raced)
-            check("evidence-bundle-vanished-cannot", lambda: any(
-                "vanished" in s for s in evidence().cannot) and not evidence().findings)
-            vanished.clear()
-            directories.discard(raced)
-            probe = adoption + "/probe.toml"
-            add(probe, b"retained")
-            check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
-            add(adoption + "/inventory-evidence.toml", b"")
-            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
-            check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
-            # The [adoption] identity binds each inventory to its run and its phase (spec 4.2): a
-            # foreign run id, a phase other than the file name's, a later phase named base, a missing
-            # identity, and an identity on a non-adoption inventory are each cannot-evaluate.
-            good_phase = copy.deepcopy(inventories[adoption + "/inventory-evidence.toml"])
-            foreign = adoc(row(probe), phase="evidence")
-            foreign["adoption"] = dict(foreign["adoption"],
-                                           run_id=adopt_run.replace("0123", "4567"))
-            for label, broken in (("foreign-run", foreign),
-                                  ("foreign-phase", adoc(row(probe), phase="completion")),
-                                  ("base-phase-name", adoc(row(probe), phase="base")),
-                                  ("missing-identity", doc(row(probe))),
-                                  ("phase-foreign-plan-digest", adoc(row(probe), phase="evidence",
-                                                                     digest="sha256:" + "0" * 64))):
-                inventories[adoption + "/inventory-evidence.toml"] = broken
-                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
-                      and not evidence().findings)
-            inventories[adoption + "/inventory-evidence.toml"] = good_phase
-            # The plan digest binds each adoption inventory to its bundle's own sealed plan.toml
-            # (spec 4.2): a well-formed foreign digest on the base inventory, a bundle with no plan, an
-            # edited plan whose digest no longer seals it, and a sealed plan of another run each cannot
-            # evaluate, even when every member's row matches its bytes.
-            first = adoption + "/inventory.toml"
-            good_first = copy.deepcopy(inventories[first])
-            inventories[first] = dict(good_first, adoption=dict(good_first["adoption"],
-                                                                plan_digest="sha256:" + "0" * 64))
-            check("evidence-identity-base-foreign-plan-digest", lambda: any(
-                "plan digest" in s for s in evidence().cannot) and not evidence().findings)
-            del files[plan]
-            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan))
-            check("evidence-identity-missing-plan", lambda: any(
-                "no plan.toml" in s for s in evidence().cannot) and not evidence().findings)
-            edited = plan_bytes.replace(b"opf.adoption.plan/v2", b"opf.adoption.plan/v9")
-            alien_bytes, alien_digest = sealed_plan(dict(format="opf.adoption.plan/v2",
-                                                         run_id=adopt_run.replace("0123", "4567")))
-            for label, raw, digest in (("plan-not-sealed", edited, plan_digest),
-                                       ("plan-of-another-run", alien_bytes, alien_digest)):
-                add(plan, raw)
-                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
-                                          row(plan, raw), digest=digest)
-                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
-                                                                           digest=digest)
-                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
-                      and not evidence().findings)
-            # Each clause of the plan proof alone (spec 4.2), with every inventory naming the plan's
-            # RECOMPUTED seal, so only that clause refuses: an edited canonical plan whose plan_digest no
-            # longer re-seals it, a sealed plan that is not canonical (a trailing comment), and a plan.toml
-            # that is not a regular file (an unreadable plan proves nothing, never a crash).
-            edited_seal = sealed_plan(dict(format="opf.adoption.plan/v9", run_id=adopt_run))[1]
-            for label, raw, digest, needle in (
-                    ("plan-edited-recomputed-seal", edited, edited_seal, "seals its own bytes"),
-                    ("plan-not-canonical", plan_bytes + b"# trailing comment\n", plan_digest,
-                     "seals its own bytes"),
-                    ("plan-not-regular", plan_bytes, plan_digest, "is unreadable")):
-                add(plan, raw)
-                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
-                                          row(plan, raw), digest=digest)
-                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
-                                                                           digest=digest)
-                if label == "plan-not-regular":
-                    unreadable.add(plan)
-                check("evidence-identity-" + label, lambda n=needle: any(
-                    "plan.toml" in s and n in s for s in evidence().cannot) and not evidence().findings)
-                unreadable.clear()
-            add(plan, plan_bytes)
-            inventories[first] = good_first
-            inventories[adoption + "/inventory-evidence.toml"] = good_phase
-            check("evidence-identity-plan-restored", lambda: not evidence().findings
+        for path in members:
+            files[path + ".stray"] = b"rogue"
+            check("evidence-off-inventory-" + path, lambda p=path: graded(evidence(), p + ".stray"))
+            del files[path + ".stray"]
+            del files[path]
+            check("evidence-missing-" + path, lambda p=path: graded(evidence(), p))
+            files[path] = b"tampered"
+            check("evidence-digest-" + path, lambda: any("mismatch" in s for s in evidence().findings))
+            files[path] = b"retained"
+            unreadable.add(path)
+            check("evidence-unreadable-" + path, lambda: bool(evidence().cannot))
+            unreadable.clear()
+        for extra in (".working/archive/empty-stray", bundle + "/empty", ".working/imported/other",
+                      ".working/imported/import/not-a-run", ".working/archive/adoption/" + run):
+            directories.add(extra)
+            check("evidence-stray-directory-" + extra, lambda: bool(evidence().findings)
                   and not evidence().cannot)
-            # ONE read of plan.toml per bundle (spec 4.2): plan A is swapped for B (A plus a newline)
-            # between the seal proof's read and the membership check, under a base inventory whose plan
-            # row names B. The seal proof reads A; the row is checked against those same bytes, so the
-            # swap is the plan's digest mismatch, never a clean result built from two reads.
-            swapped = plan_bytes + b"\n"
-            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
-                                      row(plan, swapped))
-            plan_reads = []
-
-            def swapping_read(_fd, rel, rep):
-                answer = read_bytes(_fd, rel, rep)
-                if rel == plan:
-                    plan_reads.append(answer[0])
-                    files[plan] = swapped
-                return answer
-
-            def swap_between_reads():
-                del plan_reads[:]
-                add(plan, plan_bytes)
-                with patch.object(doctor, "_read_bytes", swapping_read):
-                    report = evidence()
-                return (not report.cannot and any("mismatch" in s and repr(plan) in s for s in report.findings)
-                        and plan_reads == [plan_bytes])
-
-            check("evidence-plan-swapped-between-reads", swap_between_reads)
-            add(plan, plan_bytes)
-            inventories[first] = good_first
-            check("evidence-identity-plan-restored-after-swap", lambda: not evidence().findings
-                  and not evidence().cannot)
-            crossed_kind = doc(row(source), row(moved))
-            crossed_kind["adoption"] = dict(good_phase["adoption"])
-            inventories[bundle + "/inventory.toml"] = crossed_kind
-            check("evidence-identity-foreign-kind", lambda: bool(evidence().cannot)
+            directories.remove(extra)
+        orphan = ".working/imported/import/" + run.replace("0123", "4567")
+        add(orphan + "/file")
+        check("evidence-bundle-without-inventory", lambda: any("has no inventory" in s
+                                                             for s in evidence().findings))
+        del files[orphan + "/file"]
+        directories.discard(orphan)
+        # A bundle its parent listed but that is gone when it is listed itself is a race, not an
+        # empty bundle: its claims are unknown, so the walk cannot evaluate rather than pass.
+        raced = ".working/imported/import/" + run.replace("0123", "89ab")
+        directories.add(raced)
+        vanished.add(raced)
+        check("evidence-bundle-vanished-cannot", lambda: any(
+            "vanished" in s for s in evidence().cannot) and not evidence().findings)
+        vanished.clear()
+        directories.discard(raced)
+        probe = adoption + "/probe.toml"
+        add(probe, b"retained")
+        check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
+        add(adoption + "/inventory-evidence.toml", b"")
+        inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
+        check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
+        # The [adoption] identity binds each inventory to its run and its phase (spec 4.2): a
+        # foreign run id, a phase other than the file name's, a later phase named base, a missing
+        # identity, and an identity on a non-adoption inventory are each cannot-evaluate.
+        good_phase = copy.deepcopy(inventories[adoption + "/inventory-evidence.toml"])
+        foreign = adoc(row(probe), phase="evidence")
+        foreign["adoption"] = dict(foreign["adoption"],
+                                       run_id=adopt_run.replace("0123", "4567"))
+        for label, broken in (("foreign-run", foreign),
+                              ("foreign-phase", adoc(row(probe), phase="completion")),
+                              ("base-phase-name", adoc(row(probe), phase="base")),
+                              ("missing-identity", doc(row(probe))),
+                              ("phase-foreign-plan-digest", adoc(row(probe), phase="evidence",
+                                                                 digest="sha256:" + "0" * 64))):
+            inventories[adoption + "/inventory-evidence.toml"] = broken
+            check("evidence-identity-" + label, lambda: bool(evidence().cannot)
                   and not evidence().findings)
-            inventories[bundle + "/inventory.toml"] = doc(row(source), row(moved))
-            check("evidence-identity-restored", lambda: not evidence().findings and not evidence().cannot)
-            # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
-            # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
-            first = adoption + "/inventory.toml"
-            founding = inventories.pop(first)
-            del files[first]
-            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), *founding["file"],
-                                                                       phase="evidence")
-            check("evidence-phase-without-first-cannot", lambda: any(
-                "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
-            add(first, b"")
-            inventories[first] = founding
-            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
-            check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
-            inventory = bundle + "/inventory.toml"
-            good = copy.deepcopy(inventories)
-            # A claim on another bundle's member or another run's preimage is refused on its own, so the
-            # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
-            # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
-            sole = {"cross-bundle": adoc(row(preimage)), "foreign-preimage": adoc(row(receipt))}
-            own_preimage = ".working/archive/adoption/" + run + "/file"
-            # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
-            for label, broken in (
-                    ("format", dict(doc(), format="unsupported")),
-                    ("extra-key", dict(doc(row(source), row(moved)), note="x")),
-                    ("no-file-array", {"format": "opf.evidence.inventory/v1"}),
-                    ("row-not-table", doc("x")),
-                    ("row-extra-key", doc(dict(row(source), note="x"), row(moved))),
-                    ("foreign-kind", doc(dict(row(source), path=".working/imported/other/" + run + "/x"))),
-                    ("wrong-prefix", doc(dict(row(source), path=source[len(".working/"):]), row(moved))),
-                    ("cross-bundle", doc(row(source), row(moved), row(receipt))),
-                    ("foreign-preimage", doc(row(source), row(moved), row(preimage))),
-                    ("import-own-run-preimage", doc(row(source), row(moved), row(own_preimage))),
-                    ("lists-inventory", doc(row(source), row(moved), row(inventory))),
-                    ("boolean-size", doc(dict(row(source), size=True), row(moved))),
-                    ("negative-size", doc(dict(row(source), size=-1), row(moved))),
-                    ("uppercase-digest", doc(dict(row(source), sha256=row(source)["sha256"].upper()), row(moved))),
-                    ("duplicate", doc(row(source), row(source), row(moved)))):
-                inventories[inventory] = broken
-                inventories[adoption + "/inventory.toml"] = sole.get(label, good[adoption + "/inventory.toml"])
-                check("evidence-malformed-" + label, lambda: bool(evidence().cannot) and not evidence().findings)
-            inventories.update(copy.deepcopy(good))
-            inventories[adoption + "/inventory.toml"] = adoc(row(receipt), row(preimage), row(moved))
-            check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
-            inventories.update(copy.deepcopy(good))
-            # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate
-            # only, never a partial reconciliation grading the rest of the homes without those claims.
-            unreadable.add(inventory)
-            check("evidence-unreadable-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
+        inventories[adoption + "/inventory-evidence.toml"] = good_phase
+        # The plan digest binds each adoption inventory to its bundle's own sealed plan.toml
+        # (spec 4.2): a well-formed foreign digest on the base inventory, a bundle with no plan, an
+        # edited plan whose digest no longer seals it, and a sealed plan of another run each cannot
+        # evaluate, even when every member's row matches its bytes.
+        first = adoption + "/inventory.toml"
+        good_first = copy.deepcopy(inventories[first])
+        inventories[first] = dict(good_first, adoption=dict(good_first["adoption"],
+                                                            plan_digest="sha256:" + "0" * 64))
+        check("evidence-identity-base-foreign-plan-digest", lambda: any(
+            "plan digest" in s for s in evidence().cannot) and not evidence().findings)
+        del files[plan]
+        inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan))
+        check("evidence-identity-missing-plan", lambda: any(
+            "no plan.toml" in s for s in evidence().cannot) and not evidence().findings)
+        edited = plan_bytes.replace(b"opf.adoption.plan/v2", b"opf.adoption.plan/v9")
+        alien_bytes, alien_digest = sealed_plan(dict(format="opf.adoption.plan/v2",
+                                                     run_id=adopt_run.replace("0123", "4567")))
+        for label, raw, digest in (("plan-not-sealed", edited, plan_digest),
+                                   ("plan-of-another-run", alien_bytes, alien_digest)):
+            add(plan, raw)
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                      row(plan, raw), digest=digest)
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                       digest=digest)
+            check("evidence-identity-" + label, lambda: bool(evidence().cannot)
+                  and not evidence().findings)
+        # Each clause of the plan proof alone (spec 4.2), with every inventory naming the plan's
+        # RECOMPUTED seal, so only that clause refuses: an edited canonical plan whose plan_digest no
+        # longer re-seals it, a sealed plan that is not canonical (a trailing comment), and a plan.toml
+        # that is not a regular file (an unreadable plan proves nothing, never a crash).
+        edited_seal = sealed_plan(dict(format="opf.adoption.plan/v9", run_id=adopt_run))[1]
+        for label, raw, digest, needle in (
+                ("plan-edited-recomputed-seal", edited, edited_seal, "seals its own bytes"),
+                ("plan-not-canonical", plan_bytes + b"# trailing comment\n", plan_digest,
+                 "seals its own bytes"),
+                ("plan-not-regular", plan_bytes, plan_digest, "is unreadable")):
+            add(plan, raw)
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                      row(plan, raw), digest=digest)
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                       digest=digest)
+            if label == "plan-not-regular":
+                unreadable.add(plan)
+            check("evidence-identity-" + label, lambda n=needle: any(
+                "plan.toml" in s and n in s for s in evidence().cannot) and not evidence().findings)
             unreadable.clear()
-            del inventories[inventory]
-            check("evidence-vanished-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
-            inventories.update(copy.deepcopy(good))
-            unreadable.add(".working/imported")
-            check("evidence-unreadable-root", lambda: bool(evidence().cannot))
-            unreadable.clear()
+        add(plan, plan_bytes)
+        inventories[first] = good_first
+        inventories[adoption + "/inventory-evidence.toml"] = good_phase
+        check("evidence-identity-plan-restored", lambda: not evidence().findings
+              and not evidence().cannot)
+        # ONE read of plan.toml per bundle (spec 4.2): plan A is swapped for B (A plus a newline)
+        # between the seal proof's read and the membership check, under a base inventory whose plan
+        # row names B. The seal proof reads A; the row is checked against those same bytes, so the
+        # swap is the plan's digest mismatch, never a clean result built from two reads.
+        swapped = plan_bytes + b"\n"
+        inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                  row(plan, swapped))
+        plan_reads = []
+
+        def swapping_read(_fd, rel, rep):
+            answer = read_bytes(_fd, rel, rep)
+            if rel == plan:
+                plan_reads.append(answer[0])
+                files[plan] = swapped
+            return answer
+
+        def swap_between_reads():
+            del plan_reads[:]
+            add(plan, plan_bytes)
+            with patch.object(doctor, "_read_bytes", swapping_read):
+                report = evidence()
+            return (not report.cannot and any("mismatch" in s and repr(plan) in s for s in report.findings)
+                    and plan_reads == [plan_bytes])
+
+        check("evidence-plan-swapped-between-reads", swap_between_reads)
+        add(plan, plan_bytes)
+        inventories[first] = good_first
+        check("evidence-identity-plan-restored-after-swap", lambda: not evidence().findings
+              and not evidence().cannot)
+        crossed_kind = doc(row(source), row(moved))
+        crossed_kind["adoption"] = dict(good_phase["adoption"])
+        inventories[bundle + "/inventory.toml"] = crossed_kind
+        check("evidence-identity-foreign-kind", lambda: bool(evidence().cannot)
+              and not evidence().findings)
+        inventories[bundle + "/inventory.toml"] = doc(row(source), row(moved))
+        check("evidence-identity-restored", lambda: not evidence().findings and not evidence().cannot)
+        # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
+        # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
+        first = adoption + "/inventory.toml"
+        founding = inventories.pop(first)
+        del files[first]
+        inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), *founding["file"],
+                                                                   phase="evidence")
+        check("evidence-phase-without-first-cannot", lambda: any(
+            "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
+        add(first, b"")
+        inventories[first] = founding
+        inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
+        check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
+        inventory = bundle + "/inventory.toml"
+        good = copy.deepcopy(inventories)
+        # A claim on another bundle's member or another run's preimage is refused on its own, so the
+        # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
+        # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
+        sole = {"cross-bundle": adoc(row(preimage)), "foreign-preimage": adoc(row(receipt))}
+        own_preimage = ".working/archive/adoption/" + run + "/file"
+        # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
+        for label, broken in (
+                ("format", dict(doc(), format="unsupported")),
+                ("extra-key", dict(doc(row(source), row(moved)), note="x")),
+                ("no-file-array", {"format": "opf.evidence.inventory/v1"}),
+                ("row-not-table", doc("x")),
+                ("row-extra-key", doc(dict(row(source), note="x"), row(moved))),
+                ("foreign-kind", doc(dict(row(source), path=".working/imported/other/" + run + "/x"))),
+                ("wrong-prefix", doc(dict(row(source), path=source[len(".working/"):]), row(moved))),
+                ("cross-bundle", doc(row(source), row(moved), row(receipt))),
+                ("foreign-preimage", doc(row(source), row(moved), row(preimage))),
+                ("import-own-run-preimage", doc(row(source), row(moved), row(own_preimage))),
+                ("lists-inventory", doc(row(source), row(moved), row(inventory))),
+                ("boolean-size", doc(dict(row(source), size=True), row(moved))),
+                ("negative-size", doc(dict(row(source), size=-1), row(moved))),
+                ("uppercase-digest", doc(dict(row(source), sha256=row(source)["sha256"].upper()), row(moved))),
+                ("duplicate", doc(row(source), row(source), row(moved)))):
+            inventories[inventory] = broken
+            inventories[adoption + "/inventory.toml"] = sole.get(label, good[adoption + "/inventory.toml"])
+            check("evidence-malformed-" + label, lambda: bool(evidence().cannot) and not evidence().findings)
+        inventories.update(copy.deepcopy(good))
+        inventories[adoption + "/inventory.toml"] = adoc(row(receipt), row(preimage), row(moved))
+        check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
+        inventories.update(copy.deepcopy(good))
+        # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate
+        # only, never a partial reconciliation grading the rest of the homes without those claims.
+        unreadable.add(inventory)
+        check("evidence-unreadable-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
+        unreadable.clear()
+        del inventories[inventory]
+        check("evidence-vanished-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
+        inventories.update(copy.deepcopy(good))
+        unreadable.add(".working/imported")
+        check("evidence-unreadable-root", lambda: bool(evidence().cannot))
+        unreadable.clear()
 
     import _opf_init as init
     full_manifest = init._manifest_model()
     full_manifest["views"] = {}
-    full_manifest2 = copy.deepcopy(full_manifest)
-    full_manifest2["opf"]["homes"] = 2
-    full_manifest2["opf"]["spec_version"] = "2.0.0"
     reset()
     add(".working/imported/import/" + run + "/sources/notes.txt")
     # A journal on disk: legacy grades it as an ordinary path, homes 2 must skip it unread.
@@ -2873,33 +2963,14 @@ def boundary_self_test():
     def contained(result, path):
         return any(repr(path) in message for message in result.by_check.get("C-CONTAINMENT", []))
 
-    # A legacy (homes 1) report keeps the legacy roster, order and count and the pinned legacy residual
-    # text, with the homes-2 names graded as ordinary paths and no evidence read.
-    legacy_report, legacy_listed = dispatch(full_manifest)
-    # The roster is pinned independently of the live REQUIRED_CHECKS constant: sha256 over the 28 legacy check
-    # ids in report order joined by a newline, UTF-8, so an added, removed or reordered check changes it.
-    legacy_roster_sha256 = "21302b2c175604ab67307443e85a85fac592eff17cc4c2bf334948801adbce5f"
-
-    def legacy_roster(rep):
-        return len(rep.checks) == 28 and hashlib.sha256("\n".join(rep.checks).encode("utf-8")).hexdigest() \
-            == legacy_roster_sha256
-    check("doctor-legacy-roster-exact", lambda: legacy_roster(legacy_report)
-          and tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS)
-    # The pin is independent of the live _RESIDUALS constant: sha256 over the 12 legacy residuals joined by
-    # a newline, UTF-8. Any added, removed, reordered or reworded legacy residual changes it.
-    legacy_residuals_sha256 = "6901f8734d2293e714c521e9b74836a188627839d7d8a08a3888b4a9cc7a8a0b"
-    check("doctor-legacy-residuals-unchanged", lambda: len(legacy_report.residuals) == 12
-          and hashlib.sha256("\n".join(legacy_report.residuals).encode("utf-8")).hexdigest()
-          == legacy_residuals_sha256
-          and not any(r in legacy_report.residuals for r in doctor._HOMES2_RESIDUALS))
-    check("doctor-legacy-evidence-inert", lambda: not any(
-        path.startswith(".working/imported/") for path in legacy_listed))
-    check("doctor-legacy-contains-homes", lambda: contained(legacy_report, ".working/imported")
-          and contained(legacy_report, ".working/journals"))
-    with active():
-        report, homes2_listed = dispatch(full_manifest2)
-    check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.required_checks(2)
-          and len(report.checks) == 29)
+    # The init model is the base 2.0.0, homes 2 baseline, so its report carries the one doctor roster.
+    report, homes2_listed = dispatch(full_manifest)
+    # The roster is pinned independently of the live DOCTOR_ROSTER constant: sha256 over the 33 check ids
+    # in report order joined by a newline, UTF-8, so an added, removed or reordered check changes it.
+    roster_sha256 = "393844f1856c0071b3c73db83f999870f8f608c8163b7de1e7ef547f77919d79"
+    check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.DOCTOR_ROSTER
+          and len(report.checks) == 33
+          and hashlib.sha256("\n".join(report.checks).encode("utf-8")).hexdigest() == roster_sha256)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
     # The reservation read is disclosed as the exception spec 4.2 makes, not as awaiting a revision.
@@ -2913,21 +2984,15 @@ def boundary_self_test():
                       and p not in allocation_homes for p in homes2_listed))
     check("doctor-lists-allocation-homes", lambda: sorted(
         p for p in homes2_listed if p.startswith(".working/journals/")) == sorted(allocation_homes))
-    check("doctor-legacy-reads-no-reservations", lambda: not any(
-        p == ".working/journals" or p.startswith(".working/journals/") for p in legacy_listed))
-    # Activated tooling alone widens nothing: a legacy manifest keeps the legacy roster and residuals.
-    with active():
-        activated_legacy, _ = dispatch(full_manifest)
-    check("doctor-activated-legacy-roster", lambda: legacy_roster(activated_legacy)
-          and activated_legacy.residuals == legacy_report.residuals)
-    # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
-    # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
-    flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
+    # The render source gate is the one roster's source checks: a homes-2 evidence finding refuses it,
+    # and a report that ran only the pre-homes checks is still gated on the homes-2 and imported checks.
+    flagged = dict.fromkeys(doctor.DOCTOR_ROSTER, "PASS")
     flagged["C-EVIDENCE-ENUM"] = "FINDING"
     check("source-gate-homes2-evidence", lambda: not doctor.source_integrity_ok(
         doctor.StoreValidation(doctor.INVALID, checks=flagged)))
-    check("source-gate-legacy-roster", lambda: set(doctor.source_checks(doctor.StoreValidation(
-        doctor.VALID, checks=dict.fromkeys(doctor.REQUIRED_CHECKS, "PASS")))) == doctor.SOURCE_INTEGRITY_CHECKS)
+    check("source-gate-one-roster", lambda: set(doctor.source_checks(doctor.StoreValidation(
+        doctor.VALID, checks=dict.fromkeys(doctor.REQUIRED_CHECKS, "PASS"))))
+        == doctor.SOURCE_INTEGRITY_CHECKS | set(doctor.HOMES2_CHECKS) | set(doctor.IMPORTED_CHECKS))
 
     def roster(generation, ran):
         rep = doctor._Report()
@@ -2938,8 +3003,11 @@ def boundary_self_test():
 
     check("roster-homes2-skipped-evidence", lambda: roster(2, doctor.REQUIRED_CHECKS).checks.get(
         "C-EVIDENCE-ENUM") == "CANNOT-EVALUATE")
-    check("roster-legacy-evidence-unknown", lambda: any("C-EVIDENCE-ENUM" in m for m in roster(
-        1, doctor.required_checks(2)).unattributed))
+    # The generation argument is not read: a homes-1 call requires the same one roster, so C-EVIDENCE-ENUM
+    # is a known check there, never an unattributed id.
+    check("roster-generation-unread", lambda: roster(1, doctor.REQUIRED_CHECKS).checks.get(
+        "C-EVIDENCE-ENUM") == "CANNOT-EVALUATE" and not any(
+        "C-EVIDENCE-ENUM" in m for m in roster(1, doctor.DOCTOR_ROSTER).unattributed))
 
     # Homes 1 keeps the legacy operand handling: the legacy engine applies no journal-operand refusal,
     # so each legacy entry point reaches its first I/O whatever the operand.
@@ -3054,12 +3122,7 @@ def boundary_self_test():
                 patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
             return refusal(lambda: views.plan_views(-1, machine)) or ""
 
-    with active():
-        check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
-        # Pair the legacy allowance with the same destination's homes-2 refusal:
-        # removing the destination guard must not make this allowance vacuously pass.
-        check("view-legacy-journal-destination-planned", lambda: view_plan(manifest) == ""
-              and "journal home" in view_plan(manifest2))
+    check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
 
     import _opf_adopt_plan as planning
     import _opf_emit as emit
@@ -3071,8 +3134,7 @@ def boundary_self_test():
         model = manifest2 if generation == 2 else manifest
         model = dict(model, unmanaged={"paths": [path]}) if unmanaged else model
         resolved = SimpleNamespace(status=store.RESOLVED, machine_rel=machine)
-        with patch.object(store, "SUPPORTED_HOMES", generation), \
-                patch.object(store._journal, "require_containment"), \
+        with patch.object(store._journal, "require_containment"), \
                 patch.object(store, "_open_dir_nofollow", return_value=-1), \
                 patch.object(planning.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=1)), \
                 patch.object(planning.os, "close"), \
@@ -3090,10 +3152,13 @@ def boundary_self_test():
                 return "enumerated"
         return "completed"
 
-    # Homes 2 excludes and reserves every control root; a legacy store reserves only imports.
+    # Homes 2 excludes and reserves every control root. A manifest without the homes-2 declaration is refused
+    # at validation (mocked VALID here) and reaches the remaining homes-1 planner branch, which still
+    # enumerates the homes-2 names as sources and reserves only imports against an [unmanaged] collision.
     for home in homes:
         check("investigation-control-" + home, lambda h=home: investigation(h, generation=2) == "refused")
         check("investigation-collision-" + home, lambda h=home: investigation(h, True, 2) == "refused")
+    for home in homes[1:]:
         check("investigation-legacy-source-" + home, lambda h=home: investigation(h) == "enumerated")
     check("investigation-legacy-imports-collision", lambda: investigation(legacy_root, True) == "refused")
     for home in homes[1:]:
@@ -3133,12 +3198,11 @@ def boundary_self_test():
     control_op = dict(create, path=".working/journals/file")
     utc = datetime.datetime(2026, 9, 17, 12, tzinfo=datetime.timezone.utc)
 
-    def planned(generation, op, supported=None):
-        # `generation` selects the manifest; `supported` (default: the same) is the activated tooling.
+    def planned(generation, op):
+        # `generation` selects the manifest.
         model = manifest2 if generation == 2 else manifest
         resolved = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, detail="", pointer_source="default")
-        with patch.object(store, "SUPPORTED_HOMES", generation if supported is None else supported), \
-                patch.object(store._journal, "require_containment"), \
+        with patch.object(store._journal, "require_containment"), \
                 patch.object(store, "_open_dir_nofollow", return_value=-1), \
                 patch.object(planning.os, "fstat", return_value=same), \
                 patch.object(planning.os, "close"), \
@@ -3175,20 +3239,25 @@ def boundary_self_test():
     with patch.object(planning, "_decisions", return_value=([control_retire], [control_source], [])):
         retired, _ = planned(2, dict(create, path="notes.txt"))
         legacy_retired, _ = planned(1, dict(create, path="notes.txt"))
-    # A move beneath the Move archive is the generation-dependent disposition: spec 14.2 permits that explicit
-    # destination, so the legacy generation plans it, while the homes-2 operand refusal reaches it.
+    # A move strictly beneath the Move archive is the one control-area destination spec 14.2 admits, in every
+    # generation, so both generations plan it; the Move root itself stays refused by the homes-2 operand check.
     control_move = dict(op="move-file", source="notes.md", destination=".working/archive/moved/notes.md",
                         source_digest="sha256:" + "0" * 64)
     move_source = dict(path="notes.md", digest=control_move["source_digest"], disposition="move", occupying=False,
                        preservation=control_move["destination"])
     with patch.object(planning, "_decisions", return_value=([control_move], [move_source], [])):
-        moved, _ = planned(2, dict(create, path="notes.txt"))
+        moved, moved_frozen = planned(2, dict(create, path="notes.txt"))
         legacy_moved, legacy_moved_frozen = planned(1, dict(create, path="notes.txt"))
-        activated_plan, activated_frozen = planned(1, dict(create, path="notes.txt"), supported=2)
+    root_move = dict(control_move, destination=".working/archive/moved")
+    with patch.object(planning, "_decisions",
+                      return_value=([root_move], [dict(move_source, preservation=root_move["destination"])], [])):
+        rooted, _ = planned(2, dict(create, path="notes.txt"))
     check("plan-homes2-control-disposition-refused", lambda: retired.status == store.INVALID
           and retired.findings == tuple(adopt.validate_op(control_retire, homes=2).findings) != ())
-    check("plan-homes2-control-move-refused", lambda: moved.status == store.INVALID
-          and moved.findings == tuple(adopt.validate_op(control_move, homes=2).findings) != ())
+    check("plan-homes2-control-move-planned", lambda: moved.status == store.VALID and moved_frozen == [2]
+          and adopt.validate_op(control_move, homes=2).status == store.VALID)
+    check("plan-homes2-move-root-refused", lambda: rooted.status == store.INVALID and rooted.plan is None
+          and rooted.findings == tuple(adopt.validate_op(root_move, homes=2).findings) != ())
     # Adoption refuses the control area in the legacy generation too (spec 14.2 carries no homes qualifier):
     # the legacy op check admits these rows, and the frozen plan's revalidation at the store's own
     # generation refuses them.
@@ -3201,11 +3270,10 @@ def boundary_self_test():
           in legacy_plan.findings)
     check("plan-legacy-control-move-planned", lambda: legacy_moved.status == store.VALID
           and legacy_moved_frozen == [1])
-    check("plan-activated-legacy-generation", lambda: activated_plan.status == store.VALID
-          and activated_frozen == [1])
     check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [2])
-    check("plan-validate-homes2-refused", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_moved.plan.decode()), homes=2).status == store.INVALID)
+    check("plan-validate-homes2-move-admitted", lambda: adopt.validate_plan(
+        tomllib.loads(legacy_moved.plan.decode()), homes=2).status == store.VALID
+          and adopt.validate_plan(tomllib.loads(moved.plan.decode()), homes=2).status == store.VALID)
     check("plan-validate-legacy-unchanged", lambda: adopt.validate_plan(
         tomllib.loads(legacy_moved.plan.decode())).status == store.VALID)
 
@@ -3539,9 +3607,9 @@ def boundary_self_test():
             mismatch() or "") and mkdirs.call_count == made and reserved.call_count == published)
 
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
-          and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
+          and doctor.DOCTOR_ROSTER.index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
           and "C-EVIDENCE-ENUM" in doctor.source_checks(
-              SimpleNamespace(checks=dict.fromkeys(doctor.required_checks(2)))))
+              SimpleNamespace(checks=dict.fromkeys(doctor.DOCTOR_ROSTER))))
 
     for failure in failures:
         print("FAIL: " + failure)
@@ -5340,19 +5408,23 @@ def _self_test_vectors():
         check("gitignore-drift-{!r}".format(bad), lambda: not store.homes_gitignore_matches(bad))
     _gitignore_reconciliation_self_test(check)
 
-    # OPF-D2B PR3a (decision 5): the base spec_version bump 1.1.0 -> 1.2.0 is an intended change
-    # (init.toml provenance), no longer inert; this tooling defines no store upgrade.
-    check("inert-version", lambda: store.SUPPORTED_SPEC_VERSION == "1.2.0")
-    check("inert-homes", lambda: store.SUPPORTED_HOMES == 1
-          and store.homes_generation({"opf": {"homes": 2}}) == 1)
-    check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "1.2.0"
-          and "homes" not in init._manifest_model()["opf"])
+    # Base 2.0.0 with homes 2 is the only baseline (spec 4.2): the tooling accepts exactly that pair,
+    # init creates exactly that pair, and this tooling defines no store upgrade.
+    check("inert-version", lambda: store.SPEC_VERSION == "2.0.0")
+    check("inert-homes", lambda: store.HOMES == 2
+          and store.homes_generation({"opf": {"spec_version": "2.0.0", "homes": 2}}) == 2
+          and store.homes_generation({"opf": {"spec_version": "2.0.0", "homes": 1}}) == 1
+          and store.homes_generation({"opf": {"spec_version": "2.0.0"}}) == 1)
+    check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "2.0.0"
+          and type(init._manifest_model()["opf"].get("homes")) is int
+          and init._manifest_model()["opf"]["homes"] == 2)
     check("inert-import", lambda: doctor.IMPORTS_REL == ".working/imports"
           and doctor._is_import_run_id("imp" + suffix) and not doctor._is_import_run_id("adopt" + suffix))
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
     source = Path(store.__file__).read_text(encoding="utf-8")
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source
-          and "Until homes 2 is activated, legacy import state still" in source)
+          and "Homes 2 is the only homes generation (spec 4.2)" in source
+          and "Until homes 2 is activated" not in source)
     text = SPEC.read_text(encoding="utf-8")
     check("spec-contract", lambda: not contract_findings(text))
     # The journal-only record kind is spec-pinned through the kind loop: deleting `record` from the
@@ -5446,10 +5518,10 @@ def _self_test_vectors():
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 7, 4))
+          tuple(map(len, _SURFACE.values())) == (10, 7, 12, 7, 7, 4))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (6, 14, 10, 6, 7, 1) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -5460,6 +5532,81 @@ def _self_test_vectors():
             check("surface-retired-flip-" + path.name + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   frag not in nb and f in surface_findings(m))
+    # The retired tooling-status scan reads every prompt-pack member: its scope is the manifest and
+    # exactly the manifest's member rows, plus the implementation prompt, and the live files are green.
+    # Each stem planted in each file turns it red, every registered retired surface sentence planted
+    # in the import member does too, and so does the import member's own retired base 2.0.0 sentence.
+    statuses = {path: path.read_text(encoding="utf-8") for path in _status_retired_paths()}
+    pack_rows = tomllib.loads(statuses[PROMPT_PACK / "pack.toml"])["members"]
+    check("status-retired-scope", lambda: set(statuses) == {PROMPT_PACK / "pack.toml", IMPLEMENTATION_PROMPT} | {
+        PROMPT_PACK / row["path"] for row in pack_rows} and len(pack_rows) == 16)
+    check("status-retired-contract", lambda: not status_retired_findings(statuses))
+    check("status-retired-default-read", lambda: not status_retired_findings())
+    for path in statuses:
+        label = path.relative_to(SPEC.parents[1]).as_posix()
+        for stem in _STATUS_RETIRED_STEMS:
+            mutated = dict(statuses)
+            mutated[path] = statuses[path] + "\n" + stem + "\n"
+            check("status-retired-flip-" + label + "-" + stem,
+                  lambda f=label + " restores retired text: " + stem, m=mutated: f in status_retired_findings(m))
+    import_member = PROMPT_PACK / "import" / "SKILL.md"
+    import_label = import_member.relative_to(SPEC.parents[1]).as_posix()
+    for fragment in dict.fromkeys(fragment for retired in _SURFACE_RETIRED.values() for fragment in retired):
+        mutated = dict(statuses)
+        mutated[import_member] = statuses[import_member] + "\n" + fragment + "\n"
+        check("status-retired-surface-flip-" + fragment,
+              lambda f=import_label + " restores retired text: " + fragment, m=mutated: f in status_retired_findings(m))
+    current = ("  (section 4.5). The reference tooling initializes and validates base 2.0.0 stores with\n"
+               "  `homes = 2` (section 16.1).\n")
+    old = "  (section 4.5). The reference tooling does not yet implement base 2.0.0 (section 4.2).\n"
+    restored = dict(statuses)
+    restored[import_member] = statuses[import_member].replace(current, old, 1)
+    check("status-retired-import-old-sentence",
+          lambda: statuses[import_member].count(current) == 1 and restored[import_member].count(old) == 1 and
+          status_retired_findings(restored) == [import_label + " restores retired text: does not yet implement base 2.0.0"])
+    # Retired gate names: the live tools tree, this module included, spells neither. In a fixture
+    # tree, the store module with either alias assignment restored, or a nested module reading it,
+    # is refused at that line; a non-.py file naming both is out of scope. The vectors iterate their
+    # own list, so narrowing the registry turns them red rather than skipping them.
+    retired_currents = ("HOMES", "SPEC_VERSION")
+    check("retired-gate-names-registry", lambda: _RETIRED_GATE_NAMES == tuple(
+        "SUPPORTED_" + current for current in retired_currents))
+    check("no-retired-gate-names", lambda: retired_gate_name_findings() == [])
+    check("retired-gate-names-scan-self", lambda: Path(__file__).resolve() in set(_TOOLS.rglob("*.py")))
+    store_source = (_TOOLS / "_opf_store.py").read_text(encoding="utf-8").rstrip("\n") + "\n"
+    with tempfile.TemporaryDirectory(prefix="opf-homes-names-") as tmp:
+        tree = Path(tmp)
+        (tree / "nested").mkdir()
+        (tree / "notes.txt").write_text(" ".join(_RETIRED_GATE_NAMES) + "\n", encoding="utf-8")
+        (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
+        check("retired-gate-names-clean-tree", lambda: retired_gate_name_findings(tree) == [])
+        for current in retired_currents:
+            name = "SUPPORTED_" + current
+            (tree / "_opf_store.py").write_text(store_source + "{} = {}\n".format(name, current),
+                                                encoding="utf-8")
+            check("retired-gate-names-revert-" + name, lambda n=name, c=current:
+                  retired_gate_name_findings(tree) == ["_opf_store.py:{}: retired gate name {}; read store.{} "
+                                                       "instead".format(store_source.count("\n") + 1, n, c)])
+            (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
+            (tree / "nested" / "reader.py").write_text(
+                "import _opf_store as store\nvalue = store.{}\n".format(name), encoding="utf-8")
+            check("retired-gate-names-reader-" + name, lambda n=name, c=current:
+                  retired_gate_name_findings(tree) == ["nested/reader.py:2: retired gate name {}; read store.{} "
+                                                       "instead".format(n, c)])
+            (tree / "nested" / "reader.py").unlink()
+            # A fullwidth or math-bold spelling of the prefix is the same Python identifier (NFKC), so
+            # an alias assignment spelled either way is refused at its line like the plain one (red
+            # when the scan matches the raw line).
+            for form, first in (("fullwidth", 0xFF21), ("math-bold", 0x1D400)):
+                spelled = "".join(chr(first + ord(ch) - ord("A")) for ch in "SUPPORTED") + "_" + current
+                (tree / "_opf_store.py").write_text(store_source + "{} = {}\n".format(spelled, current),
+                                                    encoding="utf-8")
+                check("retired-gate-names-" + form + "-" + name, lambda n=name, c=current, s=spelled:
+                      s != n and unicodedata.normalize("NFKC", s) == n
+                      and retired_gate_name_findings(tree) == [
+                          "_opf_store.py:{}: retired gate name {}; read store.{} instead".format(
+                              store_source.count("\n") + 1, n, c)])
+                (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -5730,9 +5877,13 @@ def _self_test_vectors():
              ('and initializes stores directly at them.',
               'and may also upgrade older stores.'),
             )),
-            ("The reference tooling's opf doctor grades a manifest", (
-             ('so its VALID verdict on such a store says nothing about conformance to this specification,',
-              'so its VALID verdict on such a store shows conformance to this specification,'),
+            # The reference tooling's adoption status at base 2.0.0: red when the sentence says the
+            # journal is read or that apply and reconcile run.
+            ('Its opf adopt plan, approve and status', (
+             ('run at base 2.0.0 without reading the adoption journal,',
+              'run at base 2.0.0 and read the adoption journal,'),
+             ('refuse at base 2.0.0 until its adoption journal moves to its section 4.2 home,',
+              'run at base 2.0.0,'),
             )),
     ))
     spec_vectors("17", (
@@ -6038,7 +6189,7 @@ def _self_test_vectors():
         return found[0] if len(found) == 1 else start
     archive = _pin("9.2", "The upgrade MUST NOT write the adoption archive ")
     retired_runs = (
-        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling does not yet implement base 2.0.0'), (
+        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling initializes and validates base 2.0.0'), (
             'Base spec 1.3.0 defines adoption and the separate imported series on homes 1.',
             'The 1.3.0 requirements in sections 4.2, 4.5, 6.1, 8, 9.1, 9.2, 11, 12, 14, and 16.1 are a target contract; they do not claim that the reference tooling has activated adoption, imported-series validation, or the import writer.',
             'Activation MUST include deterministic doctor coverage before a writer accepts the new format.',
@@ -6051,7 +6202,7 @@ def _self_test_vectors():
             'The section 9 manifest example describes the 1.3.0 target on legacy homes.',
             'The homes-2 requirements in sections 4.2, 12, 14.1, 14.2, and 15, and the section 9.2 refusal of a homes-1 store, describe the target contract, not an activated runtime guarantee.',
         )),
-        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling does not yet implement base 2.0.0'), (
+        ('4.2', ('Base spec 2.0.0, with', 'It includes adoption,', 'A writer MUST NOT accept', 'The reference tooling initializes and validates base 2.0.0'), (
             'It still supports 1.2.0 and initializes legacy homes (generation 1, with no homes key); writers retain their legacy paths until homes 2 is activated, which requires the homes migration (opf upgrade) to be available.',
             'The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.',
         )),
@@ -6195,7 +6346,7 @@ def _self_test_vectors():
         ('15', ('OPF MUST NOT read OPF artefacts',), (
             'On a homes-2 store, OPF MUST NOT read OPF artefacts from former .aiqt/ locations or touch unrelated AIQT material, since homes 2 has no homes migration (section 4.2).',
         )),
-        ('16.1', ('The reference tooling does not yet implement base 2.0.0:',), (
+        ('16.1', ('The reference tooling initializes and validates base 2.0.0 stores',), (
             "The reference tooling targets the upgrade-capable class: its opf upgrade, in the repository's reference code, carries a store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2).",
         )),
         ('17', ('- Adoption and import run with C-EVIDENCE-ENUM,', 'Version-control history over the tracked store'), (
@@ -6305,6 +6456,17 @@ def _self_test_vectors():
             "The upgrade MUST NOT write the adoption archive ",
             "Both upgrade kinds, on the schema-level path and the homes-generation relocation path, the "
             "homes-2 path included, alike, MUST NOT write the adoption archive ", 1),)),
+    )
+    # The base 2.0.0 flip: the tooling-status sentences that said the reference tooling still
+    # initialized and validated base 1.2.0 stores, restored in place of the sentences that replaced them.
+    retired_runs += (
+        ('4.2', ('The reference tooling initializes and validates base 2.0.0',), (
+            'The reference tooling does not yet implement base 2.0.0 (section 16.1).',
+        )),
+        ('16.1', ('The reference tooling initializes and validates base 2.0.0 stores', 'Its opf adopt plan, approve and status'), (
+            'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.',
+            'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification, and its opf upgrade and opf record refuse such a store.',
+        )),
     )
     # The maintainer ruling of 2026-10-23: one implementation model, no legacy state, no legacy_fragment
     # type and no imports reserved name. Each row restores the pre-ruling pins verbatim in place of the
@@ -7731,6 +7893,18 @@ def _self_test_vectors():
         baseline_rc = main([])
     check("main-default-entry-green-baseline", lambda r=baseline_rc, out=buf.getvalue():
           r == 0 and out == "")
+    # The default entry runs the retired gate name scan: a tools tree whose module reads a retired
+    # alias is red there with that line's finding.
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-names-") as tmp:
+        retired = "SUPPORTED_" + "HOMES"
+        (Path(tmp) / "reader.py").write_text("value = store.{}\n".format(retired), encoding="utf-8")
+        with patch.object(module, "_TOOLS", Path(tmp)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-runs-retired-gate-names", lambda r=planted_rc, out=buf.getvalue():
+              r == 1 and out == "check_opf_homes: reader.py:1: retired gate name {}; read store.HOMES "
+              "instead\n".format(retired))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
@@ -7796,7 +7970,8 @@ def main(argv=None):
             return 2
         spec_text = SPEC.read_text(encoding="utf-8")
         findings = (contract_findings(spec_text) + keyword_findings()
-                    + surface_findings() + informative_findings(spec_text))
+                    + surface_findings() + status_retired_findings() + informative_findings(spec_text)
+                    + retired_gate_name_findings())
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0

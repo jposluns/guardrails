@@ -1149,7 +1149,7 @@ def self_test():
             import _opf_init
             self.write("TODO.md")
             old_manifest = _opf_init.build_manifest().replace(
-                'spec_version = "' + store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+                'spec_version = "' + store.SPEC_VERSION + '"', 'spec_version = "1.1.0"')
             self.assertIn('spec_version = "1.1.0"', old_manifest)
             self.write(".working/toml/manifest.toml", old_manifest.encode("utf-8"))
             self.refused("'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'")

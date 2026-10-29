@@ -87,7 +87,8 @@ exists, exits 0 when the change is recorded and 2 on every refusal or cannot-eva
   rewrite clean records or clean counters.
 - **Which stores.** Specification base 2.0.0 refuses as a store a manifest whose `spec_version` is
   below 2.0.0, and one at 2.0.0 or above whose `[opf].homes` is missing or not the integer 2
-  (section 4.5). The reference tooling does not yet implement base 2.0.0 (section 4.2).
+  (section 4.5). The reference tooling initializes and validates base 2.0.0 stores with
+  `homes = 2` (section 16.1).
 
 ## 3. The procedure
 

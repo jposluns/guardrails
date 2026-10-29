@@ -96,8 +96,8 @@ Two roots organize every path in this standard:
 
 Base spec 2.0.0, with `[opf].homes = 2`, is the only base version this specification defines.
 It includes adoption, the imported series and import (sections 8, 11 and 14). A writer MUST NOT
-accept a format that its doctor does not grade deterministically. The reference tooling does not
-yet implement base 2.0.0 (section 16.1).
+accept a format that its doctor does not grade deterministically. The reference tooling initializes
+and validates base 2.0.0 stores with `homes = 2` (section 16.1).
 
 ```
 <product repository root>/
@@ -2149,13 +2149,12 @@ section 8.6 authority firewall included, bind every implementation.
 An implementation supports base `spec_version` 2.0.0 and homes generation 2, the only ones this
 specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and
 initializes stores directly at them. The reference tooling
-does not yet implement base 2.0.0: it still initializes and validates stores at base `1.2.0`, a
-pre-release format this specification does not define, and it makes no claim of conformance to
-this specification. The reference tooling's `opf doctor` grades a manifest declaring
-`spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its VALID verdict on such a
-store says nothing about conformance to this specification, and its `opf upgrade` and `opf record`
-refuse such a store. The reference tooling defines no store upgrade: its `opf upgrade` refuses every
-invocation with exit 2, reading and writing nothing.
+initializes and validates base 2.0.0 stores with `homes = 2`, and it makes no claim of conformance
+to this specification. Its `opf adopt plan`, `approve` and `status` run at base 2.0.0 without
+reading the adoption journal, and `status` says the journal is not read; its `opf adopt apply` and
+`reconcile` refuse at base 2.0.0 until its adoption journal moves to its section 4.2 home, and it
+does not yet implement post-adoption import. The reference tooling defines no store upgrade: its
+`opf upgrade` refuses every invocation with exit 2, reading and writing nothing.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter
 writes, its release identity and its supported `spec_version`, homes generation, and
