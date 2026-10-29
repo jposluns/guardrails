@@ -4466,7 +4466,7 @@ def diff_source_pretool(data):
 
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
-# Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
+# Quote-aware and token-based. The commit-MESSAGE contexts (a co-author trailer, an --author value)
 # are judged only on a segment that runs a git command whose subcommand is a commit-creating verb (the git
 # command is found behind leading reserved words, a function or coprocess name, VAR=value words and wrapper
 # words, _cmtidn_git_commands), so a read-side use of the same tokens (git log --author=Claude) does not trip,
@@ -4480,19 +4480,19 @@ def diff_source_pretool(data):
 # subcommand is not a git command name (an alias). Separately, an identity
 # ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
 # segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
-# a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
+# a trailer hiding inside a quoted -m message (e.g. -m "fix; <co-author trailer>: Claude", which the old
 # whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
 # on that token catches it.
 AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# A Co-Authored-By trailer inside a single token; its value is up to 160 characters, to the end of its line (the
+# A co-author trailer inside a single token; its value is up to 160 characters, to the end of its line (the
 # token IS the quoted message, so no shell quote can appear within it). The regex matches the trailer name alone
 # and reads the value in a lookahead, so a scan of its matches (_co_author_ai) resumes right after each name and
 # reaches every trailer name in the token, one inside an earlier trailer's value included: a second trailer on the
 # same line, which a regex that consumed the value passed over when its search resumed after that value (a first
-# value of 140 characters ends inside a later 'Co-authored-by: Claude' and names no AI). The only 'c' in a trailer
+# value of 140 characters ends inside a later co-author trailer naming Claude and names no AI). The only 'c' in a trailer
 # name is its first letter, so two names cannot overlap, and each place a trailer can start is read with the value
 # that the regex consuming the value found there. Each whitespace run is taken whole (\s*+), as in the fallback's
 # co-author context (_RAW_IDENTITY_CONTEXTS): giving a run back one character at a time cost time quadratic in its
@@ -4649,7 +4649,7 @@ def _ai_value_match(regex, text):
 
 
 def _co_author_ai(tok, judged):
-    """A hit label for the first Co-Authored-By trailer in the word tok whose value names an AI identity, else
+    """A hit label for the first co-author trailer in the word tok whose value names an AI identity, else
     None. Every trailer name in the word is read, one inside an earlier trailer's value included
     (CO_AUTHOR_RE), so a word costs time linear in its length, though a word of repeated trailer names reads up
     to about 13 times as many characters as it holds for the values (each name is at least 12 characters long
@@ -4667,7 +4667,7 @@ def _co_author_ai(tok, judged):
 
 def _commit_message_and_author_ai(tokens, judged):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
-    Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
+    co-author trailer (scanned as a substring of a token, so the trailer that lives inside the
     single quoted -m message token is caught), else None. Each word is read as a git commit option
     (_cmtidn_option), so a value-taking option's value is read as that value before anything else, whether it
     shares the option's word (--author=X, -mMSG) or is the next word (--author X, -am MSG): an --author value is
@@ -5149,7 +5149,7 @@ def _commit_identity_fallback(command, error):
     tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
     (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
-    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
+    AI identity in a co-author trailer, an --author value (any prefix git reads as --author), a
     git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
@@ -5279,6 +5279,419 @@ def commit_identity(data):
               "AI identity ({}). Remove it and commit as the maintainer.".format(hit))
     return _deny(reason,
                  "AIQT guardrail: denied a git command recording an AI commit identity (rule cmtidn).")
+
+
+# --- cmtidn (file layers): the co-author trailer token held out of files ------------------------------
+# Two further linkages of the commit-identity rule (the coauthor-file and coauthor-file-bash hooks). The
+# commit_identity layer above judges the TEXT of a git command, so a trailer that reaches a commit through
+# a FILE never crosses it: a message staged with git commit -F, a PR body file, or a trailer written into
+# an ordinary file and committed later by a background script outside this hook path. These layers hold
+# the TOKEN ITSELF out of files, whatever identity its value names. The token is the co-author trailer
+# NAME (the name part of CO_AUTHOR_RE), matched case-insensitively with '-' or ' ' between its words, the
+# forms the forges read; a CRLF line end does not hide it (the token holds no newline). The pack's own
+# sources, tests and documentation never spell the token (it is built at run time, _CAB_TOKEN), so editing
+# them does not trip these layers.
+#
+# THE RULE (fail closed): a write may leave the target file with NO occurrence of the token, or with
+# STRICTLY FEWER occurrences than it currently holds (a removal); a write that keeps an occurrence in
+# place, adds one, or cannot be evaluated is refused. The THIRD layer of the same rule is the git
+# commit-msg hook shipped at .aiqt/core/hooks/githooks/commit-msg, which refuses a commit whose final
+# message holds the token in any repository where it is INSTALLED (see the README beside it); it covers
+# commits made by any process, background scripts included, but only where installed.
+_CAB_WORDS = ("Co", "Authored", "By")
+_CAB_TOKEN = "-".join(_CAB_WORDS)  # the canonical spelling, built at run time, never spelled in source
+_CAB_RE = re.compile(r"(?i)co[- ]?authored[- ]?by")  # the trailer-name pattern CO_AUTHOR_RE anchors on
+# The Bash layer's de-quoted reading: with every quote character, backslash, '$' and backquote removed
+# (the commit-identity fallback's removal plus the backquote), a token split by quoting or by a locale
+# quote is read joined. '\n' is kept: the token holds none.
+_CAB_DEQUOTE_RE = re.compile(r"[\"'\\$`]")
+# A file larger than this cannot be counted inside the hook deadline, so it fails closed (disclosed).
+_CAB_MAX_BYTES = 67_108_864
+# A Bash command longer than the commit-identity read bound is read only for the token in its raw and
+# de-quoted text; its file references are not extracted (disclosed, the same bound commit_identity keeps).
+_CAB_MAX_COMMAND = 131_072
+_CAB_FILE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
+def _cab_count(text):
+    """How many occurrences of the co-author trailer token the text holds (_CAB_RE, non-overlapping; the
+    token is ASCII, so a surrogateescape-decoded read counts the same occurrences as the bytes hold in any
+    ASCII-superset encoding)."""
+    return len(_CAB_RE.findall(text))
+
+
+def _cab_read_current(path):
+    """(count, text, why) for the file a Write/Edit/MultiEdit/NotebookEdit targets: the current token
+    count and surrogateescape-decoded text, with why None; (0, "", None) when no entry exists there (the
+    write creates the file); (None, None, why) when the current state cannot be evaluated (an entry that
+    is not a regular file, one past _CAB_MAX_BYTES, or one that cannot be examined or read), why naming
+    the reason. Symlinks are followed, as the write tools follow them; the race between this read and the
+    write is a disclosed residual."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return (0, "", None)
+    except (OSError, ValueError) as exc:
+        return (None, None, "its current state cannot be examined ({})".format(type(exc).__name__))
+    if not stat.S_ISREG(st.st_mode):
+        return (None, None, "the target exists but is not a regular file")
+    if st.st_size > _CAB_MAX_BYTES:
+        return (None, None, "the target is larger than the {}-byte read bound".format(_CAB_MAX_BYTES))
+    try:
+        data = pathlib.Path(path).read_bytes()
+    except OSError as exc:
+        return (None, None, "it cannot be read ({})".format(type(exc).__name__))
+    return (_cab_count(data.decode("utf-8", "surrogateescape")), data.decode("utf-8", "surrogateescape"), None)
+
+
+def _cab_apply_edits(text, edits):
+    """The text after the Edit/MultiEdit replacements are applied in order, or None when an edit is not a
+    mapping carrying a non-empty string old_string and a string new_string (cannot be evaluated). An
+    old_string the text does not hold leaves the text unchanged: the tool itself refuses that call, and
+    the unchanged count is then the resulting count this layer judges."""
+    for edit in edits:
+        if not isinstance(edit, dict):
+            return None
+        old, new = edit.get("old_string"), edit.get("new_string")
+        if not isinstance(old, str) or not old or not isinstance(new, str):
+            return None
+        text = text.replace(old, new) if edit.get("replace_all") else text.replace(old, new, 1)
+    return text
+
+
+def _cab_notebook_after(current_text, tool_input):
+    """The resulting token count of a NotebookEdit simulated against the parsed notebook, or None when it
+    cannot be simulated (a notebook that does not parse as JSON with a cell list, an unknown edit_mode, a
+    cell_id no cell carries, or a non-string new_source where one is required). The count is taken over
+    the re-serialized notebook, so an occurrence in an output or metadata is counted too."""
+    mode = tool_input.get("edit_mode") or "replace"
+    source = tool_input.get("new_source")
+    if mode not in ("replace", "insert", "delete"):
+        return None
+    if mode != "delete" and not isinstance(source, str):
+        return None
+    try:
+        nb = json.loads(current_text)
+    except ValueError:
+        return None
+    cells = nb.get("cells") if isinstance(nb, dict) else None
+    if not isinstance(cells, list):
+        return None
+    cell_id = tool_input.get("cell_id")
+    index = None
+    if cell_id is not None:
+        for i, cell in enumerate(cells):
+            if isinstance(cell, dict) and cell.get("id") == cell_id:
+                index = i
+                break
+        if index is None:
+            return None
+    if mode == "insert":
+        cells.insert(0 if index is None else index + 1,
+                     {"cell_type": tool_input.get("cell_type") or "code", "id": "aiqt-cab-sim",
+                      "metadata": {}, "source": source})
+    elif index is None:
+        return None
+    elif mode == "replace":
+        if not isinstance(cells[index], dict):
+            return None
+        cells[index] = dict(cells[index])
+        cells[index]["source"] = source
+    else:
+        del cells[index]
+    try:
+        return _cab_count(json.dumps(nb))
+    except (TypeError, ValueError):
+        return None
+
+
+def coauthor_file(data):
+    """cmtidn (integ/commit-identity), PreToolUse on Write|Edit|MultiEdit|NotebookEdit: the resulting
+    file may hold NO occurrence of the co-author trailer token, or STRICTLY FEWER than the current file
+    holds (a removal); a write that keeps an occurrence in place or adds one, and one this layer cannot
+    evaluate (an unreadable, non-regular or oversized current file, a malformed payload, an edit it
+    cannot simulate), is refused, fail closed. The resulting content is computed against the CURRENT
+    file (Write replaces it whole; Edit/MultiEdit replacements are applied in order; a NotebookEdit is
+    simulated on the parsed notebook), so a splice that JOINS two fragments into a new token is counted,
+    and so is one that splits an occurrence (a removal)."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: coauthor_file wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("cmtidn")
+    if tool not in _CAB_FILE_TOOLS:
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the {} payload was not a readable mapping, so the "
+            "co-author-token check could not run; failing closed.".format(tool),
+            "AIQT guardrail: denied a {} call with an unreadable tool_input (rule cmtidn, "
+            "fail-closed).".format(tool))
+    field = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    path = tool_input.get(field)
+    if not isinstance(path, str) or not path:
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the {} payload carried no readable {}, so the "
+            "co-author-token check could not run; failing closed.".format(tool, field),
+            "AIQT guardrail: denied a {} call with no readable {} (rule cmtidn, fail-closed)."
+            .format(tool, field))
+    if tool == "Write":
+        content = tool_input.get("content")
+        if not isinstance(content, str):
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): the Write payload carried no readable content, so "
+                "the co-author-token check could not run; failing closed.",
+                "AIQT guardrail: denied a Write call with no readable content (rule cmtidn, fail-closed).")
+        after = _cab_count(content)
+        if after == 0:
+            return _allow()  # a whole-file replacement holding no token satisfies the rule as a removal or a no-op
+    before, current, why = _cab_read_current(path)
+    if why is not None:
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the {} targets {!r} but {}; whether the write would "
+            "keep or add a '{}' trailer token cannot be evaluated, so it is refused (fail-closed). "
+            "Remove or shrink the target first, or write a replacement that holds no occurrence."
+            .format(tool, path, why, _CAB_TOKEN),
+            "AIQT guardrail: denied a {} whose co-author-token effect cannot be evaluated (rule cmtidn, "
+            "fail-closed).".format(tool))
+    if tool == "Edit" or tool == "MultiEdit":
+        edits = [tool_input] if tool == "Edit" else tool_input.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): the MultiEdit payload carried no readable edits "
+                "list, so the co-author-token check could not run; failing closed.",
+                "AIQT guardrail: denied a MultiEdit call with no readable edits (rule cmtidn, "
+                "fail-closed).")
+        result = _cab_apply_edits(current, edits)
+        if result is None:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): an edit in the {} payload carried no readable "
+                "old_string/new_string pair, so the resulting co-author-token count could not be "
+                "computed; failing closed.".format(tool),
+                "AIQT guardrail: denied a {} call whose edits cannot be simulated (rule cmtidn, "
+                "fail-closed).".format(tool))
+        after = _cab_count(result)
+    elif tool == "NotebookEdit":
+        if before == 0 and _cab_count(tool_input.get("new_source") or "") == 0:
+            # No occurrence exists and none is written; cell boundaries are separate JSON strings, so no
+            # splice can join fragments across them.
+            return _allow()
+        found = _cab_notebook_after(current, tool_input)
+        if found is None:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): this NotebookEdit could not be simulated against "
+                "{!r} (an unparseable notebook, an unknown edit_mode, a missing cell, or an unreadable "
+                "new_source), and an occurrence of the '{}' trailer token is involved, so it is refused "
+                "(fail-closed).".format(path, _CAB_TOKEN),
+                "AIQT guardrail: denied a NotebookEdit whose co-author-token effect cannot be evaluated "
+                "(rule cmtidn, fail-closed).")
+        after = found
+    if after == 0 or after < before:
+        return _allow()  # the write removes the token entirely, or strictly reduces its count (a removal)
+    return _deny(
+        "AIQT rule cmtidn (commit-identity): this {} would leave {!r} holding {} occurrence(s) of the "
+        "'{}' trailer token (it currently holds {}). A write may only leave a file with NO occurrence, "
+        "or with STRICTLY FEWER than it has (a removal); any other write that touches such a file is "
+        "refused. Remove the occurrence(s) in this same write, or leave the file alone."
+        .format(tool, path, after, _CAB_TOKEN, before),
+        "AIQT guardrail: denied a {} that keeps or adds the AI co-author trailer token (rule cmtidn)."
+        .format(tool))
+
+
+# The Bash layer's rosters: the command words whose file operands this layer reads (best-effort; a
+# write path outside them is a disclosed residual), the wrapper words stepped over to find them, and the
+# message/body options whose referenced file is CONSUMED into a commit message, note, tag or PR/issue
+# body (a consumed reference that cannot be resolved or read fails closed; a plain write target that
+# does not exist is simply not yet a file and carries no occurrence).
+_CAB_WRAPPER_WORDS = frozenset(("env", "sudo", "command", "exec", "nohup", "timeout", "nice", "setsid",
+                                "stdbuf", "xargs", "time"))
+_CAB_GIT_MSG_VERBS = frozenset(("commit", "merge", "tag", "notes", "am"))
+_CAB_GIT_ARG_OPTS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                               "--attr-source", "--shallow-file", "--exec-path", "--super-prefix"))
+_CAB_SEP_CHARS = frozenset(";|&()<>")
+
+
+def _cab_bash_refs(command):
+    """The (path, what, consume) file references this layer reads from a Bash command, or None when the
+    command cannot be tokenized (an unbalanced quote; with no token in the command's text its references
+    cannot be extracted, a disclosed residual). Tokenized with shlex (posix, punctuation-split), so
+    quotes are honoured and operator runs become their own tokens; a '#' starts a comment as shlex reads
+    it, and a newline separates nothing (both disclosed best-effort bounds). Read per segment (split on
+    operator tokens): a redirect target after a '>'-carrying operator; the operands of tee, cp and mv;
+    the file operands of a sed/perl carrying an in-place flag; the -F/--file/-t/--template value of a
+    git commit/merge/tag/notes/am (git global option values stepped over); and a --body-file/--notes-file
+    value anywhere in a gh segment."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return None
+    refs = []
+    segment = []
+    redirect = False
+    for tok in tokens + ["\n;"]:  # the sentinel closes the last segment and is itself discarded
+        if tok and all(ch in _CAB_SEP_CHARS for ch in tok) or tok == "\n;":
+            if ">" in tok and "<" not in tok:
+                redirect = True
+            elif "<" not in tok:
+                _cab_segment_refs(segment, refs)
+                segment = []
+            continue
+        if redirect:
+            refs.append((tok, "redirect target", False))
+            redirect = False
+            continue
+        segment.append(tok)
+    return refs
+
+
+def _cab_segment_refs(words, refs):
+    """Append the file references of one parsed segment (see _cab_bash_refs) to refs."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if "=" in word and not word.startswith(("-", "=")):
+            i += 1  # a VAR=value word, leading or among a wrapper's assignments (env A=1 git ...)
+            continue
+        if word.rsplit("/", 1)[-1] in _CAB_WRAPPER_WORDS:
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 1  # a wrapper option; a value it takes as the next word is read as the command (over-read)
+            continue
+        break
+    if i >= len(words):
+        return
+    head = words[i].rsplit("/", 1)[-1]
+    rest = words[i + 1:]
+    if head in ("cp", "mv"):
+        refs.extend((w, head + " operand", False) for w in rest if not w.startswith("-"))
+    elif head in ("sed", "perl") and any(w == "--in-place" or w.startswith(("-i", "--in-place=")) for w in rest):
+        refs.extend((w, "in-place " + head + " operand", False) for w in rest if not w.startswith("-"))
+    elif head == "tee":
+        refs.extend((w, "tee target", False) for w in rest if not w.startswith("-"))
+    elif head == "git":
+        j, sub = 0, None
+        while j < len(rest):
+            if rest[j] in _CAB_GIT_ARG_OPTS:
+                j += 2
+                continue
+            if rest[j].startswith("-"):
+                j += 1
+                continue
+            sub = rest[j]
+            j += 1
+            break
+        if sub in _CAB_GIT_MSG_VERBS:
+            while j < len(rest):
+                w = rest[j]
+                if w in ("-F", "--file", "-t", "--template"):
+                    refs.append((rest[j + 1] if j + 1 < len(rest) else "", "git {} {} file".format(sub, w), True))
+                    j += 2
+                    continue
+                if w.startswith("-F") and not w.startswith("--") and len(w) > 2:
+                    refs.append((w[2:], "git {} -F file".format(sub), True))
+                elif w.startswith(("--file=", "--template=")):
+                    refs.append((w.split("=", 1)[1], "git {} {} file".format(sub, w.split("=", 1)[0]), True))
+                j += 1
+    elif head == "gh":
+        j = 0
+        while j < len(rest):
+            w = rest[j]
+            if w in ("--body-file", "--notes-file"):
+                refs.append((rest[j + 1] if j + 1 < len(rest) else "", "gh {} value".format(w), True))
+                j += 2
+                continue
+            if w.startswith(("--body-file=", "--notes-file=")):
+                refs.append((w.split("=", 1)[1], "gh {} value".format(w.split("=", 1)[0]), True))
+            j += 1
+
+
+def _cab_check_ref(path, cwd, consume):
+    """Why one referenced file blocks the command, or None. A CONSUMED reference (a message, template or
+    body file) fails closed when it cannot be resolved, is absent, is not a regular file, or cannot be
+    read; a plain WRITE-SIDE target (a redirect, tee, cp/mv or in-place operand) that does not exist, or
+    is not a regular file (a device such as /dev/null), holds no occurrence and is passed over, but one
+    that exists and cannot be evaluated fails closed. Any readable reference holding the token blocks."""
+    if not path or path == "-":
+        return "it consumes standard input ({!r}), which this check cannot read".format(path) if consume else None
+    if not pathlib.PurePosixPath(path).is_absolute():
+        if not isinstance(cwd, str) or not pathlib.PurePosixPath(cwd).is_absolute():
+            return "the relative path {!r} cannot be resolved (the payload carries no usable cwd)".format(path)
+        path = posixpath.join(cwd, path)
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return "the file {!r} does not exist, so it cannot be read".format(path) if consume else None
+    except (OSError, ValueError) as exc:
+        return "the file {!r} cannot be examined ({})".format(path, type(exc).__name__)
+    if not stat.S_ISREG(st.st_mode):
+        return "the path {!r} is not a regular file, so it cannot be read".format(path) if consume else None
+    if st.st_size > _CAB_MAX_BYTES:
+        return "the file {!r} is larger than the {}-byte read bound".format(path, _CAB_MAX_BYTES)
+    try:
+        data = pathlib.Path(path).read_bytes()
+    except OSError as exc:
+        return "the file {!r} cannot be read ({})".format(path, type(exc).__name__)
+    if _CAB_RE.search(data.decode("utf-8", "surrogateescape")):
+        return "the file {!r} holds the trailer token".format(path)
+    return None
+
+
+def coauthor_bash(data):
+    """cmtidn (integ/commit-identity), PreToolUse/Bash: deny a Bash command whose TEXT names the
+    co-author trailer token (raw, or with quoting characters removed so a quote-split spelling is read
+    joined), whatever the command (a disclosed over-refusal of read-side searches: use the Grep or Read
+    tool, which writes nothing); and deny a command that references a file holding the token where this
+    layer reads file references (_cab_bash_refs), failing closed on a consumed reference it cannot
+    resolve or read. Removal goes through the Write/Edit layer (coauthor_file), which can PROVE the
+    count fell; this layer cannot prove a Bash removal, so it never allows one."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: coauthor_bash wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("cmtidn")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    command = (data.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
+            "so the co-author-token check could not run; failing closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    if _CAB_RE.search(command) or _CAB_RE.search(_CAB_DEQUOTE_RE.sub("", command)):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): this Bash command's text names the '{}' trailer token, "
+            "and a Bash command can neither prove it writes no file nor prove a removal, so it is "
+            "refused (fail-closed). To REMOVE occurrences from a file, use the Edit or Write tool, "
+            "whose layer allows a write that strictly reduces the count; to SEARCH for occurrences, "
+            "use the Grep or Read tool.".format(_CAB_TOKEN),
+            "AIQT guardrail: denied a Bash command naming the AI co-author trailer token (rule cmtidn).")
+    if len(command) > _CAB_MAX_COMMAND:
+        return _allow()  # no token in its text; references past the read bound are a disclosed residual
+    refs = _cab_bash_refs(command)
+    if refs is None:
+        return _allow()  # unparseable with no token in its text: references cannot be extracted (disclosed)
+    cwd = data.get("cwd")
+    seen = set()
+    for path, what, consume in refs:
+        if (path, consume) in seen:
+            continue
+        seen.add((path, consume))
+        why = _cab_check_ref(path, cwd, consume)
+        if why is not None:
+            return _deny(
+                "AIQT rule cmtidn (commit-identity): this Bash command references {} and {}; a file "
+                "holding (or possibly holding) a '{}' trailer token may not be copied, moved, appended "
+                "to, rewritten in place, or consumed as a commit message, note, tag or PR/issue body. "
+                "Remove the occurrence first with the Edit tool, or point the command at a clean file."
+                .format(what, why, _CAB_TOKEN),
+                "AIQT guardrail: denied a Bash command whose referenced file holds or may hold the AI "
+                "co-author trailer token (rule cmtidn, fail-closed).")
+    return _allow()
 
 
 # --- abspth: relative path where the tool requires absolute ------------------------------------------
@@ -32994,6 +33407,8 @@ HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
     "diff_source_pretool": diff_source_pretool,
     "commit_identity": commit_identity,
+    "coauthor_file": coauthor_file,
+    "coauthor_bash": coauthor_bash,
     "absolute_paths": absolute_paths,
     "bash_absolute_paths": bash_absolute_paths,
     "git_explicit_binding": git_explicit_binding,
@@ -33034,6 +33449,8 @@ HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
     "commit_identity": PRETOOL,
+    "coauthor_file": PRETOOL,
+    "coauthor_bash": PRETOOL,
     "absolute_paths": PRETOOL,
     "bash_absolute_paths": PRETOOL,
     "git_explicit_binding": PRETOOL,

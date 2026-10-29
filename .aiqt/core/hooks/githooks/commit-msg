@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""commit-msg: refuse a commit whose final message holds the AI co-author trailer token (cmtidn).
+
+The third layer of the commit-identity rule (integ/commit-identity). The PreToolUse hooks in
+scripts/aiqt_hooks.py judge the assistant's own tool calls, so a commit made by ANY OTHER process (a
+background script, a scheduler, a second agent, a human pasting a prepared message) never crosses them.
+Installed as a git commit-msg hook, this script reads the one argument git passes (the path of the file
+holding the proposed commit message, after templates and prepare-commit-msg ran) and exits non-zero when
+that message holds the token, so git refuses the commit itself, whoever drove it.
+
+The token is the co-author trailer NAME, matched case-insensitively with a hyphen or a space between its
+words (the forms the forges read); a CRLF line end does not hide it, and the read is byte-based and
+decoded with surrogateescape, so any ASCII-superset encoding is counted. The token is BUILT AT RUN TIME
+below and never spelled in this file, so the pack's own file-content layer does not refuse edits to it.
+
+Fail closed: a missing argument, an unreadable message file, or a file larger than the read bound refuses
+the commit (exit 2 with the reason), never passes it. No removal carve-out exists here: the FINAL message
+must hold no occurrence at all (a trailer a human maintainer wants must be added outside this policy by
+uninstalling the hook for that repository, a visible act).
+
+DISCLOSED LIMIT: this layer works ONLY where it is installed (see the README beside this file). git runs
+commit-msg for git commit and git merge (when a message is edited); it does NOT run for git commit
+--no-verify, for plumbing such as git commit-tree, for git notes, or for forge-side edits (a PR body);
+those surfaces are covered, best-effort, by the PreToolUse layers, and --no-verify inside the assistant's
+own calls by the gate-weakening hook.
+"""
+import sys
+
+MAX_BYTES = 67_108_864  # past this bound the message cannot be scanned; refuse, never pass (fail closed)
+TOKEN = "-".join(("Co", "Authored", "By"))  # built at run time, never spelled in this source
+
+
+def main(argv):
+    import re
+    pattern = re.compile("(?i)" + "[- ]?".join(("co", "authored", "by")))
+    if len(argv) != 2:
+        sys.stderr.write("commit-msg (aiqt cmtidn): expected exactly one argument, the message file path; "
+                         "got {!r}. Refusing the commit (fail-closed).\n".format(argv[1:]))
+        return 2
+    try:
+        with open(argv[1], "rb") as handle:
+            data = handle.read(MAX_BYTES + 1)
+    except OSError as exc:
+        sys.stderr.write("commit-msg (aiqt cmtidn): cannot read the message file {!r} ({}). Refusing the "
+                         "commit (fail-closed).\n".format(argv[1], exc))
+        return 2
+    if len(data) > MAX_BYTES:
+        sys.stderr.write("commit-msg (aiqt cmtidn): the message file {!r} is larger than the {}-byte scan "
+                         "bound. Refusing the commit (fail-closed).\n".format(argv[1], MAX_BYTES))
+        return 2
+    if pattern.search(data.decode("utf-8", "surrogateescape")):
+        sys.stderr.write("commit-msg (aiqt cmtidn, commit-identity): the commit message holds a '{}' "
+                         "trailer token. A recorded change carries the human maintainer's own identity, "
+                         "with no AI as author, committer, or co-author; remove the trailer from the "
+                         "message and commit again.\n".format(TOKEN))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

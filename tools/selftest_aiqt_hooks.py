@@ -235,6 +235,14 @@ def _decision(handler, command, tool="Bash", cwd=None):
     return _reduce_result(code, stdout_obj)
 
 
+# The co-author trailer token, BUILT AT RUN TIME: the coauthor-file layer refuses any write that keeps or
+# adds the token, so this suite (like the hook source, the manifest and the generated documents) never
+# spells it; each vector assembles the spelling it drives from these parts at run time.
+_CAB_UC = "-".join(("Co", "Authored", "By"))
+_CAB_MIXED = "-".join(("Co", "authored", "by"))
+_CAB_LC = _CAB_UC.lower()
+
+
 def _declared_names(tree, name):
     """(node, names) for the string tuple assigned to module-level `name` in tree: names is None when the
     value is not a literal tuple of string constants, and both are None when the name is not assigned."""
@@ -2098,6 +2106,286 @@ def _test_note_shape_pins(failures, tmp):
     if leaves != want:
         failures.append("(ns-pin-leaves) the leaf constructors are {}, expected exactly {}"
                         .format(sorted(leaves), sorted(want)))
+
+
+def _test_coauthor_guards(failures, tmp):
+    """(cab-*) The co-author-token layers of the commit-identity rule: coauthor_file (Write, Edit,
+    MultiEdit and NotebookEdit against the resulting file content), coauthor_bash (the command text and
+    the file references it reads), and the shipped commit-msg git hook (run as a child on a message
+    file, the way git runs it). THE RULE each case pins: a write may leave the target with NO occurrence
+    of the trailer token, or with STRICTLY FEWER than it holds (a removal); everything else, and every
+    cannot-evaluate, is refused. Every deny case here is a flip: before these layers existed the same
+    payload was silently allowed, and each allow case is the sibling flip that fails if the layer
+    over-widens to a blanket deny. The token is BUILT AT RUN TIME (_CAB_UC/_CAB_MIXED/_CAB_LC), never
+    spelled, so this suite stays editable under the layer it tests. Fixtures are throwaway files under
+    the temp tree; the Bash commands submitted to coauthor_bash are never executed."""
+    base = tmp / "cab"
+    base.mkdir(parents=True, exist_ok=True)
+    cab = _CAB_UC + ": Claude <c@x>"
+
+    def fdecide(tool, tool_input, event="PreToolUse", with_tool=True):
+        data = {"hook_event_name": event}
+        if with_tool:
+            data["tool_name"] = tool
+        if tool_input is not None:
+            data["tool_input"] = tool_input
+        return aiqt_hooks.coauthor_file(data)
+
+    def fexpect(label, tool, tool_input, want):
+        code, obj, _stderr = fdecide(tool, tool_input)
+        got = _reduce_result(code, obj)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+
+    def bexpect(label, command, want, cwd=None):
+        got = _decision(aiqt_hooks.coauthor_bash, command, cwd=cwd)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+
+    # wiring: both handlers dispatched as PreToolUse modes (the manifest linkage is gen_hooks-validated)
+    if (aiqt_hooks.HANDLERS.get("coauthor_file") is not aiqt_hooks.coauthor_file
+            or aiqt_hooks.HANDLERS.get("coauthor_bash") is not aiqt_hooks.coauthor_bash
+            or aiqt_hooks.HANDLER_EVENT.get("coauthor_file") != "PreToolUse"
+            or aiqt_hooks.HANDLER_EVENT.get("coauthor_bash") != "PreToolUse"):
+        failures.append("(cab-wiring) coauthor_file/coauthor_bash handler or event wiring is missing or wrong")
+
+    # --- the file layer: fixtures ---------------------------------------------------------------------
+    clean = base / "clean.txt"
+    clean.write_text("fix adapter\n", encoding="utf-8")
+    dirty = base / "dirty.txt"
+    dirty.write_text("fix\n\n" + cab + "\nmore\n", encoding="utf-8")
+    two = base / "two.txt"
+    two.write_text(cab + "\n" + _CAB_MIXED + ": Bob <b@x>\n", encoding="utf-8")
+    frag = base / "frag.txt"
+    frag.write_text("Co-X" + _CAB_UC[3:] + "\n", encoding="utf-8")  # holds NO token until the X is removed
+    huge = base / "huge.txt"
+    with open(huge, "wb") as handle:
+        handle.seek(aiqt_hooks._CAB_MAX_BYTES)
+        handle.write(b"x")  # sparse: one byte past the read bound
+
+    # Write: refuse an occurrence written into a new or existing file; allow a clean write and a removal
+    fexpect("(cab-f1) a Write of a new file holding the token denies",
+            "Write", {"file_path": str(base / "new.txt"), "content": "fix\n" + cab + "\n"}, "deny")
+    fexpect("(cab-f2) a Write of a new clean file allows",
+            "Write", {"file_path": str(base / "new2.txt"), "content": "fix adapter\n"}, "allow")
+    fexpect("(cab-f3) a Write replacing a token-holding file with clean content allows (removal to none)",
+            "Write", {"file_path": str(dirty), "content": "fix\nmore\n"}, "allow")
+    fexpect("(cab-f4) a Write replacing two occurrences with one allows (a strict reduction)",
+            "Write", {"file_path": str(two), "content": "kept: " + cab + "\n"}, "allow")
+    fexpect("(cab-f5) a Write re-writing a token-holding file still holding one occurrence denies",
+            "Write", {"file_path": str(dirty), "content": "reworded\n" + cab + "\n"}, "deny")
+    # case, separator and CRLF variants are the same token
+    fexpect("(cab-f6) the lower-case spelling denies",
+            "Write", {"file_path": str(base / "v1.txt"), "content": _CAB_LC + ": Bob <b@x>\n"}, "deny")
+    fexpect("(cab-f7) the space-separated spelling denies",
+            "Write", {"file_path": str(base / "v2.txt"), "content": _CAB_UC.replace("-", " ") + ": B <b@x>\n"},
+            "deny")
+    fexpect("(cab-f8) a CRLF line end does not hide the token, denies",
+            "Write", {"file_path": str(base / "v3.txt"), "content": "fix\r\n" + cab + "\r\n"}, "deny")
+    # Edit: the resulting content is simulated, so splices and pre-existing occurrences are judged
+    fexpect("(cab-f9) an Edit of a token-holding file that does not remove an occurrence denies",
+            "Edit", {"file_path": str(dirty), "old_string": "fix", "new_string": "repair"}, "deny")
+    fexpect("(cab-f10) an Edit removing the token line allows (removal)",
+            "Edit", {"file_path": str(dirty), "old_string": cab + "\n", "new_string": ""}, "allow")
+    fexpect("(cab-f11) an Edit adding the token to a clean file denies",
+            "Edit", {"file_path": str(clean), "old_string": "fix adapter",
+                     "new_string": "fix adapter\n" + cab}, "deny")
+    fexpect("(cab-f12) an Edit that JOINS two inert fragments into the token denies (the splice)",
+            "Edit", {"file_path": str(frag), "old_string": "X", "new_string": ""}, "deny")
+    fexpect("(cab-f13) an Edit of a clean file staying clean allows",
+            "Edit", {"file_path": str(clean), "old_string": "adapter", "new_string": "handler"}, "allow")
+    fexpect("(cab-f14) a replace_all Edit clearing every occurrence allows",
+            "Edit", {"file_path": str(two), "old_string": _CAB_UC[:3].rstrip("-"), "new_string": "nobody",
+                     "replace_all": True}, "allow")
+    # MultiEdit: edits applied in order against the same current file
+    fexpect("(cab-f15) a MultiEdit that removes one of two occurrences allows (a strict reduction)",
+            "MultiEdit", {"file_path": str(two), "edits": [
+                {"old_string": cab + "\n", "new_string": ""},
+                {"old_string": "Bob", "new_string": "Bobby"}]}, "allow")
+    fexpect("(cab-f16) a MultiEdit that removes one occurrence but writes another back denies (no net removal)",
+            "MultiEdit", {"file_path": str(two), "edits": [
+                {"old_string": cab + "\n", "new_string": ""},
+                {"old_string": "Bob", "new_string": "Bob\n" + cab}]}, "deny")
+    # fail-closed branches of the file layer
+    fexpect("(cab-f17) an Edit whose target is not a regular file denies (fail-closed)",
+            "Edit", {"file_path": str(base), "old_string": "a", "new_string": "b"}, "deny")
+    fexpect("(cab-f18) an Edit whose target is past the read bound denies (fail-closed)",
+            "Edit", {"file_path": str(huge), "old_string": "a", "new_string": "b"}, "deny")
+    fexpect("(cab-f19) a Write past the read bound with clean content still allows (the result provably "
+            "holds no token)", "Write", {"file_path": str(huge), "content": "clean\n"}, "allow")
+    fexpect("(cab-f20) a Write past the read bound whose content holds the token denies",
+            "Write", {"file_path": str(huge), "content": cab + "\n"}, "deny")
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        locked = base / "locked.txt"
+        locked.write_text(cab + "\n", encoding="utf-8")
+        os.chmod(locked, 0)
+        try:
+            fexpect("(cab-f21) an Edit of an unreadable file denies (fail-closed)",
+                    "Edit", {"file_path": str(locked), "old_string": "a", "new_string": "b"}, "deny")
+        finally:
+            os.chmod(locked, 0o600)
+    fexpect("(cab-f22) a non-mapping tool_input denies (fail-closed)", "Write", "not-a-dict", "deny")
+    fexpect("(cab-f23) a missing file_path denies (fail-closed)", "Write", {"content": "x"}, "deny")
+    fexpect("(cab-f24) a missing Write content denies (fail-closed)",
+            "Write", {"file_path": str(clean)}, "deny")
+    fexpect("(cab-f25) a missing MultiEdit edits list denies (fail-closed)",
+            "MultiEdit", {"file_path": str(clean)}, "deny")
+    fexpect("(cab-f26) an empty old_string cannot be simulated, denies (fail-closed)",
+            "Edit", {"file_path": str(clean), "old_string": "", "new_string": "b"}, "deny")
+    fexpect("(cab-f27) an out-of-scope tool allows (the matcher governs)",
+            "Read", {"file_path": str(dirty)}, "allow")
+    code, _obj, _stderr = fdecide("Write", {"file_path": str(clean), "content": "x"}, with_tool=False)
+    if _reduce_result(code, _obj) != "deny":
+        failures.append("(cab-f28) a missing tool_name must deny (fail-closed)")
+    code, _obj, _stderr = fdecide("Write", {"file_path": str(clean), "content": "x"}, event="PostToolUse")
+    if code != 2:
+        failures.append("(cab-f29) a mis-wired event must hard-block (exit 2), got {}".format(code))
+    # NotebookEdit: simulated against the parsed notebook
+    nb = base / "nb.ipynb"
+    nb_doc = {"cells": [{"cell_type": "markdown", "id": "a", "metadata": {},
+                         "source": "fix\n" + cab + "\n"},
+                        {"cell_type": "code", "id": "b", "metadata": {}, "outputs": [],
+                         "source": "print(1)\n"}],
+              "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    nb.write_text(json.dumps(nb_doc), encoding="utf-8")
+    fexpect("(cab-n1) a NotebookEdit replacing the token-holding cell with clean source allows (removal)",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "a", "edit_mode": "replace",
+                             "new_source": "fix\n"}, "allow")
+    fexpect("(cab-n2) a NotebookEdit replacing another cell while the occurrence stays denies",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "b", "edit_mode": "replace",
+                             "new_source": "print(2)\n"}, "deny")
+    fexpect("(cab-n3) a NotebookEdit deleting the token-holding cell allows (removal)",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "a", "edit_mode": "delete"}, "allow")
+    fexpect("(cab-n4) a NotebookEdit inserting a cell holding the token denies",
+            "NotebookEdit", {"notebook_path": str(nb), "cell_id": "b", "edit_mode": "insert",
+                             "new_source": cab + "\n"}, "deny")
+    fexpect("(cab-n5) a NotebookEdit naming a cell no notebook holds, with an occurrence involved, denies "
+            "(fail-closed)", "NotebookEdit", {"notebook_path": str(nb), "cell_id": "zz",
+                                              "edit_mode": "replace", "new_source": "x"}, "deny")
+    nb_clean = base / "nb-clean.ipynb"
+    nb_clean.write_text(json.dumps({"cells": [{"cell_type": "code", "id": "a", "metadata": {},
+                                               "outputs": [], "source": "print(1)\n"}],
+                                    "metadata": {}, "nbformat": 4, "nbformat_minor": 5}), encoding="utf-8")
+    fexpect("(cab-n6) a clean NotebookEdit on a clean notebook allows",
+            "NotebookEdit", {"notebook_path": str(nb_clean), "cell_id": "a", "edit_mode": "replace",
+                             "new_source": "print(2)\n"}, "allow")
+    broken = base / "broken.ipynb"
+    broken.write_text("not json " + cab + "\n", encoding="utf-8")
+    fexpect("(cab-n7) a NotebookEdit on an unparseable notebook holding an occurrence denies (fail-closed)",
+            "NotebookEdit", {"notebook_path": str(broken), "cell_id": "a", "edit_mode": "replace",
+                             "new_source": "x"}, "deny")
+
+    # --- the Bash layer --------------------------------------------------------------------------------
+    bexpect("(cab-b1) a redirect writing the token denies (the text scan)",
+            'echo "' + cab + '" > ' + str(base / "out.txt"), "deny")
+    bexpect("(cab-b2) a git commit -m holding the token denies, whatever the identity",
+            'git commit -m "fix" -m "' + _CAB_MIXED + ': Bob <b@x>"', "deny")
+    bexpect("(cab-b3) a quote-split spelling is read joined, denies",
+            'echo "Co-"A"' + _CAB_UC[4:] + '": x" > f', "deny")
+    bexpect("(cab-b4) a read-side search naming the token denies (the disclosed over-refusal)",
+            "grep -rn " + _CAB_LC + " .", "deny")
+    bexpect("(cab-b5) a heredoc body holding the token denies (the text scan sees the whole command)",
+            "cat > f <<EOF\n" + cab + "\nEOF", "deny")
+    bexpect("(cab-b6) git commit -F naming a file that holds the token denies",
+            "git commit -F " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b7) git commit -F naming a clean file allows",
+            "git commit -F " + str(clean), "allow", cwd=str(base))
+    bexpect("(cab-b8) git commit -F naming a missing file denies (fail-closed)",
+            "git commit -F " + str(base / "absent.txt"), "deny", cwd=str(base))
+    bexpect("(cab-b9) git commit -F - consumes standard input, denies (fail-closed)",
+            "git commit -F -", "deny", cwd=str(base))
+    bexpect("(cab-b10) a relative -F path resolves against the cwd, denies on a token-holding file",
+            "git commit -F dirty.txt", "deny", cwd=str(base))
+    bexpect("(cab-b11) a relative -F path with no usable cwd denies (fail-closed)",
+            "git commit -F dirty.txt", "deny")
+    bexpect("(cab-b12) a git global option value is stepped over, -F still read, denies",
+            "git -C /repo commit --file=" + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b13) a wrapped git commit -F is still read, denies",
+            "sudo env A=1 git commit -F " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b14) git notes -F naming a token-holding file denies",
+            "git notes add -F " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b15) gh pr create --body-file naming a token-holding file denies",
+            "gh pr create --title x --body-file " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b16) gh pr edit --body-file= naming a clean file allows",
+            "gh pr edit 7 --body-file=" + str(clean), "allow", cwd=str(base))
+    bexpect("(cab-b17) cp of a token-holding file denies (the occurrence survives the copy)",
+            "cp " + str(dirty) + " " + str(base / "copy.txt"), "deny", cwd=str(base))
+    bexpect("(cab-b18) mv of a token-holding file denies",
+            "mv " + str(dirty) + " " + str(base / "moved.txt"), "deny", cwd=str(base))
+    bexpect("(cab-b19) cp of a clean file allows",
+            "cp " + str(clean) + " " + str(base / "copy2.txt"), "allow", cwd=str(base))
+    bexpect("(cab-b20) tee onto a token-holding file denies (the result cannot be evaluated)",
+            "echo hi | tee " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b21) an append redirect onto a token-holding file denies",
+            "echo hi >> " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b22) a truncating redirect onto a token-holding file denies (output unknown)",
+            "echo hi > " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b23) a redirect onto a new file allows",
+            "echo hi > " + str(base / "fresh.txt"), "allow", cwd=str(base))
+    bexpect("(cab-b24) a redirect onto a device is passed over (no file can hold the token there)",
+            "echo hi > /dev/null", "allow", cwd=str(base))
+    bexpect("(cab-b25) sed -i over a token-holding file denies (a removal cannot be proven before it runs)",
+            "sed -i s/fix/repair/ " + str(dirty), "deny", cwd=str(base))
+    bexpect("(cab-b26) sed -i over a clean file allows",
+            "sed -i s/fix/repair/ " + str(clean), "allow", cwd=str(base))
+    bexpect("(cab-b27) a read-only sed over a token-holding file is out of the write roster, allows",
+            "sed -n 1p " + str(dirty), "allow", cwd=str(base))
+    bexpect("(cab-b28) a plain clean commit allows",
+            "git commit -m fix", "allow", cwd=str(base))
+    bexpect("(cab-b29) an unparseable command with no token in its text allows (references cannot be "
+            "extracted; disclosed)", "echo 'unbalanced", "allow", cwd=str(base))
+    bexpect("(cab-b30) a command past the read bound with no token in its text allows (references past "
+            "the bound are disclosed)", "echo " + "a" * (aiqt_hooks._CAB_MAX_COMMAND + 10), "allow")
+    if hasattr(os, "mkfifo"):
+        pipe = base / "pipe.msg"
+        os.mkfifo(pipe)
+        bexpect("(cab-b31) git commit -F naming a FIFO denies without reading it (fail-closed, no hang)",
+                "git commit -F " + str(pipe), "deny", cwd=str(base))
+    code, obj, _stderr = aiqt_hooks.coauthor_bash({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                   "tool_input": {}})
+    if _reduce_result(code, obj) != "deny":
+        failures.append("(cab-b32) a Bash payload with no command string must deny (fail-closed)")
+    code, obj, _stderr = aiqt_hooks.coauthor_bash({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                                                   "tool_input": {"command": "true"}})
+    if code != 2:
+        failures.append("(cab-b33) a mis-wired event must hard-block (exit 2), got {}".format(code))
+    got = _decision(aiqt_hooks.coauthor_bash, "irrelevant", tool="Glob")
+    if got != "allow":
+        failures.append("(cab-b34) a present-but-different tool must allow (the matcher governs), got {}"
+                        .format(got))
+
+    # --- the shipped commit-msg git hook (run as git runs it: a child on the message file) -------------
+    script = repo_root() / ".aiqt" / "core" / "hooks" / "githooks" / "commit-msg"
+
+    def gexpect(label, args, want_code, want_fragment):
+        proc = subprocess.run([sys.executable, "-I", "-B", str(script)] + args,
+                              capture_output=True, text=True, timeout=60)
+        if proc.returncode != want_code or (want_fragment and want_fragment not in proc.stderr):
+            failures.append("{}: expected exit {} with {!r} on stderr, got exit {} with stderr {!r}"
+                            .format(label, want_code, want_fragment, proc.returncode,
+                                    proc.stderr[-300:]))
+
+    msg_dirty = base / "msg-dirty.txt"
+    msg_dirty.write_text("fix\n\n" + cab + "\n", encoding="utf-8")
+    msg_clean = base / "msg-clean.txt"
+    msg_clean.write_text("fix adapter\n", encoding="utf-8")
+    msg_crlf = base / "msg-crlf.txt"
+    msg_crlf.write_bytes(("fix\r\n\r\n" + _CAB_LC + ": bob <b@x>\r\n").encode("utf-8"))
+    msg_spaced = base / "msg-spaced.txt"
+    msg_spaced.write_text(_CAB_UC.replace("-", " ") + " : Bob <b@x>\n", encoding="utf-8")
+    gexpect("(cab-g1) commit-msg refuses a message holding the token", [str(msg_dirty)], 1, "cmtidn")
+    gexpect("(cab-g2) commit-msg passes a clean message", [str(msg_clean)], 0, None)
+    gexpect("(cab-g3) commit-msg refuses the lower-case CRLF spelling", [str(msg_crlf)], 1, "cmtidn")
+    gexpect("(cab-g4) commit-msg refuses the space-separated spelling", [str(msg_spaced)], 1, "cmtidn")
+    gexpect("(cab-g5) commit-msg with no argument refuses the commit (fail-closed)", [], 2, "fail-closed")
+    gexpect("(cab-g6) commit-msg with an unreadable message file refuses the commit (fail-closed)",
+            [str(base / "no-such-msg.txt")], 2, "fail-closed")
+    # the shipped script itself never spells the token and stays executable
+    script_text = script.read_text(encoding="utf-8")
+    if aiqt_hooks._CAB_RE.search(script_text):
+        failures.append("(cab-g7) the shipped commit-msg hook spells the trailer token; build it at run time")
+    if not os.access(script, os.X_OK):
+        failures.append("(cab-g8) the shipped commit-msg hook is not executable")
 
 
 def _test_stop_dispatch_note_sites(failures, tmp):
@@ -4175,6 +4463,8 @@ _DEADLINE_CASES = {
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
                             "dq_case_substs_after"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens"),
+    "coauthor_bash": ("git_words", "redirects_many", "sep_semicolon"),
+    "coauthor_file": ("write_content", "write_deep_path"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
@@ -21083,7 +21373,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-l11b) a leading AI identity assignment survives, a trailing redirect is removed, denies",
                  "GIT_AUTHOR_NAME=Claude git commit -m x >/dev/null", "deny")
         ciexpect("(ci-l11c) an AI co-author trailer in a redirected commit denies",
-                 'git commit -m "Co-Authored-By: Claude <c@x>" >/dev/null', "deny")
+                 'git commit -m "' + _CAB_UC + ': Claude <c@x>" >/dev/null', "deny")
         ciexpect("(ci-l11d) a redirected commit with no AI identity allows",
                  "git commit -m fix >/dev/null", "allow")
         # QA BLOCKER 1: a backslash-newline continuation must not inject an empty argv element that hid the
@@ -21136,7 +21426,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr18) a git -C value behind a wrapper is not read as the subcommand, denies",
                  'env git -C /repo commit --author="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr19) an AI co-author trailer behind a wrapper denies",
-                 'sudo git commit -m "fix" -m "Co-Authored-By: Claude <c@x>"', "deny")
+                 'sudo git commit -m "fix" -m "' + _CAB_UC + ': Claude <c@x>"', "deny")
         ciexpect("(ci-wr20) a VAR=value word before a wrapper denies",
                  'LC_ALL=C sudo git commit --author="Claude <c@x>" -m x', "deny")
         ciexpect("(ci-wr21) a leading ! before git commit denies",
@@ -21285,7 +21575,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr35) an AI --author after an -F file name is read, denies",
                  'git commit -F msg.txt --author="Claude <c@x>"', "deny")
         ciexpect("(ci-wr36) an AI co-author trailer in a --trailer value denies",
-                 'git commit -m x --trailer "Co-authored-by: Claude <c@x>"', "deny")
+                 'git commit -m x --trailer "' + _CAB_MIXED + ': Claude <c@x>"', "deny")
         # A short option cluster is read as git reads it: letters up to the first one that takes a value, whose
         # value is the rest of the word or, when nothing follows, the next word and only that word. In git
         # commit -am -m --author=X the cluster takes -m as its message and the --author after it is a real
@@ -21512,7 +21802,7 @@ def _main_isolated(monitor):
                  'git submodule foreach "echo \'x" && git commit --author=C"laude <c@x>" -m x', "deny")
         ciexpect("(ci-wr86) an AI co-author trailer that a quote splits, in the segment after a foreach operand "
                  "that cannot be parsed, denies",
-                 'git submodule foreach "echo \'x"; git commit -m x --trailer "Co-authored-by: C"laude" <c@x>"',
+                 'git submodule foreach "echo \'x"; git commit -m x --trailer "' + _CAB_MIXED + ': C"laude" <c@x>"',
                  "deny")
         ciexpect("(ci-wr87) an AI --author value that a quote splits, in the segment after a rebase exec value "
                  "that cannot be parsed, denies",
@@ -21614,9 +21904,9 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr107) an AI --author value given as the next word, its tail in a locale quote, denies",
                  'git commit -m x --author C$"laude <c@x>"', "deny")
         ciexpect("(ci-wr108) an AI co-author trailer in a --trailer value that a locale quote splits denies",
-                 'git commit -m x --trailer "Co-authored-by: Cl"$"aude <c@x>"', "deny")
+                 'git commit -m x --trailer "' + _CAB_MIXED + ': Cl"$"aude <c@x>"', "deny")
         ciexpect("(ci-wr109) an AI co-author trailer in a -m message that a locale quote splits denies",
-                 'git commit -m x -m "Co-authored-by: Cl"$"aude <c@x>"', "deny")
+                 'git commit -m x -m "' + _CAB_MIXED + ': Cl"$"aude <c@x>"', "deny")
         ciexpect("(ci-wr110) an AI git identity variable value that $\"\" splits denies",
                  'GIT_AUTHOR_NAME=Cl$""aude git commit -m x', "deny")
         ciexpect("(ci-wr111) an AI user.name value that $\"\" splits denies",
@@ -21643,7 +21933,7 @@ def _main_isolated(monitor):
                  "git submodule foreach 'git commit --author=Ma$\"\"intainer -m x'", "allow")
         ciexpect("(ci-wr-c41) a $ inside double quotes stays a literal character, so a co-author trailer it splits "
                  "there allows",
-                 'git commit -m x -m "Co-authored-by: Cl$""aude <c@x>"', "allow")
+                 'git commit -m x -m "' + _CAB_MIXED + ': Cl$""aude <c@x>"', "allow")
         # The command and each run line are also judged with the '$' of a locale quote read as a literal
         # character, as before locale quoting was read, and an AI identity either reading finds denies: an AI name
         # followed directly by a locale quote, which the locale reading joins into one word naming no AI identity
@@ -21661,7 +21951,7 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr119) an AI --author value followed directly by a locale quote denies",
                  'git commit --author=Claude$"bot" -m x', "deny")
         ciexpect("(ci-wr120) an AI co-author trailer followed directly by a locale quote denies",
-                 'git commit -m x -m "Co-authored-by: Claude"$"bot"', "deny")
+                 'git commit -m x -m "' + _CAB_MIXED + ': Claude"$"bot"', "deny")
         ciexpect("(ci-wr121) an AI git identity variable value followed directly by a locale quote denies",
                  'GIT_AUTHOR_NAME=Claude$"bot" git commit -m x', "deny")
         ciexpect("(ci-wr122) an AI --author value followed directly by a locale quote in a foreach operand denies",
@@ -21997,8 +22287,8 @@ def _main_isolated(monitor):
         # only when the shorter one is within its bound, so a quadratic regex fails in seconds.
         for _ci_label, _ci_head, _ci_run, _ci_tail, _ci_wants in (
                 ("(ci-wr172) an AI co-author trailer after a commit message of a co-author name and a run of "
-                 "newlines, which the reader reads, denies", 'git commit -m "co-authored-by', "\n",
-                 '" -m "Co-authored-by: Claude <c@x>"',
+                 "newlines, which the reader reads, denies", 'git commit -m "' + _CAB_LC, "\n",
+                 '" -m "' + _CAB_MIXED + ': Claude <c@x>"',
                  ("this git command sets an AI identity (co-author trailer 'Claude <c@x>')",)),
                 ("(ci-wr173) an AI user.name value after user.name, a run of spaces and a quote that does not "
                  "close, in a command the tokenizer cannot parse, denies", "git config user.name", " ",
@@ -22028,23 +22318,23 @@ def _main_isolated(monitor):
         # limit (ci-wr178) deny through the raw-string scan, with a reason that names the second trailer's value.
         # Each of the five deny vectors allowed while the reader read only the first trailer name of a word and the
         # raw-string scan resumed after each value.
-        _ci_overlap = "-m 'co-authored-by: " + "x" * 140 + " co-authored-by: Claude <c@x>'"
+        _ci_overlap = "-m '" + _CAB_LC + ": " + "x" * 140 + " " + _CAB_LC + ": Claude <c@x>'"
         for _ci_label, _ci_cmd in (
                 ("(ci-wr174) an AI co-author trailer inside the 160-character value of an earlier trailer on the "
                  "same line denies", "git commit " + _ci_overlap),
                 ("(ci-wr175) an AI co-author trailer after more than 160 characters of an earlier trailer's value "
-                 "denies", "git commit -m 'co-authored-by: " + "x" * 200 + " co-authored-by: Claude <c@x>'"),
+                 "denies", "git commit -m '" + _CAB_LC + ": " + "x" * 200 + " " + _CAB_LC + ": Claude <c@x>'"),
                 ("(ci-wr176) an AI co-author trailer on the line after another trailer of the same message denies",
-                 "git commit -m 'fix\n\nCo-authored-by: Alice <a@x>\nCo-authored-by: Claude <c@x>'")):
+                 "git commit -m 'fix\n\n" + _CAB_MIXED + ": Alice <a@x>\n" + _CAB_MIXED + ": Claude <c@x>'")):
             ciexpect(_ci_label, _ci_cmd, "deny")
             _ci_got = _ci_find(_ci_cmd)
             if _ci_got != "co-author trailer 'Claude <c@x>'":
                 failures.append("{}: the reader gave {!r} (want \"co-author trailer 'Claude <c@x>'\")"
                                 .format(_ci_label, _ci_got))
         ciexpect("(ci-wr-c52) a co-author trailer inside an earlier trailer's value that names no AI identity allows",
-                 "git commit -m 'co-authored-by: " + "x" * 140 + " co-authored-by: Alice <a@x>'", "allow")
+                 "git commit -m '" + _CAB_LC + ": " + "x" * 140 + " " + _CAB_LC + ": Alice <a@x>'", "allow")
         ciexpect("(ci-wr-c53) co-author trailers on two lines of a message that name no AI identity allow",
-                 "git commit -m 'fix\n\nCo-authored-by: Alice <a@x>\nCo-authored-by: Bob <b@x>'", "allow")
+                 "git commit -m 'fix\n\n" + _CAB_MIXED + ": Alice <a@x>\n" + _CAB_MIXED + ": Bob <b@x>'", "allow")
         _ci_gi = "/usr/bin/gi? commit " + _ci_overlap
         _ci_denies.append("git commit " + _ci_overlap + " -F <(echo x)")
         for _ci_label, _ci_cmd in (
@@ -22109,8 +22399,9 @@ def _main_isolated(monitor):
         # user.name matches, the plain scan's matches that the faster scan is compared with, and the straddle
         # strings whose match is the second trailer, with the word cut by the first value's end
         _ci_counts = [0, 0, 0, 0, 0]
-        for _ci_text in _ci_strings(("co-authored-by", "Co-Authored-By: ", "coauthored by", ":", " ", "\n", "\t",
-                                     "\xa0", '"', "'", "Claude", "Co-authored-by:Claude", "x" * 140 + " ", "gpt4",
+        for _ci_text in _ci_strings((_CAB_LC, _CAB_UC + ": ", _CAB_LC.replace("-", "", 1).replace("-", " "),
+                                     ":", " ", "\n", "\t",
+                                     "\xa0", '"', "'", "Claude", _CAB_MIXED + ":Claude", "x" * 140 + " ", "gpt4",
                                      "_"), 4):
             _ci_starts = [k for k, ch in enumerate(_ci_text) if ch in "cC"]
             _ci_named = []
@@ -22284,9 +22575,9 @@ def _main_isolated(monitor):
             second value, each with whether a space, a '<' or a ':' stands before w: after each of those, and right
             after the second trailer name, where the second value starts with w."""
             for sep in (" ", "<", ":"):
-                yield True, ("co-authored-by: yyyy co-authored-by: " + "x" * (139 - d - len(sep)) + sep + w
+                yield True, (_CAB_LC + ": yyyy " + _CAB_LC + ": " + "x" * (139 - d - len(sep)) + sep + w
                              + " <a@x>")
-            yield False, "co-authored-by: " + "x" * (145 - d) + " co-authored-by" + w + " <a@x>"
+            yield False, _CAB_LC + ": " + "x" * (145 - d) + " " + _CAB_LC + w + " <a@x>"
 
         def _ci_straddles(words):
             """The straddle strings (_ci_straddle) of each word w of words, for every d from 0 to len(w) + 1."""
@@ -22423,7 +22714,7 @@ def _main_isolated(monitor):
                 ("(ci-wr136) an AI --author value after a quote character that the reader keeps, past the read "
                  "limit, denies", "; git commit --author=\"x'Cl\"aude -m x", "deny"),
                 ("(ci-wr137) an AI co-author trailer that a backslash-newline splits, past the read limit, denies",
-                 '; git commit -m x --trailer "Co-authored-by: Cl\\\naude"', "deny"),
+                 '; git commit -m x --trailer "' + _CAB_MIXED + ': Cl\\\naude"', "deny"),
                 ("(ci-wr138) a commit message that merely names an AI product, past the read limit, denies (the "
                  "disclosed over-deny)", '; git commit -m "fix claude adapter"', "deny"),
                 ("(ci-wr139) a commit message that holds an AI name inside a longer word, past the read limit, "
@@ -22440,7 +22731,7 @@ def _main_isolated(monitor):
         _ci_heredoc = "\ncat > notes.txt <<EOF\n{}EOF"
         _ci_unparsed = ('/usr/bin/gi? commit --author="Claude <c@x>" -m x' + _ci_heredoc,
                         "G=$(printf '\\147\\151\\164'); \"$G\" commit --author=\"Claude <c@x>\" -m x" + _ci_heredoc,
-                        "/usr/bin/gi? commit -m 'Co-authored-by: Claude <c@x>' -F <(echo x) '{}'")
+                        "/usr/bin/gi? commit -m '" + _CAB_MIXED + ": Claude <c@x>' -F <(echo x) '{}'")
         _ci_fill = "x\n" * ((1 << 20) // 2)
         for _ci_label, _ci_long, _ci_want in (
                 ("(ci-wr-c50) a heredoc past the read limit that writes a file naming an AI product and runs no git "
@@ -22449,7 +22740,7 @@ def _main_isolated(monitor):
                  "longer words allows", _ci_body + "\necho digits github", "allow"),
                 ("(ci-wr166) a heredoc past the read limit that writes an AI co-author trailer and --author value "
                  "to a file and runs no git denies, as the raw-string scan finds them (the disclosed over-deny)",
-                 _ci_body[:-3] + "Co-authored-by: Claude <c@x>\n--author=Claude\nEOF", "deny"),
+                 _ci_body[:-3] + _CAB_MIXED + ": Claude <c@x>\n--author=Claude\nEOF", "deny"),
                 ("(ci-wr167) an AI --author value given to a git spelled gi?, before an unquoted heredoc past the "
                  "read limit, denies", _ci_unparsed[0].format(_ci_fill), "deny"),
                 ("(ci-wr168) an AI --author value given to a git run through a variable, before an unquoted heredoc "
@@ -22458,10 +22749,10 @@ def _main_isolated(monitor):
                  "before a quoted string past the read limit, denies", _ci_unparsed[2].format(_ci_fill), "deny"),
                 ("(ci-wr170) an AI co-author trailer after a co-author name, a run of 40,000 newlines and a quote, in "
                  "a command the tokenizer cannot parse, denies",
-                 "git commit -m x co-authored-by" + "\n" * 40000 + "' Co-authored-by: Claude <c@x>", "deny"),
+                 "git commit -m x " + _CAB_LC + "\n" * 40000 + "' " + _CAB_MIXED + ": Claude <c@x>", "deny"),
                 ("(ci-wr171) an AI co-author trailer after a co-author name, a run of 40,000 newlines and a quote, in "
                  "a heredoc past the read limit that runs no git, denies",
-                 _ci_body[:-3] + "co-authored-by" + "\n" * 40000 + "'\nCo-authored-by: Claude <c@x>\nEOF", "deny"),
+                 _ci_body[:-3] + _CAB_LC + "\n" * 40000 + "'\n" + _CAB_MIXED + ": Claude <c@x>\nEOF", "deny"),
                 ("(ci-wr160) a git spelled g$'i't with an AI --author, past the read limit, denies",
                  _ci_body + "\ntrue; g$'i't commit --author=\"Claude <c@x>\" -m x", "deny"),
                 ("(ci-wr161) a git commit with an AI --author on the line after a heredoc, past the read limit, "
@@ -25012,6 +25303,7 @@ def _main_isolated(monitor):
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
+        _test_coauthor_guards(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
