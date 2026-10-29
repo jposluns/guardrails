@@ -12017,15 +12017,15 @@ def _main_isolated(report_path=None):
         # A command whose quoting or comments the detector cannot read to its end ("unbalanced": an open
         # quote, or a '#' whose comment reading depends on context) warns with a note saying so, since a
         # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
-        # open while bash starts `sleep 1` in the background. The quoted here-document row is the disclosed
-        # over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
+        # open while bash starts `sleep 1` in the background. The quoted here-document row, whose delimiter
+        # line never comes, is the disclosed over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
         # silent allow on "unbalanced", and the note check fails if it gives the detach note instead.
         ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
         check("trunc/fg-unbalanced-no-registry-warns",
               [(_verdict(res), "could not read this foreground command to its end" in ti_note_of(res),
                 "trkasy" in ti_note_of(res), "run_in_background" in ti_note_of(res))
                for res in (ti_call({"command": v}) for v in (
-                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOF",
+                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOX",
                    "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN"))],
               [("warn", True, True, True)] * 4)
         # A run_in_background that is present but not a boolean gets the unreadable-input note naming the
@@ -12804,14 +12804,50 @@ def _main_isolated(report_path=None):
         # Every other case where the lexer and the scan disagree still denies: an `&` the lexer places in a
         # substitution that a double-quoted string holds (even inside a quoted string there, which the
         # lexer skips whole), one in an ANSI-C $'...' quote, and a quoted-delimiter body `&` after which
-        # the scan ends inside a quote (an apostrophe in the body). The first two rows allow if the
-        # narrowing lifts a scan detach without the lexer's place, the first also if it reads the outermost
-        # span holding the `&`, and the third if it lifts one without the scan reading to the end.
+        # the scan ends inside a quote (an apostrophe in a body whose delimiter line never comes, which the
+        # scan reads as shell text). The first two rows allow if the narrowing lifts a scan detach without
+        # the lexer's place, the first also if it reads the outermost span holding the `&`, and the third
+        # if it lifts one without the scan reading to the end.
         check("trunc/fg-amp-in-dq-substitution-denies",
               _verdict(bg('echo "$(echo "a & b")"', rib=False)), "deny")
         check("trunc/fg-amp-in-ansi-c-quote-denies", _verdict(bg("echo $'it\\'s & b' \\'", rib=False)), "deny")
         check("trunc/fg-quoted-heredoc-amp-then-open-quote-denies",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOF", rib=False)), "deny")
+              _verdict(bg("cat > f <<'EOF'\nFix A & B's\nEOX", rib=False)), "deny")
+        # The scan reads the body of a here-document under a quoted delimiter, opened at the top level, as
+        # literal data up to its delimiter line, as bash does, so a quote, a backquote, a '$(' or an `&` in
+        # it does not change how the rest of the command is read. Each allow row denies with the scan
+        # reading such a body as shell text (the `&` row through the here-string the lexer refuses, or the
+        # body apostrophe).
+        check("trunc/fg-quoted-heredoc-body-apostrophe-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nLine one.\n\nThe project's own material.\nEOF",
+                  'cat > /abs/f <<"EOF"\nit\'s\nEOF', "cat > /abs/f <<-'EOF'\n\tit's\n\tEOF")],
+              ["allow"] * 3)
+        check("trunc/fg-quoted-heredoc-body-dquote-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nsay \"hi\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-backquote-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nrun `date # now\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-dollar-paren-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nrun $(date # now\nEOF", rib=False)), "allow")
+        check("trunc/fg-quoted-heredoc-body-amp-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nsleep 1 &\nEOF\ncat <<<done", "cat > /abs/f <<'EOF'\nit's & more\nEOF")],
+              ["allow"] * 2)
+        # A real `&` after the body's delimiter line still denies, and an unquoted delimiter's body, which
+        # bash expands, is still read as shell text, so a detach in a substitution there denies (it denied
+        # before the body skip too). A body whose end the scan cannot tell keeps the scan's reading of it
+        # as shell text, so the apostrophe still denies: no delimiter line, a delimiter line that is not the
+        # whole line (indented under <<, or ending in a carriage return), and a here-document in a subshell.
+        check("trunc/fg-quoted-heredoc-then-amp-denies",
+              _verdict(bg("cat > /abs/f <<'EOF'\nThe project's own material.\nEOF\nsleep 5 &", rib=False)),
+              "deny")
+        check("trunc/fg-unquoted-heredoc-subst-amp-denies",
+              _verdict(bg("cat > /abs/f <<EOF\n$(sleep 1 &)\nEOF", rib=False)), "deny")
+        check("trunc/fg-quoted-heredoc-unread-body-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat > /abs/f <<'EOF'\nit's\nEOFX", "cat > /abs/f <<'EOF'\nit's\n\tEOF",
+                  "cat > /abs/f <<'EOF'\nit's\nEOF\r\n", "(cat > /abs/f <<'EOF'\nit's\nEOF\n)")],
+              ["deny"] * 4)
         # A substitution after the commit-message form's body makes the lexer lex again reading no body
         # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
         # allows if a pass keeps the places recorded by the pass it replaced.
@@ -13102,7 +13138,7 @@ def _main_isolated(report_path=None):
               ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason).
-        uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
+        uq = bg("cat > f <<'EOF'\nthe user's file\nEOX", rib=False)
         uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unbalanced-quote-reason-names-quote",
               (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
