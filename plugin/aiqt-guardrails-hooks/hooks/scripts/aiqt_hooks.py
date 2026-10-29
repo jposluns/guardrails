@@ -19670,7 +19670,9 @@ def _orch_heredoc_data_command(command):
     ./path can run a written file, and an earlier hash, alias, function, enable, builtin, command, exec,
     eval or PATH or other assignment can make `cat` run something else, so any such line makes every body
     code. Only then does cat copy each body into its file with nothing in the command running it, and only
-    then are the bodies data. An empty command is not such a command."""
+    then are the bodies data. The word cat is trusted as written: a function, alias or builtin named cat
+    the shell already holds, or an inherited PATH or other environment that resolves cat to a shell or
+    another program, is not seen (disclosed in the manifest). An empty command is not such a command."""
     lines = command.split("\n")
     i, n, writes = 0, len(lines), 0
     while i < n:
@@ -20056,14 +20058,18 @@ def _orch_foreground_detach(command):
     delimiter where the scan reads the rest of the command to its end (`bash <<'EOF'` then `job &`), a
     silent allow disclosed in the manifest.
 
-    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only under a quoted
-    delimiter (<<'EOF' or <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and
-    nothing open, whose body ends at a line that is, whole, its delimiter, on a line that is a plain cat
-    writing to a file (_orch_foreground_scan), so a quote, `&` or substitution in such a body (`cat > f
-    <<'EOF'` then `the user's file`) reads as no detach. Every other body it reads as CODE: an unquoted
-    delimiter's, one fed to a shell or any consumer it cannot show only writes the body to a file (cat to
-    standard output and tee included), the commit-message form's in "$(cat <<'EOF' ... EOF)", one in a
-    subshell or after any '(' or backquote, one after a body read as code, and one with no delimiter line.
+    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
+    command is nothing but one or more plain cat writes (_orch_heredoc_data_command): each a line holding
+    only cat, one output redirect to a plain file and one quoted here-document operator (<<'EOF' or
+    <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and nothing open, then its
+    body and a line that is, whole, its delimiter, the writes separated only by newlines, with no other
+    command word anywhere. Only in such a command does a quote, `&` or substitution in a body (`cat > f
+    <<'EOF'` then `the user's file`) read as no detach. Every other body it reads as CODE: a quoted
+    delimiter's in a cat write followed or preceded by any other command (the same write followed by a
+    line `true` included), an unquoted delimiter's, one fed to a shell or any consumer it cannot show only
+    writes the body to a file (cat to standard output and tee included), the commit-message form's in
+    "$(cat <<'EOF' ... EOF)", one in a subshell or after any '(' or backquote, one after a body read as
+    code, and one with no delimiter line.
     The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say "a &
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
@@ -20071,8 +20077,9 @@ def _orch_foreground_detach(command):
     is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
     lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
     inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
-    is to quote the delimiter and write the body with `cat > file`, or to write the text to a file and
-    pass the file.
+    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
+    nothing but such writes, then run any other command in a separate call, or to write the text to a file
+    and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -21733,8 +21740,9 @@ def orch_truncation_guard(data):
                 "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
                 "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
                 "here-document body this scan reads as code (an unquoted delimiter's, or a quoted one's it "
-                "cannot end at a whole delimiter line or whose command may run it: only a plain "
-                "cat > file is read as writing data) or an ANSI-C $'...' "
+                "cannot end at a whole delimiter line or whose command may run it: only a command of "
+                "nothing but plain cat > file writes is read as writing data, so write such text with "
+                "cat in a call of its own) or an ANSI-C $'...' "
                 "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
