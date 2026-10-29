@@ -10861,8 +10861,8 @@ def _main_isolated(monitor):
         # _commit_literal_segment: unlike pl-fr4-2 it needs no grammar or D revert. Its segment fails all three
         # substitution checks (opaque_shell, argv_opaque and _commit_raw_literal), so no single revert turns
         # it red; it turns red when all three are dropped together.
-        pexpect("(pl-fr4-2b) lone single-segment backtick commit DENIES (opaque_shell command "
-                "substitution; strict fail-to-pass for the qualifier)",
+        pexpect("(pl-fr4-2b) lone single-segment backtick commit DENIES (backtick command substitution; "
+                "red only when all three substitution checks are dropped)",
                 "git commit --allow-empty -m `whoami`", "deny", cwd=str(nr_none))
         pexpect("(pl-fr4-3) 'git commit -m \"$(git -C <repo> commit ...)\"' DENIES (nested-git command "
                 "substitution)",
