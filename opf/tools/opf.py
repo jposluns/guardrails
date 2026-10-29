@@ -19341,7 +19341,11 @@ def _cmd_adopt(rest):
           the release is printed on every outcome, before a refusal or error too, and named in the text of
           every refusal raised after it; beside such a transaction any other present lease refuses as
           store-lease-held, and a lease beside no open transaction is not touched: each stays
-          the operator's to release. Exit 1 is not used.
+          the operator's to release. Reconcile takes, reads back and releases its journal lock in the journal
+          directory it opened, and checks that the journal path still names that directory only twice: once
+          the lock is taken, and after the release. A journal moved away and put back between those two
+          checks is not seen: another run that took the journal lock meanwhile, in whatever stood at the
+          journal path, can then run beside it, and the message does not mention that run. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -21814,9 +21818,11 @@ def _cli_self_test():
                                     "finished, the lock named as one that STAYS; {})".format(rc, out.strip()))
 
                 # the journal renamed aside, an empty directory put at its path, just before the lock is taken, and
-                # the release then leaves the lock taken there in place: exit 2 as journal-unclassifiable before any
-                # recovery write, naming both locations, never exit 0 with the transaction reported recovered (red
-                # when the journal path is not bound to the journal reconcile listed once the lock is taken)
+                # the release then leaves the lock in place in the journal reconcile listed, where it was taken: exit
+                # 2 as journal-unclassifiable before any recovery write, naming that directory, never exit 0 with the
+                # transaction reported recovered (red when the journal path is not bound to the journal reconcile
+                # listed once the lock is taken: the recovery then runs and exits recovery-failed; red too when the
+                # release's read-back is not bound to it: nothing is said unobserved)
                 real_acquire = journal.acquire_lock
                 unbound = "{} no longer resolves to the journal directory this run listed and holds".format(j_rel)
                 unobserved = "{}/lock stays could not be observed".format(j_rel)
@@ -21826,6 +21832,15 @@ def _cli_self_test():
                     os.mkdir(journal_root)
                     return real_acquire(journal_root, session_id)
 
+                def release_unreadable_aside(journal_root):
+                    os.chmod(os.path.join(str(journal_root) + ".aside", "lock"), 0)
+                    return real_release(journal_root)
+
+                def left_aside(root):
+                    """True when the lock stays in the journal reconcile listed, now aside, and none is at the path."""
+                    return (os.path.lexists(os.path.join(root, j_rel + ".aside", "lock"))
+                            and not os.path.lexists(os.path.join(root, j_rel, "lock")))
+
                 def unswap(root):
                     """The journal reconcile listed put back at its path, the one put there removed; True when
                     it still holds an open transaction or a lock (no recovery write landed in it)."""
@@ -21834,20 +21849,21 @@ def _cli_self_test():
                     return not journal_clean(root)
                 opened = not journal_clean(swapped)
                 with mock.patch.object(journal, "acquire_lock", swap_then_acquire), \
-                        mock.patch.object(journal, "release_lock", release_unreadable):
+                        mock.patch.object(journal, "release_lock", release_unreadable_aside):
                     rc, out = run(swapped)
-                left = os.path.lexists(os.path.join(swapped, j_rel, "lock"))
+                left = left_aside(swapped)
                 if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_UNCLASSIFIABLE) in out
                         and unbound in out and unobserved in out
                         and "transaction {}: rolled-back".format(rid) not in out and left and unswap(swapped)):
                     failures.append("adopt reconcile over a journal swapped before its lock is taken: rc={!r} "
-                                    "(expected 2 + REFUSED (journal-unclassifiable) before any recovery write, both "
-                                    "locations named; {})".format(rc, out.strip()))
+                                    "(expected 2 + REFUSED (journal-unclassifiable) before any recovery write, the "
+                                    "listed journal named, the lock left there; {})".format(rc, out.strip()))
 
                 # the same swap after a concurrent reconcile recovered every transaction, so nothing is left to
                 # recover once the lock is taken: exit 2 as journal-unclassifiable, never exit 0 saying the journal
                 # lock this run took is released while it stays (red when the journal path is not bound to the
-                # journal reconcile listed once the lock is taken)
+                # journal reconcile listed once the lock is taken: the run then exits recovery-failed; red too when
+                # the release's read-back is not bound to it: nothing is said unobserved)
                 nested = []
 
                 def first_then_swap(journal_root, session_id):
@@ -21858,15 +21874,15 @@ def _cli_self_test():
                     return swap_then_acquire(journal_root, session_id)
                 opened = not journal_clean(swapped_idle)
                 with mock.patch.object(journal, "acquire_lock", first_then_swap), \
-                        mock.patch.object(journal, "release_lock", release_unreadable):
+                        mock.patch.object(journal, "release_lock", release_unreadable_aside):
                     rc, out = run(swapped_idle)
-                left = os.path.lexists(os.path.join(swapped_idle, j_rel, "lock"))
+                left = left_aside(swapped_idle)
                 if not (opened and nested != [] and rc == EXIT_MALFORMED
                         and "REFUSED ({})".format(adopt.RECONCILE_UNCLASSIFIABLE) in out and unbound in out
                         and unobserved in out and "nothing to reconcile" not in out and left):
                     failures.append("adopt reconcile with nothing left to recover over a journal swapped before its "
-                                    "lock is taken: rc={!r} (expected 2 + REFUSED (journal-unclassifiable), both "
-                                    "locations named; {})".format(rc, out.strip()))
+                                    "lock is taken: rc={!r} (expected 2 + REFUSED (journal-unclassifiable), the "
+                                    "listed journal named, the lock left there; {})".format(rc, out.strip()))
 
                 # a directory put at the journal lock's name after the release removed the lock this run took: an
                 # entry that is not a regular file is never read as a lock taken since, so exit 2 as recovery-failed

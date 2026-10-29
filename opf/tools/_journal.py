@@ -965,17 +965,40 @@ def _is_canonical_pid_start(value):
     return v < _PIDSTART_MAX and str(v) == value          # in range AND canonical (str(int(...)) rejects leading zeros)
 
 
+class JournalAt(os.PathLike):
+    """A journal root named by its path but reached through `fd`, a descriptor the caller holds on that
+    directory (never closed here). acquire_lock, release_lock and reconcile_and_claim_stale create, read,
+    remove and fsync `lock` (and open lock.break) beneath fd when handed one, never by resolving the path,
+    so a rename of the journal, the product root or any ancestor cannot move the lock away from the
+    directory the caller lists and reads the lock back beneath. The path only names it in messages."""
+
+    def __init__(self, path, fd):
+        self.path, self.fd = Path(path), fd
+
+    def __fspath__(self):
+        return str(self.path)
+
+    def __str__(self):
+        return str(self.path)
+
+    def __truediv__(self, other):
+        return self.path / other
+
+
 def acquire_lock(journal_root, session_id):
     """O_CREAT|O_EXCL lock with owner identity (9.3 step 2). Raises JournalError (mapped to a refuse-to-
     proceed) when a lock already exists: one open transaction at a time; a possibly-live owner is never
     seized here (breaking a stale lock is the caller's explicit reconcile step in recover). The O_EXCL
     create is itself the mutual-exclusion point and refuses to follow a final-component symlink. An OSError
     raised AFTER that create carries lock_created = True, so a caller tells a lock THIS call created (and
-    may release) from one it did not, which process identity alone cannot (two threads of one process)."""
+    may release) from one it did not, which process identity alone cannot (two threads of one process).
+    A JournalAt journal_root takes the lock beneath its descriptor and flushes that descriptor."""
+    at = getattr(journal_root, "fd", None)
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(str(lock) if at is None else "lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600,
+                     dir_fd=at)
     except FileExistsError:
         raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
                            .format(lock))
@@ -988,7 +1011,10 @@ def acquire_lock(journal_root, session_id):
             os.fsync(fd)
         finally:
             _close_fd_yielding(fd)
-        _fsync_path_dir(journal_root)
+        if at is None:
+            _fsync_path_dir(journal_root)
+        else:
+            _fsync_dir_fd(at)
     except OSError as exc:
         exc.lock_created = True
         raise
@@ -1152,11 +1178,13 @@ def release_lock(journal_root):
     in place (fail-closed, never blind-unlinked). Breaking a confirmed-dead stale lock is the caller's
     explicit reconcile step (break_stale_and_acquire), never this release path. A JournalError a CLOSE
     inside the owner read raised (_fd_release_raised) is not that signal: it propagates as itself, with
-    every fault recorded on it, the lock left in place."""
+    every fault recorded on it, the lock left in place. A JournalAt journal_root reads, removes and
+    flushes the lock beneath its descriptor, never by resolving the path."""
+    at = getattr(journal_root, "fd", None)
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
-        owner = read_lock_owner(journal_root)
+        owner = read_lock_owner(journal_root) if at is None else read_lock_owner_at(at)
     except JournalError as exc:
         _fd_release_fault(exc)                                 # a close's exception: never dropped as unreadable
         return                                            # unreadable/malformed: never blind-unlink
@@ -1165,10 +1193,16 @@ def release_lock(journal_root):
     if not _owner_is_current(owner):
         return                                            # foreign lock: never delete a lock we do not own
     try:
-        os.unlink(str(lock))
+        if at is None:
+            os.unlink(str(lock))
+        else:
+            os.unlink("lock", dir_fd=at)
     except FileNotFoundError:
         return
-    _fsync_path_dir(journal_root)
+    if at is None:
+        _fsync_path_dir(journal_root)
+    else:
+        _fsync_dir_fd(at)
 
 
 def _listdir_fresh(held_fd, label):
@@ -1316,6 +1350,9 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
     exception it raises propagates as itself, nothing recovered and the stale lock kept. It is not called
     when the lock is already gone (a concurrent recoverer broke it), since this call then recovers nothing.
 
+    A JournalAt journal_root opens lock.break, reads, removes and takes `lock` beneath its descriptor,
+    never by resolving the path.
+
     PORTABILITY: fcntl is POSIX-only. On a platform without it (e.g. Windows) this FAILS CLOSED, refusing
     to break the stale lock rather than falling back to the unguarded race, consistent with the engine's
     existing non-Linux fail-safe posture (3.6b). Both supported platforms (Linux, macOS) expose fcntl."""
@@ -1324,10 +1361,12 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
     except ImportError:
         raise JournalError("stale-lock break needs the POSIX fcntl arbitration primitive (absent on this "
                            "platform): refusing to break the stale lock (fails closed, 3.6b)")
+    anchored, at = journal_root, getattr(journal_root, "fd", None)
     journal_root = Path(journal_root)
     arb = journal_root / "lock.break"
     try:                                                     # STABLE arbitration file, never replaced
-        afd = os.open(str(arb), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)   # O_NOFOLLOW: refuse a symlink
+        afd = os.open(str(arb) if at is None else "lock.break", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                      dir_fd=at)                             # O_NOFOLLOW: refuse a symlink
     except OSError as exc:
         raise JournalError("cannot open arbitration file {} ({}); refusing to break the stale lock "
                            "(fails closed)".format(arb, exc))
@@ -1349,9 +1388,10 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
                                "refuse to break the stale lock (fails closed)".format(arb, _ast.st_nlink))
         fcntl.flock(afd, fcntl.LOCK_EX)
         try:
-            current = read_lock_owner(journal_root)          # RE-READ the CURRENT owner under the lock
+            # RE-READ the CURRENT owner under the lock
+            current = read_lock_owner(journal_root) if at is None else read_lock_owner_at(at)
             if current is None:
-                acquire_lock(journal_root, session_id)
+                acquire_lock(anchored, session_id)
                 return "acquired"
             if not owner_confirmed_dead(current):
                 return "possibly-live"                       # a concurrent recoverer re-acquired: never break
@@ -1366,11 +1406,14 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
                     raise JournalError("journal {} did not reconcile to terminal; refusing to break the "
                                        "stale lock (fail-closed)".format(txn_dir.name))
             try:                                             # every journal terminal: NOW break the stale lock
-                os.unlink(str(journal_root / "lock"))
+                if at is None:
+                    os.unlink(str(journal_root / "lock"))
+                else:
+                    os.unlink("lock", dir_fd=at)
             except FileNotFoundError:
                 pass
             os.fsync(jr_fd)                                  # F1: durability flush through the CONTAINED jr fd
-            acquire_lock(journal_root, session_id)           # O_EXCL under the arbitration lock
+            acquire_lock(anchored, session_id)               # O_EXCL under the arbitration lock
             return "acquired"
         finally:
             fcntl.flock(afd, fcntl.LOCK_UN)

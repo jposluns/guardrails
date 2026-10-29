@@ -103,7 +103,12 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    path no longer names the journal it recovered. The message says so, and names the lock if it
    stays or each place it may stay. A later reconcile breaks such a lock once its owner has exited
    if the lock can be read and is well formed, and refuses on it as `journal-unclassifiable`
-   while it cannot be read or is malformed. `store-lease-release-failed` means the recovery
+   while it cannot be read or is malformed. Reconcile takes, reads back and releases its journal
+   lock in the journal directory it opened, and checks that the journal path still names that
+   directory only twice: once the lock is taken, and after the release. It cannot see the journal
+   moved away and put back between those two checks. Another run that took the journal lock
+   meanwhile, in whatever stood at the journal path, can then run beside it, and the message does
+   not mention that run. `store-lease-release-failed` means the recovery
    finished but releasing a store lease it took faulted; the message names each lease that stays.
    Exit 2 with "cannot evaluate" and no finding has two causes. The product root could not be
    evaluated. Or an unexpected error stopped reconcile, which can happen after a recovery already
