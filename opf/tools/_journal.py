@@ -644,10 +644,10 @@ def open_journal_root_from_path(root, journal_rel):
     try:
         jr_fd = _open_dir_contained(root_fd, journal_rel)
     finally:
-        # ROUND-6 defect sibling (_opf_store._open_working_dir_fd): the new jr fd is HELD in a local
+        # As in _opf_store._open_working_dir_fd: the new jr fd is HELD in a local
         # across the root close, so a root close that reports an error cannot abandon the return and
         # leak the just-opened journal-root fd. It is released quietly, the root close is a single
-        # os.close (P1: a raising close has released its number, close(2), and it is never touched
+        # os.close (a raising close has released its number, close(2), and it is never touched
         # again), and the close error keeps propagating fail-closed.
         try:
             _close_fd_yielding(root_fd)
