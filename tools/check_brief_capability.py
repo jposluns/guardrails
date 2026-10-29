@@ -85,6 +85,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        and never refuses. A pin that does not resolve to one commit (unknown, ambiguous), a git
                        that cannot be launched or times out, or a pin with no repository to read is
                        CANNOT_EVALUATE (exit 2), never a pass, whether or not the brief names a relative path.
+                       The git reads are hermetic: every inherited GIT_ variable is dropped, the system and
+                       global config are pinned to an empty file, and HOME and XDG_CONFIG_HOME name an empty
+                       directory, so an ambient git configuration (malformed or adversarial) cannot change
+                       the answer. A repository that git trusts only through the caller's safe.directory
+                       entry therefore reads CANNOT_EVALUATE.
   P4 no hand-back      ADVISORY. The family's row says handback = "yes", a sentence holds a delivery verb (return,
                        paste, print, send, show, include, quote, ...) not negated and a large output (a whole,
                        entire, full or complete file, source, diff, log or output; a diff; a patch), and no line
@@ -350,6 +355,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import ast
+import atexit
 import bisect
 import contextlib
 import io
@@ -1722,16 +1728,31 @@ def under_workdir(path, workdirs):
     return False
 
 
+_GIT_READ_HOME = None
+
+
+def _git_read_home():
+    """A process-lifetime empty directory serving as HOME and XDG_CONFIG_HOME for the P3 git reads, created
+    lazily and removed at interpreter exit."""
+    global _GIT_READ_HOME
+    if _GIT_READ_HOME is None or not os.path.isdir(_GIT_READ_HOME):
+        _GIT_READ_HOME = tempfile.mkdtemp(prefix="aiqt-brief-capability-git-home-")
+        atexit.register(shutil.rmtree, _GIT_READ_HOME, ignore_errors=True)
+    return _GIT_READ_HOME
+
+
 def _git_read_env():
     """The caller's environment with every GIT_-prefixed variable dropped, so a caller-supplied GIT_DIR or
-    config source cannot point the read at another repository; only the config-isolation pins at their
-    subtractive values are kept."""
+    config source cannot point the read at another repository, then made hermetic: the system and global
+    config pinned to os.devnull with GIT_CONFIG_NOSYSTEM=1, and HOME and XDG_CONFIG_HOME pointed at an empty
+    directory, so a malformed or adversarial ambient git configuration cannot fail or steer the read."""
     env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
-    if os.environ.get("GIT_CONFIG_NOSYSTEM") == "1":
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
-    for pin in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
-        if os.environ.get(pin) == os.devnull:
-            env[pin] = os.devnull
+    home = _git_read_home()
+    env["HOME"] = home
+    env["XDG_CONFIG_HOME"] = home
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
     return env
 
 
@@ -3633,7 +3654,26 @@ def self_test(report_path=None):
                         _git_outcome(exists_at_revision, repo, head, "docs/absent.md")]
             return out
 
+        hostile = base / "hostile-home"
+        os.makedirs(hostile / "git")
+        for name in (".gitconfig", "git/config", "system-config"):
+            with open(hostile / name, "w", encoding="utf-8") as handle:
+                handle.write("[broken\n")
+
+        def under_malformed_config():
+            """A caller's HOME, XDG_CONFIG_HOME, global and system git config name malformed files; the read
+            still gives the normal result."""
+            with _environ(HOME=str(hostile), XDG_CONFIG_HOME=str(hostile), GIT_CONFIG_NOSYSTEM="0",
+                          GIT_CONFIG_GLOBAL=str(hostile / ".gitconfig"),
+                          GIT_CONFIG_SYSTEM=str(hostile / "system-config")):
+                return p3("docs/present.md"), p3("docs/absent.md")
+
+        def caller_config_env():
+            """The previous scrub: GIT_ variables dropped, the caller's HOME and XDG_CONFIG_HOME kept."""
+            return dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
+
         check("preflight/p3-git-env-scrubbed", under_foreign_git_env(), ((0, []), (0, [("P3", "ADVISORY")])))
+        check("preflight/p3-malformed-config-normal", under_malformed_config(), ((0, []), (0, [("P3", "ADVISORY")])))
         check("preflight/p3-git-failure-cannot-evaluate", git_failures(), ["CannotEvaluate"] * 4)
         with open(base / "brief.md", "w", encoding="utf-8") as handle:
             handle.write(P3_BRIEF.format(head[:12], "docs/absent.md"))
@@ -3752,6 +3792,9 @@ def self_test(report_path=None):
                                                 [(0, [("P3", "ADVISORY")])], resolve_revision=lambda repo, rev: rev))
         check("revert/p3-git-env-red", *flip([lambda: under_foreign_git_env()[0]], ["CannotEvaluate"],
                                              _git_read_env=lambda: dict(os.environ)))
+        # with the caller's HOME kept, the malformed global config there fails every read
+        check("revert/p3-hermetic-config-red", *flip([lambda: under_malformed_config()[0]], ["CannotEvaluate"],
+                                                     _git_read_env=caller_config_env))
         real_resolve, real_exists = resolve_revision, exists_at_revision
 
         def resolve_or_pass(repo, rev):
@@ -3773,7 +3816,7 @@ def self_test(report_path=None):
                                            HANDBACK_NAMED_RE=never))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 107)
+    check("revert/every-flip-ran", len(flipped), 108)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
