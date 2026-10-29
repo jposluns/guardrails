@@ -2845,7 +2845,7 @@ def _self_test_cases(fx):
     # system time). The child exits normally each time, so no kernel CPU stop takes part.
     bound = RUNTIME_CPU_CAP_SECONDS
     check("runtime/cpu-bound-edge",
-          [_patched("os", _WaitSeam(cpu=cpu), lambda: _capped_run(fx, short_delivery, "linear"))
+          [_waits_through(_WaitSeam(cpu=cpu), lambda: _capped_run(fx, short_delivery, "linear"))
            for cpu in ((bound - 0.01, 0.0), (bound, 0.0), (bound - 0.5, 0.5), (bound + 0.01, 0.0), (bound - 0.5, 0.51))],
           [(0, "PASS")] * 3 + ["timeout"] * 2)
 
@@ -2859,7 +2859,7 @@ def _self_test_cases(fx):
             return "no wall guard setting"
         waits = _WaitSeam()
         try:
-            got = _patched("os", waits, lambda: _patched(
+            got = _waits_through(waits, lambda: _patched(
                 "RUNTIME_WALL_GUARD_SECONDS", 0, lambda: _capped_run(fx, backticks, "linear")))
         except CannotEvaluate as exc:
             return str(exc).startswith(WALL_GUARD_REFUSAL), _child_gone(waits.pids[0])
@@ -2885,7 +2885,7 @@ def _self_test_cases(fx):
     def _parent_failure_result():
         waits = _WaitSeam(failure=OSError("injected wait failure"))
         try:
-            got = _patched("os", waits, lambda: _capped_run(fx, short_delivery, "linear"))
+            got = _waits_through(waits, lambda: _capped_run(fx, short_delivery, "linear"))
         except OSError as exc:
             return str(exc), _child_gone(waits.pids[0])
         return got
@@ -3384,11 +3384,16 @@ CHILD_ADDRESS_LIMIT = 2 * 1024 * 1024 * 1024
 # a 24-core host at load average 30 to 36, five runs of each case: the linear scanners finish every
 # 16 MiB case in 0.21 to 3.83 CPU seconds (the inch-mark run the slowest, 3.40 to 3.83), and every
 # 8a61dfb9 backtracking form was still running when a 31-second kernel CPU stop ended it at about
-# 30.9 CPU seconds. The bound below sits about 2.6 times above the slowest linear run measured and
-# under a third of the CPU time every backtracking form was seen to exceed. The wall clock is only
-# a guard against waiting without end on a child that is hung or too slow to finish; when it fires
-# the run is refused (CannotEvaluate, its text starting WALL_GUARD_REFUSAL), never passed.
-RUNTIME_CPU_CAP_SECONDS = 10
+# 30.9 CPU seconds. Measured again 2026-10-29 on an 80-core host at load average 22 to 26 with the
+# same code: the inch-mark run took 11.56 to 11.87 CPU seconds in three runs (2.93 at 4 MiB and 5.45
+# at 8 MiB, so linear in its size, on a slower core), over the earlier bound of 10, and every
+# backtracking form was still running when a 91-second kernel CPU stop ended it. The bound below
+# sits about 2.5 times above the slowest linear run measured and under a third of the CPU time
+# every backtracking form was seen to exceed there. The wall clock is only a guard against waiting
+# without end on a child that is hung or too slow to finish (it sits well above the child's own
+# kernel CPU stop, one second past the bound, hard limit five more); when it fires the run is
+# refused (CannotEvaluate, its text starting WALL_GUARD_REFUSAL), never passed.
+RUNTIME_CPU_CAP_SECONDS = 30
 RUNTIME_WALL_GUARD_SECONDS = 300
 WALL_GUARD_REFUSAL = "runtime child still alive past the wall guard"
 
@@ -3441,28 +3446,32 @@ def _capped_run(fx, delivery, scanners):
 
 
 class _WaitSeam:
-    """A stand-in for the os module inside _capped_run (self-test only): every attribute is the real
-    one, but wait4 records each pid it is asked about, raises `failure` (when given) in place of the
-    first wait, as a failure in this process between spawn and reap would, and reports a reaped
-    child's CPU time as `cpu` (user and system seconds, when given) in place of the measured one.
-    It holds the real module itself, since the module-level name os is this seam while patched."""
+    """A stand-in for os.wait4 inside _capped_run (self-test only, installed by _waits_through): it
+    records each pid it is asked about, raises `failure` (when given) in place of the first wait, as
+    a failure in this process between spawn and reap would, and reports a reaped child's CPU time as
+    `cpu` (user and system seconds, when given) in place of the measured one. It holds the real
+    wait4 itself, since os.wait4 is this seam while patched."""
 
     def __init__(self, failure=None, cpu=None):
-        self.pids, self._failure, self._cpu, self._os = [], failure, cpu, os
+        self.pids, self._failure, self._cpu, self._wait4 = [], failure, cpu, os.wait4
 
-    def __getattr__(self, name):
-        return getattr(self._os, name)
-
-    def wait4(self, pid, options):
+    def __call__(self, pid, options):
         import resource
         self.pids.append(pid)
         failure, self._failure = self._failure, None
         if failure is not None:
             raise failure
-        reaped, status, usage = self._os.wait4(pid, options)
+        reaped, status, usage = self._wait4(pid, options)
         if reaped == pid and self._cpu is not None:
             usage = resource.struct_rusage(tuple(self._cpu) + tuple(usage)[2:])
         return reaped, status, usage
+
+
+def _waits_through(seam, thunk):
+    """thunk() with os.wait4 replaced by seam (a _WaitSeam), restored afterwards."""
+    from unittest import mock
+    with mock.patch.object(os, "wait4", seam):
+        return thunk()
 
 
 class _FrozenClock:
