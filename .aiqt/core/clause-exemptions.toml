@@ -119,7 +119,7 @@ reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obl
 
 [[exempt]]
 corpus-id = "estsep"
-text = "A figure that\ncarries its grade honestly is sound however uncertain; one that hides it misreports precision it does\nnot have."
+text = "A figure that carries its grade honestly is\nsound however uncertain; one that hides it misreports precision it does not have."
 reason = "Rationale for estsep.2; no obligation of its own."
 
 [[exempt]]
@@ -146,11 +146,6 @@ reason = "Cross-reference to trkasy.5 (a truncated deliverable is not observable
 corpus-id = "vfxcmt"
 text = "Applying a fix on disk is not the same as landing it."
 reason = "Rationale for vfxcmt.1; no obligation of its own."
-
-[[exempt]]
-corpus-id = "vfxcmt"
-text = "A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim."
-reason = "Restates vfxcmt.1 (confirm the fix is in its commit before claiming it); it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"

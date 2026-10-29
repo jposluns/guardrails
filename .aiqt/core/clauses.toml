@@ -491,7 +491,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 14
 end-line = 15
 canonical-text = "A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an\nestimated, inferred, or self-reported one into a single number presented as a measurement."
-source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
+source-digest = "d1893b987dd142d9b52743e7637b764cff95a9312b76c5febd52443989782387"
 
 [[clause]]
 clause-id = "estsep.2"
@@ -500,7 +500,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 15
 end-line = 17
 canonical-text = "The two grades of\nfigure are reported in labelled separation, so a reader can see which part was measured and which was\nestimated."
-source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
+source-digest = "d1893b987dd142d9b52743e7637b764cff95a9312b76c5febd52443989782387"
 
 [[clause]]
 clause-id = "estsep.3"
@@ -509,7 +509,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 17
 end-line = 18
 canonical-text = "A quantity that is not known is reported as unknown, never silently entered as zero, because a\nzero sits in a total as though it were measured."
-source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
+source-digest = "d1893b987dd142d9b52743e7637b764cff95a9312b76c5febd52443989782387"
 
 [[clause]]
 clause-id = "estsep.4"
@@ -518,7 +518,7 @@ source-path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separa
 start-line = 18
 end-line = 19
 canonical-text = "Any figure derived from an estimate, including a ratio, a\npercentage, or a total that an estimated input feeds, is itself an estimate and is labelled as one."
-source-digest = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
+source-digest = "d1893b987dd142d9b52743e7637b764cff95a9312b76c5febd52443989782387"
 
 [[clause]]
 clause-id = "nofabr.1"
@@ -752,7 +752,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -761,7 +761,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.3"
@@ -770,7 +770,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.4"
@@ -779,7 +779,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.5"
@@ -788,7 +788,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.6"
@@ -797,7 +797,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.7"
@@ -806,7 +806,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.8"
@@ -815,7 +815,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.9"
@@ -824,7 +824,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.10"
@@ -833,7 +833,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "vfxcmt.11"
@@ -842,7 +842,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
-source-digest = "0d5bd4ff7c53c1d616a393041ddace0d4deaac3c6b66da0050b5f26dc3e97b8d"
+source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -2057,7 +2057,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 18
 canonical-text = "A finding raised by an adversarial verification pass is fixed, not argued away."
-source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
+source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
 
 [[clause]]
 clause-id = "fndfix.2"
@@ -2066,7 +2066,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
+source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
 
 [[clause]]
 clause-id = "fndfix.3"
@@ -2075,7 +2075,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
+source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
 
 [[clause]]
 clause-id = "fndfix.4"
@@ -2084,16 +2084,16 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 18
 end-line = 20
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
+source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
 
 [[clause]]
 clause-id = "fndfix.5"
 corpus-id = "fndfix"
 source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 20
-end-line = 22
-canonical-text = "A refutation by observation rules out only the\ncauses its probes exercised, so every cause of the condition the finding names is probed or the finding\nstays open for the rest."
-source-digest = "34ec19847a446a30723f62f2f03b27ba188142d0ed35e69c0edc9394fffe062e"
+end-line = 23
+canonical-text = "A refutation, by reading or by observation, is\nevidence offered toward that reclassification or toward showing the finding is not real, never a closure\nits author grants itself; it names each cause it ruled out, and the finding stays open for every other\ncause of the named condition."
+source-digest = "6dea95c2668dfe8781a3dc248aa3d8e61c47b0c06433fb14cd29a9ed8758c7a3"
 
 [[clause]]
 clause-id = "goalfd.1"

@@ -6,6 +6,7 @@ alwaysApply: true
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
 finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
-explicitly reclassifies it with a recorded rationale. A refutation by observation rules out only the
-causes its probes exercised, so every cause of the condition the finding names is probed or the finding
-stays open for the rest.
+explicitly reclassifies it with a recorded rationale. A refutation, by reading or by observation, is
+evidence offered toward that reclassification or toward showing the finding is not real, never a closure
+its author grants itself; it names each cause it ruled out, and the finding stays open for every other
+cause of the named condition.
