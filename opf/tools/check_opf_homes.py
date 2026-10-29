@@ -1612,36 +1612,68 @@ def retired_gate_name_findings(tools=None):
 
 
 # The homes-1 paths of the record seam and the adoption validators are deleted: homes 2 is the only
-# generation they accept, and every other value refuses. Outside self-test code (a function whose name
-# contains `self_test`, and every check_*.py module, which still build refused homes-1 inputs) and the
-# vendored tree, this AST scan of opf/tools fails on:
-#   1. any comparison or membership test with a homes operand (a name or attribute spelled exactly
-#      `homes`, or a homes_generation(...) call) other than ONE `==` against the integer 2 or the
-#      HOMES constant: `== 1`, `< 2`, `!= 2`, `>= 2`, `in (1,)`, `== True` and a chained comparison
-#      all fail, unless the exact comparison, in that module and function, is a documented exclusion
-#      (_HOMES_COMPARE_EXCLUSIONS, one reason each);
-#   2. a `homes` parameter or read in each adoption validator named in _HOMES1_FREE;
-#   3. any reference to the deleted record journal root: a string constant other than a docstring
-#      containing .aiqt/record/journal (unless a documented exclusion, _LEGACY_JOURNAL_EXCLUSIONS), the
-#      name JOURNAL_REL anywhere in _opf_record.py, or an attribute JOURNAL_REL read off the record
-#      module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
-# RESIDUAL, outside this gate: a generation held in a differently named variable (`gen = homes`), a
-# test that is not a comparison (`if homes:`, `not homes - 1`, a mapping or index keyed by the
-# generation), a comparison or path built at run time (string joins, getattr, an imported alias of the
-# record module), the journal path spelled in pieces, and docstrings and comments, which are prose.
+# generation they accept, and every other value refuses. A homes read is a name or attribute ending in
+# `homes`, a subscript, `.get(...)` or getattr(...) keyed by a string ending in `homes`, or a
+# homes_generation(...) call; a called name (`_directory_homes(plan)`) is not one. The HOMES constant is
+# the bare name HOMES, or HOMES read off a name the module binds only by importing _opf_store. Outside
+# self-test code (a function whose name contains `self_test`, and every check_*.py module, which still
+# build refused homes-1 inputs) and the vendored tree, this AST scan of opf/tools fails on:
+#   1. any comparison or membership test with a homes read anywhere in an operand (`homes - 1 == 0`,
+#      `int(homes) == 1`, `m["opf"]["homes"] == 1`) other than ONE `==` between a bare homes read and
+#      the integer 2 or the HOMES constant (element by element in a tuple `==`), or the type guard
+#      `type(<homes read>) is int` (or `is not int`): `== 1`, `< 2`, `!= 2`, `>= 2`, `in (1,)`,
+#      `== True` and a chained comparison all fail;
+#   2. a homes-1 fallthrough after a generation test, a test that is only `== 2` comparisons (no tuple
+#      `==`) and type guards joined by `and`, or its `not`: the path a failed test takes (an `if`'s
+#      `else`, its body under `not`, or the statements after an `if` whose body ends in return, raise,
+#      continue or break) must begin with `raise` or with another such test; the false arm of a
+#      conditional expression must be None; no `or` may follow it; and a `match` on a homes read holds
+#      only `case 2:` (or HOMES) arms and a final `case _:` that raises;
+#   3. a literal other than the integer 2 passed for a homes parameter (a keyword ending in `homes`, or
+#      the position of a parameter ending in `homes` of a function that opf/tools defines under that
+#      name), or set as such a parameter's default;
+#   4. a binding of the name HOMES other than _opf_store.py's module-level `HOMES = 2` and
+#      `from _opf_store import HOMES`, or an assignment to an attribute HOMES;
+#   5. a homes parameter or homes read in each adoption validator named in _HOMES1_FREE;
+#   6. any reference to the deleted record journal root: a string or bytes constant other than a
+#      docstring containing .aiqt/record/journal (unless a documented exclusion,
+#      _LEGACY_JOURNAL_EXCLUSIONS), the name JOURNAL_REL anywhere in _opf_record.py, or an attribute
+#      JOURNAL_REL read off the record module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
+# Rules 1 to 3 pass a site that is a documented exclusion (_HOMES_COMPARE_EXCLUSIONS, one reason each).
+# RESIDUAL, outside this gate: a generation held in or passed through a differently named variable
+# (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a test that
+# is not a comparison (`if homes:`, `not homes - 1`, a mapping or index keyed by the generation); a
+# `== 2` test joined with any other condition, used as a while or assert condition, or kept as a flag
+# (`is2 = homes == 2`) and branched on later; an `if` with no `else` whose body does not end in return,
+# raise, continue or break (its failed path is the code after it, which the passing path runs too); the
+# reader of a conditional expression's None false arm; a positional generation after a `*args`, or passed
+# to a function that opf/tools does not define under the called name; a comparison, binding or path
+# built at run time (string joins, getattr or setattr with a computed name, patch.object, a globals()
+# write, a name re-bound to the store or record module); the journal path spelled in pieces; and
+# docstrings and comments, which are prose.
 _HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_plan_sources",
                                   "_control_operand_findings")}
-# The comparisons outside the record seam and the adoption validators that may stay, with the reason each
-# is not a homes-1 arm those paths can reach. Keyed by (module, innermost function, exact comparison), so
-# the same comparison anywhere else still fails.
+# The comparisons, fallthroughs, literal arguments and defaults outside the record seam and the adoption
+# validators that may stay, with the reason each is not a homes-1 arm those paths can reach. Keyed by
+# (module, innermost function, exact text: the comparison, the `== 2` test before a fallthrough, the
+# call, or `<parameter>=<default>`), so the same text anywhere else still fails.
 _HOMES_COMPARE_EXCLUSIONS = {
     ("_opf_store.py", "_validate_base", "homes != HOMES"):
         "the manifest validator's refusal: any [opf].homes but the integer 2 is a fail-closed finding",
     ("_opf_adopt_plan.py", "_inventory", "homes != store.HOMES"):
         "the investigation planner's refusal: any generation but 2 refuses before anything is planned",
     ("_opf_store.py", "store_control_roots", "homes not in (1, 2)"):
-        "an unknown generation raises; the homes-1 control roots stay for the doctor's legacy containment "
-        "grading, which grades whatever store it is pointed at, not for any write path",
+        "an unknown generation raises. Outside self-test code, generation 1 is reached only through "
+        "_opf_check.classify_containment "
+        "when homes_generation reads 1 (the manifest does not declare exactly homes = 2 with spec_version "
+        "2.0.0), and it yields .working/imports alone. That classification feeds the doctor's containment "
+        "grading of whatever store it is pointed at, and the write guard (_opf_write_guard.plan_write_scope), "
+        "which refuses on its colliding list: fewer roots, fewer collisions. It stays because the doctor "
+        "grades legacy stores and the write guard plans from the doctor's classification, so the two agree. "
+        "No write plans against it: the guard's one production caller, opf record (_run_operation), passes "
+        "only a manifest _load_manifest admitted, VALID at spec_version 2.0.0, whose homes is the integer 2",
+    ("_opf_store.py", "store_control_roots", "homes == 2"):
+        "the same function's generation-1 roots (the conditional expression's false arm); the reason above",
     ("_opf_check.py", "imported_series_active", "_opf_store.homes_generation(manifest_data) >= 2"):
         "the one imported-series flag the doctor and the writers read; on an admitted (homes-2) store it is "
         "exactly the `== 2` grade, and below 2 it only switches the series off, opening no homes-1 path",
@@ -1652,11 +1684,27 @@ _HOMES_COMPARE_EXCLUSIONS = {
     ("_opf_check.py", "_check_evidence", "homes < 2"):
         "C-EVIDENCE-ENUM is inactive below homes 2 (spec 4.2): read-only grading",
     ("_opf_check.py", "classify_containment", "homes >= 2"):
-        "the doctor's containment grading of a legacy store's ordinary paths: read-only",
+        "the classification's evidence roots and staged roots, which outside self-test code only the "
+        "doctor's containment walks read (_check_containment, _check_canonical_store_files). The write guard "
+        "(_opf_write_guard.plan_write_scope) runs the same pure classification but reads only its "
+        "malformed and colliding lists, which neither comparison feeds, so neither decides a write",
     ("_opf_check.py", "_check_containment", "cls.homes >= 2"):
         "the doctor's containment grading of a legacy store's ordinary paths: read-only",
     ("_opf_check.py", "_validate_opened_store", "homes >= 2"):
         "the doctor's homes-2-only checks (C-EVIDENCE-ENUM, the reservation read): read-only grading",
+    ("_opf_check.py", "_has_active_import_run", "homes=1"):
+        "the partial-import substantiation default; each of its callers outside check_*.py passes the "
+        "generation (_validate_archive its own, the doctor the manifest's homes_generation)",
+    ("_opf_check.py", "_validate_archive", "homes=1"):
+        "the archive walk's default; both its callers pass the generation (archived_records its own, the "
+        "doctor the manifest's homes_generation)",
+    ("_opf_check.py", "archived_records", "homes=1"):
+        "the archived-record reader's default; opf record passes homes=ctx.homes (2 on the manifest "
+        "_load_manifest admitted), and the one call outside check_*.py that omits it is "
+        "_opf_worklog_regressions' _entry_point_regressions fixture; the reader writes nothing",
+    ("_opf_oplock.py", "_t_e4_distinct_nested_stores", "len(homes) == len(rels) + 1"):
+        "an oplock self-test vector counting the distinct lock anchors it collects in a set named homes; "
+        "no homes generation is read",
 }
 # String constants naming the deleted record journal root that may stay, with the reason each is not a
 # path any code builds or opens. Keyed by (module, innermost function or <module>).
@@ -1668,25 +1716,177 @@ _LEGACY_JOURNAL_EXCLUSIONS = {
         "the same disclosure in the plan's ancestry evidence text; no path is built from the text",
 }
 _LEGACY_RECORD_JOURNAL = ".aiqt/record/journal"
+# The parenthesized rule each kind of homes-1 finding names.
+_COMPARE_RULE = "only `== 2` may test a generation"
+_FALLTHROUGH_RULE = "a failed `== 2` test may only raise, or yield None in a conditional expression"
+_MATCH_RULE = "a match on a generation holds only `case 2:` arms and a final `case _:` that raises"
+_LITERAL_RULE = "a generation argument or default may only be the integer 2 or HOMES"
 
 
-def _homes_operand(node):
+def _names_legacy_journal(value):
+    return ((isinstance(value, str) and _LEGACY_RECORD_JOURNAL in value)
+            or (isinstance(value, bytes) and _LEGACY_RECORD_JOURNAL.encode("ascii") in value))
+
+
+def _homes_key(node):
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("homes")
+
+
+def _homes_read(node):
+    """A homes read: a name or attribute ending in `homes`, a subscript, `.get(...)` or getattr(...) keyed
+    by a string ending in `homes`, or a homes_generation(...) call."""
     if isinstance(node, ast.Call):
         func = node.func
-        return ((isinstance(func, ast.Name) and func.id == "homes_generation")
-                or (isinstance(func, ast.Attribute) and func.attr == "homes_generation"))
-    return ((isinstance(node, ast.Name) and node.id == "homes")
-            or (isinstance(node, ast.Attribute) and node.attr == "homes"))
+        if isinstance(func, ast.Attribute):
+            return func.attr == "homes_generation" or (func.attr == "get" and bool(node.args)
+                                                       and _homes_key(node.args[0]))
+        return isinstance(func, ast.Name) and (func.id == "homes_generation" or (
+            func.id == "getattr" and len(node.args) > 1 and _homes_key(node.args[1])))
+    if isinstance(node, ast.Subscript):
+        return _homes_key(node.slice)
+    return ((isinstance(node, ast.Name) and node.id.endswith("homes"))
+            or (isinstance(node, ast.Attribute) and node.attr.endswith("homes")))
 
 
-def _equals_two(node):
-    """One `==` between a homes operand and the integer 2 (type-exact) or the HOMES constant."""
-    if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
+def _homes_reads(node):
+    """Every homes read in `node`; the name a call is made through (`_directory_homes(plan)`) is not one."""
+    callees = {id(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)}
+    return [n for n in ast.walk(node) if id(n) not in callees and _homes_read(n)]
+
+
+def _homes_constant(node, module):
+    """The HOMES constant: the bare name (rule 4 holds every binding of it), or HOMES read off a name the
+    module binds only by importing _opf_store."""
+    return ((isinstance(node, ast.Name) and node.id == "HOMES")
+            or (isinstance(node, ast.Attribute) and node.attr == "HOMES" and isinstance(node.value, ast.Name)
+                and node.value.id in module["store"]))
+
+
+def _two(node, module):
+    return ((isinstance(node, ast.Constant) and type(node.value) is int and node.value == 2)
+            or _homes_constant(node, module))
+
+
+def _pair_equals_two(left, right, module):
+    if (isinstance(left, (ast.Tuple, ast.List)) and isinstance(right, (ast.Tuple, ast.List))
+            and len(left.elts) == len(right.elts)):
+        return all(_pair_equals_two(a, b, module) for a, b in zip(left.elts, right.elts)
+                   if _homes_reads(a) or _homes_reads(b))
+    read, other = (left, right) if _homes_read(left) else (right, left)
+    return _homes_read(read) and not _homes_reads(other) and _two(other, module)
+
+
+def _equals_two(node, module):
+    """One `==` between a bare homes read and the integer 2 (type-exact) or the HOMES constant; a tuple or
+    list `==` pairs element by element, and only the pairs holding a homes read are judged."""
+    return (len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq) and bool(_homes_reads(node))
+            and _pair_equals_two(node.left, node.comparators[0], module))
+
+
+def _type_guard(node):
+    """`type(<homes read>) is int` or `is not int`: a type check, not a generation test."""
+    left, right = node.left, node.comparators[0]
+    return (len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot))
+            and isinstance(left, ast.Call) and isinstance(left.func, ast.Name) and left.func.id == "type"
+            and len(left.args) == 1 and not left.keywords and _homes_read(left.args[0])
+            and isinstance(right, ast.Name) and right.id == "int")
+
+
+def _generation_test(test, module):
+    """(only, negated): whether `test` is only a generation test (`== 2` comparisons, none of them a tuple
+    `==`, and type guards, joined by `and`, at least one of them `== 2`), and whether `not` negates it."""
+    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    test = test.operand if negated else test
+    parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+    two = [p for p in parts if isinstance(p, ast.Compare) and _equals_two(p, module)
+           and not isinstance(p.left, (ast.Tuple, ast.List))]
+    return bool(two) and all(p in two or (isinstance(p, ast.Compare) and _type_guard(p)) for p in parts), negated
+
+
+def _refuses(stmts, module):
+    """Whether the path a failed generation test takes begins with `raise` or with another generation test."""
+    return bool(stmts) and (isinstance(stmts[0], ast.Raise) or (
+        isinstance(stmts[0], ast.If) and _generation_test(stmts[0].test, module)[0]))
+
+
+def _literal_generation(node):
+    """Whether `node` is a literal other than the integer 2, the only generation."""
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
         return False
-    other = node.comparators[0] if _homes_operand(node.left) else node.left
-    return ((isinstance(other, ast.Constant) and type(other.value) is int and other.value == 2)
-            or (isinstance(other, ast.Name) and other.id == "HOMES")
-            or (isinstance(other, ast.Attribute) and other.attr == "HOMES"))
+    return not (type(value) is int and value == 2)
+
+
+def _binds_homes(node, module):
+    """Whether `node` binds the name HOMES, or assigns an attribute HOMES, other than by _opf_store.py's
+    module-level `HOMES = 2` or `from _opf_store import HOMES`."""
+    if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+        name = node.id if isinstance(node, ast.Name) else node.attr
+        return name == "HOMES" and id(node) not in module["constant"]
+    if isinstance(node, ast.Import):
+        return any((a.asname or a.name.split(".")[0]) == "HOMES" for a in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return any((a.asname or a.name) == "HOMES" and not (
+            node.module == "_opf_store" and node.level == 0 and a.name == "HOMES") for a in node.names)
+    if isinstance(node, ast.arg):
+        return node.arg == "HOMES"
+    if isinstance(node, ast.MatchMapping):
+        return node.rest == "HOMES"
+    return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                              ast.MatchAs, ast.MatchStar)) and node.name == "HOMES")
+
+
+def _store_names(tree):
+    """The names a module binds only by importing _opf_store (`import _opf_store`, `... as store`)."""
+    imported, other = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                (imported if alias.name == "_opf_store" else other).add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            other.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            other.add(node.id)
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            other.add(node.rest)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                               ast.MatchAs, ast.MatchStar)) and node.name:
+            other.add(node.name)
+    return imported - other
+
+
+def _homes_definition(rel, tree):
+    """The target of _opf_store.py's module-level `HOMES = 2`, the one definition rule 4 admits."""
+    if rel != "_opf_store.py":
+        return set()
+    return {id(s.targets[0]) for s in tree.body if isinstance(s, ast.Assign) and len(s.targets) == 1
+            and isinstance(s.targets[0], ast.Name) and s.targets[0].id == "HOMES"
+            and isinstance(s.value, ast.Constant) and type(s.value.value) is int and s.value.value == 2}
+
+
+def _homes_parameters(trees):
+    """Each function name the scanned modules define with a parameter ending in `homes`, and the positions
+    a call may pass that parameter at (a method's counted with and without self or cls)."""
+    params = {}
+    for tree in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                positional = [a.arg for a in node.args.posonlyargs + node.args.args]
+                for at, name in enumerate(positional):
+                    if name.endswith("homes"):
+                        params.setdefault(node.name, set()).add(at)
+                        if positional[0] in ("self", "cls"):
+                            params[node.name].add(at - 1)
+    return params
+
+
+def _homes1_arm(module, owner, text, line, what, rule, findings):
+    if (module["rel"], owner, text) not in _HOMES_COMPARE_EXCLUSIONS:
+        findings.append("{}:{}: homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every "
+                        "other one refuses ({})".format(module["rel"], line, what, text, owner, rule))
 
 
 def _docstring_ids(tree):
@@ -1700,28 +1900,93 @@ def _docstring_ids(tree):
     return ids
 
 
-def _homes1_walk(node, rel, owner, free, findings, docstrings):
+def _homes1_walk(node, owner, module, findings):
+    rel = module["rel"]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         if "self_test" in node.name:
             return
-        if node.name in free:
-            args = node.args
+        args = node.args
+        if node.name in module["free"]:
             named = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
             named += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
-            reads = sorted({n.lineno for n in ast.walk(node) if isinstance(n, ast.Name) and n.id == "homes"})
-            if "homes" in named:
-                reads = sorted(set(reads) | {node.lineno})
+            reads = {n.lineno for n in _homes_reads(node)}
+            if any(name.endswith("homes") for name in named):
+                reads.add(node.lineno)
             findings.extend("{}:{}: {} names a homes generation again; it grades every row at homes 2".format(
-                rel, line, node.name) for line in reads)
+                rel, line, node.name) for line in sorted(reads))
+        else:
+            positional = args.posonlyargs + args.args
+            defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+            defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+            for arg, default in defaults:
+                if arg.arg.endswith("homes") and _literal_generation(default):
+                    _homes1_arm(module, node.name, "{}={}".format(arg.arg, ast.unparse(default)), default.lineno,
+                                "default", _LITERAL_RULE, findings)
         owner = node.name
-    if isinstance(node, ast.Compare) and any(_homes_operand(s) for s in [node.left] + node.comparators):
-        text = ast.unparse(node)
-        if not _equals_two(node) and (rel, owner, text) not in _HOMES_COMPARE_EXCLUSIONS:
-            findings.append("{}:{}: homes-1 arm `{}` in {} is reintroduced; homes 2 is the only generation "
-                            "and every other one refuses (only `== 2` may test a generation)".format(
-                                rel, node.lineno, text, owner))
-    if (isinstance(node, ast.Constant) and isinstance(node.value, str) and _LEGACY_RECORD_JOURNAL in node.value
-            and id(node) not in docstrings and (rel, owner) not in _LEGACY_JOURNAL_EXCLUSIONS):
+    if _binds_homes(node, module):
+        findings.append("{}:{}: the HOMES constant is bound again in {}; only _opf_store.py's module-level "
+                        "`HOMES = 2` defines it, and every `== HOMES` test reads it as 2".format(
+                            rel, node.lineno, owner))
+    if isinstance(node, ast.Compare) and _homes_reads(node) and not (
+            _equals_two(node, module) or _type_guard(node)):
+        _homes1_arm(module, owner, ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
+    # A failed generation test: an if's else, or what follows an if whose body leaves, must refuse.
+    for field in ("body", "orelse", "finalbody"):
+        stmts = getattr(node, field, None)
+        for at, stmt in enumerate(stmts if isinstance(stmts, list) else ()):
+            only, negated = _generation_test(stmt.test, module) if isinstance(stmt, ast.If) else (False, False)
+            if not only:
+                continue
+            if negated or stmt.orelse:
+                failed = stmt.body if negated else stmt.orelse
+            elif isinstance(stmt.body[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+                failed = stmts[at + 1:]
+            else:
+                continue    # no else, and a body that does not leave: the code after it is shared
+            if not _refuses(failed, module):
+                _homes1_arm(module, owner, ast.unparse(stmt.test.operand if negated else stmt.test),
+                            failed[0].lineno if failed else stmt.lineno, "arm after", _FALLTHROUGH_RULE, findings)
+    if isinstance(node, ast.IfExp):
+        only, negated = _generation_test(node.test, module)
+        failed = node.body if negated else node.orelse
+        if only and not (isinstance(failed, ast.Constant) and failed.value is None):
+            _homes1_arm(module, owner, ast.unparse(node.test.operand if negated else node.test), failed.lineno,
+                        "arm after", _FALLTHROUGH_RULE, findings)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        for value, alternative in zip(node.values, node.values[1:]):
+            only, negated = _generation_test(value, module)
+            if only and not negated:
+                _homes1_arm(module, owner, ast.unparse(value), alternative.lineno, "arm after", _FALLTHROUGH_RULE,
+                            findings)
+                break
+    if isinstance(node, ast.Match) and _homes_read(node.subject):
+        for at, case in enumerate(node.cases):
+            pattern = case.pattern
+            arm = isinstance(pattern, ast.MatchValue) and _two(pattern.value, module)
+            refusal = (at == len(node.cases) - 1 and isinstance(pattern, ast.MatchAs) and pattern.pattern is None
+                       and pattern.name is None and isinstance(case.body[0], ast.Raise))
+            if case.guard is not None or not (arm or refusal):
+                _homes1_arm(module, owner, "case " + ast.unparse(pattern), pattern.lineno, "arm", _MATCH_RULE,
+                            findings)
+                break
+            if refusal:
+                break
+        else:
+            _homes1_arm(module, owner, "match " + ast.unparse(node.subject), node.lineno, "arm", _MATCH_RULE,
+                        findings)
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        passed = [kw.value for kw in node.keywords if kw.arg is not None and kw.arg.endswith("homes")]
+        for at, arg in enumerate(node.args):
+            if isinstance(arg, ast.Starred):
+                break
+            if at in module["params"].get(name, ()):
+                passed.append(arg)
+        if any(_literal_generation(arg) for arg in passed):
+            _homes1_arm(module, owner, ast.unparse(node), node.lineno, "argument", _LITERAL_RULE, findings)
+    if (isinstance(node, ast.Constant) and _names_legacy_journal(node.value)
+            and id(node) not in module["docstrings"] and (rel, owner) not in _LEGACY_JOURNAL_EXCLUSIONS):
         findings.append("{}:{}: the deleted record journal root {} is named in {}; the record journal lives "
                         "only in the typed capability home".format(rel, node.lineno, _LEGACY_RECORD_JOURNAL, owner))
     legacy_name = ((rel == "_opf_record.py" and isinstance(node, ast.Name) and node.id == "JOURNAL_REL")
@@ -1732,18 +1997,23 @@ def _homes1_walk(node, rel, owner, free, findings, docstrings):
         findings.append("{}:{}: the deleted record journal constant JOURNAL_REL is referenced in {}; the record "
                         "journal lives only in the typed capability home".format(rel, node.lineno, owner))
     for child in ast.iter_child_nodes(node):
-        _homes1_walk(child, rel, owner, free, findings, docstrings)
+        _homes1_walk(child, owner, module, findings)
 
 
 def homes1_findings(tools=None):
     tools = _TOOLS if tools is None else tools
     findings = []
+    trees = []
     for path in sorted(tools.rglob("*.py")):
         rel = path.relative_to(tools).as_posix()
         if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        _homes1_walk(tree, rel, "<module>", _HOMES1_FREE.get(rel, ()), findings, _docstring_ids(tree))
+        trees.append((rel, ast.parse(path.read_text(encoding="utf-8"), filename=rel)))
+    params = _homes_parameters(tree for _rel, tree in trees)
+    for rel, tree in trees:
+        module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
+                  "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params}
+        _homes1_walk(tree, "<module>", module, findings)
     return findings
 
 
@@ -5667,30 +5937,50 @@ def _self_test_vectors():
                               store_source.count("\n") + 1, n, c)])
                 (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
     # No homes-1 path: outside self-test code the live tools tree tests a homes generation only by `== 2`
-    # (or a documented exclusion), the adoption validators name no generation, and nothing names the
-    # deleted record journal root. In a fixture tree holding the record and adoption modules, restoring one
-    # deleted line (the homes-1 arm of _record_journal_rel or of claim_ids, or the homes-1 default of
-    # validate_op) is red at that line, as is every non-equality form of an arm; the same comparison in
-    # self-test code, or in a check_*.py module, is not (refused homes-1 inputs are still built there).
+    # with no fallthrough, passes and defaults no literal generation but 2, and binds HOMES only where it is
+    # defined (each with its documented exclusions); the adoption validators name no generation, and
+    # nothing names the deleted record journal root. In a fixture tree holding the record and adoption
+    # modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of claim_ids, or the
+    # homes-1 default of validate_op) is red at that line, as is every non-equality form of an arm; the same
+    # comparison in self-test code, or in a check_*.py module, is not (refused homes-1 inputs are still
+    # built there).
     check("homes1-free-registry", lambda: _HOMES1_FREE == {"_opf_adopt.py": (
         "validate_op", "validate_plan", "_validate_plan_sources", "_control_operand_findings")})
     check("no-homes1-paths", lambda: homes1_findings() == [])
-    # Every documented exclusion carries a reason and still names a live site, so a stale one is red.
+    # Every documented exclusion carries a reason and still names a live site (a comparison, a test, a call
+    # or a parameter default), so a stale one is red.
     live_sites, live_strings = set(), set()
+    # The premises the store_control_roots and classify_containment reasons rest on: outside self-test code
+    # opf record's _run_operation is the write guard's one caller, and the guard reads only the
+    # classification's malformed and colliding lists.
+    guard_callers, guard_reads = set(), set()
     for path in sorted(_TOOLS.rglob("*.py")):
         if "_vendor" in path.relative_to(_TOOLS).parts or path.name.startswith("check_"):
             continue
         rel = path.relative_to(_TOOLS).as_posix()
-        stack = [(ast.parse(path.read_text(encoding="utf-8")), "<module>")]
+        stack = [(ast.parse(path.read_text(encoding="utf-8")), "<module>", False)]
         while stack:
-            node, owner = stack.pop()
+            node, owner, exempt = stack.pop()
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                owner = node.name
-            if isinstance(node, ast.Compare):
+                owner, exempt = node.name, exempt or "self_test" in node.name
+                args = node.args
+                positional = args.posonlyargs + args.args
+                live_sites.update((rel, owner, "{}={}".format(a.arg, ast.unparse(d))) for a, d in list(
+                    zip(positional[len(positional) - len(args.defaults):], args.defaults))
+                    + [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None])
+            if isinstance(node, (ast.Compare, ast.BoolOp, ast.Call)):
                 live_sites.add((rel, owner, ast.unparse(node)))
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and _LEGACY_RECORD_JOURNAL in node.value:
+            if isinstance(node, ast.Constant) and _names_legacy_journal(node.value):
                 live_strings.add((rel, owner))
-            stack.extend((child, owner) for child in ast.iter_child_nodes(node))
+            if (isinstance(node, ast.Call) and not exempt
+                    and getattr(node.func, "attr", getattr(node.func, "id", None)) == "plan_write_scope"):
+                guard_callers.add((rel, owner))
+            if (rel, owner) == ("_opf_write_guard.py", "plan_write_scope") and isinstance(node, ast.Attribute) \
+                    and isinstance(node.value, ast.Name) and node.value.id == "classification":
+                guard_reads.add(node.attr)
+            stack.extend((child, owner, exempt) for child in ast.iter_child_nodes(node))
+    check("homes1-write-guard-callers", lambda: guard_callers == {("_opf_record.py", "_run_operation")})
+    check("homes1-write-guard-reads", lambda: guard_reads == {"malformed", "colliding"})
     check("homes1-exclusions-reasoned", lambda: all(
         isinstance(r, str) and r.strip() for r in list(_HOMES_COMPARE_EXCLUSIONS.values())
         + list(_LEGACY_JOURNAL_EXCLUSIONS.values())))
@@ -5788,6 +6078,130 @@ def _self_test_vectors():
             "planted.py:10: the deleted record journal root {} is named in _path; the record journal lives only "
             "in the typed capability home".format(legacy)])
         (tree / "planted.py").unlink()
+        # The one literal generation argument the live tree held: restoring IMPORTS_REL's
+        # store_control_roots(1) is red at that line; the live store_control_roots(HOMES) is its clean flip.
+        check_text = (_TOOLS / "_opf_check.py").read_text(encoding="utf-8")
+        imports_live = "IMPORTS_REL = _opf_store.store_control_roots(_opf_store.HOMES)[0]\n"
+        (tree / "_opf_store.py").write_text((_TOOLS / "_opf_store.py").read_text(encoding="utf-8"), encoding="utf-8")
+        for planted, expect in (
+                (check_text.replace(imports_live, "IMPORTS_REL = _opf_store.store_control_roots(1)[0]\n", 1), [
+                    "_opf_check.py:{}: homes-1 argument `_opf_store.store_control_roots(1)` in <module> is "
+                    "reintroduced; homes 2 is the only generation and every other one refuses ({})".format(
+                        check_text[:check_text.find(imports_live)].count("\n") + 1, _LITERAL_RULE)]),
+                (check_text, [])):
+            (tree / "_opf_check.py").write_text(planted, encoding="utf-8")
+            check("homes1-imports-rel-" + ("red" if expect else "clean"), lambda e=expect: check_text.count(
+                imports_live) == 1 and [f for f in homes1_findings(tree) if f.startswith("_opf_check.py:")] == e)
+        (tree / "_opf_check.py").unlink()
+        (tree / "_opf_store.py").unlink()
+    # Each further form the scan closes, as a red module and its clean flip one edit away: the red module is
+    # red with exactly its finding (module, line, kind, text, function, rule) and the clean one is not.
+    arm_after, arm, argument, default = "arm after", "arm", "argument", "default"
+    raises = "        raise ValueError(homes)\n"
+    match_clean = ("def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n"
+                   "        case _:\n            raise ValueError(homes)\n")
+    roots = "def roots(homes):\n    return (homes,)\n\n\nIMPORTS = roots({})[0]\n"
+    rebound = "the HOMES constant is bound again in <module>; only _opf_store.py's module-level `HOMES = 2` " \
+              "defines it, and every `== HOMES` test reads it as 2"
+    names_generation = "{} names a homes generation again; it grades every row at homes 2"
+    gap_forms = (
+        # A fallthrough after `== 2`: what a failed test reaches must refuse.
+        ("fallthrough-after-return", "planted.py",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    raise ValueError(homes)\n",
+         (4, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-else", "planted.py",
+         "def home(homes):\n    if type(homes) is int and homes == 2:\n        root = 'typed'\n    else:\n"
+         "        root = 'fallback'\n    return root\n",
+         "def home(homes):\n    if type(homes) is int and homes == 2:\n        root = 'typed'\n    else:\n"
+         + raises + "    return root\n",
+         (5, arm_after, "type(homes) is int and homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-negated", "planted.py",
+         "def home(homes):\n    if not homes == 2:\n        return 'fallback'\n    return 'typed'\n",
+         "def home(homes):\n    if not homes == 2:\n" + raises + "    return 'typed'\n",
+         (3, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-conditional", "planted.py",
+         "def home(ctx):\n    return 'typed' if ctx.homes == 2 else 'fallback'\n",
+         "def home(ctx):\n    return 'typed' if ctx.homes == 2 else None\n",
+         (2, arm_after, "ctx.homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("fallthrough-or", "planted.py",
+         "def home(homes, other):\n    return homes == 2 or other\n",
+         "def home(homes, other):\n    return homes == 2 and other\n",
+         (2, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("match-case-1", "planted.py",
+         match_clean.replace("        case _:", "        case 1:\n            return 'legacy'\n        case _:"),
+         match_clean, (5, arm, "case 1", "home", _MATCH_RULE)),
+        ("match-no-refusal", "planted.py",
+         "def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n    return 'fallback'\n",
+         match_clean, (2, arm, "match homes", "home", _MATCH_RULE)),
+        # A generation read through an expression, a key or a longer name in a comparison.
+        ("arithmetic", "planted.py", "def home(homes):\n    return homes - 1 == 0\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "homes - 1 == 0", "home", _COMPARE_RULE)),
+        ("conversion", "planted.py", "def home(homes):\n    return int(homes) == 1\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "int(homes) == 1", "home", _COMPARE_RULE)),
+        ("conversion-two", "planted.py", "def home(homes):\n    return int(homes) == 2\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "int(homes) == 2", "home", _COMPARE_RULE)),
+        ("get", "planted.py", "def home(base):\n    return base.get('homes') == 1\n",
+         "def home(base):\n    return base.get('homes') == 2\n",
+         (2, arm, "base.get('homes') == 1", "home", _COMPARE_RULE)),
+        ("subscript", "planted.py", "def home(m):\n    return m['opf']['homes'] == 1\n",
+         "def home(m):\n    return m['opf']['homes'] == 2\n",
+         (2, arm, "m['opf']['homes'] == 1", "home", _COMPARE_RULE)),
+        ("suffix-name", "planted.py", "def home(declared_homes):\n    return declared_homes == 1\n",
+         "def home(declared_homes):\n    return declared_homes == 2\n",
+         (2, arm, "declared_homes == 1", "home", _COMPARE_RULE)),
+        ("getattr", "planted.py", "def home(ctx):\n    return getattr(ctx, 'homes') == 1\n",
+         "def home(ctx):\n    return getattr(ctx, 'homes') == 2\n",
+         (2, arm, "getattr(ctx, 'homes') == 1", "home", _COMPARE_RULE)),
+        ("tuple", "planted.py", "def home(m):\n    return (m.get('spec_version'), m.get('homes')) == ('2.0.0', 1)\n",
+         "def home(m):\n    return (m.get('spec_version'), m.get('homes')) == ('2.0.0', 2)\n",
+         (2, arm, "(m.get('spec_version'), m.get('homes')) == ('2.0.0', 1)", "home", _COMPARE_RULE)),
+        ("type-guard", "planted.py", "def home(homes):\n    return type(homes) is bool\n",
+         "def home(homes):\n    return type(homes) is int\n", (2, arm, "type(homes) is bool", "home", _COMPARE_RULE)),
+        # Only the real HOMES constant reads as 2.
+        ("rebound-constant", "planted.py", "HOMES = 1\n\n\ndef home(homes):\n    return homes == HOMES\n",
+         "from _opf_store import HOMES\n\n\ndef home(homes):\n    return homes == HOMES\n", (1, rebound)),
+        ("foreign-constant", "planted.py",
+         "import _opf_store\n\n\ndef home(homes, cfg):\n    return homes == cfg.HOMES\n",
+         "import _opf_store\n\n\ndef home(homes, cfg):\n    return homes == _opf_store.HOMES\n",
+         (5, arm, "homes == cfg.HOMES", "home", _COMPARE_RULE)),
+        ("rebound-store-alias", "planted.py",
+         "import _opf_store as store\n\n\ndef home(homes, store):\n    return homes == store.HOMES\n",
+         "import _opf_store as store\n\n\ndef home(homes):\n    return homes == store.HOMES\n",
+         (5, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
+        ("attribute-assignment", "planted.py", "import _opf_store\n\n_opf_store.HOMES = 1\n",
+         "import _opf_store\n\nGENERATION = _opf_store.HOMES\n", (3, rebound)),
+        # An adoption validator reads no generation, through a key or an attribute either.
+        ("validator-get", "_opf_adopt.py", "def validate_op(row):\n    return row.get('homes', 1)\n",
+         "def validate_op(row):\n    return row.get('op', 1)\n", (2, names_generation.format("validate_op"))),
+        ("validator-attribute", "_opf_adopt.py", "def validate_plan(plan):\n    return plan.homes\n",
+         "def validate_plan(plan):\n    return plan.ops\n", (2, names_generation.format("validate_plan"))),
+        ("validator-subscript", "_opf_adopt.py", "def _validate_plan_sources(rows):\n    return rows[0]['homes']\n",
+         "def _validate_plan_sources(rows):\n    return rows[0]['op']\n",
+         (2, names_generation.format("_validate_plan_sources"))),
+        # A literal generation passed for a homes parameter or set as its default.
+        ("literal-argument", "planted.py", roots.format("1"), roots.format("2"),
+         (5, argument, "roots(1)", "<module>", _LITERAL_RULE)),
+        ("literal-keyword", "planted.py", roots.format("homes=1"), roots.format("homes=2"),
+         (5, argument, "roots(homes=1)", "<module>", _LITERAL_RULE)),
+        ("literal-default", "planted.py", "def roots(homes=1):\n    return (homes,)\n",
+         "def roots(homes=2):\n    return (homes,)\n", (1, default, "homes=1", "roots", _LITERAL_RULE)),
+        # The deleted journal root as bytes.
+        ("bytes-journal", "planted.py", "def path():\n    return b'.aiqt/record/journal'\n",
+         "def path():\n    return b'.working/journals/record/journal'\n",
+         (2, "the deleted record journal root {} is named in path; the record journal lives only in the typed "
+             "capability home".format(_LEGACY_RECORD_JOURNAL))))
+    with tempfile.TemporaryDirectory(prefix="opf-homes-gap-") as tmp:
+        tree = Path(tmp)
+        for label, name, red, clean, finding in gap_forms:
+            expect = "{}:{}: ".format(name, finding[0]) + (finding[1] if len(finding) == 2 else (
+                "homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every other one "
+                "refuses ({})".format(*finding[1:])))
+            for source, expected in ((red, [expect]), (clean, [])):
+                (tree / name).write_text(source, encoding="utf-8")
+                check("homes1-gap-" + ("red-" if expected else "clean-") + label,
+                      lambda e=expected: homes1_findings(tree) == e)
+            (tree / name).unlink()
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)

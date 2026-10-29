@@ -112,9 +112,10 @@ EVIDENCE_FORMAT = _opf_store.EVIDENCE_INVENTORY_FORMAT
 INDEX_SUFFIX = ".index.toml"
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 # The legacy imports staging tree `.working/imports`, store scope and a sibling of the machine subdir: the
-# control root store_control_roots(1) reserves (spec 14.1). Nothing writes it since the import engine was
-# removed, but the reservation stands, so containment still registers it and grades its interior.
-IMPORTS_REL = _opf_store.store_control_roots(1)[0]
+# first control root store_control_roots reserves, at homes 2 as at every earlier generation (spec 14.1).
+# Nothing writes it since the import engine was removed, but the reservation stands, so containment still
+# registers it and grades its interior.
+IMPORTS_REL = _opf_store.store_control_roots(_opf_store.HOMES)[0]
 
 
 def _is_import_run_id(name):
