@@ -1740,6 +1740,7 @@ expected-check-ids = [
   "citeledger/check-lexings-differ-variant",
   "citeledger/check-split-fallback-variant",
   "citeledger/check-split-swallowed-variant",
+  "citeledger/check-split-quote-split-variants",
   "citeledger/check-split-stdin-taken-variant",
   "citeledger/check-split-fallback-dedup-cost",
   "citeledger/check-command-in-group",

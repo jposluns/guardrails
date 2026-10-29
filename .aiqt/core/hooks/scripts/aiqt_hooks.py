@@ -2320,12 +2320,15 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False, heredoc
     against: each segment, heredoc and span is then one lex's, so a heredoc's segment index is an index into
     that lex's list, and no uncertain '#' stops it.
 
-    split_delims True reads a here-document delimiter word that a backslash-newline splits (as
-    _parse_heredoc_delim reads the word, at a '<<' this lexer reads) as a quoted delimiter that holds a
-    newline, which no line can match, so its body runs to the end of the command: the reading the citation
-    check's split-delimiter fallback names files and later commands from (_citechk_commands), which scans
-    such a command only as written and never acts on this lex. The default False reads the joined word as
-    bash does, the reading every other caller relies on.
+    split_delims True reads a here-document delimiter word that a backslash-newline splits and that is
+    unquoted once it is removed (as _parse_heredoc_delim reads the word, at a '<<' this lexer reads: <<E\\,
+    a newline and OF), which this lexer otherwise refuses, as a quoted delimiter that holds a newline, which
+    no line can match, so its body runs to the end of the command: the reading the citation check's
+    split-delimiter fallback names files and later commands from (_citechk_commands), which scans such a
+    command only as written, never acts on this lex, and names text in that body that bash can run
+    (_citechk_swallowed). A split delimiter that is quoted once the backslash-newline is removed (<<'E'\\, a
+    newline and OF) is read as bash reads it under either value. The default False reads every joined word
+    as bash does, the reading every other caller relies on.
 
     An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
     holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
@@ -2783,9 +2786,12 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 if kind == "cannot":
                     if op == "<<":
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
-                        if split_delims and parsed is not None and "\\\n" in command[i + oplen:parsed[3]]:
-                            # A delimiter word a backslash-newline splits, read for the citation check as a
-                            # quoted delimiter holding a newline, which no line matches (_lex_command).
+                        if (split_delims and parsed is not None and not parsed[0]
+                                and "\\\n" in command[i + oplen:parsed[3]]):
+                            # A delimiter word a backslash-newline splits that is unquoted once it is removed,
+                            # which this lexer refuses: read for the citation check as a quoted delimiter
+                            # holding a newline, which no line matches (_lex_command). A split delimiter that
+                            # is quoted keeps the reading above, which is bash's.
                             parsed = (True, "\n", parsed[2], parsed[3])
                         if parsed is not None and parsed[0]:
                             # a QUOTED heredoc: queue its delimiter; the literal body is skipped at the next
@@ -24109,8 +24115,13 @@ def citation_read_recorder(data):
 # delimiter in such a command is named as not read, and so is each message or body file a lexing of a
 # split-delimiter command names (_CITECHK_SPLIT_UNREAD: the file is never read or judged, since that
 # lexing's reading of the command is not bash's), and so is a git commit or gh pr create or edit that the
-# kind search finds in a here-document's body such a lexing read (_CITECHK_SWALLOWED: the lexer takes the
-# rest of the command as that body, while bash can still run it). Where the walk through such a string
+# kind search finds in a here-document's body such a lexing read (_CITECHK_SWALLOWED: for a split delimiter
+# that is unquoted once the backslash-newline is removed, the lexer takes the rest of the command as that
+# body, while bash can still run it), and so is text in such a body that bash can run as commands where
+# that search finds none there (_CITECHK_SWALLOWED_TEXT, _citechk_swallowed), and so is a message or body
+# value that such a lexing names where the scan as written found no command to scan (_CITECHK_UNSCANNED).
+# A split delimiter that is quoted once the backslash-newline is removed is lexed as bash reads it, so a
+# command after its body is lexed and gives its own item. Where the walk through such a string
 # meets what it does not follow as bash does (_citechk_substituted_ops), the command is read both ways, and
 # so is a command
 # whose two lexings differ, or of which only one lexes (_citechk_commands), unless a backslash-newline splits
@@ -24168,14 +24179,34 @@ _CITECHK_SPLIT_UNREAD = ("a backslash-newline splits a here-document delimiter i
                          "not read: no citation in it was checked")
 # Why a git commit or gh pr create or edit that the kind search finds in a here-document's body a lexing of
 # a split-delimiter command read is named as not read: the check's lexing (split_delims, _lex_command) reads
-# the split delimiter as one no line can match and takes the rest of the command as that body, while bash
-# can end the here-document at its own delimiter and run the command, whose message or body files and
-# standard input only a lexed reading could name, and the scan of the command as written reads them only as
-# text.
+# a split delimiter that is unquoted once the backslash-newline is removed as one no line can match and
+# takes the rest of the command as that body, while bash can end the here-document at its own delimiter and
+# run the command, whose message or body files and standard input only a lexed reading could name, and the
+# scan of the command as written reads them only as text.
 _CITECHK_SWALLOWED = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
                       "reads the rest of the command as that here-document's body and this command, which "
                       "bash can still run, was scanned only as text: no message or body file it names was "
                       "read and no standard input it reads was seen")
+# Why text in such a body that bash can run as commands is named as not read where the kind search finds no
+# git commit or gh pr create or edit in it (_citechk_swallowed): that search misses a command word that
+# quotes split (g'i't, "g"it, g"h"), which bash runs as git or gh, so a command there could read a message
+# or body file or standard input that no reading of the command names, and the body is named rather than
+# allowed silently.
+_CITECHK_SWALLOWED_TEXT = ("a backslash-newline splits a here-document delimiter in this command, so a "
+                           "lexing reads the rest of the command as that here-document's body, which holds "
+                           "text bash can run as commands; the search for a git commit or gh pr create or "
+                           "edit finds none there, but it misses one whose command word quotes split (such "
+                           "as g'i't), so a command there was not read: no message or body file it names "
+                           "was read and no standard input it reads was seen")
+# Why a message or body value (-m, --message, -b, --body) that a lexing of a split-delimiter command names is
+# named as not read where the kind search finds no command in the command's text: the scan as written, which
+# would read that value as text, then scans nothing (_citechk_as_written), so the value is named rather than
+# dropped silently (_citechk_items).
+_CITECHK_UNSCANNED = ("a backslash-newline splits a here-document delimiter in this command, so the command "
+                      "is scanned only as written, and the search for a git commit or gh pr create or edit "
+                      "in its text finds none (it misses one whose command word quotes split, such as "
+                      "g'i't), so this value, which a lexing of it names, was not scanned: no citation in "
+                      "it was checked")
 # Why standard input (-F -) is named as not read where it is not the command's own here-document: a pipe,
 # a file or descriptor redirection, or a redirection of the command's group supplies it, and this check
 # reads only the command's text and the files it names.
@@ -24597,8 +24628,10 @@ def _citechk_split_delim(command, spans):
     and OF, or <<"E\\, a newline and OF" it reads the quoted EOF. Two places count for "raw". One is a '<<'
     that the lexer reads as a quoted here-document's operator, whose delimiter word, as _parse_heredoc_delim
     reads it, holds a backslash-newline: the check lexes with split_delims (_lex_command), which reads that
-    delimiter, quoted or not once the backslash-newline is removed, as one that holds a newline, which no
-    line can, so the body runs to the end of the command and a later command in it gives no item. A
+    delimiter, where it is unquoted once the backslash-newline is removed, as one that holds a newline, which
+    no line can, so the body runs to the end of the command and a later command in it gives no item (text
+    there that bash can run is named, _citechk_swallowed), and reads one that is quoted as bash does, so a
+    later command gives its own item. A
     backslash-newline inside single quotes ('E\\, a newline and OF'), which bash keeps, counts too, although
     bash also runs that body to the end, and so does a '<<' inside $((...)), which the lexer reads as an
     operator and bash as a shift (each a note the command did not earn, and a message or body file the
@@ -24671,11 +24704,45 @@ def _citechk_kind(command):
     first, as bash removes it and as the lexer does, so 'git \\<newline> commit' and 'gi\\<newline>t commit'
     are found as the lexer finds them, and 'git\\<newline>commit', which bash runs as gitcommit, is not. It
     removes no quote, so a word a quote splits (g'i't) is not found; over the bound that leaves the row
-    unlabelled and never drops it (_citechk_too_long)."""
+    unlabelled and never drops it (_citechk_too_long), and in a here-document's body that a lexing of a
+    split-delimiter command runs to the end of the command, text that bash can run is named whatever it
+    finds (_citechk_swallowed)."""
     joined = command.replace("\\\n", "")
     hits = sorted((found.start(1), kind) for word, regex, kind in _CITECHK_RAW_KINDS if word in joined
                   for found in [regex.search(joined)] if found)
     return hits[0][1] if hits else None
+
+
+def _citechk_swallowed(command, end, body):
+    """Whether body, the body a lexing of command with split_delims (_lex_command) gave the here-document whose
+    '<<' ends at index end, holds text that bash can run as commands: only where that lexing read its
+    delimiter word, which a backslash-newline splits and which is unquoted once it is removed, as one that no
+    line matches, so the body runs to the end of the command, and the body is not blank. Every other
+    here-document is read as main's lexer reads it (False). A lexing gives such a body to at most the first
+    such here-document of a line, since that body runs to the end of the command, so every later one there
+    has an empty body and costs only the parse of its delimiter. Where no '(', backquote, '[' or '${' comes
+    before the body, bash reads that '<<' as a here-document operator at the top level, whose body ends at
+    the first line that is exactly the joined delimiter once each backslash-newline is removed (leading tabs
+    stripped for the <<- form), as bash reads an unquoted here-document's lines: a line after that one that
+    is not blank is text bash can run, and with no such line bash runs nothing after the operator's line.
+    Elsewhere bash can read the '<<' as an arithmetic shift ($((...)), ((...)), $[...], a subscript,
+    ${x:...}) and run every line of the body, or end a body inside a substitution at a line that only
+    begins with the delimiter (bash 5.3), so any line that is not blank counts. Each mark is searched for up
+    to the start of the body, read as the length of command less that of body (body drops its last newline
+    and, for <<-, leading tabs, so that reaches at least the body's start), and the time this takes grows
+    with the command's length."""
+    parsed = _parse_heredoc_delim(command, end, len(command))
+    if parsed is None or parsed[0] or "\\\n" not in command[end:parsed[3]] or not body.strip():
+        return False
+    lines = body.replace("\\\n", "").split("\n")
+    reach = len(command) - len(body)
+    if all(command.find(mark, 0, reach) == -1 for mark in ("(", "`", "[", "${")):
+        _quoted, delim, strip, _next = parsed
+        close = next((k for k, line in enumerate(lines) if (line.lstrip("\t") if strip else line) == delim), None)
+        if close is None:
+            return False
+        lines = lines[close + 1:]
+    return any(line.strip() for line in lines)
 
 
 def _citechk_as_written(command, cwd, parse, reason):
@@ -24725,8 +24792,9 @@ def _citechk_commands(command, cwd, deadline):
     (_lex_command, _MAIN_HASH_READING), with split_delims. A command in which a backslash-newline splits a
     here-document delimiter where bash
     reads one (_citechk_split_delim, from the places the first lexing that lexes shows) is scanned as one
-    that does not lex: at an operator the lexer reads, quoted or not, these lexings read a delimiter that no
-    line can match and run that body to the end of the command, later commands included, and in a command
+    that does not lex: at an operator the lexer reads, these lexings read a delimiter that is unquoted once
+    the backslash-newline is removed as one that no line can match and run that body to the end of the
+    command, later commands included, and read one that is quoted as bash does, and in a command
     substitution in a
     double-quoted string, where bash reads that delimiter as unquoted, the lexer reads as text a body bash
     expands. A raw command names, as not read, the expansion of each here-document with an unquoted delimiter
@@ -24749,12 +24817,16 @@ def _citechk_commands(command, cwd, deadline):
     file give two entries, and one spelling that names a file in each of two repositories gives one), never
     read or judged, since no lexing's reading of the command is bash's, standard input that -F - names
     there is named as not read too (_CITECHK_STDIN_UNSEEN) unless it is the command's own here-document,
-    whose text the scan as written already reads, and a git commit or gh pr create or edit that the kind
-    search (_citechk_kind) finds in a here-document's body a lexing read is named as not read as well
-    (_CITECHK_SWALLOWED: these lexings read a split delimiter as one no line can match and take the rest of
-    the command, which bash can still run, as that body; a spelling that search misses there, such as a git
-    word quotes split, is not named); so a citation only such a file or stream holds is not judged, but the
-    note and the row say it was not read. A command is found after any reserved words
+    whose text the scan as written already reads, a message or body value is named as not read
+    (_CITECHK_UNSCANNED) where the kind search (_citechk_kind) finds no command in the text, so that scan
+    reads nothing, and a git commit or gh pr create or edit that the kind search finds in a here-document's
+    body a lexing read is named as not read as well (_CITECHK_SWALLOWED: these lexings read a split
+    delimiter that is unquoted once the backslash-newline is removed as one no line can match and take the
+    rest of the command, which bash can still run, as that body); where that search finds none in such a
+    body, which it does for a command word that quotes split, such as g'i't, the body is named as not read
+    whenever it holds text that bash can run (_CITECHK_SWALLOWED_TEXT, _citechk_swallowed), never allowed
+    silently; so a citation only such a file, stream or text holds is not judged, but the note and the row
+    say it was not read. A command is found after any reserved words
     that begin its segment (_CITECHK_LEADING), so one
     inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
     the group as a whole (after its '}') is not the command's own. A message or body file resolves against
@@ -24785,21 +24857,32 @@ def _citechk_commands(command, cwd, deadline):
         # The scan as written cannot read a message or body file, so each one a lexing that lexed names is
         # kept as a not-read entry (never evaluated: no lexing's reading of the command is bash's), named
         # once per option spelling and path as the command writes it, however many lexings name it, on the
-        # scan's item where the kind search found one, else as the lexed command's own item. A commit or pr
-        # command that the kind search finds in a here-document's body a lexing read is kept the same way
-        # (these lexings read a split delimiter as one no line can match, so the rest of the command, which
-        # bash can still run, is that body to them): the scan as written reads its message or body files and
-        # its standard input only as text, so the entry says they were not read.
+        # scan's item where the kind search found one, else as the lexed command's own item, and where it
+        # found none, so the scan reads nothing, each message or body value a lexing names is kept too. A
+        # commit or pr command that the kind search finds in a here-document's body a lexing read is kept the
+        # same way (these lexings read a split delimiter that is unquoted once the backslash-newline is
+        # removed as one no line can match, so the rest of the command, which bash can still run, is that
+        # body to them): the scan as written reads its message or body files and its standard input only as
+        # text, so the entry says they were not read. Where that search finds none in such a body, which it
+        # does for a command word that quotes split (g'i't), the body is kept as text not read whenever bash
+        # can run text in it (_citechk_swallowed). The lexer records one '<<' span per here-document it
+        # reads, in the order of the heredocs list, so each body is paired with its operator.
+        scanned = bool(out)  # whether the scan as written reads the command's text
         found = set()  # the entries already named, so a later lexing or option adds only entries new to
         # it: a set, so many distinct entries cost time that grows with their number, not its square
-        for segments, heredocs, _spans in readings:
-            items = _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False)
-            for _index, _before, body in heredocs:
+        for segments, heredocs, spans in readings:
+            items = _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False, scanned=scanned)
+            places = [end for start, end in spans if command.startswith("<", start)]  # past each '<<'
+            for at, (_index, _before, body) in enumerate(heredocs):
                 kind = _citechk_kind(body)
                 if kind is not None:
                     items.append({"cmd": kind, "parse": "raw", "texts": [],
                                   "unread": [("{} in a here-document's body".format(kind.replace("-", " ")),
                                               _CITECHK_SWALLOWED)], "repo": cwd, "base": None})
+                elif at < len(places) and _citechk_swallowed(command, places[at], body):
+                    items.append({"cmd": None, "parse": "raw", "texts": [],
+                                  "unread": [("text in a here-document's body", _CITECHK_SWALLOWED_TEXT)],
+                                  "repo": cwd, "base": None})
             for item in items:
                 unread = []
                 for entry in item["unread"]:
@@ -24842,7 +24925,7 @@ def _citechk_shape(segments, heredocs):
                for red in seg.redirects]) for seg in segments], heredocs)
 
 
-def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
+def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scanned=True):
     """The git commit and gh pr create or edit commands of one lexing of a Bash command (segments and the
     heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
     a read attempted of each message and body file it names (one that cannot be read named in unread).
@@ -24851,7 +24934,9 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
     named with _CITECHK_STDIN_UNSEEN (taken once, at the first option that names it, whatever its
     spelling, as when it is evaluated) unless it is
     the command's own here-document, whose text the scan of the command as written already reads, and an
-    inline value, whose text that scan also reads, earns no entry."""
+    inline value, whose text that scan also reads, earns no entry. scanned False says that scan reads
+    nothing (the kind search found no command in the text, _citechk_as_written): each inline value is then
+    named in unread with _CITECHK_UNSCANNED, once per option spelling."""
     stdin = {}  # segment index: (redirects before it, body) of its last here-document
     for index, before, body in heredocs:
         stdin[index] = before, body
@@ -24901,6 +24986,11 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True):
             if name in ("-B", "--base") and kind != "git-commit":
                 item["base"] = value
             elif not evaluate:
+                if name in inline_names and not scanned:
+                    entry = ("{} value".format(name), _CITECHK_UNSCANNED)
+                    if entry not in item["unread"]:
+                        item["unread"].append(entry)
+                    continue
                 if name not in file_names:
                     continue
                 if value == "-":
@@ -25667,7 +25757,9 @@ def citation_read_check(data):
     counted), a missing session id, a body file that cannot be read, a body on standard input it cannot
     see, a message or body file a lexing of a command with a split here-document delimiter names
     (_CITECHK_SPLIT_UNREAD, never read or judged), a commit or pr command the kind search finds in a
-    here-document's body a lexing of such a command read (_CITECHK_SWALLOWED), the expansion of a
+    here-document's body a lexing of such a command read (_CITECHK_SWALLOWED), text that bash can run in such
+    a body where that search finds none (_CITECHK_SWALLOWED_TEXT), a message or body value such a lexing
+    names where that search finds no command in the command's text (_CITECHK_UNSCANNED), the expansion of a
     here-document with an unquoted delimiter in a command that does not lex or that is read both ways
     (_citechk_commands; the note says why it was), a command longer than _CITECHK_COMMAND_MAX characters,
     whatever its text names, which is neither lexed nor scanned (_citechk_too_long; that bound is checked
