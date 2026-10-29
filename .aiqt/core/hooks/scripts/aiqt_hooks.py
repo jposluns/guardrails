@@ -24158,13 +24158,18 @@ _CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
 # takes only that segment's first git or gh (an atomic group), so a search reads the command about once;
 # it finds what \bgit\b[^\n;&|]*\bcommit\b finds first, since a later git in a segment has no commit after
 # it where the first has none, and that plain form, which tries each later git again, takes time that
-# grows with the square of a segment's length.
-_CITECHK_RAW_KINDS = (("git", re.compile(r"(?:^|(?<=[\n;&|]))(?>[^\n;&|]*?(\bgit\b))[^\n;&|]*\bcommit\b"),
-                       "git-commit"),
-                      ("gh", re.compile(r"(?:^|(?<=[\n;&|]))(?>[^\n;&|]*?(\bgh\b))[^\n;&|]*\bpr\s+create\b"),
-                       "gh-pr-create"),
-                      ("gh", re.compile(r"(?:^|(?<=[\n;&|]))(?>[^\n;&|]*?(\bgh\b))[^\n;&|]*\bpr\s+edit\b"),
-                       "gh-pr-edit"))
+# grows with the square of a segment's length. Each pattern begins with the newline, ';', '&' or '|' that
+# ends the segment before (the text searched is given a newline first, so the first segment has one too),
+# so a search passes from one of those characters to the next instead of trying the pattern at each
+# character; the commit (pr) word begins the tail and its leading \b is read after it, by a lookbehind, so
+# the search back from a segment's end for that word passes each other character without trying the tail
+# there; and one pattern judges a segment's first gh once for both pr create and pr edit, pr create first
+# (group 2), so a gh word followed by both gives gh-pr-create, as ordering the two kinds by position and
+# then by name gives it. A segment is then read about twice for each of the two words.
+_CITECHK_RAW_KINDS = (("git", re.compile(r"[\n;&|](?>[^\n;&|]*?(\bgit\b))[^\n;&|]*(commit)(?<=\bcommit)\b"),
+                       ("git-commit",)),
+                      ("gh", re.compile(r"[\n;&|](?>[^\n;&|]*?(\bgh\b))(?:[^\n;&|]*pr(?<=\bpr)\s+(create)\b"
+                                        r"|[^\n;&|]*pr(?<=\bpr)\s+edit\b)"), ("gh-pr-create", "gh-pr-edit")))
 # Why the expansions of an unquoted here-document in such a command are named as not read: in a command that
 # does not lex, and in one read both ways (_citechk_commands).
 _CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
@@ -24443,9 +24448,14 @@ def _citechk_expanded_heredocs(command):
     and none is named ('x <<EOF', whose closing quote opens a quote that does not close), and bash reads no
     here-document there. A '<<' inside an arithmetic expansion $((...)) that holds no newline, quote,
     backslash, backtick or $( is a shift and is passed over (_citechk_operators); one in a $((...)) that
-    spans lines, or in another arithmetic form, ((x<<2)), let or $[...], is named."""
+    spans lines, or in another arithmetic form, ((x<<2)), let or $[...], is named. A word that begins just
+    after the '<<' with a single or double quote is quoted, and _parse_heredoc_delim reads it as quoted or
+    not at all, so it is passed over without that parse: a command of many quoted here-documents costs a
+    look at each."""
     text, out = command.replace("\\\n", ""), []
     for at in _citechk_operators(text):
+        if text.startswith(("'", '"'), at + 2):
+            continue
         parsed = _parse_heredoc_delim(text, at + 2, len(text))
         if parsed is not None and not parsed[0]:
             out.append(parsed[1])
@@ -24617,7 +24627,7 @@ def _citechk_substituted_ops(command, start, end):
         yield _CITECHK_OPEN_AT_QUOTE
 
 
-def _citechk_split_delim(command, spans):
+def _citechk_split_delim(command, spans, delims=None):
     """How the citation check reads command, a command that lexes, from the places the lexer's reading of it
     shows (spans, as _lex_command reports them): ("raw", None) where a backslash-newline splits a
     here-document delimiter at a place where bash reads one, ("both", what) where the walk through a
@@ -24649,7 +24659,9 @@ def _citechk_split_delim(command, spans):
     lies before that backslash-newline and a string after that '<' cannot change how bash or the lexer
     reads one; a double-quoted string with no '$' or backtick holds no substitution and is passed over. Each
     span is visited once and the command is not lexed again, so the time this takes grows with the
-    command's length."""
+    command's length. Where delims is a dict, each quoted here-document's delimiter parsed here is kept in
+    it under the index just past its '<<', so the fallback's _citechk_swallowed reads it there instead of
+    parsing it again."""
     join = command.rfind("\\\n")
     if join == -1:
         return "lexed", None
@@ -24659,6 +24671,8 @@ def _citechk_split_delim(command, spans):
             break
         if command[start] == "<":  # a quoted here-document's '<<', which the lexer reads
             parsed = _parse_heredoc_delim(command, end, n)
+            if delims is not None:
+                delims[end] = parsed
             if parsed is not None and "\\\n" in command[end:parsed[3]]:
                 return "raw", None
             continue
@@ -24700,7 +24714,8 @@ def _citechk_keeps_stdin(red):
 
 def _citechk_kind(command):
     """The first git commit, gh pr create or gh pr edit that command's text names, the kind whose git or gh
-    word comes first (_CITECHK_RAW_KINDS), or None where it names none. Each backslash-newline is removed
+    word comes first (_CITECHK_RAW_KINDS; pr create where one gh word is followed by both), or None where it
+    names none. Each backslash-newline is removed
     first, as bash removes it and as the lexer does, so 'git \\<newline> commit' and 'gi\\<newline>t commit'
     are found as the lexer finds them, and 'git\\<newline>commit', which bash runs as gitcommit, is not. It
     removes no quote, so a word a quote splits (g'i't) is not found; over the bound that leaves the row
@@ -24708,12 +24723,17 @@ def _citechk_kind(command):
     split-delimiter command runs to the end of the command, text that bash can run is named whatever it
     finds (_citechk_swallowed)."""
     joined = command.replace("\\\n", "")
-    hits = sorted((found.start(1), kind) for word, regex, kind in _CITECHK_RAW_KINDS if word in joined
-                  for found in [regex.search(joined)] if found)
-    return hits[0][1] if hits else None
+    text, hits = None, []
+    for word, regex, kinds in _CITECHK_RAW_KINDS:
+        if word in joined:
+            text = text or "\n" + joined  # a newline before the first segment, as before every later one
+            found = regex.search(text)
+            if found:
+                hits.append((found.start(1), kinds[0] if found.group(2) else kinds[-1]))
+    return min(hits)[1] if hits else None
 
 
-def _citechk_swallowed(command, end, body):
+def _citechk_swallowed(command, end, body, delims=None):
     """Whether body, the body a lexing of command with split_delims (_lex_command) gave the here-document whose
     '<<' ends at index end, holds text that bash can run as commands: only where that lexing read its
     delimiter word, which a backslash-newline splits and which is unquoted once it is removed, as one that no
@@ -24730,8 +24750,12 @@ def _citechk_swallowed(command, end, body):
     begins with the delimiter (bash 5.3), so any line that is not blank counts. Each mark is searched for up
     to the start of the body, read as the length of command less that of body (body drops its last newline
     and, for <<-, leading tabs, so that reaches at least the body's start), and the time this takes grows
-    with the command's length."""
-    parsed = _parse_heredoc_delim(command, end, len(command))
+    with the command's length. The delimiter is read from delims where _citechk_split_delim parsed it
+    there, so each one is parsed once for both."""
+    if delims is not None and end in delims:
+        parsed = delims[end]
+    else:
+        parsed = _parse_heredoc_delim(command, end, len(command))
     if parsed is None or parsed[0] or "\\\n" not in command[end:parsed[3]] or not body.strip():
         return False
     lines = body.replace("\\\n", "").split("\n")
@@ -24851,7 +24875,8 @@ def _citechk_commands(command, cwd, deadline):
             continue
     if not readings:
         return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
-    parse, why = _citechk_split_delim(command, readings[0][2])
+    delims = {}  # each '<<' delimiter the walk parsed, by the index past its '<<', for _citechk_swallowed
+    parse, why = _citechk_split_delim(command, readings[0][2], delims)
     if parse == "raw":
         out = _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
         # The scan as written cannot read a message or body file, so each one a lexing that lexed names is
@@ -24879,7 +24904,7 @@ def _citechk_commands(command, cwd, deadline):
                     items.append({"cmd": kind, "parse": "raw", "texts": [],
                                   "unread": [("{} in a here-document's body".format(kind.replace("-", " ")),
                                               _CITECHK_SWALLOWED)], "repo": cwd, "base": None})
-                elif at < len(places) and _citechk_swallowed(command, places[at], body):
+                elif at < len(places) and _citechk_swallowed(command, places[at], body, delims):
                     items.append({"cmd": None, "parse": "raw", "texts": [],
                                   "unread": [("text in a here-document's body", _CITECHK_SWALLOWED_TEXT)],
                                   "repo": cwd, "base": None})
@@ -24943,6 +24968,12 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
     out = []
     for index, seg in enumerate(segments):
         argv = seg.argv
+        # A first word that is no reserved word and no assignment (it holds no '=') is the command word, so
+        # a segment whose first word is neither git nor gh, by its basename, is passed over on that one
+        # judgement: a command of many one-word segments costs one look at each, not the walk below.
+        if argv and argv[0] not in _CITECHK_LEADING and "=" not in argv[0] \
+                and argv[0].rsplit("/", 1)[-1] not in ("git", "gh"):
+            continue
         while argv and argv[0] in _CITECHK_LEADING:
             if argv[0] == "time":  # time, then its -p, then a '--', as bash reads them
                 skip = 2 if argv[1:2] == ["-p"] else 1
@@ -25096,20 +25127,25 @@ def _citechk_extract(text, deadline):
             if level is None and _CITECHK_VERIFIER.match(line, heading.end()):
                 level = depth
         exempt = level is not None or line.startswith("Verifier-cited: ")
-        line, urls = _CITECHK_URL.subn(_citechk_blank, line)
-        counts["url"] += urls
         spans = []
-        for found in _CITECHK_FORM_A.finditer(line):
-            spans.append(found.span())
-            if _CITECHK_LOG.match(line, found.end()):
-                counts["log"] += 1
-                continue
-            cites.append(_citechk_cite(found.group(1), found.group(2), found.group(3), "A", exempt, counts))
-        for found in _CITECHK_FORM_B.finditer(line):
-            if any(found.start() < end and start < found.end() for start, end in spans):
-                continue
-            cites.append(_citechk_cite(found.group(3).rstrip("."), found.group(1), found.group(2), "B", exempt,
-                                       counts))
+        # A URL, an autolink and a FORM_A citation each hold a ':', and a FORM_B one begins with the word line,
+        # whose l only an l or L matches under its (?i), so a line without them is not searched for them: a
+        # text of many short lines costs a look for each, not three patterns, at each line.
+        if ":" in line:
+            line, urls = _CITECHK_URL.subn(_citechk_blank, line)
+            counts["url"] += urls
+            for found in _CITECHK_FORM_A.finditer(line):
+                spans.append(found.span())
+                if _CITECHK_LOG.match(line, found.end()):
+                    counts["log"] += 1
+                    continue
+                cites.append(_citechk_cite(found.group(1), found.group(2), found.group(3), "A", exempt, counts))
+        if "l" in line or "L" in line:
+            for found in _CITECHK_FORM_B.finditer(line):
+                if any(found.start() < end and start < found.end() for start, end in spans):
+                    continue
+                cites.append(_citechk_cite(found.group(3).rstrip("."), found.group(1), found.group(2), "B",
+                                           exempt, counts))
     return [cite for cite in cites if cite is not None], counts
 
 
