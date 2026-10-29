@@ -536,13 +536,15 @@ def _fsync_parent(root_fd, relpath):
 def _fsync_path_dir(path):
     """Durability flush of a directory by path. O_NOFOLLOW refuses a symlinked FINAL component (cheap
     defence in depth). After the F1 containment work this is used ONLY for journal_root inside acquire_lock
-    and release_lock, where jr_fd is not in scope; every txn-tree fsync goes through a contained fd instead.
+    and release_lock when a caller hands them a plain path rather than a JournalAt (the adoption journal's
+    apply, reconcile and init-store paths all hand a JournalAt, so they never reach it); every txn-tree
+    fsync goes through a contained fd instead.
     RESIDUAL (disclosed): a fsync makes no content mutation and discloses nothing, so following an ANCESTOR
     symlink on journal_root's path here flushes an unintended directory but can neither write off-tree nor
     leak. The co-located lock-file operations (the O_EXCL create in acquire_lock, which POSIX refuses a
     symlinked final `lock` for, and the unlink in release_lock) likewise address journal_root by absolute
-    path as the lock protocol's design; fully containing that journal_root-level lock protocol beneath a
-    threaded journal-root fd is a separate hardening beyond F1's txn-dir-containment scope."""
+    path for such a plain-path caller; handed a JournalAt, they and the flush are made beneath its
+    descriptor instead."""
     fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)

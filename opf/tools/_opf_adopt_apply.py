@@ -5264,7 +5264,11 @@ def _init_store(op_row, context=None):
     run_adopt_transaction takes) before observing anything it acts on and holds it across the
     substrate's whole run, so no adoption transaction can interleave between the reconcile-first
     check, the preflights and the publication; the substrate's own operation mutex is taken inside
-    it (lock order: adoption journal, then substrate mutex).
+    it (lock order: adoption journal, then substrate mutex). As on the apply and reconcile paths, the
+    lock is taken, read back and released beneath the journal directory descriptor the handler holds
+    (_journal.JournalAt), never by resolving the journal path; that path must still name the held
+    directory once the lock is taken, and a release whose outcome cannot be observed there names the
+    lock as one that may remain (_init_store_release).
 
     Durable intent, recovery and reversal: before the substrate runs, the run's init-store
     transaction captures preimages (every creation proved absent) and publishes an INTENT binding
@@ -5358,15 +5362,30 @@ def _init_store_run(op_row, context):
         try:
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
             jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+            jr_st = os.fstat(jr_fd)
+            jr_id = (jr_st.st_dev, jr_st.st_ino)    # the journal directory this run holds
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("cannot prepare the adoption journal {} ({}); nothing "
                                   "written (fail-closed)".format(JOURNAL_REL, exc))
+        # beneath the held jr_fd, where it is read back and released, never by the journal path (as on the
+        # apply and reconcile paths): a rename of the product root or an ancestor cannot move it away from there
+        lock_root = _journal.JournalAt(journal_root, jr_fd)
         try:
-            _journal.acquire_lock(journal_root, SESSION_ID)
+            _journal.acquire_lock(lock_root, SESSION_ID)
         except _journal.JournalError as exc:
             raise AdoptApplyError("cannot take the adoption journal lock ({}); nothing "
                                   "written (fail-closed)".format(exc))
         held = True
+        # a peer takes the lock by the journal path, so this one excludes a peer only while that path still
+        # resolves to the directory it was taken in (_reconcile_journal_unbound)
+        try:
+            unbound = _reconcile_journal_unbound(root_fd, jr_id)
+        except (_journal.JournalError, OSError) as exc:
+            raise AdoptApplyError("cannot bind the adoption journal lock to the journal this run holds ({}); "
+                                  "nothing written beyond the journal directories (fail-closed)".format(exc))
+        if unbound is not None:
+            raise AdoptApplyError("after this run took the journal lock, {}; nothing written beyond the journal "
+                                  "directories (fail-closed)".format(unbound))
         # Under the ONE lock both writers share (the shell's transactions take this same lock), so
         # nothing can interleave between these observations and the substrate's publication.
         _owner, opened = journal_state(root_fd, journal_root)
@@ -5442,14 +5461,42 @@ def _init_store_run(op_row, context):
                                   "({}); reconcile() reverses it (fail-closed)".format(exc))
         return schema._ok()
     finally:
-        if held:
-            try:
-                _journal.release_lock(journal_root)
-            except (_journal.JournalError, OSError):
-                pass   # a leftover lock refuses the next run into reconcile(), never a silent seize
-        if jr_fd is not None:
-            _journal._close_fd_quietly(jr_fd)
-        store._close_fd_exc_safe(root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            if held:
+                _init_store_release(lock_root, root_fd, jr_fd, jr_id, inflight)
+        finally:
+            if jr_fd is not None:
+                _journal._close_fd_quietly(jr_fd)
+            store._close_fd_exc_safe(root_fd)
+
+
+def _init_store_release(lock_root, root_fd, jr_fd, jr_id, inflight):
+    """Release the journal lock init-store took, beneath the held journal descriptor (lock_root), and read
+    back what it left there (_lock_after_release). A lock left at the journal path still bound to that
+    directory refuses the next run into reconcile(), never a silent seize, so it is left as it is. One whose
+    presence cannot be observed (the journal path no longer resolves to the held directory, or the read
+    fails) is named as one that may remain: a refusal with nothing in flight, appended to an AdoptApplyError
+    in flight, a note on any other exception in flight."""
+    fault = None
+    try:
+        _journal.release_lock(lock_root)
+    except (_journal.JournalError, OSError) as exc:
+        fault = exc
+    try:
+        _lock_after_release(root_fd, jr_fd, jr_id, None)
+        return
+    except (_journal.JournalError, OSError) as unseen:
+        said = ("whether the journal lock this run took stays could not be observed ({}){}; it was taken and "
+                "released beneath the journal directory this run holds (st_dev {}, st_ino {}), so {}/lock may "
+                "remain there".format(_journal._msg_said(unseen), "" if fault is None else
+                                      ", and its release raised {}".format(_journal._msg_said(fault)),
+                                      jr_id[0], jr_id[1], JOURNAL_REL))
+    if inflight is None:
+        raise AdoptApplyError("the init-store transaction completed, but {} (fail-closed)".format(said))
+    if isinstance(inflight, AdoptApplyError):
+        raise AdoptApplyError("{}; {}".format(inflight, said)) from inflight
+    inflight.add_note(said)
 
 
 # --- the registration ops (slice 4): register-unmanaged and repoint-consumer --------------------------
@@ -19158,6 +19205,43 @@ def _init_store_self_test(check):
                       why, [e["path"] for e in adm], adirs))
         finally:
             store._close_fd_exc_safe(rfd)
+
+    # the product root renamed aside and an empty journal made at its path just before init-store takes the
+    # journal lock, a later precondition refusing, and a read-only directory at the journal path at the release:
+    # the lock is taken and released beneath the journal directory this run holds, so no lock of this run's
+    # stays anywhere (red when init-store takes and releases its lock by the journal path: it stays there)
+    from unittest import mock
+    real_acquire, real_release = _journal.acquire_lock, _journal.release_lock
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve() / "product"
+        os.mkdir(root)
+        aside = Path(str(root) + ".aside")
+        made = _journal_root(root)
+
+        def root_swap_then_acquire(journal_root, session_id):
+            os.rename(root, aside)
+            os.makedirs(made)
+            return real_acquire(journal_root, session_id)
+
+        def release_read_only(journal_root):
+            os.chmod(made, 0o500)
+            return real_release(journal_root)
+
+        def record_refused(_product_root):
+            raise AdoptApplyError("INJECTED-RECORD-REFUSAL")
+        with mock.patch.object(_journal, "acquire_lock", root_swap_then_acquire), \
+                mock.patch.object(_journal, "release_lock", release_read_only), \
+                mock.patch.object(sys.modules[__name__], "_init_store_record", record_refused):
+            res = dispatch(row, ctx(root))
+        left = []
+        for jr in (made, aside / JOURNAL_REL):
+            if os.path.isdir(jr):
+                os.chmod(jr, 0o700)
+                if os.path.lexists(jr / "lock"):
+                    left.append(str(jr / "lock"))
+        check("init-store-root-renamed-before-lock-no-lock-left",
+              refused(res, "INJECTED-RECORD-REFUSAL") and not left,
+              observed="left={!r} findings={!r}".format(left, res.findings))
 
     if shutil.which("git") is None:
         check("init-store-git-available", False)
