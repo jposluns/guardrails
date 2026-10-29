@@ -17,8 +17,8 @@
 # that the gate also parses and checks (validate_examples). No writer consumes them in this release;
 # `opf record import --batch` does not exist, and the procedure marks that step not yet executable.
 format = "opf.prompt-pack/v1"
-version = "0.7.1"
-digest = "sha256:e69a271c26449d5dd070bbfed55486d080d5cbd90fe08626d57bda78bb0c2fcc"
+version = "0.7.2"
+digest = "sha256:8ccdca6469da108e2cad87970e63bec20c9e026f80e55c954ef33d4e91f0c9c1"
 
 [[members]]
 path = "adopt/SKILL.md"
@@ -30,11 +30,11 @@ sha256 = "02ef9143f2bd829546ec306c23cf035e71f73a9d5307e5db285aeca4913a4bcf"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "d665a67bb34556c74da284b4b69568195b4f93ded26dd4c911d9689a9c6688a3"
+sha256 = "f3fe2d0fb62f8669e7bafa759ed4e06977036d7ce31a8425a13203886a41a39e"
 
 [[members]]
 path = "import/SKILL.md"
-sha256 = "2557ac6f3307e3b520647b540a2108f2a8079c7dab8e4c40393b28bd154c62b6"
+sha256 = "d7e8dc06a08b531e3a7e7919da737d47f0321a35172fc7faff9233198b7df8eb"
 
 [[members]]
 path = "import/examples/autonomous_decision.batch.toml"

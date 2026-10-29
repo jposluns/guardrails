@@ -63,7 +63,11 @@ defines, and every surface's tooling-status sentences from before the tooling in
 validated base 2.0.0 stores, is searched over its whole file's normalized text and is red wherever it lands
 (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
-deleted sentence restored there stays green.
+deleted sentence restored there stays green. Every file under opf/prompt-pack, each pack member and
+its manifest found by walking the directory, and the implementation prompt are searched the same way
+for every registered retired surface sentence and for the stems of the tooling-status sentences from
+before the tooling initialized and validated base 2.0.0 stores (status_retired_findings); other
+wording in those files stays unprotected.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D), and a
@@ -268,6 +272,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import html
 import re
 import tempfile
+import tomllib
 import unicodedata
 from pathlib import Path
 
@@ -281,6 +286,8 @@ ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt.html"
 ADOPT_GUIDE = SPEC.parents[1] / "site" / "adopt.md"
 RECORD_INDEXES = SPEC.parents[1] / "site" / "record-indexes.html"
 CORE_FILES = SPEC.parents[1] / "site" / "core-files.html"
+PROMPT_PACK = SPEC.parents[1] / "prompt-pack"
+IMPLEMENTATION_PROMPT = SPEC.parent / "OPF-IMPLEMENTATION-PROMPT.md"
 
 
 class _Descriptive(str):
@@ -1588,6 +1595,36 @@ def surface_findings(texts=None):
         for fragment in _SURFACE_RETIRED.get(path, ()):
             if fragment in body:
                 findings.append("surface {} restores retired text: {}".format(path.name, fragment))
+    return findings
+
+
+# Retired tooling-status wording outside the registered surfaces: every file under opf/prompt-pack
+# (each pack member and the manifest, found by walking the directory, so a member added later is
+# covered without registering it) and the implementation prompt. Each registered retired surface
+# sentence, and each stem of the tooling-status sentences from before the tooling initialized and
+# validated base 2.0.0 stores, present in a file's normalized text is a finding.
+_STATUS_RETIRED_STEMS = (
+    "does not yet implement base 2.0.0",
+    "does not yet implement spec 2.0.0",
+    "still initializes and validates stores at base 1.2.0",
+)
+
+
+def _status_retired_paths():
+    return sorted(path for path in PROMPT_PACK.rglob("*") if path.is_file()) + [IMPLEMENTATION_PROMPT]
+
+
+def status_retired_findings(texts=None):
+    texts = {path: path.read_text(encoding="utf-8") for path in _status_retired_paths()} if texts is None else texts
+    fragments = tuple(dict.fromkeys(_STATUS_RETIRED_STEMS + tuple(
+        fragment for retired in _SURFACE_RETIRED.values() for fragment in retired)))
+    findings = []
+    for path, text in texts.items():
+        body = _surface_text(text)
+        for fragment in fragments:
+            if fragment in body:
+                findings.append("{} restores retired text: {}".format(
+                    path.relative_to(SPEC.parents[1]).as_posix(), fragment))
     return findings
 
 
@@ -5495,6 +5532,38 @@ def _self_test_vectors():
             check("surface-retired-flip-" + path.name + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   frag not in nb and f in surface_findings(m))
+    # The retired tooling-status scan reads every prompt-pack member: its scope is the manifest and
+    # exactly the manifest's member rows, plus the implementation prompt, and the live files are green.
+    # Each stem planted in each file turns it red, every registered retired surface sentence planted
+    # in the import member does too, and so does the import member's own retired base 2.0.0 sentence.
+    statuses = {path: path.read_text(encoding="utf-8") for path in _status_retired_paths()}
+    pack_rows = tomllib.loads(statuses[PROMPT_PACK / "pack.toml"])["members"]
+    check("status-retired-scope", lambda: set(statuses) == {PROMPT_PACK / "pack.toml", IMPLEMENTATION_PROMPT} | {
+        PROMPT_PACK / row["path"] for row in pack_rows} and len(pack_rows) == 16)
+    check("status-retired-contract", lambda: not status_retired_findings(statuses))
+    check("status-retired-default-read", lambda: not status_retired_findings())
+    for path in statuses:
+        label = path.relative_to(SPEC.parents[1]).as_posix()
+        for stem in _STATUS_RETIRED_STEMS:
+            mutated = dict(statuses)
+            mutated[path] = statuses[path] + "\n" + stem + "\n"
+            check("status-retired-flip-" + label + "-" + stem,
+                  lambda f=label + " restores retired text: " + stem, m=mutated: f in status_retired_findings(m))
+    import_member = PROMPT_PACK / "import" / "SKILL.md"
+    import_label = import_member.relative_to(SPEC.parents[1]).as_posix()
+    for fragment in dict.fromkeys(fragment for retired in _SURFACE_RETIRED.values() for fragment in retired):
+        mutated = dict(statuses)
+        mutated[import_member] = statuses[import_member] + "\n" + fragment + "\n"
+        check("status-retired-surface-flip-" + fragment,
+              lambda f=import_label + " restores retired text: " + fragment, m=mutated: f in status_retired_findings(m))
+    current = ("  (section 4.5). The reference tooling initializes and validates base 2.0.0 stores with\n"
+               "  `homes = 2` (section 16.1).\n")
+    old = "  (section 4.5). The reference tooling does not yet implement base 2.0.0 (section 4.2).\n"
+    restored = dict(statuses)
+    restored[import_member] = statuses[import_member].replace(current, old, 1)
+    check("status-retired-import-old-sentence",
+          lambda: statuses[import_member].count(current) == 1 and restored[import_member].count(old) == 1 and
+          status_retired_findings(restored) == [import_label + " restores retired text: does not yet implement base 2.0.0"])
     # Retired gate names: the live tools tree, this module included, spells neither. In a fixture
     # tree, the store module with either alias assignment restored, or a nested module reading it,
     # is refused at that line; a non-.py file naming both is out of scope. The vectors iterate their
@@ -7901,7 +7970,7 @@ def main(argv=None):
             return 2
         spec_text = SPEC.read_text(encoding="utf-8")
         findings = (contract_findings(spec_text) + keyword_findings()
-                    + surface_findings() + informative_findings(spec_text)
+                    + surface_findings() + status_retired_findings() + informative_findings(spec_text)
                     + retired_gate_name_findings())
         for finding in findings:
             print("check_opf_homes: " + finding)

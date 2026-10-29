@@ -864,6 +864,14 @@ reason = "test-code"
 
 [[site]]
 path = "opf/tools/check_opf_homes.py"
+function = "_self_test_vectors"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "opf/tools/check_opf_homes.py"
 function = "boundary_self_test"
 form = "call"
 count = 1

@@ -141,9 +141,9 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   validator refuses a `spec_version` above 2.0.0 as a fail-closed INVALID finding naming the
   tooling-upgrade remedy, refuses one below 2.0.0 as a fail-closed INVALID finding, and refuses a
   manifest that omits `[opf].homes` or gives any value other than the integer `2` (section 9.2;
-  step 8). Section 16.1 says the reference tooling "still initializes and validates stores at base
-  `1.2.0`, a pre-release format this specification does not define", so its verdict on your store
-  says nothing about conformance; that is expected and is not a fault in your store.
+  step 8). Section 16.1 says the reference tooling "initializes and validates base 2.0.0 stores
+  with `homes = 2`, and it makes no claim of conformance to this specification", so its verdict on
+  your store is not a conformance verdict.
 - **One implementation model.** OPF-SPEC.md, section 16.1 (Implementation conformance) says "The
   base defines one implementation model and no implementation conformance classes: a declared
   scope, exclusion, profile, or posture MUST NOT waive a base requirement, and current-format
