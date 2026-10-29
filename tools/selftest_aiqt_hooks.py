@@ -10564,8 +10564,12 @@ _CLK_PARITY = ("LEASE_MAX_BYTES", "TRANSCRIPT_PREFIX_BYTES", "_SESS_RE", "_LEASE
 def _clock_parity_problems(hook_text, preview_text):
     """The shared definitions whose code differs between the handlers in hook_text and the preview Stop hook in
     preview_text, compared as syntax trees with docstrings dropped and the handlers' prefixed names read back."""
-    hook = _clock_definitions(ast.parse(hook_text))
-    preview = _clock_definitions(ast.parse(preview_text))
+    return _clock_parity_definition_problems(_clock_definitions(ast.parse(hook_text)),
+                                             _clock_definitions(ast.parse(preview_text)))
+
+
+def _clock_parity_definition_problems(hook, preview):
+    """_clock_parity_problems over the two sides' parsed definitions ({name: node}, _clock_definitions)."""
     out = []
     for kind, shared in (("fsw", _FSW_PARITY), ("clk", _CLK_PARITY)):
         names = _CLOCK_HOOK_NAMES[kind]
@@ -10578,6 +10582,43 @@ def _clock_parity_problems(hook_text, preview_text):
             elif _clock_shape(ours, back) != _clock_shape(theirs):
                 out.append("{}: {} differs from .preview/stamp-truth-stop.py".format(kind, name))
     return out
+
+
+def _clock_parity_mutants(hook):
+    """(label, mutated hook definitions, the one parity problem it must be reported as) for every shared definition
+    of either handler: its value (an assignment) or body (a function) changed; its name in aiqt_hooks changed, so
+    the map no longer finds it; and, through _CLOCK_HOOK_NAMES, each prefixed name its value or body reads, and a
+    function's own name, changed to another prefixed name of the same handler."""
+    import copy
+    for kind, shared in (("fsw", _FSW_PARITY), ("clk", _CLK_PARITY)):
+        names = _CLOCK_HOOK_NAMES[kind]
+        prefixed = sorted(names.values())
+        differs = "{}: {{}} differs from .preview/stamp-truth-stop.py".format(kind)
+        for name in shared:
+            new = names[name]
+            node = copy.deepcopy(hook[new])
+            if isinstance(node, ast.Assign):
+                node.value = ast.Tuple(elts=[node.value, ast.Constant(value=None)], ctx=ast.Load())
+            else:
+                node.body.append(ast.Pass())
+            yield "{} {} value or body".format(kind, name), dict(hook, **{new: node}), differs.format(name)
+            moved = {key: value for key, value in hook.items() if key != new}
+            moved[new + "_moved"] = hook[new]
+            yield "{} {} definition name".format(kind, name), moved, "{}: {} is missing from aiqt_hooks".format(
+                kind, name)
+            is_function = isinstance(hook[new], ast.FunctionDef)
+            read = sorted({n.id for n in ast.walk(hook[new] if is_function else hook[new].value)
+                           if isinstance(n, ast.Name) and n.id in prefixed})
+            for target, own in ([(new, True)] if is_function else []) + [(item, False) for item in read]:
+                other = next(item for item in prefixed if item != target)
+                node = copy.deepcopy(hook[new])
+                if own:
+                    node.name = other
+                else:
+                    next(n for n in ast.walk(node if is_function else node.value)
+                         if isinstance(n, ast.Name) and n.id == target).id = other
+                yield ("{} {} name map {} to {}".format(kind, name, target, other), dict(hook, **{new: node}),
+                       differs.format(name))
 
 
 def _test_clock_hooks(failures, tmp):
@@ -10788,7 +10829,8 @@ def _test_clock_hooks(failures, tmp):
             failures.append("(clock-manifest-rows) the {} manifest row must carry {!r}, got {!r}".format(
                 hook_id, want, {key: row.get(key) for key in want}))
 
-    # (fsw-parity, clk-parity) the code shared with the preview Stop hook, and a mutant the comparison must catch.
+    # (fsw-parity, clk-parity) the code shared with the preview Stop hook, and the mutants the comparison must catch:
+    # one edit of the hook text, then every mutant _clock_parity_mutants makes of each shared definition.
     hook_text = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
     preview_text = (repo_root() / ".preview" / "stamp-truth-stop.py").read_text(encoding="utf-8")
     for problem in _clock_parity_problems(hook_text, preview_text):
@@ -10797,6 +10839,13 @@ def _test_clock_hooks(failures, tmp):
     if mutant == hook_text or _clock_parity_problems(mutant, preview_text) != [
             "fsw: SCHED_GAP_TOKENS differs from .preview/stamp-truth-stop.py"]:
         failures.append("(clock-parity-mutant) a changed SCHED_GAP_TOKENS must be the one parity problem reported")
+    hook_definitions = _clock_definitions(ast.parse(hook_text))
+    preview_definitions = _clock_definitions(ast.parse(preview_text))
+    for label, mutated, want in _clock_parity_mutants(hook_definitions):
+        got = _clock_parity_definition_problems(mutated, preview_definitions)
+        if got != [want]:
+            failures.append("(clock-parity-definition-mutant) {}: must be the one parity problem {!r}, got {!r}".format(
+                label, want, got))
 
     # (clk-preview-dup) a plugin control whose preview copy stays published is documented as a pair to keep one of.
     preview_ids = {entry["id"] for entry in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "preview.toml")

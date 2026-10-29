@@ -37200,8 +37200,9 @@ def _pending_alarm_message(handler_name, seconds):
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt. It prints and flushes
+    UserPromptSubmit/PostToolUse handler, or a warn-only PreToolUse one (HANDLER_EVENT class
+    PRETOOL_WARN_ONLY): a non-blocking systemMessage on exit 0, so no error on these paths can wedge
+    a session, trap a teammate, block a human prompt, or block a tool call. It prints and flushes
     the note and returns the exit code 0, so main returns it directly (a note constructor's call is
     only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
     entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
@@ -37292,7 +37293,8 @@ def main(argv):
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
-    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2).
+    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2), save a warn-only one
+    # (HANDLER_EVENT class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS), which WARNS on exit 0 too.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
@@ -37300,12 +37302,12 @@ def main(argv):
     handler_name = mode
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
     # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
-    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture). A fail-open mode must not
-    # exit 2 and must still run its handler (a stop guard's deliberate deny included), so it restores
-    # SIG_DFL for this one short-lived hook process, re-probes, and notes the restore; SIG_DFL is
-    # SIGCHLD's normal disposition, signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open
-    # handlers reach waits for its child. If the re-probe still fails, it warns without running the
-    # handler.
+    # success. A fail-closed mode (a PreToolUse one not classed PRETOOL_WARN_ONLY) refuses (exit 2). A
+    # fail-open mode (a warn-only PreToolUse one included) must not exit 2 and must still run its
+    # handler (a stop guard's deliberate deny included), so it restores SIG_DFL for this one short-lived
+    # hook process, re-probes, and notes the restore; SIG_DFL is SIGCHLD's normal disposition,
+    # signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open handlers reach waits for its
+    # child. If the re-probe still fails, it warns without running the handler.
     unobservable = _child_status_refusal()
     if unobservable is not None:
         if not is_fail_open:
@@ -37324,8 +37326,9 @@ def main(argv):
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
-            # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
-            # stop guard), not even on a malformed invocation: WARN and exit 0. The warn print raising
+            # A fail-open handler's ERROR path (a Stop one's, or a warn-only PreToolUse one's) never exits 2
+            # (a deliberate deny does, via the orchestration stop guard), not even on a malformed
+            # invocation: WARN and exit 0. The warn print raising
             # (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
             try:
                 return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
@@ -37357,15 +37360,16 @@ def main(argv):
                 # is named.
                 detail = _exception_text(exc)
                 if is_fail_open:
-                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
-                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
-                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
-                    # keeps the 0.
+                    # A fail-open handler's ERROR path never exits 2: surface a non-blocking warning and exit
+                    # 0, so no Stop payload (including a bare '{' or any garbage) can ever wedge the session
+                    # and no warn-only PreToolUse payload can block the call. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
                     except BaseException:
                         return 0
-                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # A fail-closed PreToolUse hook that cannot read its payload cannot clear the action, so it
+                # fails CLOSED.
                 # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
                 _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
                 return 2
@@ -37381,15 +37385,16 @@ def main(argv):
                                     "stderr text")
             except Exception as exc:  # a handler crash is an unreadable result
                 if is_fail_open:
-                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
-                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # Same event-aware posture for a crash inside a fail-open handler (e.g. a Stop detector
+                    # that throws on a pathological message, or a warn-only PreToolUse check): WARN and exit
+                    # 0, never exit 2. The warn print raising (a
                     # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(
                             handler_name, "handler crash: {}".format(_exception_text(exc)))
                     except BaseException:
                         return 0
-                # A PreToolUse handler crash fails closed (block), not pass.
+                # A fail-closed PreToolUse handler crash fails closed (block), not pass.
                 _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
                     handler_name, _exception_text(exc)))
                 return 2
