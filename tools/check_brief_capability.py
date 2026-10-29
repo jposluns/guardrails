@@ -10,7 +10,38 @@ command line in the text the family is addressed by (S1 to S3), unless a closed 
 signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
 RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
-`read-only-sandbox`) no rule applies and the result is OK.
+`read-only-sandbox`) no execution rule applies; the PREFLIGHT rules below apply to every family.
+
+PREFLIGHT (the input paths a brief names; read over the whole brief, line by line, before scope is applied):
+
+  P1 relative input    ADVISORY. The brief names a workdir (the word workdir, work dir or working directory)
+                       and an input by a relative path: a token with a slash whose last component has a file
+                       suffix (`tools/t.py`, `.aiqt/core/x.toml`), or that opens with `./` or `../`. A relative
+                       path resolves against the worker's own scratch (its working directory), not the workdir.
+  P2 outside workdir   HARD. The family's row says reads-outside-workdir = "no", the brief declares a workdir
+                       (the first absolute path after the word workdir on its line), and it names an absolute
+                       path that is neither that workdir nor under it, read lexically (`..` folded, no link
+                       followed: /w/repo/x is under /w/repo, /w/repository is not). "undeclared" and "yes" never
+                       fire, and with no declared workdir the rule does not fire.
+  P3 missing at pin    HARD. A line that opens (once markup is skipped) with REVIEWED HEAD or BRIEF-PIN and a
+                       commit of 7 to 40 hex digits pins a revision, and a relative path the brief names (`./`
+                       dropped; `../` paths are not repository-relative and are skipped) does not exist at it in
+                       the repository the lint is pointed at (--repo, default this repository), read with
+                       `git cat-file -e <commit>:<path>` from the object store, never the working tree. A pin
+                       that does not resolve to one commit (unknown, ambiguous), a git that cannot be launched or
+                       times out, or a pin with no repository to read is CANNOT_EVALUATE, never a pass.
+  P4 no hand-back      ADVISORY. The family's row says handback = "yes", a sentence holds a delivery verb (return,
+                       paste, print, send, show, include, quote, ...) not negated and a large output (a whole,
+                       entire, full or complete file, source, diff, log or output; a diff; a patch), and no line
+                       names a hand-back file (the words hand-back file or path and an absolute path).
+
+What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
+sandbox); that is the dispatcher's check, made where the worker runs. It does not follow symbolic links, so a
+path under the workdir lexically can lead outside it; it does not know which relative paths are inputs and
+which are files the brief asks the worker to create, so a new file named under a pin refuses (P3) and must be
+named without its path or added after the pin is moved; it reads only the path shapes above (a path split by a
+line break, inside a URL, after a colon such as `<rev>:<path>`, or with no suffix and no `./` is not read); and
+reads-outside-workdir is what the table declares, not a measurement.
 
 TEXT. Format characters (Unicode category Cf: a byte order mark, zero-width and bidirectional
 controls) are removed first; a brief that is then empty or only whitespace and control characters is
@@ -125,12 +156,13 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2 or S3). Rewrite the brief, or send the item to a
-                           family that can execute. When a hit is a command line (S2 or S3), the REFUSE line
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2 or P3). Rewrite the brief, or send the item
+                           to a family that can execute (S1 to S3) or name paths it can read (P2, P3). When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
-                           blank; a scope range runs backwards; the family is not in the table; the
+                           blank; a scope range runs backwards; a pinned revision does not resolve or
+                           cannot be read (P3); the family is not in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
                            included). A brief that cannot be evaluated is never OK.
@@ -242,7 +274,7 @@ within 60 s, and some others when an earlier revision exceeded the bound, each m
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
-  check_brief_capability.py --family NAME [--unscoped] [--table PATH] BRIEF
+  check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] BRIEF
   check_brief_capability.py --self-test
   check_brief_capability.py --execution-report ABS_PATH   (the self-test, as the execution gate runs it)
 """
@@ -265,6 +297,7 @@ import bisect
 import contextlib
 import io
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -288,6 +321,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402
+import _git_fixture_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TABLE_REL = ".aiqt/core/worker-capabilities.toml"
@@ -304,6 +338,7 @@ TABLE_VOCABULARY = dict(
 )
 TABLE_VOCABULARY["repo-read"] = ("path",)
 TABLE_VOCABULARY["git-read"] = ("yes", "no", "undeclared")
+TABLE_VOCABULARY["reads-outside-workdir"] = ("yes", "no", "undeclared")
 FAMILY_NAME_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 NEGATION_WINDOW = 60
 R6_SUBJECT_MAX = 200
@@ -1380,20 +1415,206 @@ def cancel_demotion(finding):
                                                 "section asks for something"), excerpt)
 
 
+# ---------- preflight: the input paths a brief names ----------
+
+WORKDIR_WORD_RE = re.compile(r"(?<![\w-])(?:workdir|work\s+dir|working\s+directory)(?![\w-])", re.I)
+ABS_PATH_RE = re.compile(r"(?<![\w.~/:@%-])/[\w.@+-]++(?:/[\w.@+-]++)*+/?+")
+REL_PATH_RE = re.compile(r"(?<![\w.~/:@%-])(?:\.\.?/)?+\.?+[\w@+-][\w.@+-]*+(?:/[\w.@+-]++)++/?+")
+FILE_SUFFIX_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,11}\Z")
+PIN_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+([0-9a-fA-F]{7,40})(?![\w-])")
+HANDBACK_NAMED_RE = re.compile(r"(?<![\w-])hand[- ]?back\s+(?:file|path)(?![\w-])", re.I)
+LARGE_OUTPUT_RE = re.compile(r"(?<![\w-])(?:(?:whole|entire|full|complete)\s+(?:file|source|module|diff|patch|log|"
+                             r"output|transcript|listing)s?+|(?:unified\s+)?diffs?+|patch(?:es)?+)(?![\w-])", re.I)
+DELIVER_RE = re.compile(r"(?<![\w-])(?:return|give|paste|print|send|deliver|hand\s+back|show|produce|include|"
+                        r"attach|provide|reply\s+with|quote)(?![\w-])", re.I)
+GIT_READ_TIMEOUT = 10
+
+
+def _path_token(token):
+    """A path match with one sentence stop dropped (never the dot of `/.` or `..`)."""
+    if token.endswith(".") and not token.endswith(("/.", "..")):
+        return token[:-1]
+    return token
+
+
+class PreflightText:
+    """The paths a brief names, found once: [(line, path)] for absolute paths, for relative paths that name a
+    file (a last component with a suffix such as `.py`) or open with `./` or `../`, the declared workdirs (the
+    first absolute path after the word workdir on its line), the pinned revisions (a line that opens, once markup
+    is skipped, with REVIEWED HEAD or BRIEF-PIN and a commit of 7 to 40 hex digits), and whether a hand-back file
+    is named (the words hand-back file or path and an absolute path on one line)."""
+
+    def __init__(self, text):
+        self.text = text
+        self.names_workdir = bool(WORKDIR_WORD_RE.search(text))
+        self.absolute, self.relative, self.workdirs, self.pins = [], [], [], []
+        self.handback_named = False
+        for number, line in enumerate(text.split("\n"), 1):
+            line = line.rstrip("\r")
+            found = [(match.start(), _path_token(match.group(0))) for match in ABS_PATH_RE.finditer(line)]
+            self.absolute.extend((number, path) for _, path in found)
+            for match in REL_PATH_RE.finditer(line):
+                path = _path_token(match.group(0))
+                if path.startswith(("./", "../")) or FILE_SUFFIX_RE.search(path.rstrip("/").rsplit("/", 1)[-1]):
+                    self.relative.append((number, path))
+            for word in WORKDIR_WORD_RE.finditer(line):
+                after = [path for start, path in found if start >= word.end()]
+                if after:
+                    self.workdirs.append(after[0])
+            pin = PIN_RE.match(line, MarkupEnds(line)(0))
+            if pin:
+                self.pins.append((number, pin.group(1)))
+            if found and HANDBACK_NAMED_RE.search(line):
+                self.handback_named = True
+
+
+def under_workdir(path, workdirs):
+    """Whether an absolute path is a declared workdir or lies under one, read lexically (`..` folded, no link
+    followed): /w/repo/x is under /w/repo, /w/repository is not."""
+    path = posixpath.normpath(path)
+    for workdir in workdirs:
+        workdir = posixpath.normpath(workdir)
+        if path == workdir or path.startswith(workdir.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _git_read_env():
+    """The caller's environment with every GIT_-prefixed variable dropped, so a caller-supplied GIT_DIR or
+    config source cannot point the read at another repository; only the config-isolation pins at their
+    subtractive values are kept."""
+    env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
+    if os.environ.get("GIT_CONFIG_NOSYSTEM") == "1":
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+    for pin in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        if os.environ.get(pin) == os.devnull:
+            env[pin] = os.devnull
+    return env
+
+
+def resolve_revision(repo, rev):
+    """The full commit id a pinned revision names in `repo`, or CannotEvaluate: a revision that does not
+    resolve, or a git that cannot be launched or times out, leaves the question open, never a pass."""
+    try:
+        probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
+                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("pinned revision {}: cannot run git in {}: {}".format(rev, repo, exc))
+    commit = probe.stdout.decode("ascii", "replace").strip()
+    if probe.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+        raise CannotEvaluate("pinned revision {} does not resolve to a commit in {}".format(rev, repo))
+    return commit
+
+
+def exists_at_revision(repo, commit, path):
+    """Whether `path` exists at `commit` in `repo`, read from the object store with git cat-file -e (never the
+    working tree), or CannotEvaluate when git cannot be launched or times out."""
+    try:
+        probe = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
+                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, exc))
+    return probe.returncode == 0
+
+
+def _first_seen(pairs):
+    """[(line, path)] keeping only the first line each path is named on."""
+    seen, out = set(), []
+    for line, path in pairs:
+        if path not in seen:
+            seen.add(path)
+            out.append((line, path))
+    return out
+
+
+def rule_p1(names, row, repo):
+    """P1 ADVISORY: the brief names a workdir and an input by a relative path, which resolves against the
+    worker's own scratch (its working directory), not the workdir."""
+    if not names.names_workdir:
+        return []
+    return [("P1", "ADVISORY", line, "relative path with a workdir named: it resolves against the worker's "
+             "own scratch, not the workdir; name it as an absolute path under the workdir", _excerpt(path))
+            for line, path in _first_seen(names.relative)]
+
+
+def rule_p2(names, row, repo):
+    """P2 HARD: the family declares reads-outside-workdir = "no" and the brief names an absolute path that is
+    not under a declared workdir."""
+    if row["reads-outside-workdir"] != "no" or not names.workdirs:
+        return []
+    return [("P2", "HARD", line, "absolute path outside the declared workdir ({}), which this family cannot "
+             "read".format(", ".join(sorted(set(names.workdirs)))), _excerpt(path))
+            for line, path in _first_seen(names.absolute) if not under_workdir(path, names.workdirs)]
+
+
+def rule_p3(names, row, repo):
+    """P3 HARD: the brief pins a revision and a repository-relative path it names does not exist at that
+    revision in `repo`. A pin that does not resolve, or no repository to read, is CannotEvaluate."""
+    if not names.pins:
+        return []
+    paths = [(line, path[2:] if path.startswith("./") else path) for line, path in names.relative
+             if not path.startswith("../")]
+    paths = [(line, path.rstrip("/")) for line, path in _first_seen(paths) if path.rstrip("/")]
+    if not paths:
+        return []
+    if repo is None:
+        raise CannotEvaluate("the brief pins a revision but no repository was given to read it from")
+    findings = []
+    for _, rev in names.pins:
+        commit = resolve_revision(repo, rev)
+        for line, path in paths:
+            if not exists_at_revision(repo, commit, path):
+                findings.append(("P3", "HARD", line, "path does not exist at the pinned revision {}".format(rev),
+                                 _excerpt(path)))
+    return findings
+
+
+def rule_p4(names, row, repo):
+    """P4 ADVISORY: the family declares handback = "yes", a sentence asks for a whole file, a diff or other
+    large output, and the brief names no hand-back file."""
+    if row["handback"] != "yes" or names.handback_named:
+        return []
+    findings = []
+    for block in parse_blocks(names.text):
+        if block.kind != "prose":
+            continue
+        line_starts, offset = [], 0
+        for _, line in block.lines:
+            line_starts.append(offset)
+            offset += len(line) + 1
+        for start, raw in sentences(block.text().replace("\n", " ")):
+            verb, large = DELIVER_RE.search(raw), LARGE_OUTPUT_RE.search(raw)
+            if verb and large and not Sentence(raw).negated(*verb.span()):
+                findings.append(("P4", "ADVISORY", block.lines[bisect.bisect_right(line_starts, start) - 1][0],
+                                 "large output asked for with no hand-back file named", _excerpt(raw)))
+    return findings
+
+
+def preflight(text, row, repo):
+    """The preflight findings (P1 to P4) for a brief's text and its family's row; they apply to every family."""
+    names = PreflightText(text)
+    return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
+        names, row, repo)
+
+
 def can_execute(row):
-    """Whether a family's table row lets it run commands; the rules apply only to one that cannot."""
+    """Whether a family's table row lets it run commands; the execution rules apply only to one that cannot."""
     return row["execute"] != "no"
 
 
-def evaluate(data, family, table, scoped=True):
+def evaluate(data, family, table, scoped=True, repo=None):
     """(exit code, findings) for a brief's bytes addressed to `family`, or CannotEvaluate. Findings are
-    (rule, severity, line, message, excerpt), in brief order."""
+    (rule, severity, line, message, excerpt), in brief order. `repo` is the repository a pinned revision is
+    read from (P3)."""
     if family not in table:
         raise CannotEvaluate("family {!r} is not in the capability table (known: {})".format(
             family, ", ".join(sorted(table))))
     text = decode_brief(data)
+    early = preflight(text, table[family], repo)
     if can_execute(table[family]):
-        return EXIT_OK, []
+        early.sort(key=lambda finding: finding[2])
+        hard = any(severity == "HARD" for _, severity, _, _, _ in early)
+        return (EXIT_REFUSE if hard else EXIT_OK), early
     blocks = parse_blocks(text)
     if scoped:
         blocks = apply_scope(blocks, family, set(table))
@@ -1426,6 +1647,7 @@ def evaluate(data, family, table, scoped=True):
         previous_asks = asks_to_run(found)
         findings.extend((group, finding) for finding in found)
     findings = [cancel_demotion(finding) if group in voided else finding for group, finding in findings]
+    findings = sorted(early + findings, key=lambda finding: finding[2])
     hard = any(severity == "HARD" for _, severity, _, _, _ in findings)
     return (EXIT_REFUSE if hard else EXIT_OK), findings
 
@@ -1435,24 +1657,33 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-def run(brief_path, family, table_path, scoped=True):
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4"))
+
+
+def run(brief_path, family, table_path, scoped=True, repo=None):
     try:
         table = load_table(table_path)
-        code, findings = evaluate(_read_regular(brief_path, "brief"), family, table, scoped)
+        code, findings = evaluate(_read_regular(brief_path, "brief"), family, table, scoped, repo)
     except CannotEvaluate as exc:
         print("CANNOT_EVALUATE: {}".format(exc))
         return EXIT_CANNOT_EVALUATE
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
-    if code == EXIT_REFUSE:
+    if code == EXIT_REFUSE and set(hard) - PREFLIGHT_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
               "hit(s): {}); rewrite the brief or send these items to a family that can execute{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
+    elif code == EXIT_REFUSE:
+        print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
+              "paths under the declared workdir and that exist at the pinned revision".format(
+                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard)))))
     elif can_execute(table[family]):
-        print("OK: family {} can execute ({}); the execution rules do not apply".format(
-            family, table[family]["execute"]))
+        advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
+        print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
+            family, table[family]["execute"],
+            "; {} preflight advisory, read the ADVISORY lines".format(advisory) if advisory else ""))
     else:
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {}: no structural hit ({} advisory, {} info); read the ADVISORY lines".format(
@@ -1460,7 +1691,7 @@ def run(brief_path, family, table_path, scoped=True):
     return code
 
 
-USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table PATH] BRIEF\n"
+USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] BRIEF\n"
          "       check_brief_capability.py --self-test | --execution-report ABS_PATH")
 
 
@@ -1482,7 +1713,7 @@ def main(argv):
         return self_test()
     if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
         return self_test(argv[1])
-    family, table_path, scoped, paths = None, None, True, []
+    family, table_path, scoped, paths, repo = None, None, True, [], None
     args = list(argv)
     while args:
         arg = args.pop(0)
@@ -1490,6 +1721,8 @@ def main(argv):
             family = args.pop(0)
         elif arg == "--table" and args and table_path is None:
             table_path = Path(args.pop(0))
+        elif arg == "--repo" and args and repo is None:
+            repo = Path(args.pop(0))
         elif arg == "--unscoped":
             scoped = False
         elif arg.startswith("-"):
@@ -1500,7 +1733,8 @@ def main(argv):
     if family is None or paths is None or len(paths) != 1:
         print("CANNOT_EVALUATE: wrong arguments\n" + USAGE, file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
-    return run(paths[0], family, ROOT / TABLE_REL if table_path is None else table_path, scoped)
+    return run(paths[0], family, ROOT / TABLE_REL if table_path is None else table_path, scoped,
+               ROOT if repo is None else repo)
 
 
 # SELF-TEST: production code ends here. Every fixture below is synthetic (no real brief text, path, or
@@ -1517,15 +1751,16 @@ EXECUTED = []
 _EXECUTED_SET = set()
 
 
-def _family_row(name, execute, network, git_read, scratch, handback):
+def _family_row(name, execute, network, git_read, scratch, handback, outside):
     return ('[[family]]\nname = "%s"\nexecute = "%s"\nnetwork = "%s"\nrepo-read = "path"\ngit-read = "%s"\n'
-            'scratch = "%s"\nhandback = "%s"\n' % (name, execute, network, git_read, scratch, handback))
+            'scratch = "%s"\nhandback = "%s"\nreads-outside-workdir = "%s"\n'
+            % (name, execute, network, git_read, scratch, handback, outside))
 
 
 TABLE_FIXTURE = ("format-version = 1\n"
-                 + _family_row("alpha", "yes", "yes", "yes", "persistent", "yes")
-                 + _family_row("beta", "read-only-sandbox", "no", "yes", "per-command", "no")
-                 + _family_row("gamma", "no", "no", "undeclared", "none", "no"))
+                 + _family_row("alpha", "yes", "yes", "yes", "persistent", "yes", "yes")
+                 + _family_row("beta", "read-only-sandbox", "no", "yes", "per-command", "no", "undeclared")
+                 + _family_row("gamma", "no", "no", "undeclared", "none", "no", "no"))
 
 
 def check(name, got, want):
@@ -1554,12 +1789,12 @@ def _patched(**replacements):
                 names[name] = value
 
 
-def _outcome(text, family="gamma", scoped=True):
+def _outcome(text, family="gamma", scoped=True, repo=None):
     """(exit code, sorted distinct (rule, severity)) for a synthetic brief, or "CannotEvaluate"."""
     table = parse_table(TABLE_FIXTURE.encode("utf-8"))
     try:
         code, findings = evaluate(text.encode("utf-8") if isinstance(text, str) else text, family, table,
-                                  scoped)
+                                  scoped, repo)
     except CannotEvaluate:
         return "CannotEvaluate"
     return code, sorted(set((rule, severity) for rule, severity, _, _, _ in findings))
@@ -1858,7 +2093,45 @@ PUNCTUATED_LIST = "Name the stage: lint, gate, test, build or self-test.\n"
 OXFORD_PARENTHESIS = "Quote the line (test, build, or run).\n"
 GIT_PARENTS = "1. Quote the parents of the merge commit as the file headers list them.\n"
 GIT_STATEMENT = "The merge commit's parents are listed in the notes.\n"
+P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
+P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
+P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
+P1_NOT_A_PATH = "The workdir is /w/repo.\nAnswer yes/no on read/write access under Python 3.14/3.15.\n"
+P2_BRIEF = "The workdir is /w/repo.\nRead {} before you answer.\n"
+P2_OUTSIDE = P2_BRIEF.format("/etc/other/notes.md")
+P2_NO_WORKDIR = "Read /etc/other/notes.md before you answer.\n"
+P3_BRIEF = "REVIEWED HEAD: {} (main).\nRead {} before you answer.\n"
+P3_MID_LINE = "Name a REVIEWED HEAD: 0123456789ab line.\nRead docs/absent.md before you answer.\n"
+P4_WHOLE_FILE = "Paste the whole file in your reply.\n"
+P4_NAMED = P4_WHOLE_FILE + "HAND-BACK FILE: /dev/shm/h/x.diff\n"
+P4_NEGATED = "Do not paste the whole file.\n"
 LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+
+
+def _preflight_repo(base):
+    """(repo, full commit id) of a fixture repository under `base` whose one commit holds docs/present.md; its
+    working tree also holds docs/untracked.md, which no commit has."""
+    repo = base / "repo"
+    os.makedirs(repo / "docs")
+    with open(repo / "docs" / "present.md", "w", encoding="utf-8") as handle:
+        handle.write("present\n")
+    env = _git_fixture_env.git_fixture_env(
+        GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+        GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                    "init", "-q", str(repo)], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "add", "docs/present.md"],
+                   check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "commit", "-q", "-m", "fixture"],
+                   check=True, capture_output=True, timeout=60, env=env)
+    head = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                           "maintenance.auto=false", "rev-parse", "HEAD"],
+                          check=True, capture_output=True, timeout=60, env=env)
+    with open(repo / "docs" / "untracked.md", "w", encoding="utf-8") as handle:
+        handle.write("untracked\n")
+    return repo, head.stdout.decode("ascii").strip()
 # The child caps its address space at 1 GiB, then times evaluate() on 128 KiB and 1 MiB briefs, each a prefix,
 # one unit repeated, and a suffix.
 LINEAR_CHILD = (
@@ -2320,6 +2593,16 @@ def self_test(report_path=None):
     except CannotEvaluate as exc:
         shipped = str(exc)
     check("table/shipped-table-loads", shipped, dict(claude="yes", codex="read-only-sandbox", gemini="no"))
+    try:
+        outside = dict((name, row["reads-outside-workdir"]) for name, row in load_table(ROOT / TABLE_REL).items())
+    except CannotEvaluate as exc:
+        outside = str(exc)
+    check("table/shipped-reads-outside-workdir", outside, dict(claude="undeclared", codex="undeclared", gemini="no"))
+    check("table/reads-outside-workdir-missing-or-malformed-2",
+          [_table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"\n', "")),
+           _table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"', 'reads-outside-workdir = "maybe"')),
+           _table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"', "reads-outside-workdir = false"))],
+          ["CannotEvaluate"] * 3)
     check("table/fixture-loads", _table_outcome(TABLE_FIXTURE), ["alpha", "beta", "gamma"])
     check("table/unknown-key-2",
           _table_outcome(TABLE_FIXTURE.replace('scratch = "none"\n', 'scratch = "none"\ncolour = "x"\n')),
@@ -2560,7 +2843,10 @@ def self_test(report_path=None):
             ("perf/closed-args-fail-linear", " -x.y", "Never run git log", "!"),
             ("perf/closed-args-no-stop-linear", " -x/y", "Never run git log", ""),
             ("perf/closed-args-option-linear", " --a=b", "Never run git log", " x"),
-            ("perf/fence-contents-linear", "confirm, ", "1. CI failed on `make test`.\n\n   ```text\n", "")):
+            ("perf/fence-contents-linear", "confirm, ", "1. CI failed on `make test`.\n\n   ```text\n", ""),
+            # the preflight path scans: many paths on one line, and one path with many components
+            ("perf/preflight-paths-linear", " /w/x/a.md d/b.md", "The workdir is /w/r.\n", ""),
+            ("perf/preflight-long-path-linear", "a/", "The workdir is /w/r. Paste the whole diff of /", ".md")):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -2871,7 +3157,77 @@ def self_test(report_path=None):
     check("revert/r7-red", *flip([lambda: _outcome(GIT_PARENTS)], [(0, [])], rule_r7=nothing))
     check("revert/r7-request-red", *flip([lambda: _outcome(GIT_STATEMENT)], [(0, [("R7", "ADVISORY")])],
                                         _asks=lambda sentence: True))
-    check("revert/every-flip-ran", len(flipped), 76)
+    # ---------- preflight: the input paths a brief names (P1 to P4), each quiet on its clean shape ----------
+    def p2(path, family="gamma"):
+        return _outcome(P2_BRIEF.format(path), family)
+
+    check("preflight/p1-relative-advisory", (_outcome(P1_RELATIVE, "alpha"), _outcome(P1_RELATIVE)),
+          ((0, [("P1", "ADVISORY")]), (0, [("P1", "ADVISORY")])))
+    check("preflight/p1-clean-quiet", [_outcome(text, "alpha") for text in (P1_ABSOLUTE, P1_NO_WORKDIR, P1_NOT_A_PATH)],
+          [(0, [])] * 3)
+    check("preflight/p2-outside-hard", (_outcome(P2_OUTSIDE), _outcome(P2_BRIEF.format("/w/repo/../x/a.md"))),
+          ((1, [("P2", "HARD")]), (1, [("P2", "HARD")])))
+    # the workdir boundary: just inside, exactly at, and just outside it on both sides of the name
+    check("preflight/p2-workdir-boundary",
+          [p2(path)[0] for path in ("/w/repo/a.md", "/w/repo", "/w/repo/", "/w/repository/a.md", "/w/rep/a.md")],
+          [0, 0, 0, 1, 1])
+    check("preflight/p2-clean-quiet", (p2("/w/repo/docs/notes.md"), _outcome(P2_NO_WORKDIR),
+                                       _outcome(P2_OUTSIDE, "alpha"), _outcome(P2_OUTSIDE, "beta")), ((0, []),) * 4)
+    check("preflight/p4-whole-file-advisory", _outcome(P4_WHOLE_FILE, "alpha"), (0, [("P4", "ADVISORY")]))
+    check("preflight/p4-clean-quiet", [_outcome(P4_NAMED, "alpha"), _outcome(P4_NEGATED, "alpha"),
+                                       _outcome(P4_WHOLE_FILE, "beta")], [(0, [])] * 3)
+    check("preflight/p3-no-repo-cannot-evaluate", _outcome(P3_BRIEF.format("0123456789ab", "docs/a.md"), "alpha"),
+          "CannotEvaluate")
+    check("preflight/p3-pin-mid-line-quiet", _outcome(P3_MID_LINE, "alpha"), (0, []))
+    base = Path(tempfile.mkdtemp(prefix="aiqt-brief-preflight-"))
+    try:
+        repo, head = _preflight_repo(base)
+
+        def p3(path, rev=head[:12], family="alpha"):
+            return _outcome(P3_BRIEF.format(rev, path), family, True, repo)
+
+        check("preflight/p3-missing-at-pin-hard", (p3("docs/absent.md"), p3("./docs/absent.md", head)),
+              ((1, [("P3", "HARD")]), (1, [("P3", "HARD")])))
+        # read from the object store, never the working tree: a file only in the working tree is missing
+        check("preflight/p3-working-tree-not-read", p3("docs/untracked.md"), (1, [("P3", "HARD")]))
+        check("preflight/p3-clean-quiet", (p3("docs/present.md"), p3("docs/present.md", head),
+                                           _outcome("BRIEF-PIN " + head + "\nRead docs/present.md.\n", "gamma",
+                                                    True, repo)), ((0, []),) * 3)
+        check("preflight/p3-unresolved-pin-cannot-evaluate", (p3("docs/present.md", "0123456789ab"),
+                                                              p3("docs/present.md", "f" * 40)),
+              ("CannotEvaluate", "CannotEvaluate"))
+        with open(base / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write(P3_BRIEF.format(head[:12], "docs/absent.md"))
+        with open(base / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        argv = [str(base / "brief.md"), "--family", "alpha", "--table", str(base / "table.toml"), "--repo", str(repo)]
+        check("main/preflight-repo-option", (_quiet(main, argv), _quiet(main, argv + ["--repo", str(repo)])),
+              (EXIT_REFUSE, EXIT_CANNOT_EVALUATE))
+        # red on revert: each preflight rule, and each guard of its clean shape, patched out flips its fixture
+        check("revert/p1-red", *flip([lambda: _outcome(P1_RELATIVE, "alpha")], [(0, [])], rule_p1=nothing))
+        check("revert/p1-file-name-red", *flip([lambda: _outcome(P1_NOT_A_PATH, "alpha")],
+                                               [(0, [("P1", "ADVISORY")])], FILE_SUFFIX_RE=re.compile(r"")))
+        check("revert/p2-red", *flip([code(P2_OUTSIDE)], [0], rule_p2=nothing))
+        # a plain prefix test, with no component boundary and no `..` folded, reads both as under the workdir
+        check("revert/p2-under-workdir-red", *flip(
+            [lambda: p2("/w/repository/a.md")[0], lambda: p2("/w/repo/../x/a.md")[0]], [0, 0],
+            under_workdir=lambda path, workdirs: any(path.startswith(workdir) for workdir in workdirs)))
+        real_p2 = rule_p2
+        check("revert/p2-family-gate-red", *flip([lambda: _outcome(P2_OUTSIDE, "beta")[0]], [1],
+                                                 rule_p2=lambda names, row, repo: real_p2(
+                                                     names, dict(row, **{"reads-outside-workdir": "no"}), repo)))
+        check("revert/p3-red", *flip([lambda: p3("docs/absent.md")[0]], [0], rule_p3=nothing))
+        check("revert/p3-cat-file-red", *flip([lambda: p3("docs/untracked.md")[0]], [0],
+                                              exists_at_revision=lambda repo, commit, path: os.path.lexists(
+                                                  os.path.join(str(repo), path))))
+        check("revert/p3-unresolved-red", *flip([lambda: p3("docs/present.md", "0123456789ab")], [(1, [("P3", "HARD")])],
+                                                resolve_revision=lambda repo, rev: rev))
+        check("revert/p4-red", *flip([lambda: _outcome(P4_WHOLE_FILE, "alpha")], [(0, [])], rule_p4=nothing))
+        check("revert/p4-named-red", *flip([lambda: _outcome(P4_NAMED, "alpha")], [(0, [("P4", "ADVISORY")])],
+                                           HANDBACK_NAMED_RE=never))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    check("revert/every-flip-ran", len(flipped), 86)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -2894,9 +3250,12 @@ def self_test(report_path=None):
           "included) voids, quoted source text is not a data context and a command-line refusal says how to "
           "rewrite, and every blocking rule, command-line form, closed-shape "
           "guard and void patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
+          "the preflight refuses an absolute path outside a declared workdir for a family that cannot read outside "
+          "it (P2) and a path missing at a pinned revision read with git cat-file (P3; an unresolved pin exits 2), "
+          "prints P1 and P4 as ADVISORY, and each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 24 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 26 repeated shapes "
           "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
