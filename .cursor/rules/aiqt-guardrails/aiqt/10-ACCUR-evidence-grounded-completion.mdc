@@ -15,7 +15,10 @@ A machine-checkable status or completion assertion over a named set, such as all
 revision or a coverage figure, is emitted from an observation that ran that exact set, never narrated
 alongside the checks. For a claim about the current or working state, that observation follows the last
 write to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to
-an immutable revision remains evidence about that revision.
+an immutable revision remains evidence about that revision. A review carried to a rebased or replayed
+revision transfers only where the change's own diff decides its correctness: an unchanged patch identity
+shows the diff is the same, not the files it relies on, so each such file that changed between the reviewed
+and new bases reopens review of the parts that rely on it.
 
 A fix claim scoped to a defect class, not merely the cited instance, is complete only when it
 also accounts for every sibling instance of that class. Such a claim carries either a recorded,

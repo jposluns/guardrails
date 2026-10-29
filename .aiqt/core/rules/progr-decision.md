@@ -14,4 +14,6 @@ map-iso-23894-tight: [A.2, B.4]
 # Decision classification before enacting
 
 Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked
-(BLOCKED)? Record the classification before acting on it.
+(BLOCKED)? Record the classification before acting on it. Before an ASK goes to the maintainer or any
+procedure standing in for them, search the decision record for that subject: a recorded maintainer
+ruling answers it and outranks any predicted one.
