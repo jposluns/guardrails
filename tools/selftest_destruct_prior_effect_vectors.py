@@ -29,7 +29,9 @@ PRIOR_EFFECT_VECTORS = [
     ("pe-function-keyword-shadows-known", 1, 'function echo { eval "$@"; }; echo rm -rf src/pkg', "deny"),
     ("pe-func-shadows-wrapper", 1, 'nice() { eval "$*"; }; nice echo rm -rf src/pkg', "deny"),
     ("pe-alias-shadows-known", 1, "shopt -s expand_aliases; alias echo='bash -c'; echo 'rm -rf src/pkg'", "deny"),
-    ("pe-func-shadows-cd", 1, "cd() { true; }; cd {scratch}/d && rm -rf src/pkg", "deny"),
+    # (a cd function definition carries a cd word ended by a separator, which cd-gate already voids the cwd
+    # for, so the shadowed-cd witness here is the alias spelling, which carries no cd word)
+    ("pe-alias-shadows-cd", 1, "shopt -s expand_aliases; alias cd=true; cd {scratch}/d && rm -rf src/pkg", "deny"),
     # class 2: state set by one segment and used by a later one
     ("pe-export-pager", 2, "export GIT_PAGER='rm -rf src/pkg'; git log", "deny"),
     ("pe-bare-then-export-pager", 2, "GIT_PAGER='rm -rf src/pkg'; export GIT_PAGER; git log -1", "deny"),

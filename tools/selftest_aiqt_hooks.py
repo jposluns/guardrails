@@ -2304,13 +2304,17 @@ def _test_destructive_guard(failures, tmp):
         (repo / "src" / "pkg" / "a.py").write_text("x = 1\n", encoding="utf-8")
         regen = sorted(aiqt_hooks._DESTRUCT_REGENERABLE)
         (repo / ".gitignore").write_text(".env\n" + "".join(name + "/\n" for name in regen), encoding="utf-8")
-        _git(repo, "add", ".gitignore", "src/pkg/a.py")
+        # a tracked clean file lp beside an untracked file ':lp', whose name read as a pathspec WITHOUT
+        # --literal-pathspecs is the short-magic spelling of lp, so the probe would see the clean lp instead
+        (repo / "lp").write_text("tracked\n", encoding="utf-8")
+        _git(repo, "add", ".gitignore", "src/pkg/a.py", "lp")
         _git(repo, "commit", "-q", "-m", "pkg", env_identity=True)
         (repo / ".env").write_text("TOKEN=placeholder\n", encoding="utf-8")
         for name in regen:
             (repo / name).mkdir()
             (repo / name / "artifact.bin").write_text("generated\n", encoding="utf-8")
         (repo / "notes.txt").write_text("uncommitted notes\n", encoding="utf-8")
+        (repo / ":lp").write_text("untracked\n", encoding="utf-8")
         nest = _init_repo(base / "nest")
         (nest / "holder").mkdir()
         subprocess.run(["git", "init", "-q", str(nest / "holder" / "inner")], check=True, capture_output=True,
@@ -2339,6 +2343,8 @@ def _test_destructive_guard(failures, tmp):
         # scratch that points into it, for the cd-through-'..' vector
         (scratch / "d" / "sub").mkdir(parents=True)
         os.symlink(str(scratch / "d" / "sub"), str(base / "cdlink"))
+        # a HARD link under scratch to the repository's ignored .env: its real path is the scratch path
+        os.link(str(repo / ".env"), str(scratch / "hl"))
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("(dz-fixture) could not build the destructive-guard fixtures: {}".format(exc))
         return
@@ -2464,20 +2470,34 @@ def _test_destructive_guard(failures, tmp):
         ("deny-heredoc-feed", "heredoc-feed", "bash <<'EOF'\nrm -rf {}/x\nEOF".format(absent), rp, "deny", {}),
         # (C) a cd that may not run in the parent shell must not move the inferred cwd: conditional (&&/||),
         # backgrounded (&, a subshell), wrapped (command cd is modelled; time cd is not and fails closed).
-        ("deny-cd-conditional", "cd-flow", "false && cd {}/d && true; rm -rf relic".format(scratch), rp,
+        ("deny-cd-conditional", "cd-flow", "false && cd {}/d && rm -rf relic".format(scratch), rp,
          "deny", {}),
         ("deny-cd-or", "cd-flow", "true || cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
-        ("deny-cd-background", "cd-flow", "cd {}/d && true & rm -rf relic".format(scratch), rp, "deny", {}),
+        # a cd's move holds only through the && chain it gates: after a background operator or a ';' a
+        # later step runs whether or not the cd succeeded (it can fail at run time when an earlier step
+        # removes DIR), so the cwd is UNKNOWN there; the mutant keeps the move and allows .env under d
+        ("deny-cd-background", "cd-gate", "cd {}/d && true & rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-ungated", "cd-gate", "cd {}/d && true; rm -f .env".format(scratch), rp, "deny", {}),
         ("deny-cd-command", "cd-flow", "command cd {} && rm -rf data".format(absent), rp, "deny", {}),
         ("deny-cd-wrapped", "cd-flow", "time cd {}/d && rm -rf relic".format(scratch), rp, "deny", {}),
         # a cd inside a compound body (skipped or repeated), a cd through '..' (logical and physical cd differ),
         # a cd to a directory that does not exist (the shell stays put) and a relative cd under CDPATH.
-        ("deny-cd-if-body", "scope", "if false; then true; cd {}/d && true; fi; rm -rf relic".format(scratch),
+        ("deny-cd-if-body", "scope", "if false; then true; cd {}/d && rm -rf relic; fi".format(scratch),
          rp, "deny", {}),
         ("deny-cd-while-body", "scope",
-         "while false; do true; cd {}/d && true; done; rm -rf relic".format(scratch), rp, "deny", {}),
+         "while false; do true; cd {}/d && rm -rf relic; done".format(scratch), rp, "deny", {}),
         ("deny-cd-dotdot", "cd-dotdot", "cd {}/cdlink/.. && rm -rf relic".format(base), rp, "deny", {}),
-        ("deny-cd-absent", "cd-exists", "cd {}/absent-dir && true; rm -rf relic".format(scratch), rp, "deny", {}),
+        ("deny-cd-absent", "cd-exists", "cd {}/absent-dir && rm -rf relic".format(scratch), rp, "deny", {}),
+        # truncate and dd write in place through a hard link, so a scratch path gets no scratch exemption for
+        # them (hl is a hard link to the repository's ignored .env); rm of the same name removes only it
+        ("deny-truncate-scratch-hardlink", "scratch-writer", "truncate -s 0 {}/hl".format(scratch), rp, "deny",
+         {}),
+        ("deny-dd-scratch-hardlink", "scratch-writer", "dd if=/dev/null of={}/hl".format(scratch), rp, "deny",
+         {}),
+        ("allow-rm-scratch-hardlink", "scratch", "rm -f {}/hl".format(scratch), rp, "allow", {}),
+        # the probes read the operand as a LITERAL pathspec: ':lp' is untracked and gets a snapshot, while
+        # without --literal-pathspecs git reads it as the clean tracked lp and the delete allows unsnapshotted
+        ("allow-literal-pathspec-snapshot", "snapshot", "rm :lp", rp, "allow-note", {}),
         ("deny-cd-cdpath", "cd-cdpath", "export CDPATH=/srv; cd repo && rm -rf src/absent", str(base), "deny",
          {}),
         # (E) a linked worktree's .git FILE is an administrative entry, never restorable content.
@@ -2641,6 +2661,60 @@ def _test_destructive_guard(failures, tmp):
             if mutant == want:
                 failures.append("(dz-mutant-{}) removing rule {!r} left {!r} at {}; the vector does not depend "
                                 "on its rule".format(label, rule, command, want))
+        # REAL-SHELL ORACLE: each row builds a fresh repository holding an ignored keep.log and a scratch
+        # directory s (holding qa, and hl, a hard link to keep.log), asks the hook from the repository, then
+        # RUNS the command in real bash there and reads whether keep.log survived. The hook must deny exactly
+        # the rows bash damages, and each deny row must flip to allow with its rules removed (a truncate after a
+        # failed cd is guarded twice: the unknown cwd, and no scratch exemption at the cwd the mutant assumes).
+        oracle_rows = [
+            ("cd-failed-rm", ("cd-gate",), "rmdir {s}/qa; cd {s}/qa && true; rm -f keep.log", "deny"),
+            ("cd-failed-truncate", ("cd-gate", "scratch-writer"),
+             "rmdir {s}/qa; cd {s}/qa && true; truncate -s 0 keep.log", "deny"),
+            ("cd-gated-rm", ("cd-gate",), "cd {s}/qa && rm -f keep.log", "allow"),
+            ("hardlink-truncate", ("scratch-writer",), "truncate -s 0 {s}/hl", "deny"),
+            ("hardlink-dd", ("scratch-writer",), "dd if=/dev/null of={s}/hl", "deny"),
+            ("cp-symlink-truncate", ("scratch-writer",), "cp -s {r}/keep.log {s}/sl && truncate -s 0 {s}/sl",
+             "deny"),
+            ("hardlink-rm", ("scratch",), "rm -f {s}/hl", "allow"),
+        ]
+        bash_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(base), "LC_ALL": "C"}
+        for label, rules, template, want in oracle_rows:
+            orepo = base / "oracle" / label
+            oscr = scratch / ("oracle-" + label)
+            try:
+                orepo.mkdir(parents=True)
+                subprocess.run(["git", "init", "-q", str(orepo)], check=True, capture_output=True, text=True,
+                               timeout=30, env=git_fixture_env())
+                (orepo / ".gitignore").write_text("keep.log\n", encoding="utf-8")
+                _git(orepo, "add", ".gitignore")
+                _git(orepo, "commit", "-q", "-m", "ignore", env_identity=True)
+                (orepo / "keep.log").write_text("keep\n", encoding="utf-8")
+                (oscr / "qa").mkdir(parents=True)
+                os.link(str(orepo / "keep.log"), str(oscr / "hl"))
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("(dz-oracle-fixture-{}) could not build the fixture: {}".format(label, exc))
+                continue
+            command = template.format(s=oscr, r=orepo)
+            got = run(command, str(orepo), {})
+            aiqt_hooks._DESTRUCT_RULES = saved_rules - frozenset(rules)
+            try:
+                mutant = run(command, str(orepo), {})
+            finally:
+                aiqt_hooks._DESTRUCT_RULES = saved_rules
+            try:
+                subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=str(orepo), env=bash_env,
+                               capture_output=True, text=True, timeout=30)
+                kept = (orepo / "keep.log").read_text(encoding="utf-8") == "keep\n"
+            except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+                kept = False
+            if got != want:
+                failures.append("(dz-oracle-{}) {!r}: expected {}, got {}".format(label, command, want, got))
+            if kept != (want == "allow"):
+                failures.append("(dz-oracle-effect-{}) {!r}: real bash {} the ignored keep.log, but the row "
+                                "expects {}".format(label, command, "kept" if kept else "damaged", want))
+            if want == "deny" and mutant != "allow":
+                failures.append("(dz-oracle-mutant-{}) removing rules {} must allow the damaging {!r}, got {}"
+                                .format(label, rules, command, mutant))
         covered = {vec[1] for vec in vectors}
         if covered != saved_rules:
             failures.append("(dz-rules-covered) rules without a vector: {}; vectors naming no rule: {}".format(

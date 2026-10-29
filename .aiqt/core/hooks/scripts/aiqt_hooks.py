@@ -7762,8 +7762,8 @@ def protected_line(data):
 _DESTRUCT_RULES = frozenset((
     "rm", "truncate", "dd", "benign-sink", "find", "format", "shred", "dropdb", "sql", "terraform",
     "kubectl", "wrappers", "wrapper-opts", "runner", "known", "known-forms", "computed", "construct",
-    "pipe-feed", "heredoc-feed", "cd", "cd-flow", "scope", "cd-dotdot", "cd-exists", "cd-cdpath", "subst",
-    "unresolvable", "no-preserve-root", "home", "scratch", "repo-root", "regenerable", "ignored", "embedded",
+    "pipe-feed", "heredoc-feed", "cd", "cd-flow", "scope", "cd-dotdot", "cd-exists", "cd-cdpath", "cd-gate",
+    "subst", "unresolvable", "no-preserve-root", "home", "scratch", "scratch-writer", "repo-root", "regenerable", "ignored", "embedded",
     "gitlink", "git-admin", "dotdot", "snapshot", "clean", "raw", "shell-context", "raw-join",
     "assign", "prose-shadow", "prior-effect", "recover-stop"))
 # NO IN-BAND OVERRIDE: no leading assignment, prefix or wording in the command is read as an authorization. A
@@ -8758,7 +8758,7 @@ def _destruct_probe(top, rel, deadline=None):
     return facts
 
 
-def _destruct_classify_path(path, recursive, deadline=None, prior=None):
+def _destruct_classify_path(path, recursive, deadline=None, prior=None, writer=False):
     """Classify one resolved operand path. Returns ('allow', None), ('note', detail) for content git has
     POSITIVE evidence it can restore (the path is listed as tracked), ('snap', top) for uncommitted content
     a recovery snapshot of the repository top can hold, or ('deny', detail). The rules run in this order,
@@ -8767,7 +8767,10 @@ def _destruct_classify_path(path, recursive, deadline=None, prior=None):
     it (a linked worktree's .git file, an assume-unchanged mark) DENIES, and a .git component anywhere under
     the toplevel DENIES outright (an administrative entry, never restorable content). Every slow step
     (repository discovery, the status and ls-files probes) runs under the remaining guard deadline.
-    prior invalidates absence/symlink-only allows after earlier effects, not positive tracked-clean evidence."""
+    prior invalidates absence/symlink-only allows after earlier effects, not positive tracked-clean evidence.
+    writer marks an in-place writer (truncate, dd of=), which gets NO scratch exemption: it writes through a
+    hard link or a symbolic link made by an earlier step, whose other names or target a textual guard cannot
+    see, so a scratch path may share its content with a repository file."""
     real = os.path.realpath(path)
     changed_resolution = bool(prior and (
         (prior["mutates"] and real != path) or any(_path_is_within(path, link) for link in prior["links"])))
@@ -8780,6 +8783,10 @@ def _destruct_classify_path(path, recursive, deadline=None, prior=None):
             return ("deny", "{} is the home directory or one of its ancestors".format(path))
     if "scratch" in _DESTRUCT_RULES and any(
             real != root and _path_is_within(real, root) for root in _destruct_scratch_roots()):
+        if writer and "scratch-writer" in _DESTRUCT_RULES:
+            return ("deny", "{} is under scratch, but an in-place write reaches every hard link to it and the "
+                            "target of a link an earlier step makes, which this guard cannot see, so scratch "
+                            "is not disposable for this writer".format(path))
         return prior_denial if changed_resolution else ("allow", None)
     anchor = real
     while not os.path.isdir(anchor) and anchor != "/":
@@ -9056,7 +9063,8 @@ def _destruct_classified(seg, idx, word, cwd, deadline, ctx):
                                      "with no known working directory, or a '..' path whose kernel "
                                      "resolution this guard cannot prove".format(word, args[k])))
         else:
-            verdict = _destruct_classify_path(path, recursive, deadline, ctx.get("prior"))
+            verdict = _destruct_classify_path(path, recursive, deadline, ctx.get("prior"),
+                                              writer=word in ("truncate", "dd"))
             if verdict[0] != "deny" and time.monotonic() > deadline:
                 # the work itself crossed the deadline: a result completed after it is not trusted (the
                 # platform would be deciding the call by then, not this guard), so it DENIES (fail closed)
@@ -9074,10 +9082,13 @@ def _destruct_next_cwd(seg, cwd, prev_sep, depth, scoped, cdpath_risk):
     forward by '&&', the cd stands bare or behind only a command/builtin prefix, DIR is one literal non-option
     word with no '..' component (logical and physical cd resolve '..' differently), a relative DIR is not
     subject to CDPATH (unset in this environment and named nowhere in the command), and DIR is an existing
-    directory this process can search (a failed cd leaves the shell where it was). Any other directory change
-    - a pushd or popd, a cd/pushd/popd named ANYWHERE behind another word, a source, . or eval that may run
-    one - makes the cwd UNKNOWN (None), so a later relative operand cannot resolve and DENIES (fail closed).
-    The caller separately voids a cwd moved inside a backgrounded list (its cd ran in a subshell)."""
+    directory this process can search at hook time. Existence now does not prove the cd succeeds at run
+    time (an earlier step can remove DIR, and a failed cd leaves the shell where it was), so the move holds
+    only through the && chain the cd gates: the caller makes the cwd UNKNOWN for every later step once a
+    directory change is followed by any separator other than && or a pipe (cd-gate), which also voids a
+    move inside a backgrounded list. Any other directory change - a pushd or popd, a cd/pushd/popd named
+    ANYWHERE behind another word, a source, . or eval that may run one - makes the cwd UNKNOWN (None), so a
+    later relative operand cannot resolve and DENIES (fail closed)."""
     argv = seg.argv
     idx = _command_word_index(argv)
     if "cd-flow" in _DESTRUCT_RULES:
@@ -9148,7 +9159,7 @@ def _destruct_scan(command, segments, cwd, restrict_groups=False):
     broken = False
     prev_sep = ""
     upstream = []
-    cwd_boundary = cwd
+    dir_changed = cwd_lost = False
     cdpath_risk = bool(os.environ.get("CDPATH")) or "CDPATH" in command or "cdable_vars" in command
     # the $(cat <<EOF ...) prose idiom holds only while nothing in the command (outside such prose) can shadow cat
     prose = not ("prose-shadow" in _DESTRUCT_RULES
@@ -9183,14 +9194,16 @@ def _destruct_scan(command, segments, cwd, restrict_groups=False):
             prior["config"] = effect["config"] or prior["config"]
             prior["mutates"] = prior["mutates"] or effect["mutates"]
         cwd = next_cwd
-        if "cd-flow" in _DESTRUCT_RULES:
-            if seg.sep_after == "&":
-                if cwd != cwd_boundary:
-                    cwd = None  # a cwd moved inside a backgrounded list: its cd ran in a subshell, so the
-                    # parent shell cwd is not what the move computed; fail closed to UNKNOWN
-                cwd_boundary = cwd
-            elif seg.sep_after in ("", ";"):
-                cwd_boundary = cwd  # a list boundary: a later background operator covers only what follows it
+        if "cd-gate" in _DESTRUCT_RULES:
+            # A cd can fail at run time even when DIR exists now (an earlier step may remove it), and a
+            # failed cd leaves the shell where it was. Its move holds only while its success gates what
+            # runs: once a directory change is followed by any separator other than && or a pipe (;, ||,
+            # &, a newline, a group boundary), the later steps run whether or not it succeeded, so the
+            # cwd is UNKNOWN for every later step of the command, even after a later absolute cd.
+            dir_changed = dir_changed or any(_destruct_word(tok) in ("cd", "pushd", "popd") for tok in seg.argv)
+            cwd_lost = cwd_lost or (dir_changed and seg.sep_after not in ("&&", "|", "|&"))
+            if cwd_lost:
+                cwd = None
         upstream = ctx["upstream"] + [seg] if seg.sep_after in ("|", "|&") else []
         prev_sep = seg.sep_after
         if seg.sep_after == "(":
@@ -10093,10 +10106,14 @@ def destructive_guard(data):
     a literal absolute path and classified. A relative operand resolves against the payload cwd, moved only by a
     literal, UNCONDITIONALLY-REACHED 'cd DIR &&' in the parent shell (bare or behind command/builtin), outside
     every subshell and compound body, with no '..' in DIR, no CDPATH in play, and DIR an existing searchable
-    directory; any other directory change makes the cwd UNKNOWN, so later relative operands DENY. A '..' in an
+    directory, and only through the && chain that cd gates: once a directory change is followed by any other
+    separator, a later step runs even if the cd failed at run time, so the cwd is UNKNOWN for every later step;
+    any other directory change makes the cwd UNKNOWN, so later relative operands DENY. A '..' in an
     operand is resolved the way the kernel resolves it (the prefix through its last '..' must resolve strictly,
     else the operand DENIES). Each resolved path is classified, in order: the home directory or an ancestor of it
-    DENIES; a literal path strictly under /tmp or the process TMPDIR ALLOWS; a path outside every git repository
+    DENIES; a literal path strictly under /tmp or the process TMPDIR ALLOWS for rm and unlink (truncate and dd
+    write in place through a hard link or a link an earlier step makes, so they get no scratch exemption and
+    DENY there); a path outside every git repository
     DENIES; the repository root (or an ancestor of it) DENIES; a .git component under the toplevel DENIES; a
     regenerable build DIRECTORY (node_modules, __pycache__, .pytest_cache, build, dist, target; the directory type
     is required) ALLOWS; content holding an ignored file, a nested repository, or a submodule DENIES; uncommitted
@@ -10109,8 +10126,9 @@ def destructive_guard(data):
 
     FALSE DENIES (the accepted cost of the allow-list): a harmless command in an unmodelled shape is denied when it
     names a destructive word (xargs grep rm, pytest -k truncate, a python heredoc mentioning rm, a relative rm after
-    a cd inside a case statement), as is every glob or variable operand and every path word outside a repository
-    and outside scratch.
+    a cd inside a case statement), as is every glob or variable operand, every path word outside a repository
+    and outside scratch, a relative operand after any cd whose && chain has ended (cd d && true; rm x), and
+    every truncate or dd of= target under scratch, even a plain file there.
 
     The prior-effect rule can also deny benign commands naming no destructive word: a trusted-name helper
     defined then invoked, a literal copy/write-then-run build step, client file-loading meta-commands, and
@@ -10141,8 +10159,10 @@ def destructive_guard(data):
     RESIDUAL (not seen): a destructive operation spelled without any in-scope word (python shutil.rmtree, a script
     file, a make target, a value computed at run time and not spelled in the command), state from an earlier turn
     (an alias, a function, a git alias, a CDPATH, a changed cwd the payload does not report), mv or cp over an
-    existing file and a shell redirect, docker or podman rm and other container state, an API call, and content
-    git cannot see as changed (assume-unchanged or skip-worktree marks).
+    existing file and a shell redirect, docker or podman rm and other container state, an API call, content
+    git cannot see as changed (assume-unchanged or skip-worktree marks), and the other names of a hard link
+    outside scratch (truncate or dd on a repository path is judged at that name only; the snapshot holds its
+    content, not the other name's state).
 
     Beyond these bounded partials, the contents of an executable created, copied, linked or written by one
     segment and run by a later one, and a filesystem fact (a path's absence, its tracked-clean state, or a
