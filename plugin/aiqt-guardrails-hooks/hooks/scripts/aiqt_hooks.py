@@ -15635,17 +15635,80 @@ _GATE_NOTE_WRAPPERS = frozenset((
 _GATE_SUBST_WORD_RE = re.compile(r"(?:\$\(|`)\s*([^\s()`|;&<>]+)")
 
 
-def _gate_suffixes(argv):
-    """The argv suffixes the note tier judges as a command: after any leading reserved words, the command
-    itself, and, when its word is a wrapper (_GATE_NOTE_WRAPPERS), every later suffix too."""
+def _gate_suffix_starts(argv):
+    """The start indexes of the argv suffixes the note tier judges as a command: after any leading reserved
+    words, the command itself, and, when its word is a wrapper (_GATE_NOTE_WRAPPERS), every later suffix too.
+    The suffixes are never built all at once: a wrapper before a long run of words has as many suffixes as
+    words, so building them took memory and time quadratic in the run."""
     k = 0
     while k < len(argv) and argv[k] in _GATE_RESERVED:
         k += 1
     if k >= len(argv):
-        return []
+        return range(0)
     if _gate_word(argv[k]) not in _GATE_NOTE_WRAPPERS:
-        return [argv[k:]]
-    return [argv[m:] for m in range(k, len(argv))]
+        return range(k, k + 1)
+    return range(k, len(argv))
+
+
+def _gate_assignment_runs(argv, start):
+    """For each index j from start, the number of leading VAR=value words of argv[j:] (_command_word_index of
+    that suffix), read in one pass from the end; the entry at len(argv) is 0."""
+    runs = [0] * (len(argv) + 1)
+    for j in range(len(argv) - 1, start - 1, -1):
+        runs[j] = runs[j + 1] + 1 if _ENV_ASSIGN_RE.match(argv[j]) else 0
+    return runs
+
+
+def _gate_checker_suffix(argv):
+    """True when a _gate_suffix_starts suffix of argv is checker-shaped (_is_checker_segment) or carries a
+    verify option (_gate_verify_shaped). A wrapper's suffixes are judged from facts about the tokens after
+    each position, gathered in one pass from the end, so the judgement takes time linear in argv, where
+    judging each suffix afresh reread the rest of the command once per suffix."""
+    starts = _gate_suffix_starts(argv)
+    if len(starts) <= 1:
+        return any(_is_checker_segment(argv[m:]) or _gate_verify_shaped(argv[m:]) for m in starts)
+    n = len(argv)
+    runs = _gate_assignment_runs(argv, starts[0])
+    flags = [False] * (n + 1)      # a verify option at or after j (_gate_verify_shaped)
+    tests = [False] * (n + 1)      # a '--test' at or after j (the node test runner)
+    operands = [False] * (n + 1)   # _is_checker_segment's runner operand scan from j finds a hit
+    after = [False] * (n + 1)      # the same scan from j once a '--' has been read
+    for j in range(n - 1, starts[0] - 1, -1):
+        tok = argv[j]
+        hit = not _ENV_ASSIGN_RE.match(tok) and (tok.rsplit("/", 1)[-1].lower() in _CHECKER_WORDS
+                                                 or _name_parts_hit(tok))
+        flags[j] = flags[j + 1] or tok.split("=", 1)[0] in _GATE_VERIFY_FLAGS
+        tests[j] = tests[j + 1] or tok == "--test"
+        after[j] = after[j + 1] or (tok != "--" and hit)
+        operands[j] = after[j + 1] if tok == "--" else operands[j + 1] or (hit and not tok.startswith("-"))
+    for m in starts:
+        c = m + runs[m]
+        if c >= n:
+            continue   # all assignments: no command word, so neither test holds
+        word = argv[c].rsplit("/", 1)[-1].lower()
+        if (word in _CHECKER_WORDS or _name_parts_hit(word) or (word in ("node", "nodejs") and tests[m])
+                or (word in _CHECKER_RUNNERS and operands[c + 1])
+                or (_gate_word(argv[c]) not in _GATE_TEXT_COMMANDS and flags[c + 1])):
+            return True
+    return False
+
+
+def _gate_suffix_sink_kind(argv):
+    """The first _gate_note_sink_kind over the _gate_suffix_starts suffixes of argv, or None. A wrapper's
+    suffix whose command word is neither one of the four plain wrappers _gate_peel peels nor a word
+    _gate_note_sink_kind can name has no kind, so it is passed over without being built."""
+    starts = _gate_suffix_starts(argv)
+    if len(starts) <= 1:
+        return next((k for k in (_gate_note_sink_kind(argv[m:]) for m in starts) if k is not None), None)
+    runs = _gate_assignment_runs(argv, starts[0])
+    for m in starts:
+        c = m + runs[m]
+        if c >= len(argv) or _gate_word(argv[c]) not in _GATE_SINK_SUFFIX_WORDS:
+            continue
+        kind = _gate_note_sink_kind(argv[m:])
+        if kind is not None:
+            return kind
+    return None
 
 
 # A '|' that is not part of '||', then head or tail, in the raw text: the substitution note's trigger.
@@ -15663,7 +15726,7 @@ def _gate_flow_note(records, command):
     """gatdis note tier, for a command the canonical deny does not prove: the note text, or None. It notes
     when the raw text holds a checker word right inside a $( or backquote substitution and a '| head' or
     '| tail' (_GATE_SUBST_PIPE_RE; '||' is not a pipe), and when a checker-shaped command (_is_checker_segment or
-    _gate_verify_shaped on a _gate_suffixes suffix) is followed by a pipe and, after that pipe, by a stage that
+    _gate_verify_shaped on a _gate_suffix_starts suffix, _gate_checker_suffix) is followed by a pipe and, after that pipe, by a stage that
     may pass on only part of its input (_gate_note_sink_kind on a suffix); with no such command, a raw-text
     substitution and any lexed pipe followed by such a stage. Each text claims only what its reason proves:
     raw-text evidence may be quoted text, so the substitution texts say 'appears' and assert neither that the
@@ -15673,9 +15736,8 @@ def _gate_flow_note(records, command):
         return (_GATE_SUBST_TEXT + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw "
                 "text, where either may be quoted text, so it does not prove that the substitution runs, that the "
                 "pipe exists, or that any output is dropped; this is a note, not a refusal." + _GATE_NOTE_ADVICE)
-    first = next((i for i, seg in enumerate(records)  # a segment with no word has no suffix (_gate_suffixes)
-                  if seg.argv and any(_is_checker_segment(s) or _gate_verify_shaped(s)
-                                      for s in _gate_suffixes(seg.argv))), None)
+    first = next((i for i, seg in enumerate(records)  # a segment with no word has no suffix (_gate_suffix_starts)
+                  if seg.argv and _gate_checker_suffix(seg.argv)), None)
     by_subst = first is None and subst
     if by_subst:
         first = 0
@@ -15684,8 +15746,8 @@ def _gate_flow_note(records, command):
     pipe = next((p for p in range(first, len(records)) if records[p].sep_after in _GATE_PIPES), None)
     if pipe is None:
         return None
-    kind = next((k for k in (_gate_note_sink_kind(s) for seg in records[pipe + 1:]
-                             for s in _gate_suffixes(seg.argv)) if k is not None), None)
+    kind = next((k for k in (_gate_suffix_sink_kind(seg.argv) for seg in records[pipe + 1:]) if k is not None),
+                None)
     if kind is None:
         return None
     if by_subst:
@@ -22052,6 +22114,12 @@ def _truncating_sink_kind(argv):
         return "{} {}".format(argv[0], flag), effects[flag[1]].format(
             "line that matches its pattern" if count == "1" else count + " lines that match its pattern")
     return None
+
+
+# The command words _gate_note_sink_kind can name a kind for, and the four plain wrappers it peels to reach one
+# (_gate_suffix_sink_kind passes over any other suffix).
+_GATE_SINK_SUFFIX_WORDS = (frozenset(_GATE_WRAPPER_GRAMMAR) | frozenset(("head", "tail")) | _GATE_GREP_SINKS
+                           | _GATE_PROGRAM_FILTERS | _GATE_CUTTING_WORDS)
 
 
 def _gate_note_sink_kind(argv):
