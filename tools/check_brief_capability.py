@@ -367,6 +367,7 @@ import io
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -3710,12 +3711,17 @@ def self_test(report_path=None):
             with hostile_environ():
                 return p3("docs/present.md"), p3("docs/absent.md")
 
-        def caller_config_env():
-            """The previous scrub: GIT_ variables dropped, the caller's HOME and XDG_CONFIG_HOME kept."""
-            return dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
-
         pins = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "XDG_CONFIG_HOME")
         real_read_env = _git_read_env
+
+        def caller_config_env():
+            """The previous scrub's per-user surfaces: _git_read_env with the global config unpinned and the caller's
+            HOME and XDG_CONFIG_HOME kept. The system pins stay, so this revert never reads the system git
+            configuration (the previous scrub dropped them with every other GIT_ variable)."""
+            env = real_read_env()
+            env.pop("GIT_CONFIG_GLOBAL", None)
+            env.update((name, os.environ[name]) for name in ("HOME", "XDG_CONFIG_HOME") if name in os.environ)
+            return env
 
         def read_env_pins():
             """Each pin of the read environment under the hostile caller environment."""
@@ -3740,6 +3746,59 @@ def self_test(report_path=None):
             env = real_read_env()
             env.update((name, os.environ[name]) for name in ("GIT_DIR", "GIT_OBJECT_DIRECTORY") if name in os.environ)
             return env
+
+        def without_system_pins(make_env):
+            """make_env with GIT_CONFIG_NOSYSTEM and GIT_CONFIG_SYSTEM removed: the git it configures reads the system
+            configuration."""
+            def unpinned(**overrides):
+                env = make_env(**overrides)
+                env.pop("GIT_CONFIG_NOSYSTEM", None)
+                env.pop("GIT_CONFIG_SYSTEM", None)
+                return env
+            return unpinned
+
+        class UnpinnedFixtureEnv:
+            """A _git_fixture_env stand-in whose git_fixture_env leaves the system configuration unpinned."""
+            git_fixture_env = staticmethod(without_system_pins(_git_fixture_env.git_fixture_env))
+
+        def reverted_reads():
+            """The reads under the read environments the reverts swap in."""
+            with _patched(_git_read_env=caller_config_env):
+                under_malformed_config()
+            with _patched(_git_read_env=caller_git_dir_env):
+                under_foreign_git_env()
+
+        def system_config_reads():
+            """[(stage, whether git was launched, whether a launch would read the system configuration)] for the
+            fixture build, the reads and the reverted reads, each run with a recording git first on PATH. A launch
+            with GIT_CONFIG_NOSYSTEM other than 1 and GIT_CONFIG_SYSTEM unset would read it (the test the system
+            config-injection lane applies); the recorder then pins it away before it runs the git it shadows, so no
+            launch here, a patched one included, reads the system configuration."""
+            real_git = shutil.which("git")
+            if real_git is None:
+                raise RuntimeError("self-test requires git")
+            directory = Path(tempfile.mkdtemp(prefix="system-config-", dir=base))
+            log = directory / "launches"
+            with open(directory / "git", "w", encoding="utf-8") as handle:
+                handle.write(
+                    '#!/bin/sh\n'
+                    'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then\n'
+                    '  printf "system\\n" >> {0}\nelse\n  printf "pinned\\n" >> {0}\nfi\n'
+                    'export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM={1}\nexec {2} "$@"\n'.format(
+                        shlex.quote(str(log)), shlex.quote(os.devnull), shlex.quote(real_git)))
+            os.chmod(directory / "git", 0o700)
+            out = []
+            with _environ(PATH=str(directory) + os.pathsep + os.environ.get("PATH", os.defpath)):
+                for stage, run in (("fixture", lambda: _preflight_repo(directory)),
+                                   ("reads", lambda: (p3("docs/present.md"), p3("docs/absent.md"))),
+                                   ("reverts", reverted_reads)):
+                    with open(log, "w", encoding="utf-8"):
+                        pass
+                    run()
+                    with open(log, encoding="utf-8") as handle:
+                        launches = handle.read().split()
+                    out.append((stage, bool(launches), "system" in launches))
+            return out
 
         # git's ownership refusal as it prints it in English, and a translation that keeps only the hint's command
         ownership_stderr = ("fatal: detected dubious ownership in repository at '{0}'\nTo add an exception for "
@@ -3775,6 +3834,9 @@ def self_test(report_path=None):
         check("preflight/p3-read-env-pins", read_env_pins(),
               ["1", os.devnull, os.devnull, _git_read_home(), _git_read_home()])
         check("preflight/p3-git-failure-cannot-evaluate", git_failures(), ["CannotEvaluate"] * 4)
+        # no git launch of the fixture build, the reads or the reverted reads would read the system configuration
+        unexposed = [("fixture", True, False), ("reads", True, False), ("reverts", True, False)]
+        check("preflight/p3-no-system-config-read", system_config_reads(), unexposed)
         with open(base / "brief.md", "w", encoding="utf-8") as handle:
             handle.write(P3_BRIEF.format(head[:12], "docs/absent.md"))
         with open(base / "table.toml", "w", encoding="utf-8") as handle:
@@ -3909,6 +3971,12 @@ def self_test(report_path=None):
                                               _git_read_env=without_pin("HOME")))
         check("revert/p3-pin-xdg-red", *flip([read_env_pins], [pinned[:4] + [str(hostile)]],
                                              _git_read_env=without_pin("XDG_CONFIG_HOME")))
+        # with the system pins removed from the read or the fixture environment, a launch would read the system config
+        check("revert/p3-read-system-config-red", *flip(
+            [system_config_reads], [[unexposed[0], ("reads", True, True), unexposed[2]]],
+            _git_read_env=without_system_pins(real_read_env)))
+        check("revert/p3-fixture-system-config-red", *flip(
+            [system_config_reads], [[("fixture", True, True)] + unexposed[1:]], _git_fixture_env=UnpinnedFixtureEnv))
         # without the ownership reading, the refusal reads as an unresolved pin and the cat-file read as missing
         check("revert/p3-dubious-ownership-red", *flip([ownership_named], [[(EXIT_CANNOT_EVALUATE, False, False)] * 2],
                                                        _ownership_refused=lambda probe: False))
@@ -3933,7 +4001,7 @@ def self_test(report_path=None):
                                            HANDBACK_NAMED_RE=never))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 114)
+    check("revert/every-flip-ran", len(flipped), 116)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
