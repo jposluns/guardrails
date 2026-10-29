@@ -279,7 +279,7 @@ reason = "Scope note separating this rule from the branch-and-merge-on-green rul
 
 [[exempt]]
 corpus-id = "trkasy"
-text = "A task started and abandoned, a background process whose completion\nis neither collected nor monitored, an asynchronous result neither awaited nor otherwise observed, or a queued\njob whose outcome no one reads, hides any failure it carries and leaves a later claim that it finished\nungrounded."
+text = "A task abandoned at launch, an uncollected background process, an\nunawaited result or an unread queued job hides its failures and leaves a later claim that it finished\nungrounded."
 reason = "Rationale for trkasy.1 and trkasy.2; no obligation of its own."
 
 [[exempt]]
