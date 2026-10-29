@@ -7266,7 +7266,7 @@ def _selftest_git_set_head(root, commit):
 
 # --- self-test -----------------------------------------------------------------------------------------
 
-def self_test():
+def self_test(section=None):
     """Fail-closed invariants over synthetic vectors and throwaway temporary fixtures, judged on returned
     statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
     or of apply input also matches one reason keyword so the refusal is attributed to the rule under test,
@@ -7281,7 +7281,12 @@ def self_test():
     init-store vectors use git too (real fixture repositories, which the substrate binds) and a subprocess
     (a child dispatch of THIS engine, SIGKILLed inside the substrate's publication), under that same
     throwaway HOME, as are the file-ops crash matrix's --selftest-child interpreters of this module,
-    which inherit that environment."""
+    which inherit that environment. `section` (default None, the whole module) names one entry of
+    _SELF_TEST_SECTIONS to run alone (_self_test_section); an unknown name is refused with exit 2."""
+    if section is not None and section not in _SELF_TEST_SECTIONS:
+        print("OPF-ADOPT-APPLY SELF-TEST: unknown section {!r} (known: {})".format(
+            section, ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+        return 2
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -7293,7 +7298,7 @@ def self_test():
     try:
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-home-") as home:
             with mock.patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM="1"):
-                return _self_test_checks()
+                return _self_test_checks() if section is None else _self_test_section(section)
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-ADOPT-APPLY SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
@@ -8029,39 +8034,8 @@ def _self_test_checks():
         return {rel: data for rel, (kind, _mode, data) in tree_state(root).items()
                 if kind == "file" and not rel.startswith(".aiqt/")}
 
-    # The whole-tree state the file-op checks (section 11 on) compare: EVERY entry beneath the root, `.aiqt/`
-    # included, as (kind, mode, bytes or link target), never followed; directories, symlinks and special
-    # entries count, as do modes. journal=False leaves out exactly the adoption journal root's subtree and
-    # its ancestor directories (the journal's own bookkeeping), for comparisons across a transaction.
-    # A directory the walk cannot list (the root or any subtree) RAISES (os.walk alone skips it silently), so
-    # an unreadable subtree fails the comparison instead of dropping out of both states (section 11k).
-    journal_dirs = tuple("/".join(JOURNAL_REL.split("/")[:i]) for i in range(1, JOURNAL_REL.count("/") + 2))
-
-    def walk_error(exc):
-        raise exc
-
-    def tree_state(root, journal=True):
-        out = {}
-        for dirpath, dirnames, filenames in os.walk(root, onerror=walk_error):
-            base = os.path.relpath(dirpath, root)
-            for name in dirnames + filenames:
-                rel = name if base == "." else base + "/" + name
-                if not journal and (rel in journal_dirs or _within(rel, JOURNAL_REL)):
-                    continue
-                full = os.path.join(dirpath, name)
-                st = os.lstat(full)
-                mode = stat.S_IMODE(st.st_mode)
-                if stat.S_ISLNK(st.st_mode):
-                    out[rel] = ("link", mode, os.readlink(full))
-                elif stat.S_ISDIR(st.st_mode):
-                    out[rel] = ("dir", mode, None)
-                elif stat.S_ISREG(st.st_mode):
-                    out[rel] = ("file", mode, Path(full).read_bytes())
-                else:
-                    out[rel] = ("special", mode, None)
-            if not journal:
-                dirnames[:] = [d for d in dirnames if (d if base == "." else base + "/" + d) != JOURNAL_REL]
-        return out
+    # The whole-tree state the file-op checks (section 11 on) compare (_st_tree_state).
+    journal_dirs, tree_state = _ST_JOURNAL_DIRS, _st_tree_state
 
     def untouched_save_journal_dirs(before, root):
         """A refusal's whole-tree predicate: every entry of `before` is unchanged in kind, mode and bytes or
@@ -16579,49 +16553,15 @@ def _self_test_checks():
     # stays frozen, archives an occupying retire or move source preserve-first, and leaves a non-occupying
     # move source frozen; the retirement stage (RETIREMENT_PHASE, after the green check) removes the
     # frozen retire source, relocates both move sources, and touches nothing for the occupying retire.
-    # Each round trip below goes red if its op still refuses.
-    fx_files = {"legacy/RULES.md": b"old rules\n", ".working/TODO.md": b"hand-kept todo\n",
-                "legacy/MOVE.md": b"move me\n", "docs/VIEW.md": b"old view\n"}
-    fx_new, fx_new_bytes = "adopter/NEW.md", b"planned\n"
-    fx_moved = store.moved_dest("legacy/MOVE.md")
-    fx_view_dest = "adopter/view-old.md"
-    fx_sources = [dict(path="legacy/RULES.md", disposition="retire", occupying=False,
-                       preservation=archive_rel(rid, "legacy/RULES.md")),
-                  dict(path=".working/TODO.md", disposition="retire", occupying=True,
-                       preservation=archive_rel(rid, ".working/TODO.md")),
-                  dict(path="legacy/MOVE.md", disposition="move", occupying=False, preservation=fx_moved),
-                  dict(path="docs/VIEW.md", disposition="move", occupying=True,
-                       preservation=archive_rel(rid, "docs/VIEW.md"))]
-    for row in fx_sources:
-        row["digest"] = plan_digest(fx_files[row["path"]])
-    fx_create = dict(op="create-file", path=fx_new, content_digest=plan_digest(fx_new_bytes))
-    fx_disposed = [dict(op="retire-file", path="legacy/RULES.md",
-                        preimage_digest=plan_digest(fx_files["legacy/RULES.md"])),
-                   dict(op="retire-file", path=".working/TODO.md",
-                        preimage_digest=plan_digest(fx_files[".working/TODO.md"])),
-                   dict(op="move-file", source="legacy/MOVE.md", destination=fx_moved,
-                        source_digest=plan_digest(fx_files["legacy/MOVE.md"])),
-                   dict(op="move-file", source="docs/VIEW.md", destination=fx_view_dest,
-                        source_digest=plan_digest(fx_files["docs/VIEW.md"]))]
+    # Each round trip below goes red if its op still refuses. The fixture is _st_file_ops's, shared with the
+    # kill-injection matrix (section 17).
+    fx = _st_file_ops(rid)
+    fx_files, fx_new, fx_new_bytes, fx_moved, fx_view_dest = (fx.files, fx.new, fx.new_bytes, fx.moved,
+                                                              fx.view_dest)
+    fx_sources, fx_create, fx_disposed = fx.sources, fx.create, fx.disposed
     check("file-ops-fixture-rows-valid",
           all(schema.validate_op(r).status == VALID for r in [fx_create] + fx_disposed))
-
-    def file_fixture(temp):
-        root = Path(temp).resolve()
-        for rel, payload in fx_files.items():
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_bytes(payload)
-        return root
-
-    def apply_stage(root, rows=None, sources=None, content=None):
-        return attempt(run_adopt_transaction, root, rid, compose_rows(
-            [fx_create] + fx_disposed if rows is None else rows, fx_sources if sources is None else sources,
-            {fx_new: fx_new_bytes} if content is None else content))
-
-    def retirement_stage(root, rows=None, sources=None):
-        return attempt(run_adopt_transaction, root, rid, compose_rows(
-            fx_disposed if rows is None else rows, fx_sources if sources is None else sources),
-            phase=RETIREMENT_PHASE)
+    file_fixture, apply_stage, retirement_stage = fx.file_fixture, fx.apply_stage, fx.retirement_stage
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = file_fixture(temp)
@@ -17243,6 +17183,202 @@ def _self_test_checks():
         check("tree-state-control-leg-lists-every-entry",
               "legacy" in intact and "legacy/RULES.md" in intact and tree_state(root) == intact)
 
+    # 17: the kill-injection matrix, see _kill_matrix_self_test (also run alone by
+    # --self-test-section kill-matrix).
+    _kill_matrix_self_test(check)
+
+    _self_test_fence(check)
+
+    if census:
+        left_open = sorted(descriptors() - entry_descriptors)
+        check("self-test-leaves-no-descriptor-open", not left_open,
+              observed="{} descriptor(s) left open, first {}".format(
+                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd)))
+                                   for fd, _identity in left_open[:4]]))
+    else:
+        skipped.append(("self-test-leaves-no-descriptor-open", no_census))
+    for name, why in skipped:
+        print("  SKIPPED: {} ({})".format(name, why))
+    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)
+
+
+def _st_fixture_plan(run_id_):
+    """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
+    digest of its canonical emission without that field), so the bundle verifier proves it exactly as
+    it proves a real plan (spec 4.2)."""
+    body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+    digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+
+
+def _st_run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
+    """Self-test shadow of the module transaction: a base transaction that names no plan digest
+    stages its run's fixture plan first, as apply stages the approved plan, and every transaction
+    that names none carries that plan's digest."""
+    plan_bytes_, digest = _st_fixture_plan(run_id_)
+    staged = compose
+    if phase is None and plan_digest is None:
+        def staged(ops):
+            ops.create(plan_rel(run_id_), plan_bytes_)
+            return compose(ops)
+    return run_adopt_transaction(product_root, run_id_, staged, phase,
+                                 digest if plan_digest is None else plan_digest)
+
+
+def _st_fixture(temp):
+    """The journaled shell's throwaway fixture: (root, the bytes of each relpath) written beneath temp."""
+    root = Path(temp).resolve()
+    files = dict(((".working/TODO.md", b"hand-kept todo\n"),
+                  (".working/toml/manifest.toml", b"# a foreign manifest-shaped file\n"),
+                  ("legacy/RULES.md", b"old rules\n")))
+    for rel, payload in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(payload)
+    return root, files
+
+
+def _st_compose_full(files, drift=False):
+    def compose(ops):
+        todo = files[".working/TODO.md"] + (b"drift" if drift else b"")
+        ops.archive_occupying(".working/TODO.md", "sha256:" + _sha256(todo))
+        ops.archive_occupying(".working/toml/manifest.toml",
+                              "sha256:" + _sha256(files[".working/toml/manifest.toml"]))
+        ops.preserve("legacy/RULES.md", "sha256:" + _sha256(files["legacy/RULES.md"]))
+    return compose
+
+
+def _st_lock_free(root):
+    return _journal.read_lock_owner(_journal_root(root)) is None
+
+
+_ST_JOURNAL_DIRS = tuple("/".join(JOURNAL_REL.split("/")[:i])
+                         for i in range(1, JOURNAL_REL.count("/") + 2))
+
+
+def _st_walk_error(exc):
+    raise exc
+
+
+def _st_tree_state(root, journal=True):
+    """The whole-tree state the file-op checks (section 11 on) compare: EVERY entry beneath the root, `.aiqt/`
+    included, as (kind, mode, bytes or link target), never followed; directories, symlinks and special
+    entries count, as do modes. journal=False leaves out exactly the adoption journal root's subtree and
+    its ancestor directories (_ST_JOURNAL_DIRS, the journal's own bookkeeping), for comparisons across a
+    transaction. A directory the walk cannot list (the root or any subtree) RAISES (os.walk alone skips it
+    silently), so an unreadable subtree fails the comparison instead of dropping out of both states
+    (section 11k)."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_st_walk_error):
+        base = os.path.relpath(dirpath, root)
+        for name in dirnames + filenames:
+            rel = name if base == "." else base + "/" + name
+            if not journal and (rel in _ST_JOURNAL_DIRS or _within(rel, JOURNAL_REL)):
+                continue
+            full = os.path.join(dirpath, name)
+            st = os.lstat(full)
+            mode = stat.S_IMODE(st.st_mode)
+            if stat.S_ISLNK(st.st_mode):
+                out[rel] = ("link", mode, os.readlink(full))
+            elif stat.S_ISDIR(st.st_mode):
+                out[rel] = ("dir", mode, None)
+            elif stat.S_ISREG(st.st_mode):
+                out[rel] = ("file", mode, Path(full).read_bytes())
+            else:
+                out[rel] = ("special", mode, None)
+        if not journal:
+            dirnames[:] = [d for d in dirnames if (d if base == "." else base + "/" + d) != JOURNAL_REL]
+    return out
+
+
+def _st_attempt(fn, *args, **kwargs):
+    """(result, None) on success, (None, refusal text) on AdoptApplyError."""
+    try:
+        return fn(*args, **kwargs), None
+    except AdoptApplyError as exc:
+        return None, str(exc)
+
+
+def _st_file_ops(rid):
+    """The three file ops' fixture at run `rid` (section 16 of _self_test_checks and the kill-injection
+    matrix): the source files, the planned create, the plan's source rows and disposed rows, a writer of
+    the files beneath a temporary directory, and the apply and retirement stages over them, each returning
+    _st_attempt's (result, refusal text)."""
+    import types
+
+    def plan_digest(payload):
+        return "sha256:" + _sha256(payload)
+
+    files = {"legacy/RULES.md": b"old rules\n", ".working/TODO.md": b"hand-kept todo\n",
+             "legacy/MOVE.md": b"move me\n", "docs/VIEW.md": b"old view\n"}
+    new, new_bytes = "adopter/NEW.md", b"planned\n"
+    moved = store.moved_dest("legacy/MOVE.md")
+    view_dest = "adopter/view-old.md"
+    source_rows = [dict(path="legacy/RULES.md", disposition="retire", occupying=False,
+                    preservation=archive_rel(rid, "legacy/RULES.md")),
+               dict(path=".working/TODO.md", disposition="retire", occupying=True,
+                    preservation=archive_rel(rid, ".working/TODO.md")),
+               dict(path="legacy/MOVE.md", disposition="move", occupying=False, preservation=moved),
+               dict(path="docs/VIEW.md", disposition="move", occupying=True,
+                    preservation=archive_rel(rid, "docs/VIEW.md"))]
+    for row in source_rows:
+        row["digest"] = plan_digest(files[row["path"]])
+    create = dict(op="create-file", path=new, content_digest=plan_digest(new_bytes))
+    disposed = [dict(op="retire-file", path="legacy/RULES.md",
+                     preimage_digest=plan_digest(files["legacy/RULES.md"])),
+                dict(op="retire-file", path=".working/TODO.md",
+                     preimage_digest=plan_digest(files[".working/TODO.md"])),
+                dict(op="move-file", source="legacy/MOVE.md", destination=moved,
+                     source_digest=plan_digest(files["legacy/MOVE.md"])),
+                dict(op="move-file", source="docs/VIEW.md", destination=view_dest,
+                     source_digest=plan_digest(files["docs/VIEW.md"]))]
+
+    def file_fixture(temp):
+        root = Path(temp).resolve()
+        for rel, payload in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        return root
+
+    def apply_stage(root, rows=None, sources=None, content=None):
+        return _st_attempt(_st_run_adopt_transaction, root, rid, compose_rows(
+            [create] + disposed if rows is None else rows, source_rows if sources is None else sources,
+            {new: new_bytes} if content is None else content))
+
+    def retirement_stage(root, rows=None, sources=None):
+        return _st_attempt(_st_run_adopt_transaction, root, rid, compose_rows(
+            disposed if rows is None else rows, source_rows if sources is None else sources),
+            phase=RETIREMENT_PHASE)
+
+    return types.SimpleNamespace(files=files, new=new, new_bytes=new_bytes, moved=moved,
+                                 view_dest=view_dest, sources=source_rows, create=create, disposed=disposed,
+                                 file_fixture=file_fixture,
+                                 apply_stage=apply_stage, retirement_stage=retirement_stage)
+
+
+def _kill_matrix_self_test(check):
+    """The kill-injection matrix (section 17 of _self_test_checks, which calls it; also run alone by
+    `--self-test-section kill-matrix`), over the file-ops fixture (_st_file_ops) at the self-test's run id."""
+    import tempfile
+    from unittest import mock
+    VALID = store.VALID
+    now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    rid = mint_run_id(now, "0123456789abcdef")
+    fx = _st_file_ops(rid)
+    fx_create, fx_disposed, fx_sources, fx_new, fx_new_bytes = (fx.create, fx.disposed, fx.sources, fx.new,
+                                                                fx.new_bytes)
+    file_fixture, apply_stage, retirement_stage = fx.file_fixture, fx.apply_stage, fx.retirement_stage
+    fixture_plan, tree_state, attempt = _st_fixture_plan, _st_tree_state, _st_attempt
+    lock_free = _st_lock_free
+    lease_rel = "{}/{}/lease.toml".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
+    import _opf_init
+
+    def txn_state(root, txn):
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+        try:
+            return _journal.classify_state(jr_fd, _journal_root(root) / txn)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+
     # 17: the kill-injection matrix (the journal's crash harness, the migrate.py model): each stage's
     # transaction runs in a CHILD interpreter that os._exit()s (137) at one kill point, leaving only what
     # was already fsync'd; a FRESH child then reconciles, breaking the dead owner's stale lock, and an
@@ -17321,11 +17457,23 @@ def _self_test_checks():
                 recovered = crash_child(temp, dict(action="reconcile", root=str(root)))
                 again, _why = attempt(reconcile, root)
                 state, txn_now = tree_state(root, journal=False), txn_state(root, txn_of)
+                # Each conjunct is evaluated exactly where the short-circuit chain evaluates it (the journal
+                # read only after the three exit facts hold, the bundle verified at most once and only on
+                # the complete-poststate leg), so the verdict is the chain's; the observed detail names
+                # which conjunct failed, an unevaluated one as None.
+                quiet = journal_quiet(root) if died == 137 and recovered == 0 and again == [] else None
+                at_pre, at_post = state == pre, state == post
+                verified = (verify_bundle(root, rid) if quiet and not (at_pre and txn_now != "complete")
+                            and at_post and txn_now == "complete" else None)
                 check("kill-{}-{}-recovers-to-prestate-or-verified-poststate".format(stage, point),
-                      died == 137 and recovered == 0 and again == [] and journal_quiet(root)
-                      and ((state == pre and txn_now != "complete")
-                           or (state == post and txn_now == "complete"
-                               and verify_bundle(root, rid).status == VALID)))
+                      quiet is True
+                      and ((at_pre and txn_now != "complete")
+                           or (at_post and txn_now == "complete"
+                               and verified is not None and verified.status == VALID)),
+                      observed=dict(died=died, recovered=recovered, again=again, journal_quiet=quiet,
+                                    txn_now=txn_now, state_is_pre=at_pre, state_is_post=at_post,
+                                    verify_bundle=None if verified is None
+                                    else (verified.status, list(verified.findings))))
         for rpoint in (["torn:ROLLBACK-IN-PROGRESS"] + ["after-restore-{}".format(i) for i in range(n)]
                        + ["torn:ROLLBACK-COMPLETE"]):
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -17362,69 +17510,6 @@ def _self_test_checks():
               and lease_rel in released[0] and "confirmed-dead" in released[0] and not (root / lease_rel).exists()
               and lock_free(root) and journal_quiet(root) and tree_state(root, journal=False) == pre,
               (died, left, report, why, released))
-
-    _self_test_fence(check)
-
-    if census:
-        left_open = sorted(descriptors() - entry_descriptors)
-        check("self-test-leaves-no-descriptor-open", not left_open,
-              observed="{} descriptor(s) left open, first {}".format(
-                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd)))
-                                   for fd, _identity in left_open[:4]]))
-    else:
-        skipped.append(("self-test-leaves-no-descriptor-open", no_census))
-    for name, why in skipped:
-        print("  SKIPPED: {} ({})".format(name, why))
-    return _self_test_outcome(failures, failure_details, checked[0], bound_expired, skipped)
-
-
-def _st_fixture_plan(run_id_):
-    """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
-    digest of its canonical emission without that field), so the bundle verifier proves it exactly as
-    it proves a real plan (spec 4.2)."""
-    body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
-    digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
-    return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
-
-
-def _st_run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
-    """Self-test shadow of the module transaction: a base transaction that names no plan digest
-    stages its run's fixture plan first, as apply stages the approved plan, and every transaction
-    that names none carries that plan's digest."""
-    plan_bytes_, digest = _st_fixture_plan(run_id_)
-    staged = compose
-    if phase is None and plan_digest is None:
-        def staged(ops):
-            ops.create(plan_rel(run_id_), plan_bytes_)
-            return compose(ops)
-    return run_adopt_transaction(product_root, run_id_, staged, phase,
-                                 digest if plan_digest is None else plan_digest)
-
-
-def _st_fixture(temp):
-    """The journaled shell's throwaway fixture: (root, the bytes of each relpath) written beneath temp."""
-    root = Path(temp).resolve()
-    files = dict(((".working/TODO.md", b"hand-kept todo\n"),
-                  (".working/toml/manifest.toml", b"# a foreign manifest-shaped file\n"),
-                  ("legacy/RULES.md", b"old rules\n")))
-    for rel, payload in files.items():
-        (root / rel).parent.mkdir(parents=True, exist_ok=True)
-        (root / rel).write_bytes(payload)
-    return root, files
-
-
-def _st_compose_full(files, drift=False):
-    def compose(ops):
-        todo = files[".working/TODO.md"] + (b"drift" if drift else b"")
-        ops.archive_occupying(".working/TODO.md", "sha256:" + _sha256(todo))
-        ops.archive_occupying(".working/toml/manifest.toml",
-                              "sha256:" + _sha256(files[".working/toml/manifest.toml"]))
-        ops.preserve("legacy/RULES.md", "sha256:" + _sha256(files["legacy/RULES.md"]))
-    return compose
-
-
-def _st_lock_free(root):
-    return _journal.read_lock_owner(_journal_root(root)) is None
 
 
 def _st_rendering(exc):
@@ -17722,6 +17807,38 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired, skippe
         return 2
     print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; ten executable ops: the file ops, "
           "init-store, the registration ops, enable-hook and the finish ops)".format(checked))
+    return 0
+
+
+# The self-test sections `--self-test-section NAME` runs alone, each a suite of _self_test_checks that builds
+# its own fixtures and takes only the check recorder.
+_SELF_TEST_SECTIONS = {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence}
+
+
+def _self_test_section(name):
+    """Run the one self-test section `name` and return its exit code: 1 when one of its checks failed, else
+    0. Only that section runs (no other section and no descriptor census), so the summary names the
+    section and never reports a pass of the module self-test."""
+    failures, failure_details, checked = [], {}, [0]
+
+    def check(check_name, cond, observed=None):
+        checked[0] += 1
+        if not cond:
+            failures.append(check_name)
+            if observed is not None:
+                failure_details[check_name] = observed
+
+    _SELF_TEST_SECTIONS[name](check)
+    if failures:
+        print("OPF-ADOPT-APPLY SELF-TEST SECTION {}: FAIL ({} of {} checks failed)".format(
+            name, len(failures), checked[0]))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+            if f in failure_details:
+                print("    observed: {}".format(failure_details[f]))
+        return 1
+    print("OPF-ADOPT-APPLY SELF-TEST SECTION {}: {} checks passed (only this section ran; not a result for "
+          "the whole module self-test, which --self-test runs)".format(name, checked[0]))
     return 0
 
 
@@ -21238,10 +21355,16 @@ def main():
         return _init_store_child_main(args[1:])
     if args[:1] == ["--selftest-class-sweep-child"]:
         return _class_sweep_child_main(args[1:])
+    if args[:1] == ["--self-test-section"]:
+        if len(args) == 2:
+            return self_test(section=args[1])
+        print("usage: _opf_adopt_apply.py --self-test-section NAME (one of: {})".format(
+            ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+        return 2
     if "--self-test" in args or "--selftest" in args:
         return self_test()
-    print("usage: _opf_adopt_apply.py --self-test (a library module; the adoption verb is `opf adopt`)",
-          file=sys.stderr)
+    print("usage: _opf_adopt_apply.py --self-test | --self-test-section NAME (a library module; the adoption "
+          "verb is `opf adopt`)", file=sys.stderr)
     return 2
 
 
