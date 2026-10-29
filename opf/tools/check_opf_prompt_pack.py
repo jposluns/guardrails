@@ -18,16 +18,39 @@ The pack digest is sha256 over the UTF-8 bytes of "opf.prompt-pack/v1\\n", then 
 then one "member <sha256> <path>\\n" line per member in order. It binds the version and each member's
 exact bytes; TOML layout and comments never participate.
 
-  check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack)
-  check_opf_prompt_pack.py --self-test  synthetic packs assert each guard's exact status and guard name
+IMPORT EXAMPLES (validate_examples, run on the shipped pack only after validate_pack is VALID). The
+members under import/examples/ are the post-adoption import examples spec 14.1 asks the pack for, one
+`<type>.batch.toml` per baseline record type (module types follow once the imported series admits them).
+Their guards:
+
+  example-roster    the files under import/examples/ are exactly one <type>.batch.toml per key of
+                    _opf_store.BASELINE_TYPES, with nothing else there
+  example-batch     each example is a VALID _opf_import_batch.parse_batch batch (canonical bytes, the
+                    closed batch schema, and every built record VALID under validate_imported_record);
+                    the parser's own status is kept, so an example it cannot evaluate is CANNOT-EVALUATE
+  example-type      every row of an example is of its file's type (a [[worklog]] row is a worklog)
+  example-midnight  no historical timestamp, the contribution delivery instants included, is a UTC
+                    midnight (spec 8.3: "a UTC midnight MUST NOT be fabricated"), which the validator
+                    cannot tell from a recorded midnight
+  example-reasons   across the set, the `unrecorded` reasons are every _opf_adopt.MISSINGNESS_REASONS
+                    value, and at least one row carries `history` and one carries `unparsed`
+
+  check_opf_prompt_pack.py              verify the shipped pack beside this tool (../prompt-pack), its
+                                        import examples included
+  check_opf_prompt_pack.py --self-test  synthetic packs assert each guard's exact status and guard name,
+                                        and the shipped flow/SKILL.md carries each FLOW_PINNED sentence
 
 Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such as digest drift),
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
 
-Inert: nothing consumes the pack in this slice; binding a plan's prompt_pack {version, digest} to this
-pack is a later slice. VALID means the manifest agrees with the bytes on disk. It is not
-authentication, it does not check that a content change also bumped the version, and it does not
-review what the documents say.
+Inert: no writer consumes the import examples (`opf record import --batch` does not exist in this
+release), and binding a plan's prompt_pack {version, digest} to this pack is a later slice. VALID means
+the manifest agrees with the bytes on disk and each import example passes the guards above. It is not
+authentication, it does not check that a content change also bumped the version, and it does not review
+what the documents say: whether an example's history, unparsed text and missingness reasons are faithful
+to a real source is not machine-checked (spec 8.3), and the example-midnight guard refuses every UTC
+midnight, a genuinely recorded one included, so an example never spells one. Of the Markdown members,
+only the self-test reads text, and only for the FLOW_PINNED sentences, present verbatim or not.
 """
 import sys
 
@@ -47,6 +70,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -56,9 +80,12 @@ from pathlib import Path
 # Required for direct execution under python3 -I, including an opf-only copy.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_adopt import (  # noqa: E402
-    VALID, INVALID, CANNOT_EVALUATE, _DIGEST_RE, _is_contained_filepath,
+    VALID, INVALID, CANNOT_EVALUATE, MISSINGNESS_REASONS, _DIGEST_RE, _is_contained_filepath,
 )
 from _semver import _parse as _parse_version  # noqa: E402
+import _opf_import_batch as batch  # noqa: E402
+import _opf_schema as schema  # noqa: E402
+import _opf_store  # noqa: E402
 
 PACK_FORMAT = "opf.prompt-pack/v1"
 MANIFEST_NAME = "pack.toml"
@@ -70,6 +97,8 @@ MAX_MEMBERS = 1000
 _HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
 EXIT_CODES = {VALID: 0, INVALID: 1, CANNOT_EVALUATE: 2}
 DEFAULT_PACK_DIR = Path(__file__).resolve().parent.parent / "prompt-pack"
+EXAMPLES_DIR = "import/examples/"
+EXAMPLE_SUFFIX = ".batch.toml"
 
 
 class _Refusal(Exception):
@@ -225,6 +254,84 @@ def validate_pack(pack_dir):
     return VALID, None, "version {}, digest {}, {} member(s)".format(version, digest, count)
 
 
+def _is_utc_midnight(value):
+    """True when value is an RFC 3339 UTC timestamp whose time of day is exactly 00:00:00, an all-zero
+    fraction included; a value that is not such a timestamp is never a midnight here."""
+    key = schema._instant_key(value)
+    return key is not None and key[3:] == (0, 0, 0, "")
+
+
+def _row_timestamps(row):
+    """(name, value) for each historical timestamp a batch row supplies, the delivery instants included."""
+    found = [(k, row[k]) for k in schema.IMPORTED_HISTORICAL_TIMESTAMPS if k in row]
+    delivery = row.get("delivery")
+    if type(delivery) is dict:
+        found += [("delivery." + k, delivery[k]) for k in schema._IMPORTED_DELIVERY_TIMESTAMPS if k in delivery]
+    return found
+
+
+def _validate_examples(pack_dir):
+    names = [p[len(EXAMPLES_DIR):] for p in _walk_files(pack_dir) if p.startswith(EXAMPLES_DIR)]
+    stray = [n for n in names if "/" in n or not n.endswith(EXAMPLE_SUFFIX)]
+    _require(not stray, "example-roster", "file(s) under {} that are not <type>{}: {}".format(
+        EXAMPLES_DIR, EXAMPLE_SUFFIX, stray))
+    stems = sorted(n[:-len(EXAMPLE_SUFFIX)] for n in names)
+    missing = sorted(set(_opf_store.BASELINE_TYPES) - set(stems))
+    unexpected = sorted(set(stems) - set(_opf_store.BASELINE_TYPES))
+    _require(not missing and not unexpected, "example-roster",
+             "the import examples are not one per baseline type: missing {}, unexpected {}".format(
+                 missing, unexpected))
+    reasons, history, unparsed = set(), 0, 0
+    for stem in stems:
+        path = EXAMPLES_DIR + stem + EXAMPLE_SUFFIX
+        data = _read_regular(pack_dir / path, MAX_MEMBER_BYTES, "member")
+        result = batch.parse_batch(data)
+        _require(result.status == VALID, "example-batch", "{} is not a VALID import batch: {}".format(
+            path, "; ".join(result.findings)), result.status)
+        try:
+            doc = tomllib.loads(data.decode("utf-8"))
+        except (ValueError, RecursionError, MemoryError) as exc:
+            # Unreachable once parse_batch is VALID over the same bytes; a refusal, never a traceback.
+            raise _Refusal(CANNOT_EVALUATE, "example-batch", "{} does not parse: {}".format(path, exc))
+        rows = ([(row.get("type"), row) for row in doc.get("record", [])]
+                + [("worklog", row) for row in doc.get("worklog", [])])
+        wrong = sorted({str(t) for t, _row in rows if t != stem})
+        _require(not wrong, "example-type", "{} holds row type(s) {}, not only {!r}".format(path, wrong, stem))
+        fabricated = ["{} = {}".format(name, value) for _t, row in rows
+                      for name, value in _row_timestamps(row) if _is_utc_midnight(value)]
+        _require(not fabricated, "example-midnight",
+                 "{} spells a UTC midnight, which a date-only source value must never become (spec 8.3): "
+                 "{}".format(path, fabricated))
+        for _t, row in rows:
+            reasons.update(entry.get("reason") for entry in row.get("unrecorded", []))
+            history += bool(row.get("history"))
+            unparsed += bool(row.get("unparsed"))
+    absent = [r for r in MISSINGNESS_REASONS if r not in reasons]
+    _require(not absent and history and unparsed, "example-reasons",
+             "the import examples do not cover every missingness reason and provenance form: reasons "
+             "absent {}, rows with history {}, rows with unparsed {}".format(absent, history, unparsed))
+    return len(stems)
+
+
+def validate_examples(pack_dir):
+    """(status, guard, detail) for the import examples of the pack at pack_dir. Reads only; writes nothing.
+    Meaningful only for a pack validate_pack judged VALID (the examples' bytes are then the bound ones)."""
+    try:
+        count = _validate_examples(Path(pack_dir))
+    except _Refusal as refusal:
+        return refusal.status, refusal.guard, str(refusal)
+    return VALID, None, "{} import example(s)".format(count)
+
+
+def _validate_with_examples(pack_dir):
+    """validate_pack, then validate_examples once the pack is VALID: the shipped pack's whole verdict."""
+    status, guard, detail = validate_pack(pack_dir)
+    if status != VALID:
+        return status, guard, detail
+    status, guard, examples = validate_examples(pack_dir)
+    return (status, guard, examples if status != VALID else detail + ", " + examples)
+
+
 # ---- self-test ------------------------------------------------------------------------------------
 
 
@@ -251,6 +358,60 @@ def _sha(data):
 
 _DOCS = dict([("adoption-sop.md", b"# Adoption\n\nStep one.\n"),
               ("examples/worklog.toml", b"id = 'WL-1'\n")])
+
+# Normative /flow rules the self-test pins in the shipped member: the member digest passes a consistent
+# revert of the prose (digests recomputed), so each sentence here must appear verbatim, every whitespace
+# run read as one space so a re-flow of the lines never fails it. An edit to one of these rules edits
+# its sentence here in the same change.
+FLOW_MEMBER = "flow/SKILL.md"
+FLOW_PINNED = (
+    "its later lines list the IDs of the findings its round opened, closed, and routed out of the unit, "
+    "and each re-report matched to an accepted ID with the grade the panel gave it (section 7)",
+    "each accepted residual named by its `finding` ID on the entry's later lines with each re-report "
+    "matched to it and the grade the panel gave that re-report (section 7)",
+    "a re-report the run matches to an accepted ID is open unless the `accept` names it, the same defect "
+    "at the same site as the finding it names by ID, the round's entry listing each such match with the "
+    "grade the panel gave it.",
+    "The grade a match is compared with is the one the `accept` records for the finding it names (the "
+    "at-stall bullet below), never one read from the `finding` record, which carries no grade while open "
+    "(OPF-SPEC.md section 8.5).",
+    "A re-report is a match only when the panel grades it no worse than that recorded grade; where either "
+    "grade is missing or unreadable, or the two cannot be ordered, it reads as graded worse.",
+    "A re-report graded worse is no match and is never named in a standing `accept`, the `accept` never "
+    "carried to a worse grade: the round records it as an opening under a new `finding` ID that links "
+    "`relates` to the accepted `finding` ID, and it is fixed, or reaches the maintainer through the stall "
+    "test or a park, as any open finding does (the verification rule below).",
+    "a still-open finding a later round reports again is not opened again, save that a re-report of an "
+    "accepted finding graded worse is the new finding the convergence bullet above opens)",
+    "and each re-report it matched to an accepted ID with the grade the panel gave it (the convergence "
+    "bullet above), and a converging round's `converge` entry lists its closures, routings, and matches on "
+    "its later lines the same way (section 5), so a resumed run reads every round's openings, closures, "
+    "routings, and matches from the unit's `verdict` and `converge` entries in `WL` order (section 5).",
+    "The reopening is that new finding, which carries its own grade and is opened, routed, and closed as "
+    "its own, so a minor one routes out of the unit (the routing bullet below), and the closed finding it "
+    "follows stays closed.",
+    "that leaves such a finding open outside a standing `accept`, a finding being inside one only where "
+    "the `accept` names its own `finding` ID or it is a match graded no worse, so the new finding a "
+    "re-report graded worse than an accepted finding opens is outside (the convergence bullet above);",
+    "where an `accept` names each residual it accepts by its `finding` ID together with the panel's grade "
+    "of that finding when the `accept` is recorded, the grade a later match is compared with (the "
+    "convergence bullet above).",
+    "a re-report of a still-open residual the `accept` names, matched only as the convergence bullet "
+    "allows, graded no worse than the grade the `accept` records for it, and listed on that entry with its "
+    "grade,",
+    "an oscillation (a confirmed recurrence linked `follows` to a closed finding, graded medium or worse) "
+    "counts as no reduction and never vetoes convergence;",
+)
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def _missing_pinned(text, pinned=FLOW_PINNED):
+    """The pinned sentences absent from text, each whitespace run on either side read as one space."""
+    flat = _flat(text)
+    return [sentence for sentence in pinned if _flat(sentence) not in flat]
 
 
 def _vectors():
@@ -346,6 +507,133 @@ def _vectors():
         vectors.append(("version-token-" + ascii(bad), INVALID, "version",
                         lambda p, v=bad: std(p, version=v)))
     return vectors
+
+
+def _example_vectors():
+    """(name, expected status, expected guard, text the detail must carry, builder(pack_dir)) for the import
+    examples. Each builder copies the shipped pack, edits it, and re-stamps every member row and the digest,
+    so validate_pack stays VALID and only an example guard can refuse (member-without-row excepted: it
+    leaves its file out of the rows, so the byte guard refuses first)."""
+
+    def stamp(pack, skip=()):
+        rows = [(p, _sha((pack / p).read_bytes())) for p in _walk_files(pack)
+                if p != MANIFEST_NAME and p not in skip]
+        (pack / MANIFEST_NAME).write_text(_manifest_text("1.0.0", rows), encoding="utf-8")
+
+    def example(pack, stem):
+        return pack / (EXAMPLES_DIR + stem + EXAMPLE_SUFFIX)
+
+    def rewrite(pack, stem, change):
+        doc = tomllib.loads(example(pack, stem).read_text(encoding="utf-8"))
+        change(doc)
+        example(pack, stem).write_bytes(batch.canonical_batch_bytes(doc))
+
+    def built(change=None):
+        def build(pack):
+            shutil.copytree(DEFAULT_PACK_DIR, pack, dirs_exist_ok=True)
+            if change is not None:
+                change(pack)
+            stamp(pack)
+        return build
+
+    def unrecorded_removed(pack):
+        rewrite(pack, "backlog_item", lambda d: d["record"][0]["unrecorded"].pop(0))
+
+    def caller_digest(pack):
+        rewrite(pack, "backlog_item", lambda d: d["source"].update(source_sha256="0" * 64))
+
+    def midnight(pack):
+        def change(doc):
+            row = doc["record"][0]
+            row["unrecorded"] = [u for u in row["unrecorded"] if u["field"] != "created_at"]
+            row["created_at"] = "2019-03-04T00:00:00Z"
+        rewrite(pack, "pending_decision", change)
+
+    def delivery_midnight(pack):
+        rewrite(pack, "contribution",
+                lambda d: d["record"][0]["delivery"].update(sent_at="2019-12-02T00:00:00.000Z"))
+
+    def field_midnight(stem, field, value):
+        # Supply value as the first row's field (no longer recorded absent), so the guard must read that field.
+        def change(doc):
+            row = (doc.get("record") or doc["worklog"])[0]
+            row["unrecorded"] = [u for u in row.get("unrecorded", []) if u["field"] != field]
+            if not row["unrecorded"]:
+                del row["unrecorded"]
+            row[field] = value
+        return lambda pack: rewrite(pack, stem, change)
+
+    def no_history(pack):
+        for stem in ("finding", "worklog"):
+            rewrite(pack, stem, lambda d: [row.pop("history", None)
+                                           for row in d.get("record", []) + d.get("worklog", [])])
+
+    def without_row(pack):
+        shutil.copytree(DEFAULT_PACK_DIR, pack, dirs_exist_ok=True)
+        extra = EXAMPLES_DIR + "extra" + EXAMPLE_SUFFIX
+        (pack / extra).write_bytes(example(pack, "backlog_item").read_bytes())
+        stamp(pack, skip=(extra,))
+
+    def reason_coverage(pack):
+        def change(doc):
+            for row in doc.get("record", []) + doc.get("worklog", []):
+                for entry in row.get("unrecorded", []):
+                    if entry["reason"] == "conflicting":
+                        entry["reason"] = "ambiguous"
+        rewrite(pack, "finding", change)
+
+    def no_unparsed(pack):
+        rewrite(pack, "handoff", lambda d: d["record"][0].pop("unparsed"))
+
+    def stray_member(pack):
+        (pack / (EXAMPLES_DIR + "notes.md")).write_bytes(b"not an example\n")
+
+    def not_utf8(pack):
+        example(pack, "done").write_bytes(b"\xff\n")
+
+    return [
+        ("examples-valid", VALID, None, "12 import example(s)", built()),
+        ("example-unrecorded-row-removed", INVALID, "example-batch", "has no unrecorded row",
+         built(unrecorded_removed)),
+        ("example-caller-digest", INVALID, "example-batch", "caller-supplied measurement 'source_sha256'",
+         built(caller_digest)),
+        ("example-fabricated-midnight", INVALID, "example-midnight", "created_at = 2019-03-04T00:00:00Z",
+         built(midnight)),
+        ("example-delivery-midnight", INVALID, "example-midnight", "delivery.sent_at", built(delivery_midnight)),
+        ("example-updated-at-midnight", INVALID, "example-midnight", "updated_at = 2019-07-09T00:00:00Z",
+         built(field_midnight("pending_decision", "updated_at", "2019-07-09T00:00:00Z"))),
+        ("example-date-midnight", INVALID, "example-midnight", "date = 2019-05-02T00:00:00Z",
+         built(field_midnight("worklog", "date", "2019-05-02T00:00:00Z"))),
+        ("example-decided-at-midnight", INVALID, "example-midnight", "decided_at = 2019-07-08T00:00:00Z",
+         built(field_midnight("pending_decision", "decided_at", "2019-07-08T00:00:00Z"))),
+        ("example-receipted-at-midnight", INVALID, "example-midnight", "delivery.receipted_at",
+         built(lambda p: rewrite(p, "contribution", lambda d: d["record"][0]["delivery"].update(
+             receipted_at="2019-12-05T00:00:00Z")))),
+        ("example-member-without-row", INVALID, "unlisted-file", "extra.batch.toml", without_row),
+        ("example-roster-missing", INVALID, "example-roster", "missing ['block']",
+         built(lambda p: example(p, "block").unlink())),
+        ("example-roster-stray", INVALID, "example-roster", "notes.md", built(stray_member)),
+        ("example-reason-coverage", INVALID, "example-reasons", "reasons absent ['conflicting']",
+         built(reason_coverage)),
+        ("example-unparsed-coverage", INVALID, "example-reasons", "rows with unparsed 0", built(no_unparsed)),
+        ("example-history-coverage", INVALID, "example-reasons", "rows with history 0", built(no_history)),
+        ("example-type-mismatch", INVALID, "example-type", "'finding'",
+         built(lambda p: example(p, "handoff").write_bytes(example(p, "finding").read_bytes()))),
+        ("example-non-canonical", INVALID, "example-batch", "not canonical",
+         built(lambda p: example(p, "maintainer_decision").write_bytes(
+             b"# c\n" + example(p, "maintainer_decision").read_bytes()))),
+        ("example-writer-run-key", INVALID, "example-batch", "unknown key 'run'",
+         built(lambda p: rewrite(p, "done", lambda d: d["record"][0].update(run="x")))),
+        ("example-not-utf8", CANNOT_EVALUATE, "example-batch", "not UTF-8", built(not_utf8)),
+    ]
+
+
+# The example-midnight boundary: each value just inside, exactly at and just outside a UTC midnight.
+_MIDNIGHT_BOUNDARY = [
+    ("2019-03-04T00:00:00Z", True), ("2019-03-04T00:00:00.000Z", True), ("2019-03-04T00:00:00+00:00", True),
+    ("2019-03-04T00:00:00.001Z", False), ("2019-03-04T00:00:01Z", False), ("2019-03-03T23:59:59.999Z", False),
+    ("2019-03-04", False), ("2019-03-04T00:00:00", False), (None, False),
+]
 
 
 def _snapshot(root):
@@ -450,6 +738,50 @@ def _self_test_vectors():
                 if not ok:
                     failures.append("{} (wanted {} {}, got {} {}: {})".format(
                         name, status, guard, got[0], got[1], got[2]))
+            # The import-example guards, over edited copies of the shipped pack.
+            for index, (name, status, guard, text, build) in enumerate(_example_vectors()):
+                pack = Path(tmp) / "example{}".format(index) / "prompt-pack"
+                build(pack)
+                before = _snapshot(pack)
+                got = _validate_with_examples(pack)
+                again = _validate_with_examples(pack)
+                count += 1
+                ok = (got[:2] == (status, guard) and text in got[2] and again == got
+                      and _snapshot(pack) == before)
+                print("{} {}: {} {}".format("PASS" if ok else "FAIL", name, got[0], got[1] or "").rstrip())
+                if not ok:
+                    failures.append("{} (wanted {} {} carrying {!r}, got {} {}: {})".format(
+                        name, status, guard, text, got[0], got[1], got[2]))
+            for value, want in _MIDNIGHT_BOUNDARY:
+                count += 1
+                ok = _is_utc_midnight(value) is want
+                print("{} midnight-boundary {!r}: {}".format("PASS" if ok else "FAIL", value, want))
+                if not ok:
+                    failures.append("midnight-boundary {!r} (wanted {})".format(value, want))
+            # The default run (main with no argument) includes the import examples: the shipped pack reports
+            # them, and a pack whose only fault is an example guard's is refused, not VALID.
+            import contextlib
+            import io
+            builders = dict((v[0], v[4]) for v in _example_vectors())
+            broken = Path(tmp) / "default-run" / "prompt-pack"
+            builders["example-unparsed-coverage"](broken)
+            for name, pack_dir, code, stream, text in (
+                    ("default-run-examples", DEFAULT_PACK_DIR, 0, "out", ", 12 import example(s))"),
+                    ("default-run-example-refused", broken, 1, "err", "[example-reasons]")):
+                out, err = io.StringIO(), io.StringIO()
+                shipped_dir = globals()["DEFAULT_PACK_DIR"]
+                globals()["DEFAULT_PACK_DIR"] = pack_dir
+                try:
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        got = main([])
+                finally:
+                    globals()["DEFAULT_PACK_DIR"] = shipped_dir
+                count += 1
+                ok = got == code and text in (out if stream == "out" else err).getvalue()
+                print("{} {}: exit {}".format("PASS" if ok else "FAIL", name, got))
+                if not ok:
+                    failures.append("{} (wanted exit {} carrying {!r}, got exit {}: {!r} {!r})".format(
+                        name, code, text, got, out.getvalue(), err.getvalue()))
             # chmod cannot make a directory unreadable to root. Restore access before snapshot/cleanup.
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 print("SKIP unreadable-subdirectory: running as root")
@@ -546,6 +878,20 @@ sys.exit(0)
             print("{} close-vectors: {}".format("FAIL" if close_failures else "PASS",
                                                 "; ".join(close_failures) or "3 green, 1 pre-fix red"))
             failures.extend(close_failures)
+        # The shipped /flow member carries every pinned rule sentence, and dropping any one of them from
+        # it is caught as exactly that sentence missing, so reverting a pinned rule is red.
+        shipped = _read_regular(DEFAULT_PACK_DIR / FLOW_MEMBER, MAX_MEMBER_BYTES, "member").decode("utf-8")
+        count += 1
+        missing = _missing_pinned(shipped)
+        print("{} flow-pinned-sentences: {} of {} present".format(
+            "FAIL" if missing else "PASS", len(FLOW_PINNED) - len(missing), len(FLOW_PINNED)))
+        failures.extend("flow-pinned-sentences: {} lacks {!r}".format(FLOW_MEMBER, s) for s in missing)
+        count += 1
+        present = [s for s in FLOW_PINNED if s not in missing]
+        blind = [s for s in present if _missing_pinned(_flat(shipped).replace(_flat(s), "")) != [s]]
+        print("{} flow-pinned-sentences-revert: {} of {} present red when dropped".format(
+            "FAIL" if blind else "PASS", len(present) - len(blind), len(present)))
+        failures.extend("flow-pinned-sentences-revert: dropping {!r} is not red".format(s) for s in blind)
         count += 1
         if compute_digest("1.0.0", []) != "sha256:" + _sha(b"opf.prompt-pack/v1\nversion 1.0.0\n"):
             failures.append("digest-definition")
@@ -568,7 +914,7 @@ def main(argv=None):
         if args:
             print("usage: check_opf_prompt_pack.py [--self-test]", file=sys.stderr)
             return 2
-        status, guard, detail = validate_pack(DEFAULT_PACK_DIR)
+        status, guard, detail = _validate_with_examples(DEFAULT_PACK_DIR)
         if status == VALID:
             print("OPF PROMPT PACK: VALID ({})".format(detail))
         else:

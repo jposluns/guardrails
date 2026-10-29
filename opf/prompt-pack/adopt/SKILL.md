@@ -3,8 +3,8 @@ name: adopt
 description: The OPF adoption procedure for an AI development assistant. Adopt OPFiles (OPF)
   into a project with the `opf adopt` verb, in order: investigate, propose one plan, take one
   approval, apply, verify. Each stage states whether the reference tooling that ships beside
-  this pack can run it. Today investigation and planning run, read-only; approval capture,
-  apply, completion and retirement are not yet executable, and the assistant stops before
+  this pack can run it. Today investigation, planning and approval run, read-only; recording
+  the approval, apply, completion and retirement are not yet executable, and the assistant stops before
   them rather than doing their work by hand. For a project with no prior records, read
   clean-start.md beside this file.
 ---
@@ -40,17 +40,17 @@ Three rules govern everything else:
 | Investigate | the planner's read-only `investigate` entry (section 3) | runs; writes nothing |
 | Plan | `opf adopt plan --inputs FILE [--root DIR]` | runs; prints the frozen plan; writes nothing |
 | Status | `opf adopt status [--root DIR]` | runs; writes nothing |
-| Approve | `opf adopt approve` | not yet executable: refuses with exit 2 |
+| Approve | `opf adopt approve` | runs; re-checks the frozen plan against the live tree and prints the approval; writes nothing |
 | Apply | `opf adopt apply` | not yet executable: refuses with exit 2 |
 | Complete | `opf adopt complete` | not yet executable: refuses with exit 2 |
-| Reconcile | `opf adopt reconcile` | not yet executable: refuses with exit 2 |
+| Reconcile | `opf adopt reconcile [--root DIR]` | runs; recovers an interrupted adoption transaction from the adoption journal (section 2) |
 | Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` | not yet executable: `opf record` has no `import` subcommand, and `opf import` refuses every argument with exit 2 |
 
-Inside the apply engine, three of the eleven plan operations have executors (`plant-governance`,
-`render-views` and `record-adoption`), but no command reaches them yet. The other eight
-(`install-pack`, `init-store`, `create-file`, `register-unmanaged`, `move-file`,
-`repoint-consumer`, `retire-file` and `enable-hook`) refuse as not yet executable. A plan can name
-all eleven; naming one does not make it runnable.
+Inside the apply engine, each of the ten plan operations has an executor, but `opf adopt apply`
+still refuses every plan with exit 2 before it writes anything: the apply stage's receipt step is
+not yet executable, and apply cannot yet obtain the release pack that `plant-governance` rows plant
+from, sequence `init-store`, or gather what `render-views` reads. A plan can name all ten; naming
+one does not make it runnable.
 
 The reference tooling requires Python 3.14 or newer. Its exit convention is 0 clean, 1 a finding,
 2 cannot-evaluate or refused. A refusal is never a pass.
@@ -71,7 +71,29 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    expected first-adoption result. Exit 0 listing an adoption run, exit 1 (a held journal lock,
    an interrupted transaction, an evidence bundle that does not verify, or a directory at the
    adoption evidence home whose name is not a run id) or exit 2 means stop and report what it
-   printed; this build cannot resume or reconcile a run.
+   printed. No command resumes a run. A held journal lock or an interrupted transaction is
+   recovered only by `opf adopt reconcile --root <product root>`, and only after the adopter
+   confirms that no adoption run is live. It works from the adoption journal alone: it rolls each
+   interrupted transaction back, or forward when every change had already landed, prints each
+   outcome, and names a lock it released from a run that is no longer running. Beside an
+   interrupted transaction other than an `init-store` one, it holds the adoption journal lock and
+   the store lease of each machine directory under `.working/` while it recovers, and it releases
+   only those. Exit 0 with "nothing to reconcile" means it
+   wrote nothing, or, when it says every transaction was already terminal, that it made no
+   recovery write. Exit 2 means stop and report what it printed. A refusal named
+   `journal-lock-held`, `journal-unclassifiable`, `store-lease-held`,
+   `init-store-reversal-unproven` or `pre-lock-fault` came before any recovery write.
+   `recovery-failed` means the recovery started and may be partial: the journal records how far
+   it got, and a later reconcile resumes it. `store-lease-release-failed` means the recovery
+   finished but a store lease it took stays. Exit 2 with "cannot evaluate" and no finding means
+   the product root could not be evaluated. This build does not release a leftover store lease
+   (a `lease.toml` in a machine directory under `.working/`, such as `.working/toml/lease.toml`).
+   Reconcile refuses as `store-lease-held` while one sits beside an interrupted transaction,
+   except beside an interrupted `init-store` transaction alone: that operation may have left
+   its own lease, and reconcile neither refuses on it nor takes one. A store pointer
+   (`.opf.toml` or `.opf.local.toml`) beside an interrupted transaction also refuses as
+   `store-lease-held`. Releasing a leftover lease is the adopter's own step. After reconcile,
+   run `opf adopt status` again.
 4. Keep every working file of this procedure (the worksheet, saved observations and plans)
    outside the product repository. A new file inside an investigated root changes the
    inventory, and the plan then refuses as "inventory changed".
@@ -93,8 +115,9 @@ the sources and targets you pass. It never enters `.git`.
 - **Targets** are paths the plan will create outside the scanned roots, for example `opf`, the
   directory of the OPF pack mirror. The plan installs there only the members it names: the
   pre-commit hook at `opf/enforcement/precommit/pre-commit` with `install.sh` beside it, the CI
-  recipe and the tool entry point `opf/tools/opf.py`. The modules that entry point imports come
-  from a later install step (section 4). The planner needs to see that each target is absent.
+  recipe, and the tool entry point `opf/tools/opf.py` with every other file of the release's
+  `opf/tools/` directory, which that entry point runs (section 4). The planner needs to see that
+  each target is absent.
 
 **Discover the sources first.** Do not ask the adopter which old files exist; find them. Run the
 read-only discovery entry, with an absolute product root and the tooling directory that holds
@@ -163,8 +186,9 @@ python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); impor
 findings. In the observation TOML, read:
 
 - `observation_digest`: the planning worksheet must quote it exactly.
-- `ancestry.adoption`: `first-adoption` or `re-adoption`. A pointer, a resolved store manifest,
-  or content at a reserved `.working` name makes it re-adoption.
+- `ancestry.adoption`: `first-adoption` or `re-adoption`. A pointer or a resolved store
+  manifest makes it re-adoption; a tree with neither is a first adoption, manifestless
+  content at a reserved `.working` name included.
 - `resolution.status`: whether a store already resolves. A store that does not resolve needs an
   `init-store` operation in the plan; a store that resolves must not have one.
 - `candidates`: every path that needs a disposition. These are the confirmed sources, foreign
@@ -200,16 +224,18 @@ frozen plan marks each source `occupying = true` or `occupying = false`.
   destination is a collision, never an overwrite. A named destination whose file name is
   `opf.yml`, `opf-ci.sh`, `pre-commit` or `install.sh`, in any mix of upper and lower case,
   refuses with exit 2 when you plan, unless it lies beneath `.working/archive/moved/`. Those
-  are the enforcement launcher names, and a moved file is never checked as an enforcement
-  member. Take the default destination, or give the file another name such as
+  are the enforcement launcher names, and the frozen plan refuses a file moved under one of them
+  outside that archive whether or not an enforcement row names it (the enforcement notes below
+  give each case). Take the default destination, or give the file another name such as
   `pre-commit.old`.
 
 The reserved store control area (`.working/archive`, `imported`, `staging`, `journals`) is never
 adopter content, and no decision may name it.
 
 Then write the planning worksheet, a TOML file with a closed set of keys; the planner refuses a
-key outside this set. The sample below is complete for one case: the investigation in section
-3 finds no store and one candidate, the named source `TODO.md`, which takes `retire`, and
+key outside this set. The sample below is complete for one case, except for the `opf/tools/`
+files after the entry point, which you add as described after the sample: the investigation in
+section 3 finds no store and one candidate, the named source `TODO.md`, which takes `retire`, and
 nothing exists yet at the enforcement member paths. Replace each value in angle brackets with a
 real one. Write every digest as `sha256:` followed by 64 lowercase hex digits. The
 `observation_digest` from section 3 and the `digest` in `pack.toml` already have that form, so
@@ -283,6 +309,10 @@ residuals = ["shell-or-interpreter-wrapping", "same-user-tampering"]
 
 [[bindings.enforcement.members]]
 path = ".claude/settings.json"
+digest = "<digest of the bytes to install there>"
+
+[[bindings.enforcement.members]]
+path = "opf/enforcement/claude/pretooluse_deny.py"
 digest = "<digest of the bytes to install there>"
 
 [[bindings.enforcement]]
@@ -377,44 +407,64 @@ path = ".working/WORKLOG.md"
 digest = "<digest of this rendered view>"
 
 [[ops]]
-op = "install-pack"
-target = "."
-
-[[ops.members]]
+op = "plant-governance"
 path = ".github/workflows/opf.yml"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/ci/github-actions.yml"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = "opf/enforcement/ci/opf-ci.sh"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/ci/opf-ci.sh"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = "opf/tools/opf.py"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/tools/opf.py"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = "opf/enforcement/precommit/pre-commit"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/precommit/pre-commit"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = "opf/enforcement/precommit/install.sh"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/precommit/install.sh"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = ".claude/settings.json"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/claude/settings.opf.json"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
+path = "opf/enforcement/claude/pretooluse_deny.py"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/claude/pretooluse_deny.py"
+
+[[ops]]
+op = "plant-governance"
 path = "AGENTS.md"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/codex/AGENTS.opf.md"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = "GEMINI.md"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/gemini-cli/GEMINI.opf.md"
 
-[[ops.members]]
+[[ops]]
+op = "plant-governance"
 path = ".cursor/rules/opf.mdc"
-digest = "<digest of the bytes to install there>"
+content_digest = "<digest of the bytes to install there>"
+source_member = "opf/enforcement/cursor/opf.mdc"
 ```
 
 How to fill it:
@@ -448,13 +498,24 @@ How to fill it:
   installs. So the pre-commit hook sits at `opf/enforcement/precommit/pre-commit` with
   `install.sh` beside it, the CI recipe sits at `opf/enforcement/ci/opf-ci.sh`, where the
   workflow's `run:` line points, and both rows name `opf/tools/opf.py`, the tool those files run.
-  The sample names only that entry point. The modules it imports sit beside it in the release's
-  `opf/tools/` directory, which a later install step mirrors; that step is not executable in
-  this build. The planner treats a member named `opf.yml`, `opf-ci.sh`, `pre-commit` or
-  `install.sh`, in any row and in any mix of upper and lower case (`PRE-COMMIT` or `Pre-Commit`
-  too), as that file, whichever of `install-pack`, `plant-governance` or `enable-hook` installs
-  it. If the path it runs lies outside `opf/` or above the product root, or no `install-pack` or
-  `plant-governance` operation in the plan creates that path, the plan refuses with exit 2. The
+  That entry point imports the modules beside it and reads other files there, so it runs only
+  beside the whole `opf/tools/` directory of its release. Both rows therefore also name every
+  other file of that directory at its `opf/tools/` path, and the plan plants each one with a
+  `plant-governance` row, as it plants the entry point. The sample shows the entry point only;
+  add the rest to both rows and to `ops`. If a plan installs the entry point but leaves any file
+  of that directory out of a `ci` or `pre-commit` row, or plants no `plant-governance` row for
+  it, the plan refuses with exit 2. The planner lists that directory from the `opf/tools/` it runs
+  from, so plan with the release you install. Print each file's path and digest with:
+
+  ```
+  python3 -I -B -c "import sys, os, hashlib; sys.path.insert(0, sys.argv[1]); import _opf_adopt as a; [print(p, 'sha256:' + hashlib.sha256(open(os.path.join(sys.argv[1], p[len('opf/tools/'):]), 'rb').read()).hexdigest()) for p in a.tool_tree()]" <opf tools directory>
+  ```
+
+  The planner treats a member named `opf.yml`, `opf-ci.sh`,
+  `pre-commit` or `install.sh`, in any row and in any mix of upper and lower case (`PRE-COMMIT` or
+  `Pre-Commit` too), as that file, whichever of `plant-governance` or `enable-hook` installs it.
+  If the path it runs lies outside `opf/` or above the product root, or no `plant-governance`
+  operation in the plan creates that path, the plan refuses with exit 2. The
   `ci` row must still name members whose file names are exactly `opf.yml` and `opf-ci.sh`, and
   the `pre-commit` row members named exactly `pre-commit` and `install.sh`, in lower case as the
   pack ships them. A case variant such as `INSTALL.SH` is still treated as that launcher: what
@@ -471,21 +532,26 @@ How to fill it:
   give no other platform's member one of those four names. Every file that any operation in the
   plan writes under one of the four names, in any case, must be named in some row, or the plan
   refuses with exit 2, so a launcher the plan writes is never left out while a decoy is named.
-  That covers each file that `install-pack`, `init-store`, `render-views`, `create-file`,
-  `plant-governance` or `record-adoption` creates, each `move-file` destination, and each file
+  That covers each file that `init-store`, `render-views`, `create-file`, `plant-governance` or
+  `record-adoption` creates, each `move-file` destination, and each file
   that `enable-hook` or `repoint-consumer` rewrites, such as `.git/hooks/pre-commit` or
   `.husky/pre-commit`. The one exception is a `move-file` destination under the store's Move
   archive, `.working/archive/moved/`, where a `move` decision files an old hook away: moving the
   former `.opf/hooks/pre-commit` there is accepted. A file moved there is not checked, so do not
   run it from there. A `move` destination under one of the four names anywhere else is refused
-  before the plan is built (exit 2), because no row can name a moved file: a member must be
-  installed by an `install-pack`, `plant-governance` or `enable-hook` operation, which would then
-  write that path a second time. The copy the plan keeps of a retired, migrated or occupying
-  source is not an operation's write and is not checked by this rule either. The planner applies
+  before the plan is built (cannot-evaluate, exit 2), because the frozen plan refuses such a
+  destination whether or not a row names it. Named in no row, it is a file the plan writes under
+  one of the four names that no row names (cannot-evaluate, exit 2, as above). Named in a row
+  but installed by no `plant-governance` or `enable-hook` operation, it is a
+  member that no operation installs (invalid, exit 1). Named in a row and installed by one of
+  those operations, the move and the install write that path twice (invalid, exit 1), unless a
+  launch check above refuses the installed file first (cannot-evaluate, exit 2), as it does when
+  the path that file runs is not one the plan creates in `opf/`. The copy the plan keeps of a
+  retired, migrated or occupying source is not an operation's write and is not checked by this
+  rule either. The planner applies
   this check, like every other exit-2 check in this paragraph, only when every operation row is
-  well formed; this check also needs every row's member list to be well formed, with an
-  `install-pack`, `plant-governance` or `enable-hook` operation installing each member path,
-  whatever its digest. Otherwise those defects refuse the plan with exit 1, unless the plan is
+  well formed; this check also needs every row's member list to be well formed, with a
+  `plant-governance` or `enable-hook` operation installing each member path, whatever its digest. Otherwise those defects refuse the plan with exit 1, unless the plan is
   refused with exit 2 for another reason first. No other defect holds the check back, so a plan
   whose operation rows are well formed but which also has, say, a member digest that no
   operation installs can refuse with exit 2 before its exit-1 findings are reported. Two paths
@@ -512,14 +578,54 @@ How to fill it:
   listed that path in `targets`. A plan from such a worksheet now refuses with exit 2, because
   its workflow runs `opf/enforcement/ci/opf-ci.sh` and its hook runs `tools/opf.py`, and the
   plan installs neither in the mirror. Installing the hook with `enable-hook` instead refuses
-  the same way. Rewrite the `ci` and `pre-commit` rows and the `install-pack` members as the
-  sample shows, replace the target with `opf`, and investigate again, because the targets
+  the same way. Rewrite the `ci` and `pre-commit` rows and the rows planting their members as
+  the sample shows, replace the target with `opf`, and investigate again, because the targets
   changed.
 - `init-store` is required when no store resolves and refused when one does. `render-views`
   lists exactly the views the planned store declares, one member each; with no store yet, those
   are the thirteen views of the default manifest, as in the sample. Every enforcement member is
-  installed, with the same path and digest, by an `install-pack`, `plant-governance` or
-  `enable-hook` operation in the same plan.
+  installed, with the same path and digest, by a `plant-governance` or `enable-hook` operation in
+  the same plan.
+- Plant each enforcement member with one `plant-governance` row: `path` is where it lands,
+  `content_digest` is its digest, and `source_member` is the release-manifest path its bytes come
+  from. A file under `opf/` comes from its own path, and `.github/workflows/opf.yml`,
+  `.claude/settings.json`, `AGENTS.md`, `GEMINI.md` and `.cursor/rules/opf.mdc` come from the pack
+  member the sample names for them; any other `source_member` at those paths refuses with exit 1.
+  The `claude-code` row names `.claude/settings.json` and the deny hook it registers,
+  `opf/enforcement/claude/pretooluse_deny.py`, which must be planted at that path; a plan that
+  registers the hook without planting it refuses with exit 2.
+- When the project has no `.claude/settings.json`, plant the pack's reviewed template there, as
+  the sample does; its digest is the `.claude/settings.json` member digest. Print it with:
+
+  ```
+  python3 -I -B -c "import sys, hashlib; print('sha256:' + hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())" <opf enforcement directory>/claude/settings.opf.json
+  ```
+
+  When the project already has `.claude/settings.json`, a plant over it refuses with exit 2.
+  Merge the hook into it instead: replace that one `plant-governance` row with an `enable-hook`
+  row, keep the deny hook's row, and set the `.claude/settings.json` member digest to the merged
+  file's digest:
+
+  ```
+  [[ops]]
+  op = "enable-hook"
+  registration_path = ".claude/settings.json"
+  plugin_entry = "python3 -I \"$CLAUDE_PROJECT_DIR\"/opf/enforcement/claude/pretooluse_deny.py"
+  old_digest = "<digest of the existing .claude/settings.json>"
+  new_digest = "<digest of that file with the hook merged in>"
+  ```
+
+  `plugin_entry` must be exactly that command; any other value refuses with exit 1. Print the
+  existing file's digest with the line above, and the merged digest, run from the product root,
+  with:
+
+  ```
+  python3 -I -B -c "import sys; sys.path.insert(0, '<opf tools directory>'); import _opf_adopt as a, _opf_adopt_hook as h; r = h.merge_registration(open('.claude/settings.json', 'rb').read(), a.HOOK_COMMAND); print(r.status, r.new_digest, r.findings)"
+  ```
+
+  Anything but `VALID` with a digest means the merge refuses that file; report it and stop. Do
+  not list `.claude` or the settings file as a source: a source stays byte-identical until its
+  retirement, so a plan that merges into one refuses with exit 1.
 - Disposition operations (`register-unmanaged`, `move-file`, `retire-file`) come from the
   decisions; never list them under `ops`.
 - Every planned creation needs an observed absence, and every replacement needs matching
@@ -550,8 +656,8 @@ Run `opf adopt plan --inputs <worksheet> --root <product root>`:
 - Exit 1: an operation row, or the frozen plan, breaks the plan schema. Examples: an operation
   missing a required field; enforcement rows that are not the six platforms, each once and in
   order; a means its platform does not allow, or a means without its required residual; an
-  enforcement member that no `install-pack`, `plant-governance` or `enable-hook` row installs
-  with the same path and digest; an `anchor_sha256` that differs from `manifest_sha256`; and a
+  enforcement member that no `plant-governance` or `enable-hook` row installs with the same path
+  and digest; a `plant-governance` row planting a pack path from another `source_member`; an `anchor_sha256` that differs from `manifest_sha256`; and a
   `move` destination the frozen plan refuses, such as one inside the store tree but not beneath
   `.working/archive/moved/`, or one that another effect of the plan also writes (a destination
   under a launcher name outside `.working/archive/moved/` refuses with exit 2 first, as below).
@@ -588,9 +694,13 @@ Ask once, for the whole plan by its `plan_digest`. If the adopter wants any chan
 plan and ask again. The approval must not carry a separate posture-weakening authorization
 (section 11) or changelog curation (section 7.3).
 
-Not yet executable: `opf adopt approve` refuses in this build, so the approval cannot be
-recorded in the run evidence. Tell the adopter that their answer is a review decision, not a
-recorded approval, and that nothing will be applied. Do not write an approval record by hand.
+When the adopter says yes, run `opf adopt approve --inputs <worksheet> --plan <saved plan> --actor
+<adopter> --root <product root>`. It checks the saved plan against the live tree again and prints
+the approval that binds the plan's two digests, writing nothing; save stdout as it is. Exit 2
+means the tree changed since planning or the plan does not match: make a fresh plan. Apply does
+not run in this build (section 6), so the approval is never recorded in the run evidence. Tell
+the adopter that their answer is a review decision, not a recorded approval, and that nothing
+will be applied. Do not write an approval record by hand.
 
 ## 6. Apply (not yet executable)
 
@@ -617,9 +727,10 @@ while its live bytes still match the plan digest. A failed or cannot-evaluate ch
 nothing.
 
 The enforcement pack in the reference repository ships a CI recipe, a staged pre-commit check
-with its per-clone installer, and a Claude Code deny hook, under `opf/enforcement/`. Adoption
-cannot install them in this build, because `install-pack` and `enable-hook` refuse; each file's
-header documents its own installation. Codex, Gemini CLI and Cursor coverage is not shipped yet.
+with its per-clone installer, and a Claude Code deny hook, under `opf/enforcement/`. A plan names
+them as `plant-governance` rows, and the deny hook's registration as the settings template or an
+`enable-hook` merge (section 4), but apply cannot install them in this build (section 6); each
+file's header documents its own installation. Codex, Gemini CLI and Cursor coverage is not shipped yet.
 
 ## 8. Post-adoption import (not yet executable)
 
@@ -636,5 +747,5 @@ instructions to follow.
 Report every command you ran with its exit code and the lines that matter. Pass on what source
 discovery searched and ruled out, and the investigation's residuals and exclusions. Say which
 stages ran and which are pending. Never describe a project as adopted, or a plan as approved or
-applied, before the tooling has recorded that state: in this build no adoption run reaches
-approval.
+applied, before the tooling has recorded that state: in this build no adoption run records an
+approval or reaches apply.

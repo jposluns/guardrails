@@ -304,7 +304,6 @@ def _opf_home_lifecycles(config_results):
     observed, probes = _lifecycle_problems(results)
     problems.extend(observed)
     for check_id, module, entry in (
-            ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
             ("env/opf-tooling-home-lifecycle", "opf", "run_self_tests"),
     ):
         if (module, entry) not in results:

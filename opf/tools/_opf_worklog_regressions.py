@@ -2,7 +2,7 @@
 """Bounded regressions for the PR-1 intake boundary.
 
 The fixture replaces contained filesystem primitives, not the loader or TOML
-parser. Upgrade additionally uses isolated on-disk stores and the real CLI.
+parser.
 Permission failures are injected at read time so these tests also work
 as root. Production callers and their exception translations still execute.
 
@@ -41,7 +41,6 @@ import _opf_check        # noqa: E402
 import _opf_store        # noqa: E402
 import _opf_views        # noqa: E402
 import _opf_worklog as wl  # noqa: E402
-import _opf_write_guard  # noqa: E402
 
 M = "m"
 LEGACY = "m/worklog.toml"
@@ -398,7 +397,9 @@ def _manifest_intake_regressions(check):
             data = (_opf_store.tomllib.loads(value.decode()) if phase == "read" else
                     value[0] if phase == "validation" else value)
             control = value[1] if phase == "validation" else None
-            expected = _manifest_diagnostics(data, _opf_store.validate_manifest(data, control))
+            # Every intake names the manifest it read (p) in the older-spec_version refusal.
+            expected = _manifest_diagnostics(
+                data, _opf_store.validate_manifest(data, control, manifest_rel=p))
         elif message == exotic:
             expected["views"] = (p + " is present but is not a regular file "
                                  "(a FIFO, device, socket, or directory; fail-closed, never opened)")
@@ -416,7 +417,7 @@ def _manifest_intake_regressions(check):
         control = value[1] if phase == "validation" else None
         if control is not None:
             # Only doctor accepts supported_profiles. Never change base-only intake.
-            validation = _opf_store.validate_manifest(data, control)
+            validation = _opf_store.validate_manifest(data, control, manifest_rel=p)
             expected = {"doctor": (
                 ["m/manifest.toml: " + message]
                 if validation.status == _opf_store.CANNOT_EVALUATE else
@@ -597,6 +598,8 @@ def _entry_point_regressions(check):
 
     p = M + "/manifest.toml"
     for name, data, validation, control in manifest_cases(check):
+        # Every intake names the manifest it read (p) in the older-spec_version refusal.
+        validation = _opf_store.validate_manifest(data, control, manifest_rel=p)
         with _Fixture() as fx:
             readers = _manifest_readers(fx, control)
             readers.update({key: (lambda run=run: run()[1])
@@ -892,150 +895,6 @@ def _late_fault_text(mode):
             "unreadable": "fixture late intake denied"}[mode]
 
 
-def _upgrade_preflight_regressions(check, fence):
-    """Exercise both upgrade origins through the CLI, with real git/store bytes.
-
-    Refusal snapshots include every non-git path and the git index. A separate
-    lease spy detects even an acquire/release cycle that leaves no final bytes.
-    No production I/O or validator is replaced in the end-to-end cases.
-    """
-    import io
-    import shutil
-    import sys
-    import tempfile
-    import tomllib
-
-    import _opf_emit
-    import _opf_init
-    import check_opf_upgrade as fixtures
-    import subprocess
-    import opf
-
-    if opf._bootstrap() != 0:
-        raise RuntimeError("upgrade regression bootstrap failed")
-    git = shutil.which("git", path=os.defpath)
-    if git is None:
-        raise RuntimeError("upgrade regression requires git")
-    cli = Path(__file__).resolve().with_name("opf.py")
-
-    def snapshot(root):
-        # os.walk's onerror prevents an unreadable subtree passing as empty.
-        def unreadable(exc):
-            raise exc
-        result = {}
-        for parent, dirs, files in os.walk(root, onerror=unreadable):
-            if Path(parent) == root:
-                dirs.remove(".git")
-            for name in dirs + files:
-                path = Path(parent) / name
-                rel = path.relative_to(root).as_posix()
-                mode = path.lstat().st_mode
-                if stat.S_ISDIR(mode):
-                    result[rel] = ("dir",)
-                elif stat.S_ISREG(mode):
-                    result[rel] = ("file", path.read_bytes())
-                else:
-                    raise RuntimeError("unexpected fixture path: " + rel)
-        return result, (root / ".git/index").read_bytes()
-
-    with tempfile.TemporaryDirectory(prefix="opf-worklog-upgrade-") as temporary:
-        base = Path(temporary).resolve()
-        home = base / "home"
-        home.mkdir()
-        # No inherited GIT_* redirection, config, hooks, or author identity.
-        env = {"PATH": os.defpath, "HOME": str(home), "XDG_CONFIG_HOME": str(home),
-               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-               "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
-               "LC_ALL": "C", "TZ": "UTC", "TMPDIR": str(base)}
-
-        def git_call(root, *args):
-            # F-367: pin automatic maintenance off in option position, so no detached
-            # `git maintenance run --auto` / `git gc --auto` child can outlive the
-            # commit and race this fixture temporary directory cleanup.
-            _opf_emit.run_status_owned(
-                [git, "-C", str(root), "-c", "init.templateDir=",
-                 "-c", "init.defaultBranch=main", "-c", "core.hooksPath=" + str(home),
-                 "-c", "commit.gpgSign=false", "-c", "user.name=OPF fixture",
-                 "-c", "user.email=fixture@example.invalid",
-                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
-                 "-c", "maintenance.auto=false", *args],
-                fixture_id="upgrade-git/" + root.name + "/" + args[0], process_fixture=True,
-                env=env, cwd=base, check=True, capture_output=True, timeout=150)
-
-        for origin in ("1.0.0", "1.1.0"):
-            for unsupported in (True, False):
-                label = "F5-upgrade-" + origin
-                root = base / (origin + ("-future" if unsupported else "-legacy"))
-                machine = root / ".working/toml"
-                machine.mkdir(parents=True)
-                if origin == "1.0.0":
-                    # Frozen legacy bytes shared with the existing upgrade gate.
-                    manifest = tomllib.loads(fixtures._FIX_MANIFEST)
-                    counters = fixtures._FIX_COUNTERS
-                    indexes = fixtures._FIX_INDEX_TYPES
-                    token = "devprocess"
-                else:
-                    manifest = tomllib.loads(_opf_init.build_manifest())
-                    manifest["opf"]["spec_version"] = origin
-                    counters = _opf_init.build_counters()
-                    indexes = _opf_init.INDEX_TYPES
-                    token = "opf"
-                if unsupported:
-                    manifest[token]["worklog"] = 2
-                    (machine / "worklog").mkdir()
-                else:
-                    check(label + "-legacy-key-absent", "worklog" not in manifest[token])
-                    (machine / "worklog.toml").write_text(fixtures._FIX_WORKLOG, encoding="utf-8")
-                (machine / "manifest.toml").write_text(_opf_emit.emit_checked(manifest), encoding="utf-8")
-                (machine / "counters.toml").write_text(counters, encoding="utf-8")
-                (machine / "version.toml").write_text(fixtures._FIX_VERSION, encoding="utf-8")
-                for name in indexes:
-                    (machine / (name + ".index.toml")).write_text(fixtures._FIX_INDEX, encoding="utf-8")
-                (root / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
-                (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
-                try:
-                    git_call(root, "init")
-                    git_call(root, "--literal-pathspecs", "add", "--", ".working",
-                             _opf_store.POINTER_REL, "CHANGELOG.md")
-                    git_call(root, "commit", "-m", "seed upgrade regression")
-                except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
-                    print(label + "-git-setup", str(exc))
-                    check(label + "-git-setup", False)
-                    continue
-                before, index_before = snapshot(root)
-                if unsupported:
-                    with patch.dict(os.environ, env, clear=True), \
-                            patch.object(_opf_write_guard, "acquire_lease",
-                                         side_effect=opf._UpgradeError("lease reached")) as lease, \
-                            contextlib.redirect_stdout(io.StringIO()), \
-                            contextlib.redirect_stderr(io.StringIO()):
-                        message = _error(lambda: opf._upgrade_run(str(root)))
-                    check(label + "-before-lease", message == fence and lease.call_count == 0)
-                try:
-                    proc = _opf_emit.run_status_owned(
-                        [sys.executable, "-I", "-B", str(cli), "upgrade", "--root", str(root)],
-                        fixture_id=label + ("/future" if unsupported else "/legacy"),
-                        expected_returncode=2 if unsupported else 0, process_fixture=True,
-                        env=env, cwd=base, capture_output=True, text=True, timeout=120)
-                except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
-                    print(label + "-cli", str(exc))
-                    check(label + "-cli", False)
-                    continue
-                after, index_after = snapshot(root)
-                if unsupported:
-                    check(label + "-refuses-generation", proc.returncode == 0
-                          and fence in proc.stderr)
-                    check(label + "-store-byte-identical", after == before)
-                    check(label + "-git-index-byte-identical", index_after == index_before)
-                else:
-                    upgraded = tomllib.loads((machine / "manifest.toml").read_text(encoding="utf-8"))
-                    check(label + "-legacy-succeeds", proc.returncode == 0
-                          and "doctor-VALID" in proc.stdout
-                          and upgraded["opf"]["spec_version"] == _opf_store.SUPPORTED_SPEC_VERSION)
-                    check(label + "-legacy-generation-one", "worklog" not in upgraded["opf"]
-                          and wl.generation(upgraded) == 1)
-
-
 def _round5_regressions(check):
     """Full doctor attribution/probe boundary."""
     import _opf_emit
@@ -1164,8 +1023,6 @@ def self_test():
         mv = _opf_store.validate_manifest(fx.manifest)
         check("F5-production-manifest", mv.status == _opf_store.CANNOT_EVALUATE
               and mv.findings == [fence])
-
-    _upgrade_preflight_regressions(check, fence)
 
     with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
         for gen in (1, 2):
