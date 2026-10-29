@@ -72,7 +72,8 @@ spelling.
 THE IMPORTED-LEDGER BUILDER. build_imported_ledger(version_data, history, changelog_text) returns
 (new_version_data, findings): a new ledger and no finding, or None and the findings, never a partial
 ledger. It builds only from a VALID History holding at least one row (each row's version and date are
-re-graded by the parser's own rules) and a version ledger validate_version grades VALID, and refuses, each
+re-graded by the parser's own rules, each exactly a str) and a version ledger validate_version grades
+VALID, and refuses, each
 by a named finding: a ledger holding any witnessed row (imported rows form a prefix of the ledger, spec
 6.1); a history version that collides with an existing row by string or by SemVer precedence; changelog
 text that is not a str, that the changelog gate's heading scan cannot read, or that carries a heading the
@@ -81,12 +82,15 @@ or with more than one. It then appends, in history order, one `[[release]]` row 
 and recorded date verbatim, `worklog_span = []`, the empty-coverage digest compute_span_digest({}, None),
 `imported = true`) and one `[[summary]]` row (`covers` the version, `status = "published"`, `digest` the
 freeze digest of that release's curated CHANGELOG.md entry, `imported = true`), and re-checks the whole new
-ledger with validate_version: anything but VALID returns the findings and no ledger. Every digest is
-computed here from preserved bytes; no caller-supplied size or digest is read, no prose is written, the
-input ledger is never mutated, and no clock is read. NOT CHECKED BY THE BUILDER: the changelog gates over
-the whole new ledger (a heading matching no summary row, or entries out of order, is the changelog gate's
-finding once the ledger is written); the store write itself, the plan's retirement of the history file
-and the doctor's prior-row checks, which the writer's command and the plan own.
+ledger twice, fail-closed: validate_version must grade it VALID, and the changelog gates (run_gates over
+the same changelog_text) must grade it PASS, so a heading matching no summary row (an `## unreleased`
+heading with no working row, an `## Unreleased` heading, an entry for a version outside the ledger, a
+range heading beside the releases' own), entries out of order and a coverage gap in the base ledger each
+return the findings and no ledger. The gates run over an empty worklog, which is exact: every built row
+is imported and so carries an empty worklog_span. Every digest is computed here from preserved bytes; no
+caller-supplied size or digest is read, no prose is written, the input ledger is never mutated, and no
+clock is read. NOT CHECKED BY THE BUILDER: the store write itself, the plan's retirement of the history
+file and the doctor's prior-row checks, which the writer's command and the plan own.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.
@@ -400,7 +404,8 @@ def parse_history(data):
 def _history_findings(history):
     """The findings that refuse `history` as builder input: it must be a VALID History, as parse_history
     returns it, holding at least one HistoryRow. Each row's version and date are re-graded by the parser's
-    own rules, so a hand-built History cannot carry a row parse_history refuses."""
+    own rules (each exactly a str, by type identity, as parse_history requires), so a hand-built History
+    cannot carry a row parse_history refuses."""
     if type(history) is not History or history.status != VALID:
         return ["the history is not a VALID parsed history (build only from parse_history's VALID result)"]
     rows = history.rows
@@ -411,7 +416,12 @@ def _history_findings(history):
     findings = []
     for i, row in enumerate(rows):
         where = "history release[{}]".format(i)
-        if release.parse_semver(row.version) is None:
+        if type(row.version) is not str:
+            # Exactly a str, by type identity, with the type name alone: a str subclass is never parsed,
+            # displayed or stored, so none of its methods runs.
+            findings.append("{} version must be exactly a SemVer str, not a {} value".format(
+                where, type(row.version).__name__))
+        elif release.parse_semver(row.version) is None:
             findings.append("{} version {} is not a valid SemVer string (spec 6.1)".format(
                 where, schema._bounded_display(row.version)))
         err = _date_error(row.date, where)
@@ -492,13 +502,15 @@ def build_imported_ledger(version_data, history, changelog_text):
     and `changelog_text` the curated CHANGELOG.md text.
 
     It refuses a ledger that does not validate, a ledger holding any witnessed row, a history version that
-    collides with an existing row, a history that is not VALID or holds no row, and a release whose
-    version has no CHANGELOG.md entry headed by exactly that version, or more than one. It then appends,
-    in history order, one imported [[release]] row per history row (the recorded date, an empty
-    worklog_span, the empty-coverage digest) and one published, imported [[summary]] row whose digest is
-    the freeze digest of that release's entry, and re-checks the new ledger with validate_version, which
-    must be VALID. Every digest is computed here; no caller-supplied size or digest is read, and no prose
-    is written.
+    collides with an existing row, a history that is not VALID or holds no row (or a row whose version is
+    not exactly a str), and a release whose version has no CHANGELOG.md entry headed by exactly that
+    version, or more than one. It then appends, in history order, one imported [[release]] row per
+    history row (the recorded date, an empty worklog_span, the empty-coverage digest) and one published,
+    imported [[summary]] row whose digest is the freeze digest of that release's entry, and re-checks the
+    new ledger twice: validate_version must grade it VALID, and the changelog gates (run_gates over the
+    same changelog_text and an empty worklog) must grade it PASS; either refusal returns its findings and
+    no ledger. Every digest is computed here; no caller-supplied size or digest is read, and no prose is
+    written.
 
     Pure: the input ledger is never mutated (the result is a deep copy), and no file, clock, environment,
     network or process is read or touched (the changelog parser's first call imports the vendored CommonMark
@@ -538,6 +550,13 @@ def build_imported_ledger(version_data, history, changelog_text):
     if rechecked.status != VALID:
         return None, (["the built ledger does not validate, so nothing is returned (spec 6.1)"]
                       + list(rechecked.findings))
+    # The changelog gates over the same text. Every built row is imported (a witnessed row refuses the
+    # build) and an imported row carries an empty worklog_span, so the freeze gate's coverage recompute
+    # reads no worklog entry and an empty worklog is exact here.
+    gated = changelog.run_gates(built, {"schema": 1, "entry": []}, changelog_text)
+    if gated.status != changelog.PASS:
+        return None, (["the built ledger does not pass the changelog gates, so nothing is returned "
+                       "(spec 6.3, 7.1, 7.2)"] + list(gated.findings))
     return built, []
 
 
@@ -662,6 +681,7 @@ def _builder_vectors(check):
     """The build_imported_ledger vectors: acceptance over a fresh ledger, the row and summary contents,
     the refusals, the boundaries and the pure-function properties."""
     import datetime
+    import os
     import time
 
     hist = parse_history(_FIXTURE)
@@ -698,7 +718,10 @@ def _builder_vectors(check):
     check("writer-deterministic", build_imported_ledger({"schema": 1}, hist, _CHANGELOG) == result)
 
     # No clock: every clock read of the time module and datetime's now, utcnow and today raise while the
-    # builder runs, and the result is the same ledger.
+    # builder runs, and the result is the same ledger. A clock read through a pre-bound name (`from time
+    # import monotonic`, `from datetime import datetime`) is patched too: every global of this module and of
+    # each module loaded from its directory (the siblings the builder reaches and the vendored parser) that
+    # is one of those clock functions or datetime types is replaced while the builder runs.
     class _ClockRead(Exception):
         pass
 
@@ -715,11 +738,22 @@ def _builder_vectors(check):
 
     saved = {name: getattr(time, name) for name in _CLOCK_NAMES if hasattr(time, name)}
     saved_types = (datetime.datetime, datetime.date)
+    swaps = {id(fn): _raising_clock for fn in saved.values()}
+    swaps[id(datetime.datetime)] = _NoClockDateTime
+    swaps[id(datetime.date)] = _NoClockDate
+    here = os.path.dirname(changelog.__file__)
+    spaces = [globals()] + [vars(mod) for mod in list(sys.modules.values())
+                            if type(getattr(mod, "__file__", None)) is str
+                            and (os.path.dirname(mod.__file__) == here
+                                 or mod.__file__.startswith(here + os.sep))]
+    bound = [(ns, name, value) for ns in spaces for name, value in list(ns.items()) if id(value) in swaps]
     clocked = None
     try:
         for name in saved:
             setattr(time, name, _raising_clock)
         datetime.datetime, datetime.date = _NoClockDateTime, _NoClockDate
+        for ns, name, value in bound:
+            ns[name] = swaps[id(value)]
         try:
             clocked = build_imported_ledger({"schema": 1}, hist, _CHANGELOG)
         except _ClockRead:
@@ -728,8 +762,11 @@ def _builder_vectors(check):
         for name, fn in saved.items():
             setattr(time, name, fn)
         datetime.datetime, datetime.date = saved_types
+        for ns, name, value in bound:
+            ns[name] = value
+    reached = [vars(mod) for mod in (changelog, release, schema, store, batch, _commonmark_headings)]
     check("writer-reads-no-clock", len(saved) == len(_CLOCK_NAMES) and clocked == result
-          and result[0] is not None)
+          and result[0] is not None and all(any(ns is r for ns in spaces) for r in reached))
 
     # The ledger refusals. A witnessed row (no imported flag, here on an empty span so the flag alone
     # tells it from an imported row) refuses the build, before the history (D4); a version equal to an
@@ -801,6 +838,33 @@ def _builder_vectors(check):
     data, got = build_imported_ledger({"schema": 1}, hist, _CHANGELOG.encode("utf-8"))
     check("writer-refuses-changelog-not-text", data is None and any("exactly a str" in f for f in got))
 
+    # The changelog-gate re-check of the output: each ledger below passes every input refusal and
+    # validate_version, and only run_gates over the same text refuses it, so no ledger is returned.
+    gates_refusal = ("the built ledger does not pass the changelog gates, so nothing is returned "
+                     "(spec 6.3, 7.1, 7.2)")
+    for name, base, text, finding in (
+            ("unreleased-heading-without-working-row", {"schema": 1},
+             _cut(_CHANGELOG, "## 1.0.0 (", "## unreleased\n\n- in progress\n\n## 1.0.0 ("),
+             "has an '## unreleased' heading but version.toml has no covers = \"unreleased\" summary row"),
+            ("capitalised-unreleased-heading", {"schema": 1},
+             _cut(_CHANGELOG, "## 1.0.0 (", "## Unreleased\n\n- in progress\n\n## 1.0.0 ("),
+             "'## Unreleased' entry heading matches no non-superseded, non-unreleased summary row"),
+            ("entries-ascending", {"schema": 1},
+             "# Changelog\n\nA curated summary of the worklog.\n\n" + _ENTRY_090 + "\n"
+             + _ENTRY_100.rstrip("\n") + "\n", "entry '## 1.0.0' is out of order"),
+            ("entry-outside-ledger", {"schema": 1},
+             _CHANGELOG + "\n## 0.8.0 (2025-06-30)\n\n- an earlier preview\n",
+             "'## 0.8.0' entry heading matches no non-superseded, non-unreleased summary row"),
+            ("range-heading-beside-release-headings", {"schema": 1},
+             _CHANGELOG + "\n## 0.9.0..1.0.0\n\n- the first two releases\n",
+             "'## 0.9.0..1.0.0' entry heading matches no non-superseded, non-unreleased summary row"),
+            ("base-row-without-summary",
+             {"schema": 1, "release": [_imported_ledger_row("0.8.0", "2025-06-30T08:15:00Z")]}, _CHANGELOG,
+             "released version '0.8.0' is covered by no changelog summary row")):
+        data, got = build_imported_ledger(base, hist, text)
+        check("writer-gates-refuse-" + name, data is None and got[:1] == [gates_refusal]
+              and any(finding in f for f in got))
+
     # The history refusals: a refused history, an empty one, and a hand-built VALID history carrying a
     # date parse_history refuses; one row is just inside the empty bound.
     data, got = build_imported_ledger({"schema": 1}, parse_history(_doc([])), _CHANGELOG)
@@ -821,6 +885,26 @@ def _builder_vectors(check):
           and rows[0].get("version") == "1.0.0"
           and sums[0].get("digest") == _frozen("## 1.0.0 (2026-01-12)\n\n- the first stable release\n")
           and changelog.run_gates(result[0], worklog, cl_one).status == changelog.PASS)
+
+    # A hand-built VALID history whose version is a str subclass is refused by the version's exact type,
+    # as parse_history refuses it, even where it spells a valid SemVer version that has its own entry.
+    class _VersionStr(str):
+        def __str__(self):
+            return "9.9.9"
+
+    data, got = build_imported_ledger(
+        {"schema": 1}, History(VALID, [], "release-notes.toml", (HistoryRow(_VersionStr("1.0.0"), _DATE),),
+                               "0" * 64), cl_one)
+    check("writer-refuses-str-subclass-version", data is None
+          and got == ["history release[0] version must be exactly a SemVer str, not a _VersionStr value"])
+    # The SemVer re-grade refuses a hand-built VALID history whose version is not SemVer, by its own
+    # finding alone, even where CHANGELOG.md carries an entry headed by that version.
+    for name, bad in (("word", "x"), ("two-parts", "1.0"), ("leading-zero", "01.0.0")):
+        data, got = build_imported_ledger(
+            {"schema": 1}, History(VALID, [], "release-notes.toml", (HistoryRow(bad, _DATE),), "0" * 64),
+            "# Changelog\n\n## {}\n\n- a release\n".format(bad))
+        check("writer-regrades-history-semver-" + name, data is None
+              and got == ["history release[0] version '{}' is not a valid SemVer string (spec 6.1)".format(bad)])
 
 
 def self_test():
