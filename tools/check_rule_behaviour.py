@@ -51,10 +51,11 @@ removed, any changed range or insertion point touches its span on either side, o
 moved (its source path changed, its span is not the exact image of its base span under the alignment,
 or its window's line bounds moved relative to its text). A new clause whose span holds no changed byte is
 only registered. Every changed byte outside every clause span on its side is prose residue, which only
-non-clause-text waivers in the frontmatter, heading or whitespace categories can tile. Each clause in C is
-bound by a new or changed case whose decision differs between the base encoding and HEAD and flips back
-when that clause's base rows are restored, or carried by a live review waiver of the one kind its change
-admits: wording-only (the text changed, the rows did not), unencoded (no base row), or anchor-only (the
+non-clause-text waivers in the frontmatter, heading or whitespace categories can tile (a heading tile lies
+inside one ATX heading line: one to six '#' opening the line, then a space, a tab or the line end). Each
+clause in C is bound by a new or changed case whose decision differs between the base encoding and HEAD
+and flips back when that clause's base rows are restored, or carried by a live review waiver of the one
+kind its change admits: wording-only (the text changed, the rows did not), unencoded (no base row), or anchor-only (the
 anchor moved, the text and rows did not). A clause with no base encoding is bindable only when it is
 wholly new. A base revision with neither this script nor the table is the genesis change, which passes
 only when C and the residue are empty.
@@ -163,6 +164,9 @@ RETIRED_WAIVER_KINDS = {
     "whole-edit": "one waiver no longer covers a whole edit; bind each clause and tile non-clause text",
 }
 CATEGORIES = ("frontmatter", "heading", "whitespace")
+# An ATX heading line as CommonMark reads one from the first byte of a line: one to six '#', then a space, a
+# tab or the line end. A line such as '#word', or one opening with seven '#', is paragraph text, never heading.
+ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \t]|\n|\Z)")
 BUDGET_KEYS = {"wording-only": "wording-only-per-change", "unencoded": "unencoded-per-change",
                "anchor-only": "anchor-only-per-change", "non-clause-text": "non-clause-text-per-change"}
 ABSENT = "absent"
@@ -489,7 +493,7 @@ def parse_row(raw, where, clause_key="clause-id"):
     if not isinstance(raw, dict):
         raise GateError("{}: not a table".format(where))
     kind = raw.get("kind")
-    if kind not in EFFECT_KEY:
+    if not isinstance(kind, str) or kind not in EFFECT_KEY:
         raise GateError("{}: kind {!r} is not require, exempt or limit".format(where, kind))
     allowed = {clause_key, "text-sha256", "kind", "when", EFFECT_KEY[kind]}
     if kind == "require":
@@ -526,7 +530,7 @@ def parse_row(raw, where, clause_key="clause-id"):
             for pair in listed:
                 if not isinstance(pair, dict) or set(pair) != {"label", "where"}:
                     raise GateError("{}: an exempt-on entry is not {{label, where}}".format(where))
-                if vocab is None or pair["label"] not in vocab:
+                if vocab is None or not isinstance(pair["label"], str) or pair["label"] not in vocab:
                     raise GateError("{}: exempt-on label {!r} is outside exempt-vocab".format(where, pair["label"]))
                 if pair["where"] not in WHERES:
                     raise GateError("{}: exempt-on where {!r} is unknown".format(where, pair["where"]))
@@ -906,6 +910,8 @@ def parse_waivers(data, label):
             raise GateError("{}: duplicate waiver id {}".format(where, wid))
         ids.add(wid)
         kind = raw.get("kind")
+        if not isinstance(kind, str):
+            raise GateError("{}: waiver kind {!r} is not a string".format(where, kind))
         if kind in RETIRED_WAIVER_KINDS:
             raise GateError("{}: kind {} is retired: {}".format(where, kind, RETIRED_WAIVER_KINDS[kind]))
         if kind not in WAIVER_KINDS:
@@ -991,7 +997,9 @@ def parse_exclusions(data, label):
 
 
 def _category_holds(data, start, end, category):
-    """Whether bytes [start, end) of one rule file fall in a non-clause-text category."""
+    """Whether bytes [start, end) of one rule file fall in a non-clause-text category: spaces and newlines
+    (whitespace), the leading ----fenced block (frontmatter), or one ATX heading line, its line end included
+    (heading)."""
     piece = data[start:end]
     if category == "whitespace":
         return all(byte in (0x20, 0x0A) for byte in piece)
@@ -1013,7 +1021,7 @@ def _category_holds(data, start, end, category):
         line_start = data.rfind(b"\n", 0, start) + 1
         nxt = data.find(b"\n", line_start)
         line_end = len(data) if nxt < 0 else nxt + 1
-        return data[line_start:line_start + 1] == b"#" and end <= line_end
+        return ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end
     return False
 
 
@@ -2110,6 +2118,19 @@ def _v(gate):
     return _expect(gate, fx, code=2, needles=["exempt-vocab without exempt-on"])
 
 
+# A value of the wrong TOML type is malformed input (exit 2), never a crash.
+@_vector("schema/obligation-kind-not-a-string-exit-2")
+def _v(gate):
+    fx = _schema_head(lambda fx: fx.rows[0].update(kind=["require"]))
+    return _expect(gate, fx, code=2, needles=["kind ['require'] is not require, exempt or limit"])
+
+
+@_vector("schema/exempt-on-label-not-a-string-exit-2")
+def _v(gate):
+    fx = _params_head({"exempt-vocab": ["history"], "exempt-on": [{"label": ["history"], "where": "changelog-quote"}]})
+    return _expect(gate, fx, code=2, needles=["exempt-on label ['history'] is outside exempt-vocab"])
+
+
 @_vector("schema/named-set-unknown-key-refused")
 def _v(gate):
     fx = _schema_head(lambda fx: fx.cases["k-x"]["scenario"].update({"named-set": dict(NAMED, closed=True)}))
@@ -2350,6 +2371,13 @@ _matcher("strict-row-stays-strict-beside-vocab-row",
              {"where": "changelog-quote", "form": "quotation", "disposition": "exempt:history"}]},
          "REJECT instance:dispositioned:changelog-quote",
          SEED_ROWS + [_req("evgcmp.16", ["fix:wording"], ["instance:dispositioned"])])
+# A where the row names in never-exempt stays strict even when one of its exempt-on pairs names that where.
+_matcher("never-exempt-overrides-exempt-on-pair-rejects", {"op": "wording-fix", "probe": PROBE, "instances": [
+    {"where": "changelog-quote", "form": "quotation", "disposition": "exempt:history"}]},
+    "REJECT instance:dispositioned:changelog-quote",
+    [_req("evgcmp.15", ["fix:wording"], ["instance:dispositioned"],
+          {"exempt-vocab": ["history"], "never-exempt": ["changelog-quote"],
+           "exempt-on": [{"label": "history", "where": "changelog-quote"}]})])
 
 
 def _one_instance(where, form, label):
@@ -3433,6 +3461,13 @@ def _v(gate):
     return _expect(gate, head, base, code=2, needles=["kind whole-edit is retired"])
 
 
+@_vector("waiver/kind-not-a-string-exit-2")
+def _v(gate):
+    base, head = _wording()
+    head.waivers[0]["kind"] = ["wording-only"]
+    return _expect(gate, head, base, code=2, needles=["waiver kind ['wording-only'] is not a string"])
+
+
 @_vector("waiver/wording-only-encoding-changed-fails")
 def _v(gate):
     base, head = _wording()
@@ -3518,6 +3553,61 @@ def _v(gate):
     head.waivers = [_rw("t{}".format(n), ALPHA, side, s, e, base, head, "heading")
                     for n, (side, s, e) in enumerate(pieces, 1)]
     return _expect(gate, head, base, code=0, needles=["(heading)"])
+
+
+def _heading_insert(line, tail="\n"):
+    """A new line after the last clause, tiled as the blank line before it (whitespace), then from its first
+    byte to the end of the change (heading)."""
+    base = _alpha()
+    base.budget["non-clause-text-per-change"] = 2
+    head = base.copy().edit(ALPHA, "Gamma must hold.\n", "Gamma must hold.\n\n" + line + tail)
+    (side, start, end), = _pieces(base, head, ALPHA)
+    assert side == "head" and head.rules[ALPHA].encode("utf-8")[start:start + 1] == b"\n", (side, start, end)
+    split = start + 1
+    head.waivers = [_rw("t1", ALPHA, side, start, split, base, head, "whitespace"),
+                    _rw("t2", ALPHA, side, split, end, base, head, "heading")]
+    return base, head, split, end
+
+
+def _not_heading(gate, line, tail="\n"):
+    base, head, split, end = _heading_insert(line, tail)
+    return _expect(gate, head, base, code=1, needles=["waiver t2: {} [{},{}) is not heading text".format(
+        ALPHA, split, end)])
+
+
+# A heading tile covers one ATX heading line only: '#' then a space or the line end, at most six '#', and
+# nothing past the line's own newline.
+@_vector("waiver/heading-tile-hash-without-space-refused")
+def _v(gate):
+    return _not_heading(gate, "#Bounded claims may skip the count.")
+
+
+@_vector("waiver/heading-tile-seven-hashes-refused")
+def _v(gate):
+    return _not_heading(gate, "####### Omega")
+
+
+@_vector("waiver/heading-tile-six-hashes-passes")
+def _v(gate):
+    base, head, _split, _end = _heading_insert("###### Omega")
+    return _expect(gate, head, base, code=0, needles=["by non-clause-text t2 (heading)"])
+
+
+@_vector("waiver/heading-tile-bare-hash-line-passes")
+def _v(gate):
+    base, head, _split, _end = _heading_insert("#")
+    return _expect(gate, head, base, code=0, needles=["by non-clause-text t2 (heading)"])
+
+
+@_vector("waiver/heading-tile-ends-at-line-end-passes")
+def _v(gate):
+    base, head, _split, _end = _heading_insert("# Omega")
+    return _expect(gate, head, base, code=0, needles=["by non-clause-text t2 (heading)"])
+
+
+@_vector("waiver/heading-tile-ends-one-past-line-end-refused")
+def _v(gate):
+    return _not_heading(gate, "# Omega", "\n\n")
 
 
 @_vector("waiver/non-clause-text-whitespace-range-passes")
@@ -4090,6 +4180,36 @@ def _v(gate):
     return got[0] == 2 and "leaves no commit to judge" in got[1], got
 
 
+class _FixedListing:
+    """Stands in for the subprocess module inside one gate module: every run returns one fixed listing."""
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self, stdout):
+        # built before the swap, since the swap can rebind this module's own subprocess name
+        self.result = subprocess.CompletedProcess(["git"], 0, stdout, b"")
+
+    def run(self, _argv, **_kwargs):
+        return self.result
+
+
+# A listing whose second commit is not the first parent of the one before it is not a chain; git never
+# prints one, so the listing is supplied directly.
+@_vector("binding/push-range-broken-first-parent-chain-exit-2")
+def _v(gate):
+    head, parent, other, base = "1" * 40, "2" * 40, "3" * 40, "4" * 40
+    saved = gate.subprocess
+    gate.subprocess = _FixedListing("{} {}\n{} {}\n".format(head, parent, other, base).encode("ascii"))
+    try:
+        got = gate.GitHistory(ROOT).first_parent_range(base, head)
+    except gate.GateError as exc:
+        got = str(exc)
+    except Exception as exc:  # a crash is a vector failure, never a pass
+        got = "crashed ({}: {})".format(type(exc).__name__, exc)
+    finally:
+        gate.subprocess = saved
+    return got == "cannot read the first-parent chain from {} to {}".format(base, head), got
+
+
 # ------------------------------------------------------------- cases, and two more change shapes
 
 @_vector("cases/expect-head-mismatch-fails")
@@ -4167,7 +4287,8 @@ MUTANTS = (
     ("form-required", '        if "form" not in instance:', "        if False:", "schema/instance-missing-form-refused"),
     ("form-vocabulary", '        if instance["form"] not in FORMS:', "        if False:",
      "schema/instance-unknown-form-refused"),
-    ("pair-label", '                if vocab is None or pair["label"] not in vocab:', "                if False:",
+    ("pair-label", '                if vocab is None or not isinstance(pair["label"], str) or pair["label"] not in vocab:',
+     "                if False:",
      "schema/exempt-on-label-outside-vocab-refused"),
     ("vocab-surface", "            if set(vocab) - set(label for label, _w in pairs):", "            if False:",
      "schema/exempt-vocab-label-without-surface-refused"),
@@ -4355,8 +4476,21 @@ MUTANTS = (
      "waiver/frontmatter-tile-ends-at-block-end-passes"),
     ("frontmatter-fence", '        if not data.startswith(b"---\\n"):', '        if not data.startswith(b"---\\n\\n"):',
      "waiver/frontmatter-tile-ends-one-before-block-end-passes"),
-    ("heading-category", '        return data[line_start:line_start + 1] == b"#" and end <= line_end', "        return False",
-     "waiver/non-clause-text-heading-range-passes"),
+    ("heading-category", "        return ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end",
+     "        return False", "waiver/non-clause-text-heading-range-passes"),
+    ("heading-any-hash", "        return ATX_HEADING_RE.match(data, line_start) is not None and end <= line_end",
+     '        return data[line_start:line_start + 1] == b"#" and end <= line_end',
+     "waiver/heading-tile-hash-without-space-refused"),
+    ("heading-hash-count", 'ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \\t]|\\n|\\Z)")',
+     'ATX_HEADING_RE = re.compile(rb"#+(?:[ \\t]|\\n|\\Z)")', "waiver/heading-tile-seven-hashes-refused"),
+    ("heading-five-hashes", 'ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \\t]|\\n|\\Z)")',
+     'ATX_HEADING_RE = re.compile(rb"#{1,5}(?:[ \\t]|\\n|\\Z)")', "waiver/heading-tile-six-hashes-passes"),
+    ("heading-empty-line", 'ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \\t]|\\n|\\Z)")',
+     'ATX_HEADING_RE = re.compile(rb"#{1,6}(?:[ \\t]|\\Z)")', "waiver/heading-tile-bare-hash-line-passes"),
+    ("heading-past-line-end", "is not None and end <= line_end", "is not None",
+     "waiver/heading-tile-ends-one-past-line-end-refused"),
+    ("heading-before-line-end", "is not None and end <= line_end", "is not None and end < line_end",
+     "waiver/heading-tile-ends-at-line-end-passes"),
     ("whitespace-any", "        return all(byte in (0x20, 0x0A) for byte in piece)", "        return True",
      "waiver/non-clause-text-prose-range-refused"),
     ("whitespace-spaces", "        return all(byte in (0x20, 0x0A) for byte in piece)",
@@ -4365,6 +4499,16 @@ MUTANTS = (
     ("tile-coverage", "        for low, high in _subtract(start, end, tiled.get((path, side), ())):",
      "        for low, high in ([] if tiled.get((path, side)) else [(start, end)]):", "waiver/non-clause-text-gap-fails"),
     ("tile-split", "    have.append((start, end))", "    have[:] = [(start, end)]", "waiver/non-clause-text-tiles-exactly"),
+    ("waiver-kind-type", '            raise GateError("{}: waiver kind {!r} is not a string".format(where, kind))',
+     "            pass", "waiver/kind-not-a-string-exit-2"),
+    ("row-kind-type", "    if not isinstance(kind, str) or kind not in EFFECT_KEY:", "    if kind not in EFFECT_KEY:",
+     "schema/obligation-kind-not-a-string-exit-2"),
+    ("pair-label-type", 'if vocab is None or not isinstance(pair["label"], str) or pair["label"] not in vocab:',
+     'if vocab is None or pair["label"] not in vocab:', "schema/exempt-on-label-not-a-string-exit-2"),
+    ("never-exempt", "    if where in never:", "    if False:", "matcher/never-exempt-overrides-exempt-on-pair-rejects"),
+    ("range-chain-continuity", "            if not all(COMMIT_RE.fullmatch(field) for field in fields) or fields[0] != "
+     "expected:", "            if not all(COMMIT_RE.fullmatch(field) for field in fields):",
+     "binding/push-range-broken-first-parent-chain-exit-2"),
     ("retired-kinds", "        if kind in RETIRED_WAIVER_KINDS:", "        if False:", "waiver/untestable-kind-refused"),
     ("unknown-kinds", "        if kind not in WAIVER_KINDS:", "        if False:", "waiver/unknown-kind-refused"),
     ("duplicate-id", "        if wid in ids:", "        if False:", "waiver/duplicate-id-fails"),
@@ -4543,6 +4687,8 @@ def self_test(report_path=None):
                 ("schema/exempt-on-unknown-where-refused",),
                 ("schema/exempt-on-duplicate-pair-refused",),
                 ("schema/exempt-vocab-without-exempt-on-refused",),
+                ("schema/obligation-kind-not-a-string-exit-2",),
+                ("schema/exempt-on-label-not-a-string-exit-2",),
                 ("schema/named-set-unknown-key-refused",),
                 ("schema/named-set-member-malformed-refused",),
                 ("schema/named-set-count-not-positive-refused",),
@@ -4580,6 +4726,7 @@ def self_test(report_path=None):
                 ("matcher/wording-fix-probe-missing-one-property-rejects",),
                 ("matcher/wording-fix-no-instances-with-probe-accepts",),
                 ("matcher/strict-row-stays-strict-beside-vocab-row",),
+                ("matcher/never-exempt-overrides-exempt-on-pair-rejects",),
                 ("matcher/rule-quotation-exempt-history-rejects",),
                 ("matcher/rule-operative-exempt-warning-rejects",),
                 ("matcher/register-copy-quotation-exempt-history-rejects",),
@@ -4676,11 +4823,13 @@ def self_test(report_path=None):
                 ("binding/push-range-each-commit-against-its-parent",),
                 ("binding/push-range-base-off-first-parent-chain-exit-2",),
                 ("binding/push-range-empty-exit-2",),
+                ("binding/push-range-broken-first-parent-chain-exit-2",),
                 ("waiver/reported-separately-not-bound",),
                 ("waiver/digest-mismatch-fails",),
                 ("waiver/unknown-kind-refused",),
                 ("waiver/untestable-kind-refused",),
                 ("waiver/retired-kind-refused",),
+                ("waiver/kind-not-a-string-exit-2",),
                 ("waiver/wording-only-encoding-changed-fails",),
                 ("waiver/wording-only-on-unencoded-clause-refused",),
                 ("waiver/unencoded-on-encoded-clause-refused",),
@@ -4689,6 +4838,12 @@ def self_test(report_path=None):
                 ("waiver/live-row-matching-nothing-fails",),
                 ("waiver/non-clause-text-prose-range-refused",),
                 ("waiver/non-clause-text-heading-range-passes",),
+                ("waiver/heading-tile-hash-without-space-refused",),
+                ("waiver/heading-tile-seven-hashes-refused",),
+                ("waiver/heading-tile-six-hashes-passes",),
+                ("waiver/heading-tile-bare-hash-line-passes",),
+                ("waiver/heading-tile-ends-at-line-end-passes",),
+                ("waiver/heading-tile-ends-one-past-line-end-refused",),
                 ("waiver/non-clause-text-whitespace-range-passes",),
                 ("waiver/non-clause-text-tiles-exactly",),
                 ("waiver/non-clause-text-gap-fails",),
