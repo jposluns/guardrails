@@ -1706,7 +1706,8 @@ def _substrate_record_kept(product_root, op_id):
     run here records its own operation at the same control root, and that worktree's recovery then refuses on
     the recorded init history. Nor does that order free a fresh run here: it refuses on that worktree's
     operation at the same control root, first the record put back and then the one that worktree's recovery
-    records, until that recovery completes and a person removes that worktree's record, as the text warns."""
+    records, until that recovery completes and a person moves that worktree's record out of this product root,
+    kept, never deleted, as the text warns."""
     return ("moves its substrate record of operation {} ({}), if one is there, to a place outside this product "
             "root, keeping it, never deleting it: where the repository has linked worktrees, each of them, the "
             "main one included, finds the record at that same path, so another worktree's journal may name that "
@@ -1715,7 +1716,8 @@ def _substrate_record_kept(product_root, op_id):
             "since a fresh run here records its own operation at that same control root and that worktree's "
             "recovery then refuses on the recorded init history; after that order a fresh run here refuses in "
             "turn on that worktree's operation at that same control root until that worktree's recovery "
-            "completes and a person removes that worktree's record from that path; a person deletes the kept "
+            "completes and a person moves that worktree's record from that path to a place outside this product "
+            "root, keeping it, never deleting it; a person deletes the kept "
             "record only once no worktree's journal names that operation".format(
                 op_id, _substrate_record_said(product_root, op_id)))
 
@@ -4417,7 +4419,13 @@ def _init_store_orphan_or_refuse(product_root, root_fd, jr_fd, journal_root, rec
                               "init history, its record stays. Where instead this tree was copied with "
                               "another tree's open init-store transaction, since moved out of this journal "
                               "and kept as the reconcile remedy states, the next step is a person's: "
-                              "{}".format(record.op_id, _orphan_record_next_step(product_root, record.op_id)))
+                              "{}. Where that operation is instead another linked worktree's (every worktree "
+                              "of the repository, the main one included, resolves the same control root), the "
+                              "record is that worktree's and stays while that worktree's journal or store "
+                              "needs it, so this refusal stands until that worktree's recovery completes or "
+                              "its store no longer needs the record, and a person then moves the record to a "
+                              "place outside this product root, keeping it, never deleting it".format(
+                                  record.op_id, _orphan_record_next_step(product_root, record.op_id)))
     # Spec 14.2: only journal state this tree's own run wrote is recovery state, so the scrub below
     # consumes the rolled-back intent only when it records the live product root's binding.
     recorded = _recorded_binding(intent["header"])
@@ -5031,12 +5039,17 @@ def _init_store(op_row, context=None):
     plan creates exactly the members, and every member's live bytes verify. That is THIS OP's
     verdict; a `views-ready` milestone alone is never adoption success (spec 14), which still needs
     render-views, record-adoption and the completion checks. Every other outcome refuses
-    CANNOT-EVALUATE after the reversal above. RESIDUAL (disclosed): init.toml's digest is bound by
+    CANNOT-EVALUATE after the reversal above, but one: a committed run whose journal lock release then
+    fails is CANNOT-EVALUATE naming the commit, its scaffold LANDED and the lock that stays
+    (AdoptCommittedLockError's text, as run_adopt_transaction raises it), never VALID over a kept lock
+    and never a refusal. RESIDUAL (disclosed): init.toml's digest is bound by
     path and verified against the operation's validated recorded plan, never by a plan-time digest;
     and the context plan's own approval binding (plan_digest against the captured approval) is the
     stage driver's, not this op's."""
     try:
         return _init_store_run(op_row, context)
+    except AdoptCommittedLockError as exc:
+        return schema._cannot("init-store: {}".format(exc))     # not a refusal: it COMMITTED, named as such
     except AdoptApplyError as exc:
         return schema._cannot("init-store refused: {}".format(exc))
 
@@ -5236,7 +5249,6 @@ def _init_store_run(op_row, context):
             except (_journal.JournalError, OSError) as exc:
                 raise AdoptApplyError("the scaffold is published but its transaction cannot complete "
                                       "({}); reconcile() reverses it (fail-closed)".format(exc))
-            return schema._ok()
         finally:
             if held:
                 try:
@@ -5272,6 +5284,14 @@ def _init_store_run(op_row, context):
         raise
     finally:
         store._close_fd_exc_safe(root_fd)
+    if kept_lock:
+        # Reached only once the transaction COMMITTED, so this is no refusal: the scaffold LANDED, and the lock
+        # whose release failed is named beside that commit, never a silent success over it, as
+        # run_adopt_transaction names it (AdoptCommittedLockError).
+        raise AdoptCommittedLockError(txn, "; ".join(
+            "this run's journal lock {}/lock STAYS (its release failed: {}): the next run refuses on it into "
+            "reconcile()".format(JOURNAL_REL, why) for why in kept_lock)) from kept_lock[0]
+    return schema._ok()
 
 
 # --- the registration ops (slice 4): register-unmanaged and repoint-consumer --------------------------
@@ -15705,7 +15725,10 @@ def _st_directs_copy_back(text):
     pairs a restoring word (restore, reinstate, or `back` as in put, copy, move or want back) with a kept thing (an
     original, a source, a preimage, the archive, the evidence, a copy, or anything kept). It reads words, not
     meaning: a directive using no listed restoring word or no listed kept thing passes, and any other caution
-    that pairs them reads as a directive."""
+    that pairs them reads as a directive. RESIDUAL (disclosed): so most rewordings of a copy-back pass: another
+    verb (return, copy or move each file to its path or into place), another form of a kept word (`archived`),
+    or a verb and its object split across clauses; it guards the shipped remedy texts against a drift that
+    keeps a listed pair in one clause, never proves that no remedy directs a copy-back."""
     for caution in _ST_CAUTIONS:
         text = text.replace(caution, " ")
     return any(_ST_RESTORING.search(clause) and _ST_KEPT_THING.search(clause)
@@ -18234,8 +18257,9 @@ def _init_store_git_checks(check, ctx, refused):
                 and "need the record put back at that path, BEFORE any fresh run here: the record is put back and "
                     "that worktree's recovery completed first" in said
                 and "after that order a fresh run here refuses in turn on that worktree's operation at that same "
-                    "control root until that worktree's recovery completes and a person removes that worktree's "
-                    "record from that path" in said)
+                    "control root until that worktree's recovery completes and a person moves that worktree's "
+                    "record from that path to a place outside this product root, keeping it, never deleting it"
+                    in said)
             return res.status == store.CANNOT_EVALUATE and 0 <= moves < removes and record and restores_nothing
 
         def cleared_by_hand(root, runs, records=()):
@@ -18317,6 +18341,34 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-initialized-store-refused",
               refused(dispatch(row, ctx(root, run_id=rid())), "already records init history")
               and snap(root) == before)
+
+        # A committed init-store whose journal lock release then fails names the commit and the lock that stays,
+        # never VALID over a kept lock nor a refusal, as run_adopt_transaction does (red against a release fault
+        # recorded only on the refusal path): the dispatch's text, then the handler's own raise and its type.
+        from unittest import mock
+
+        def release_refused(journal_root):
+            raise OSError("an injected lock release fault")
+        for name, direct in (("kept-lock", False), ("kept-lock-typed", True)):
+            root = init_op._plain_repo(os.path.join(base, name), env)
+            run = rid()
+            raised = res = None
+            with mock.patch.object(_journal, "release_lock", release_refused):
+                if direct:
+                    try:
+                        _init_store_run(row, ctx(root, run_id=run))
+                    except AdoptApplyError as exc:
+                        raised = exc
+                else:
+                    res = dispatch(row, ctx(root, run_id=run))
+            said = str(raised) if direct else " ".join(res.findings)
+            check("init-store-commit-lock-release-failure-named" + ("-typed" if direct else ""),
+                  (type(raised) is AdoptCommittedLockError and raised.txn == _txn_name(run, INIT_STORE_PHASE)
+                   if direct else res.status == store.CANNOT_EVALUATE and "refused" not in said)
+                  and "COMMITTED" in said and "LANDED" in said and "lock STAYS" in said
+                  and "an injected lock release fault" in said
+                  and store.resolve_store(root).status == store.RESOLVED and txn_state(root, run) == "complete"
+                  and os.path.exists(os.path.join(str(_journal_root(root)), "lock")), observed=said)
 
         # THE REVERSAL (claude 4 / codex 3): a member digest the published bytes cannot match (a
         # deferred view digest, so every pre-write check passes) rolls the WHOLE scaffold back from
