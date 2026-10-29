@@ -2967,6 +2967,125 @@ def _read_visit_failures(cwd, size=65536):
     return out
 
 
+def _read_lead_outcome(text, partial, locale, skip_empty):
+    """_lex_readings(text, partial, locale, skip_empty) inside _CommandReading with origins: (readings, added,
+    origins, shared), or the ValueError's type and text."""
+    try:
+        with aiqt_hooks._CommandReading(origins=True) as reading:
+            readings = aiqt_hooks._lex_readings(text, partial, locale, skip_empty)
+    except ValueError as exc:
+        return type(exc).__name__, str(exc)
+    return readings, reading.added, reading.origins, reading.shared
+
+
+def _read_lead_problem(text, partial, got, want, counts):
+    """What _read_lead_failures finds wrong with got, the _read_lead_outcome of text under the _shared_lead in
+    place, against want, the same with no reading given a head (None for nothing); counts[0] gains each own
+    reading given a head and counts[1] each own reading given none that holds at least as many records."""
+    if got != want:
+        return "_lex_readings({!r}, partial={}) gave {!r}, with no head shared {!r}".format(text, partial, got, want)
+    if len(got) == 2:
+        return None  # the same ValueError both ways
+    readings, added, _origins, shared = got
+    lists = [reading[0] if partial else reading for reading in readings]
+    own = sum(len(segs) for segs in lists) - added
+    offset = 0
+    for segs in lists:
+        if offset < own:
+            lead = aiqt_hooks._shared_lead(segs, shared)
+            if lead:
+                counts[0] += 1
+                if any(segs[at] is not shared[at] for at in range(lead)):
+                    return "a reading of {!r} given a head of {} records does not hold them".format(text, lead)
+            elif shared and len(segs) >= len(shared):
+                counts[1] += 1
+        offset += len(segs)
+    if not partial:
+        joined = [seg for segs in lists for seg in segs]
+        found = aiqt_hooks._diff_possibles(lists, added, shared)
+        joined_found = [(index, seg) for index, seg in enumerate(joined)
+                        if (seg.argv or seg.raw) and aiqt_hooks._is_possible_producer(seg)]
+        if (len(found) != len(joined_found)
+                or any(a[0] != b[0] or a[1] is not b[1] for a, b in zip(found, joined_found))):
+            return "_diff_possibles on {!r} gave {!r}, the joined segments {!r}".format(text, found, joined_found)
+    return None
+
+
+def _read_lead_failures(cwd, count=2000, seed=20261029, size=65536):
+    """(dl-read-lead) The records each reading of an uncertain '#' that resumed from the first reading's stop
+    holds at its head (aiqt_hooks._shared_lead) are judged once, as each reading's own would be: on
+    _LEX_FORK_TEXTS and `count` seeded texts over _LEX_FORK_ALPHABET, in every partial, skip_empty and locale
+    mode, inside _CommandReading, every own reading _shared_lead gives a head holds each record of the
+    context's shared at its index (the same object), and _lex_readings gives the same readings, added count,
+    origins and shared as it gives with _shared_lead giving no reading a head; on each full lex,
+    diff_source_pretool's possible producers (_diff_possibles) are, by index and record, those of the joined
+    segments _lex_command returns. The corpus must hold an own reading given a head and one at least as long
+    given none (a reading lexed from the start, or main's) (dl-read-lead-corpus).
+    (dl-read-lead-red) A wrong head, one given to every reading at least as long as shared, must be caught by
+    the same check.
+    (dl-read-lead-taken) One diff_source_pretool call on the seps_hash_lines shape at 64 KB (sixteen readings
+    of one long run of separators) gives a head at least 32 times: to each of the sixteen readings, in the
+    command reading (_read_segments) and in the possible-producer test (_diff_possibles)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_FORK_ALPHABET) for _ in range(rng.randint(1, 12))))
+    modes = [(partial, skip_empty, locale) for partial in (False, True) for skip_empty in (False, True)
+             for locale in (False, True)]
+    real = aiqt_hooks._shared_lead
+
+    def wrong(segments, shared):
+        return len(shared) if shared and len(segments) >= len(shared) else 0
+
+    def problems(lead):
+        found = []
+        counts = [0, 0]
+        try:
+            for text in texts:
+                for partial, skip_empty, locale in modes:
+                    aiqt_hooks._shared_lead = lead
+                    got = _read_lead_outcome(text, partial, locale, skip_empty)
+                    aiqt_hooks._shared_lead = lambda segments, shared: 0
+                    want = _read_lead_outcome(text, partial, locale, skip_empty)
+                    aiqt_hooks._shared_lead = lead
+                    problem = _read_lead_problem(text, partial, got, want, counts)
+                    if problem is not None:
+                        found.append(problem)
+                        if len(found) == 3:
+                            return found, counts
+        finally:
+            aiqt_hooks._shared_lead = real
+        return found, counts
+
+    found, counts = problems(real)
+    out.extend("(dl-read-lead) {}".format(problem) for problem in found)
+    if not (counts[0] and counts[1]):
+        out.append("(dl-read-lead-corpus) the corpus must hold an own reading given a head ({}) and one at least as "
+                   "long given none ({})".format(counts[0], counts[1]))
+    if not problems(wrong)[0]:
+        out.append("(dl-read-lead-red) a head given to every reading at least as long passes the check")
+    command = _DEADLINE_SHAPES["seps_hash_lines"](size, cwd)[1]["command"]
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
+    heads = [0]
+
+    def counted(segments, shared):
+        lead = real(segments, shared)
+        heads[0] += lead > 0
+        return lead
+    aiqt_hooks._shared_lead = counted
+    try:
+        aiqt_hooks.HANDLERS["diff_source_pretool"](data)
+    finally:
+        aiqt_hooks._shared_lead = real
+    if heads[0] < 32:
+        out.append("(dl-read-lead-taken) diff_source_pretool gave a head {} times on a {}-character command of one "
+                   "run of separators before four '#' lines; sixteen readings, each read twice, need 32".format(
+                       heads[0], len(command)))
+    return out
+
+
 # Commands for the continuation-join fast path: with no backslash-newline pair (backslashes, newlines and
 # quoting apart from each other) and with pairs at top level, inside quotes, substitutions, an expansion and
 # comments, including pairs the walk keeps.
@@ -6620,6 +6739,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_procsubst_taken_failures())
     failures.extend(_suffix_reading_failures())
     failures.extend(_read_visit_failures(str(tmp)))
+    failures.extend(_read_lead_failures(str(tmp)))
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
