@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "348bb30fc4ddf35fabe45b89ffd384d468772d99cefeadb030cab8c970f16a53"
+tree-sha256 = "c98b7c9edbca3635187372057d5845e43f8b7070a5a7208413c0057c35b7f31c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 501422
-sha256 = "428e2b2ce4e9c7522025750601c90184da16c521ebdb7bf5e2e1a79bb9ad1c7a"
+bytes = 501470
+sha256 = "5a2b9c1abc3f926df2865c56985f3dcb1a128e190d1c2a80bedcb380bd378135"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3551,8 +3551,8 @@ sha256 = "c1bfcfd49e043c76dabc8e5aa4a946e0dd0231899174cc581eebdecb8b627316"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 337029
-sha256 = "88e7e6e68b5257fccd4b48ad30d023d4ffb7b334968ef36866d87658df4623f0"
+bytes = 338563
+sha256 = "412a00f05d008b5d81b04955733764b2e883485213adf1c8eafb5641c1f1f542"
 
 [[sources]]
 path = "tools/check_overclaim.py"
@@ -3881,8 +3881,8 @@ sha256 = "8d11b8cd543f2ca5da0fa0788d05b476a94635c9919df4e66ff8a19affbc7caa"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 429186
-sha256 = "afe23cba0162c49dea9dafdf47d9fcb445251867ead5f5b98830d14959242cfd"
+bytes = 429187
+sha256 = "c6c3e25ed33c7a3a9f9187fc42f7593aba955cbd5761ffcb00eb38a65a6c1b97"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
