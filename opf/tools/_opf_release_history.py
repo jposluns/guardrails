@@ -591,10 +591,13 @@ _ENTRY_100 = "## 1.0.0 (2026-01-12)\n\n- the first stable release\n\n"
 _ENTRY_090 = "## 0.9.0 (2025-11-03)\n\n- the first public preview\n"
 # The empty-coverage digest, pinned literally: `sha256:` and the SHA-256 of the scheme header line alone.
 _EMPTY_COVERAGE = "sha256:e91c065ea5c1163990cf33408e517d24c89b8c4e544baf4a433a3ab6f57270f3"
-# The clock reads the builder vectors make raise.
+# The time-module clock reads the builder vectors must find among the functions they make raise. The
+# vectors derive that set from the time module itself (every public function it exposes), so a clock
+# function a later Python adds is made to raise too; this pinned list is the floor the derived set must
+# cover.
 _CLOCK_NAMES = ("time", "time_ns", "monotonic", "monotonic_ns", "perf_counter", "perf_counter_ns",
-                "process_time", "process_time_ns", "thread_time", "thread_time_ns", "localtime", "gmtime",
-                "ctime", "asctime", "strftime")
+                "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
+                "clock_gettime_ns", "localtime", "gmtime", "ctime", "asctime", "strftime")
 
 
 def _edited(old, new):
@@ -717,11 +720,12 @@ def _builder_vectors(check):
           and not any(p in s for p in prose for s in _strings(result[0])))
     check("writer-deterministic", build_imported_ledger({"schema": 1}, hist, _CHANGELOG) == result)
 
-    # No clock: every clock read of the time module and datetime's now, utcnow and today raise while the
-    # builder runs, and the result is the same ledger. A clock read through a pre-bound name (`from time
-    # import monotonic`, `from datetime import datetime`) is patched too: every global of this module and of
-    # each module loaded from its directory (the siblings the builder reaches and the vendored parser) that
-    # is one of those clock functions or datetime types is replaced while the builder runs.
+    # No clock: every public function of the time module (so every time-module clock read, whatever
+    # interpreter runs the vectors) and datetime's now, utcnow and today raise while the builder runs, and
+    # the result is the same ledger. A clock read through a pre-bound name (`from time import monotonic`,
+    # `from datetime import datetime`) is patched too: every global of this module and of each module loaded
+    # from its directory (the siblings the builder reaches and the vendored parser) that is one of those
+    # time functions or datetime types is replaced while the builder runs.
     class _ClockRead(Exception):
         pass
 
@@ -736,7 +740,10 @@ def _builder_vectors(check):
     class _NoClockDate(datetime.date):
         today = classmethod(_raising_clock)
 
-    saved = {name: getattr(time, name) for name in _CLOCK_NAMES if hasattr(time, name)}
+    # The time functions, read from the time module at test time (a type such as struct_time is not a
+    # clock read and stays), so the set is the running interpreter's own and never a stale list.
+    saved = {name: value for name, value in vars(time).items()
+             if not name.startswith("_") and callable(value) and not isinstance(value, type)}
     saved_types = (datetime.datetime, datetime.date)
     swaps = {id(fn): _raising_clock for fn in saved.values()}
     swaps[id(datetime.datetime)] = _NoClockDateTime
@@ -746,27 +753,42 @@ def _builder_vectors(check):
                             if type(getattr(mod, "__file__", None)) is str
                             and (os.path.dirname(mod.__file__) == here
                                  or mod.__file__.startswith(here + os.sep))]
-    bound = [(ns, name, value) for ns in spaces for name, value in list(ns.items()) if id(value) in swaps]
-    clocked = None
-    try:
-        for name in saved:
-            setattr(time, name, _raising_clock)
-        datetime.datetime, datetime.date = _NoClockDateTime, _NoClockDate
-        for ns, name, value in bound:
-            ns[name] = swaps[id(value)]
+
+    def _without_clock(build):
+        """build({"schema": 1}, hist, _CHANGELOG) with every swap in place, or None when it read the
+        clock; every swap is restored on every path."""
+        bound = [(ns, name, value) for ns in spaces for name, value in list(ns.items()) if id(value) in swaps]
         try:
-            clocked = build_imported_ledger({"schema": 1}, hist, _CHANGELOG)
-        except _ClockRead:
-            clocked = None
-    finally:
-        for name, fn in saved.items():
-            setattr(time, name, fn)
-        datetime.datetime, datetime.date = saved_types
-        for ns, name, value in bound:
-            ns[name] = value
+            for name in saved:
+                setattr(time, name, _raising_clock)
+            datetime.datetime, datetime.date = _NoClockDateTime, _NoClockDate
+            for ns, name, value in bound:
+                ns[name] = swaps[id(value)]
+            try:
+                return build({"schema": 1}, hist, _CHANGELOG)
+            except _ClockRead:
+                return None
+        finally:
+            for name, fn in saved.items():
+                setattr(time, name, fn)
+            datetime.datetime, datetime.date = saved_types
+            for ns, name, value in bound:
+                ns[name] = value
+
+    clocked = _without_clock(build_imported_ledger)
     reached = [vars(mod) for mod in (changelog, release, schema, store, batch, _commonmark_headings)]
-    check("writer-reads-no-clock", len(saved) == len(_CLOCK_NAMES) and clocked == result
+    check("writer-reads-no-clock", set(_CLOCK_NAMES) <= set(saved) and clocked == result
           and result[0] is not None and all(any(ns is r for ns in spaces) for r in reached))
+
+    # A builder that reads clock_gettime_ns(0) and then builds is caught: the no-clock run returns no
+    # ledger for it, and every time function is restored afterwards.
+    def _clock_gettime_ns_mutant(ledger, history, text):
+        time.clock_gettime_ns(0)
+        return build_imported_ledger(ledger, history, text)
+
+    check("writer-no-clock-catches-clock-gettime-ns-mutant",
+          _without_clock(_clock_gettime_ns_mutant) is None
+          and all(getattr(time, name) is fn for name, fn in saved.items()))
 
     # The ledger refusals. A witnessed row (no imported flag, here on an empty span so the flag alone
     # tells it from an imported row) refuses the build, before the history (D4); a version equal to an
@@ -909,7 +931,8 @@ def _builder_vectors(check):
 
 def self_test():
     """Pure in-memory vectors, judged on returned statuses, findings, bytes and ledgers: no file, process,
-    network or clock (the builder vectors replace every clock read with one that raises, and restore it).
+    network or clock (the builder vectors replace every public function of the time module, so every clock
+    read, with one that raises, and restore it).
     Exit 0 all pass, 1 a failed check, 2 a harness error (fail-closed)."""
     results = []
 
