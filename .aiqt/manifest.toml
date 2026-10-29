@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "11f882dbef6e6e4ea8a8fcf3b679c255f041319127e61d6d8faed857e25eea60"
+tree-sha256 = "5d56198e636b684574f22ef0d95e1026bea18f2e5eb82fdfb80c344c9cbd013d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 501422
-sha256 = "428e2b2ce4e9c7522025750601c90184da16c521ebdb7bf5e2e1a79bb9ad1c7a"
+bytes = 502444
+sha256 = "63f201df491f66a88aaf2ff68c1264e9f8dc0958b7fa6fa8cdbbaeaa6cafec4b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2271,8 +2271,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44331
-sha256 = "0a8c41be3e27a17fe160dedc5ddfe4be0fc4afe1365aae9f2a2c19591e59d4d7"
+bytes = 44385
+sha256 = "e9178114f847d9d6df0b2c04efdf1f8e6ce525116d63a39332d6b4f1916447ec"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2731,8 +2731,8 @@ sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
-bytes = 14478
-sha256 = "ebb4dd9cc25b39746ee43e3c8589a99475c23684eea8399074a185cb8d99edce"
+bytes = 14509
+sha256 = "ce69a15da77df28afc0e8aca6c6ef89c15643112c0922d3f4991e82f7bb878a7"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -3416,8 +3416,8 @@ sha256 = "844fdc5cbe91d0d2697f71c81363406c754d02391aecea5a55311fe90171e643"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 158303
-sha256 = "e9952449ea7f74fbb607ce8d1c40326b9388fd3803328c7af6b19660f93b63a4"
+bytes = 171599
+sha256 = "a5efb4ba9eaa97f47a8b0c53ea0708a2db157bd71b6e8f1d169864c5cba4f398"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3616,8 +3616,8 @@ sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
-bytes = 101190
-sha256 = "a7aee4a4c218a76bb776140fccc16123bd338e01d5bb4307a7c191ddd609ace2"
+bytes = 103943
+sha256 = "b3e59633e90bf4b224461dcab484fe2e647d99be5698a7369d80652c552ec754"
 
 [[sources]]
 path = "tools/check_secrets.py"
@@ -3673,6 +3673,11 @@ sha256 = "0eb34c0b00ca261d6a9a242df1edf8f7b6cbcbb3e416a2cea02581d4296cde3a"
 path = "tools/conformance.py"
 bytes = 98489
 sha256 = "95fcd50b2a181cca6951f9378f1026755f5626be5577dbe67edfd1117d2093e0"
+
+[[sources]]
+path = "tools/direct-launch-residual-baseline.txt"
+bytes = 4282
+sha256 = "c7be01d710b915a6973af27b302bb131a60844797764b53394f5e8c3842c7df2"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3871,8 +3876,8 @@ sha256 = "810599c9ab44a78bf387b2dfb559bcef9e5a39ce1d05e511351b2ea8a9d7437d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 138331
-sha256 = "2561f02d965feb6ae68ab133c642587060c0c0edce7144578f0592ed41af4a4b"
+bytes = 138829
+sha256 = "8bc2a3a6e1d6daf5173849d9f76ac3d3c1b354fb483e71cb41da0ce1c4a6390a"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

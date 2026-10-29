@@ -737,6 +737,7 @@ tools/check_version_monotonicity.py text eol=lf
 tools/check_versions.py text eol=lf
 tools/ci-status.sh text eol=lf
 tools/conformance.py text eol=lf
+tools/direct-launch-residual-baseline.txt text eol=lf
 tools/doctor.py text eol=lf
 tools/gen_adapters.py text eol=lf
 tools/gen_agents.py text eol=lf
