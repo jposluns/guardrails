@@ -20,8 +20,19 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        path resolves against the worker's own scratch (its working directory), not the workdir.
   P2 outside workdir   HARD. The family's row says reads-outside-workdir = "no", the brief declares a workdir,
                        and it names an absolute path that is neither that workdir nor under it, read lexically
-                       (`..` folded, no link followed: /w/repo/x is under /w/repo, /w/repository is not). A
-                       declaration is a line that opens (once markup is skipped) with Workdir, The workdir or Your
+                       (posixpath.normpath: `//`, `.` and `..` folded, no link followed: /w/repo/x is under
+                       /w/repo, /w/repository is not). The path judged is the WHOLE whitespace-delimited word
+                       from where the absolute path opens to the word's end (closing punctuation and markup
+                       dropped; a quoted path that holds a space is one word), so a `//`, a `~` segment or a
+                       `..` later in the word cannot hide an escape (/w/repo//../../etc/x is /etc/x). A path
+                       word it cannot place from its text also refuses (fail closed): a home (~/) or variable
+                       ($X/) path, a relative word whose `..` climbs above its own start (posixpath.normpath
+                       opens with `..`, as the tail of an unquoted path with a space, b/../../etc/x, does), and
+                       a word that holds more than MAX_WORD_PATHS absolute paths. A path that follows a
+                       prohibition on its line (never, do not, don't, must not, not to, anywhere before the
+                       path on that line) is not judged: the line forbids the path rather than asking for it.
+                       Negation is judged LEXICALLY, not by meaning, so "Do not stop until you read /etc/x"
+                       does not fire either. A declaration is a line that opens (once markup is skipped) with Workdir, The workdir or Your
                        workdir (or work dir, working directory), then optionally is or a colon, then one absolute
                        path, quoted with " or ` when it holds a space (Workdir /w/repo (read-only). The workdir
                        is /w/repo. workdir:/w/repo); a line that is only such a lead takes its path from the next
@@ -30,26 +41,30 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        path is followed by a word (an unquoted space), or a bare lead with no path on the next
                        line is CANNOT_EVALUATE (exit 2). "undeclared" and "yes" never fire, and with no declared
                        workdir the rule does not fire. A quoted absolute path that holds a space is read whole.
-  P3 missing at pin    HARD. A line that opens (once markup is skipped) with REVIEWED HEAD or BRIEF-PIN and a
-                       commit of 7 to 40 hex digits pins a revision, and a relative path the brief names (`./`
-                       dropped; `../` paths are not repository-relative and are skipped) does not exist at it in
-                       the repository the lint is pointed at (--repo, default this repository), read with
-                       `git cat-file -e <commit>:<path>` from the object store, never the working tree. A pin
-                       that does not resolve to one commit (unknown, ambiguous), a git that cannot be launched or
-                       times out, or a pin with no repository to read is CANNOT_EVALUATE, never a pass, whether
-                       or not the brief names a relative path.
+  P3 missing at pin    ADVISORY. A line that opens (once markup is skipped) with REVIEWED HEAD or BRIEF-PIN and
+                       a commit of 7 to 40 or of 64 hex digits pins a revision, and a relative path the brief
+                       names (`./` and `..` folded with posixpath.normpath; a path that then climbs out of the
+                       repository is not repository-relative and is skipped) does not exist at it in the
+                       repository the lint is pointed at (--repo, default this repository), read with
+                       `git cat-file -e <commit>:<path>` from the object store, never the working tree. The
+                       path may be a file the brief asks the worker to create, so P3 prints an ADVISORY line
+                       and never refuses. A pin that does not resolve to one commit (unknown, ambiguous), a git
+                       that cannot be launched or times out, or a pin with no repository to read is
+                       CANNOT_EVALUATE (exit 2), never a pass, whether or not the brief names a relative path.
   P4 no hand-back      ADVISORY. The family's row says handback = "yes", a sentence holds a delivery verb (return,
                        paste, print, send, show, include, quote, ...) not negated and a large output (a whole,
                        entire, full or complete file, source, diff, log or output; a diff; a patch), and no line
                        names a hand-back file (the words hand-back file or path and an absolute path).
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
-sandbox); that is the dispatcher's check, made where the worker runs. It does not follow symbolic links, so a
-path under the workdir lexically can lead outside it; it does not know which relative paths are inputs and
-which are files the brief asks the worker to create, so a new file named under a pin refuses (P3) and must be
-named without its path or added after the pin is moved; it reads only the path shapes above (a path split by a
-line break, inside a URL, after a colon such as `<rev>:<path>`, or with no suffix and no `./` is not read); and
-reads-outside-workdir is what the table declares, not a measurement.
+sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
+there. It does not follow symbolic links, so a path under the workdir lexically can lead outside it; it does
+not know which relative paths are inputs and which are files the brief asks the worker to create, so a path
+missing at a pin is ADVISORY (P3); it reads only the path shapes above (a path split by a line break, inside a
+URL, after a colon such as `<rev>:<path>`, or with no suffix and no `./` is not read, and an unquoted path with
+a space is read as separate words, so /w/repo x/y is /w/repo and the relative word x/y); a prohibition is read
+lexically, so a path after a negation word on its line is never judged by P2; and reads-outside-workdir is
+what the table declares, not a measurement.
 
 TEXT. Format characters (Unicode category Cf: a byte order mark, zero-width and bidirectional
 controls) are removed first; a brief that is then empty or only whitespace and control characters is
@@ -164,8 +179,8 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2 or P3). Rewrite the brief, or send the item
-                           to a family that can execute (S1 to S3) or name paths it can read (P2, P3). When a hit is a command line (S2 or S3), the REFUSE line
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3 or P2). Rewrite the brief, or send the item
+                           to a family that can execute (S1 to S3) or name paths it can read (P2). When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
@@ -1431,7 +1446,12 @@ QUOTED_ABS_PATH_RE = re.compile(r"\"(/[^\"\n]*+)\"|`(/[^`\n]*+)`")
 ABS_PATH_RE = re.compile(r"(?<![\w.~/:@%-])/[\w.@+-]++(?:/[\w.@+-]++)*+/?+")
 REL_PATH_RE = re.compile(r"(?<![\w.~/:@%-])(?:\.\.?/)?+\.?+[\w@+-][\w.@+-]*+(?:/[\w.@+-]++)++/?+")
 FILE_SUFFIX_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,11}\Z")
-PIN_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+([0-9a-fA-F]{7,40})(?![\w-])")
+WORD_RE = re.compile(r"\S++")
+# a home (~) or variable ($) path: where it leads is not in the text, so it cannot be placed under a workdir
+UNPLACED_LEAD_RE = re.compile(r"[~$][\w{}.-]*+/")
+# a prohibition before a path on its line: the line forbids the path rather than asking for it
+PROHIBITION_RE = re.compile(r"(?<![\w/.-])(?:never|do\s++not|don['\u2019]t|must\s++not|not\s++to)(?![\w/.-])", re.I)
+PIN_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+([0-9a-fA-F]{64}|[0-9a-fA-F]{7,40})(?![\w-])")
 HANDBACK_NAMED_RE = re.compile(r"(?<![\w-])hand[- ]?back\s+(?:file|path)(?![\w-])", re.I)
 LARGE_OUTPUT_RE = re.compile(r"(?<![\w-])(?:(?:whole|entire|full|complete)\s+(?:file|source|module|diff|patch|log|"
                              r"output|transcript|listing)s?+|(?:unified\s+)?diffs?+|patch(?:es)?+)(?![\w-])", re.I)
@@ -1447,17 +1467,65 @@ def _path_token(token):
     return token
 
 
+def _word_end(word):
+    """A path word with the punctuation and markup that close it dropped (quotes, emphasis, brackets, a comma,
+    a sentence stop), never the dots of `/.` or `..`."""
+    end = len(word)
+    while end and (word[end - 1] in "\"'`*_)]}>,;:!?"
+                   or (word[end - 1] == "." and not word.endswith(("/.", ".."), 0, end))):
+        end -= 1
+    return word[:end]
+
+
+def unplaced(word):
+    """Whether a relative path word cannot be placed under a workdir lexically: a home (~) or variable ($)
+    path, or a path whose `..` climbs above its own start (posixpath.normpath opens with `..`: the tail of an
+    unquoted path with a space, or a path relative to the worker's own directory)."""
+    return "/" in word and bool(UNPLACED_LEAD_RE.match(word) or posixpath.normpath(word).split("/")[0] == "..")
+
+
+MAX_WORD_PATHS = 16   # more absolute paths than this in one word: the word is not judged path by path
+
+
+def path_words(line):
+    """[(start, path, placed)] for the path words of one line, each judged whole. A quoted absolute path that
+    holds a space is one word. A whitespace-delimited word that holds an absolute path (where ABS_PATH_RE opens
+    one) gives the word from that point to its end (_word_end), so a `//`, a `~` segment or a `..` later in the
+    word cannot cut the path short; a word that opens more than MAX_WORD_PATHS of them is given whole and
+    unplaced. A word with no absolute path that cannot be placed (unplaced) is given whole and unplaced."""
+    quoted = [match for match in QUOTED_ABS_PATH_RE.finditer(line) if any(
+        character.isspace() for character in match.group(1) or match.group(2))]
+    found = [(match.start(), match.group(1) or match.group(2), True) for match in quoted]
+    spans, index = [match.span() for match in quoted], 0
+    for word in WORD_RE.finditer(line):
+        while index < len(spans) and spans[index][1] <= word.start():
+            index += 1
+        if index < len(spans) and spans[index][0] < word.end():
+            continue   # a word that overlaps a quoted path with a space is read as that quoted path
+        text, starts = word.group(0), [match.start() for match in ABS_PATH_RE.finditer(word.group(0))]
+        if len(starts) > MAX_WORD_PATHS:
+            found.append((word.start(), text, False))
+            continue
+        found.extend((word.start() + start, _word_end(text[start:]), True) for start in starts)
+        lead = len(text) - len(text.lstrip("\"'`*_([{<"))
+        if not starts and unplaced(_word_end(text[lead:])):
+            found.append((word.start() + lead, _word_end(text[lead:]), False))
+    return sorted(found)
+
+
 class PreflightText:
-    """The paths a brief names, found once: [(line, path)] for absolute paths, for relative paths that name a
-    file (a last component with a suffix such as `.py`) or open with `./` or `../`, the declared workdirs (see
-    _declaration_rest) and the declarations that name none clearly, the pinned revisions (a line that opens, once markup
-    is skipped, with REVIEWED HEAD or BRIEF-PIN and a commit of 7 to 40 hex digits), and whether a hand-back file
-    is named (the words hand-back file or path and an absolute path on one line)."""
+    """The paths a brief names, found once: [(line, path)] for the path words P2 judges (see path_words), split
+    into the absolute ones and the ones it cannot place (unplaced), each kept only when no prohibition
+    (PROHIBITION_RE) precedes it on its line; for relative paths that name a file (a last component with a suffix
+    such as `.py`) or open with `./` or `../`; the declared workdirs (see _declaration_rest) and the
+    declarations that name none clearly; the pinned revisions (a line that opens, once markup is skipped, with
+    REVIEWED HEAD or BRIEF-PIN and a commit of 7 to 40 or 64 hex digits); and whether a hand-back file is named
+    (the words hand-back file or path and an absolute path on one line)."""
 
     def __init__(self, text):
         self.text = text
         self.names_workdir = bool(WORKDIR_WORD_RE.search(text))
-        self.absolute, self.relative, self.workdirs, self.pins = [], [], [], []
+        self.absolute, self.unplaced, self.relative, self.workdirs, self.pins = [], [], [], [], []
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
         self.handback_named = False
         bare = None   # the line of a bare Workdir (or Workdir:) whose path is on the next line
@@ -1466,10 +1534,12 @@ class PreflightText:
             quoted = [match for match in QUOTED_ABS_PATH_RE.finditer(line) if any(
                 character.isspace() for character in match.group(1) or match.group(2))]
             inside = lambda start: any(span.start() <= start < span.end() for span in quoted)  # noqa: E731
-            found = [(match.start(), _path_token(match.group(0))) for match in ABS_PATH_RE.finditer(line)
-                     if not inside(match.start())]
-            found.extend((match.start(), match.group(1) or match.group(2)) for match in quoted)
-            self.absolute.extend((number, path) for _, path in sorted(found))
+            words = path_words(line)
+            found = [(start, path) for start, path, placed in words if placed]
+            negation = PROHIBITION_RE.search(line)
+            for start, path, placed in words:
+                if not negation or start < negation.end():
+                    (self.absolute if placed else self.unplaced).append((number, path))
             for match in REL_PATH_RE.finditer(line):
                 path = _path_token(match.group(0))
                 if inside(match.start()):
@@ -1603,9 +1673,11 @@ def rule_p1(names, row, repo):
 
 
 def rule_p2(names, row, repo):
-    """P2 HARD: the family declares reads-outside-workdir = "no" and the brief names an absolute path that is
-    not under the declared workdir. Two declarations that name different workdirs, or one whose workdir cannot
-    be read, leave the boundary open: CannotEvaluate, never a pass."""
+    """P2 HARD: the family declares reads-outside-workdir = "no" and the brief names a path word (path_words)
+    that is not under the declared workdir once posixpath.normpath folds it, or that it cannot place (unplaced),
+    on a line where no prohibition (PROHIBITION_RE, read lexically) precedes it. Two declarations that name
+    different workdirs, or one whose workdir cannot be read, leave the boundary open: CannotEvaluate, never a
+    pass."""
     if row["reads-outside-workdir"] != "no":
         return []
     if names.unclear:
@@ -1616,29 +1688,43 @@ def rule_p2(names, row, repo):
             len(set(posixpath.normpath(path) for path in names.workdirs)), ", ".join(sorted(set(names.workdirs)))))
     if not names.workdirs:
         return []
-    return [("P2", "HARD", line, "absolute path outside the declared workdir ({}), which this family cannot "
-             "read".format(", ".join(sorted(set(names.workdirs)))), _excerpt(path))
-            for line, path in _first_seen(names.absolute) if not under_workdir(path, names.workdirs)]
+    workdirs = ", ".join(sorted(set(names.workdirs)))
+    outside = [(line, "absolute path outside the declared workdir ({}), which this family cannot read".format(
+        workdirs), path) for line, path in _first_seen(names.absolute) if not under_workdir(path, names.workdirs)]
+    cannot_place = [(line, "path that cannot be placed under the declared workdir ({}) from its text (a home or "
+                     "variable path, or `..` that climbs above where the path starts), which this family may "
+                     "not be able to read".format(workdirs), path) for line, path in _first_seen(names.unplaced)]
+    return [("P2", "HARD", line, message, _excerpt(path)) for line, message, path in outside + cannot_place]
+
+
+def repository_path(path):
+    """The repository-relative form of a relative path a brief names, with `./` and `..` folded
+    (posixpath.normpath), or None when it names the root or climbs out of the repository."""
+    path = posixpath.normpath(path)
+    if path == "." or path.split("/")[0] == "..":
+        return None
+    return path
 
 
 def rule_p3(names, row, repo):
-    """P3 HARD: the brief pins a revision and a repository-relative path it names does not exist at that
-    revision in `repo`. A pin that does not resolve, or no repository to read, is CannotEvaluate, whether or not
-    the brief names a relative path."""
+    """P3 ADVISORY: the brief pins a revision and a repository-relative path it names (repository_path) does
+    not exist at that revision in `repo`; it may be a file the brief asks the worker to create, so it never
+    refuses. A pin that does not resolve, or no repository to read, is CannotEvaluate, whether or not the brief
+    names a relative path."""
     if not names.pins:
         return []
     if repo is None:
         raise CannotEvaluate("the brief pins a revision but no repository was given to read it from")
     commits = [(rev, resolve_revision(repo, rev)) for _, rev in names.pins]
-    paths = [(line, path[2:] if path.startswith("./") else path) for line, path in names.relative
-             if not path.startswith("../")]
-    paths = [(line, path.rstrip("/")) for line, path in _first_seen(paths) if path.rstrip("/")]
+    paths = [(line, repository_path(path)) for line, path in names.relative]
+    paths = _first_seen([(line, path) for line, path in paths if path is not None])
     findings = []
     for rev, commit in commits:
         for line, path in paths:
             if not exists_at_revision(repo, commit, path):
-                findings.append(("P3", "HARD", line, "path does not exist at the pinned revision {}".format(rev),
-                                 _excerpt(path)))
+                findings.append(("P3", "ADVISORY", line, "path does not exist at the pinned revision {}: if it "
+                                 "is an input, the worker cannot read it there; if the brief asks the worker to "
+                                 "create it, nothing is wrong".format(rev), _excerpt(path)))
     return findings
 
 
@@ -1750,7 +1836,7 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
                   "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir and that exist at the pinned revision".format(
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard)))))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
@@ -2209,6 +2295,17 @@ P2_SAME_TWICE = "Workdir /w/repo.\nThe workdir is /w/repo/.\nRead /w/repo/a.md b
 P2_QUOTED = "Workdir \"/w/my repo\".\nRead {} before you answer.\n"
 P2_NEXT_LINE = "Workdir\n/w/repo\nRead {} before you answer.\n"
 P2_COLON = "workdir:/w/repo\nRead {} before you answer.\n"
+# a `//`, a `~` segment or an unquoted space ended the previous extraction's path before the `..` that escapes
+P2_ESCAPES = ("/w/repo//../../etc/passwd", "/w/repo/x~/../../../etc/passwd", "/w/repo/a b/../../../etc/x.md")
+P2_UNPLACED = ("~/notes.md", "$TMPDIR/x.md", "../x.md", ",".join(["/w/repo/a.md"] * 17))
+# a prohibition before the path on its line; the path itself is not asked for
+P2_NEGATED = ("Workdir /w/repo (read-only).\nReview /w/repo/a.md. Never read /etc/shadow.\n",
+              "Workdir /w/repo (read-only).\nReview /w/repo/a.md, but never write to /srv/other/x.\n",
+              "Workdir /w/repo.\nDo not open ~/notes.md or $HOME/x.\n",
+              "Workdir /w/repo.\nYou must not read /etc/x.md; don't write /tmp/y.md.\n",
+              "Workdir /w/repo.\nRemember not to read /etc/x.md.\n")
+P2_NOT_NEGATED = ("Workdir /w/repo.\nRead /etc/x.md; never write it.\n",
+                  "Workdir /w/repo.\nRead /w/repo/never/a.md and /etc/x.md.\n")
 P3_PIN_ONLY = "BRIEF-PIN {}\nAnswer the question.\n"
 P3_BRIEF = "REVIEWED HEAD: {} (main).\nRead {} before you answer.\n"
 P3_MID_LINE = "Name a REVIEWED HEAD: 0123456789ab line.\nRead docs/absent.md before you answer.\n"
@@ -3293,6 +3390,25 @@ def self_test(report_path=None):
               (P2_QUOTED, "\"/w/my repo/x.md\"", "/w/my other/x.md"), (P2_NEXT_LINE, "/w/repo/a.md", "/etc/x.md"),
               (P2_COLON, "/w/repo/a.md", "/etc/x.md")) for path in (inside, outside)] + [_outcome(P2_SAME_TWICE)[0]],
           [0, 1] * 3 + [0])
+    # the whole word is judged: an escape after `//`, `~`, an unquoted space, inside quotes or later in the word
+    check("preflight/p2-path-word-hard",
+          [p2(path)[0] for path in P2_ESCAPES + ("\"/w/repo/a b/../../../etc/x.md\"", "/w/repo/a.md,/etc/x.md")],
+          [1] * 5)
+    check("preflight/p2-path-word-clean-quiet",
+          [p2(path) for path in ("/w/repo//docs/a.md", "/w/repo/x~/a.md", "/etc//../w/repo/a.md",
+                                 "(/w/repo/a.md).", "`/w/repo/./a.md`,")], [(0, [])] * 5)
+    check("preflight/p2-unplaced-hard", [p2(path)[0] for path in P2_UNPLACED], [1] * 4)
+    # the word cap: just inside, exactly at, and just outside MAX_WORD_PATHS absolute paths in one word
+    check("preflight/p2-word-cap-boundary", [p2(",".join(["/w/repo/a.md"] * count))[0] for count in (15, 16, 17)],
+          [0, 0, 1])
+    check("preflight/p2-relative-not-climbing-quiet", [p2(path)[0] for path in ("docs/../docs/a.md", "a/b/../c.md")],
+          [0, 0])
+    check("preflight/p2-negated-quiet", [_outcome(text) for text in P2_NEGATED], [(0, [])] * 5)
+    check("preflight/p2-not-negated-hard", [_outcome(text) for text in P2_NOT_NEGATED], [(1, [("P2", "HARD")])] * 2)
+    # a pin is 7 to 40 or 64 hex digits: each end just outside, at and inside
+    check("preflight/p3-pin-length-boundary",
+          [bool(PreflightText("BRIEF-PIN {}\n".format("a" * count)).pins) for count in (6, 7, 8, 39, 40, 41, 63, 64, 65)],
+          [False, True, True, True, True, False, False, True, False])
     check("preflight/p4-whole-file-advisory", _outcome(P4_WHOLE_FILE, "alpha"), (0, [("P4", "ADVISORY")]))
     check("preflight/p4-clean-quiet", [_outcome(P4_NAMED, "alpha"), _outcome(P4_NEGATED, "alpha"),
                                        _outcome(P4_WHOLE_FILE, "beta")], [(0, [])] * 3)
@@ -3306,10 +3422,20 @@ def self_test(report_path=None):
         def p3(path, rev=head[:12], family="alpha"):
             return _outcome(P3_BRIEF.format(rev, path), family, True, repo)
 
-        check("preflight/p3-missing-at-pin-hard", (p3("docs/absent.md"), p3("./docs/absent.md", head)),
-              ((1, [("P3", "HARD")]), (1, [("P3", "HARD")])))
+        # a path missing at the pin may be a file the brief asks the worker to create: printed, never refused
+        check("preflight/p3-missing-at-pin-advisory", (p3("docs/absent.md"), p3("./docs/absent.md", head),
+                                                       p3("docs/absent.md", family="gamma")),
+              ((0, [("P3", "ADVISORY")]),) * 3)
         # read from the object store, never the working tree: a file only in the working tree is missing
-        check("preflight/p3-working-tree-not-read", p3("docs/untracked.md"), (1, [("P3", "HARD")]))
+        check("preflight/p3-working-tree-not-read", p3("docs/untracked.md"), (0, [("P3", "ADVISORY")]))
+        # `..` is folded before the rev:path read; a path that climbs out of the repository is not read
+        check("preflight/p3-dotdot-folded", (p3("docs/../docs/present.md"), p3("docs/x/../absent.md"),
+                                             p3("../outside.md")),
+              ((0, []), (0, [("P3", "ADVISORY")]), (0, [])))
+        # a 64-hex pin is read as a pin (this repository's object format gives it no commit)
+        check("preflight/p3-pin-64-hex", (_outcome(P3_PIN_ONLY.format("a" * 64), "alpha", True, repo),
+                                         _outcome(P3_PIN_ONLY.format("a" * 65), "alpha", True, repo)),
+              ("CannotEvaluate", (0, [])))
         check("preflight/p3-clean-quiet", (p3("docs/present.md"), p3("docs/present.md", head),
                                            _outcome("BRIEF-PIN " + head + "\nRead docs/present.md.\n", "gamma",
                                                     True, repo)), ((0, []),) * 3)
@@ -3338,7 +3464,7 @@ def self_test(report_path=None):
                         _git_outcome(exists_at_revision, repo, head, "docs/absent.md")]
             return out
 
-        check("preflight/p3-git-env-scrubbed", under_foreign_git_env(), ((0, []), (1, [("P3", "HARD")])))
+        check("preflight/p3-git-env-scrubbed", under_foreign_git_env(), ((0, []), (0, [("P3", "ADVISORY")])))
         check("preflight/p3-git-failure-cannot-evaluate", git_failures(), ["CannotEvaluate"] * 4)
         with open(base / "brief.md", "w", encoding="utf-8") as handle:
             handle.write(P3_BRIEF.format(head[:12], "docs/absent.md"))
@@ -3346,7 +3472,7 @@ def self_test(report_path=None):
             handle.write(TABLE_FIXTURE)
         argv = [str(base / "brief.md"), "--family", "alpha", "--table", str(base / "table.toml"), "--repo", str(repo)]
         check("main/preflight-repo-option", (_quiet(main, argv), _quiet(main, argv + ["--repo", str(repo)])),
-              (EXIT_REFUSE, EXIT_CANNOT_EVALUATE))
+              (EXIT_OK, EXIT_CANNOT_EVALUATE))
         # red on revert: each preflight rule, and each guard of its clean shape, patched out flips its fixture
         check("revert/p1-red", *flip([lambda: _outcome(P1_RELATIVE, "alpha")], [(0, [])], rule_p1=nothing))
         check("revert/p1-file-name-red", *flip([lambda: _outcome(P1_NOT_A_PATH, "alpha")],
@@ -3374,16 +3500,41 @@ def self_test(report_path=None):
             return [("P2", "HARD", line, "", path) for line, path in names.absolute
                     if not under_workdir(path, names.workdirs)]
 
+        # each guard on its own: the previous parser declares a prose path, so a second workdir appears
         check("revert/p2-declaration-red", *flip(
-            [lambda text=text: _outcome(text)[0] for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO, P2_TWO,
-                                                                P2_SPACE_UNQUOTED)],
-            [0] * 5, _declaration_rest=path_after_word, rule_p2=union_p2))
-        check("revert/p3-red", *flip([lambda: p3("docs/absent.md")[0]], [0], rule_p3=nothing))
-        check("revert/p3-cat-file-red", *flip([lambda: p3("docs/untracked.md")[0]], [0],
+            [lambda text=text: _outcome(text) for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO)],
+            ["CannotEvaluate"] * 3, _declaration_rest=path_after_word))
+        # and the previous rule reads every declaration as a workdir and ignores an unclear one
+        check("revert/p2-ambiguity-red", *flip(
+            [lambda text=text: _outcome(text)[0] for text in (P2_TWO, P2_SPACE_UNQUOTED, P2_BARE_END)],
+            [0] * 3, rule_p2=union_p2))
+
+        def token_paths(line):
+            """The previous extraction: each ABS_PATH_RE match alone, cut short at `//`, `~` or a space."""
+            quoted = [match for match in QUOTED_ABS_PATH_RE.finditer(line) if any(
+                character.isspace() for character in match.group(1) or match.group(2))]
+            found = [(match.start(), _path_token(match.group(0)), True) for match in ABS_PATH_RE.finditer(line)
+                     if not any(span.start() <= match.start() < span.end() for span in quoted)]
+            return sorted(found + [(match.start(), match.group(1) or match.group(2), True) for match in quoted])
+
+        check("revert/p2-path-word-red", *flip([lambda path=path: p2(path)[0] for path in P2_ESCAPES], [0] * 3,
+                                               path_words=token_paths))
+        check("revert/p2-unplaced-red", *flip([lambda path=path: p2(path)[0] for path in P2_UNPLACED[:3]], [0] * 3,
+                                              unplaced=lambda word: False))
+        check("revert/p2-word-cap-red", *flip([lambda: p2(P2_UNPLACED[3])[0]], [0], MAX_WORD_PATHS=10 ** 6))
+        check("revert/p2-negation-red", *flip([code(text) for text in P2_NEGATED], [1] * 5, PROHIBITION_RE=never))
+        check("revert/p3-pin-64-hex-red", *flip([lambda: _outcome(P3_PIN_ONLY.format("a" * 64), "alpha", True, repo)],
+                                                [(0, [])], PIN_RE=re.compile(
+                                                    r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+"
+                                                    r"([0-9a-fA-F]{7,40})(?![\w-])")))
+        check("revert/p3-red", *flip([lambda: p3("docs/absent.md")], [(0, [])], rule_p3=nothing))
+        check("revert/p3-cat-file-red", *flip([lambda: p3("docs/untracked.md")], [(0, [])],
                                               exists_at_revision=lambda repo, commit, path: os.path.lexists(
                                                   os.path.join(str(repo), path))))
-        check("revert/p3-unresolved-red", *flip([lambda: p3("docs/present.md", "0123456789ab")], [(1, [("P3", "HARD")])],
-                                                resolve_revision=lambda repo, rev: rev))
+        check("revert/p3-dotdot-red", *flip([lambda: p3("docs/../docs/present.md")], [(0, [("P3", "ADVISORY")])],
+                                            repository_path=lambda path: path))
+        check("revert/p3-unresolved-red", *flip([lambda: p3("docs/present.md", "0123456789ab")],
+                                                [(0, [("P3", "ADVISORY")])], resolve_revision=lambda repo, rev: rev))
         check("revert/p3-git-env-red", *flip([lambda: under_foreign_git_env()[0]], ["CannotEvaluate"],
                                              _git_read_env=lambda: dict(os.environ)))
         real_resolve, real_exists = resolve_revision, exists_at_revision
@@ -3407,7 +3558,7 @@ def self_test(report_path=None):
                                            HANDBACK_NAMED_RE=never))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 89)
+    check("revert/every-flip-ran", len(flipped), 96)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -3430,9 +3581,11 @@ def self_test(report_path=None):
           "included) voids, quoted source text is not a data context and a command-line refusal says how to "
           "rewrite, and every blocking rule, command-line form, closed-shape "
           "guard and void patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
-          "the preflight refuses an absolute path outside a declared workdir for a family that cannot read outside "
-          "it (P2) and a path missing at a pinned revision read with git cat-file (P3; an unresolved pin exits 2), "
-          "prints P1 and P4 as ADVISORY, and each preflight rule and guard patched out flips its fixture; "
+          "the preflight refuses a path word outside a declared workdir, judged whole and folded with "
+          "posixpath.normpath, or one it cannot place, unless a prohibition precedes it on its line, for a family "
+          "that cannot read outside it (P2), prints a path missing at a pinned revision of 7 to 40 or 64 hex digits "
+          "read with git cat-file after `..` is folded (P3; an unresolved pin exits 2), P1 and P4 as ADVISORY, and "
+          "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 26 repeated shapes "
