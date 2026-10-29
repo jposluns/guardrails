@@ -49,12 +49,32 @@ path = ".aiqt/newtab.toml"
 reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Adopters own their roots, like .aiqt/derived-command-parameters.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
+path = ".aiqt/python-host.toml"
+reason = "Repository-local CI configuration: the exact CPython patch release the maintainer host runs, read by tools/check_python_host_pin.py and tools/check_python_floor.py to hold the host-patch CI jobs to it; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such jobs."
+
+[[exclusion]]
 path = ".aiqt/char-policy.json"
 reason = "Repository-local character policy read by tools/check_no_dashes.py and the char-policy-write preview hook; tracked, not shipped. Adopters own their roots (an absent file applies the gate's built-in default), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
 path = ".aiqt/cited-standards.toml"
 reason = "Repository-local corpus config for tools/check_cited_standards.py, passed with --config by this repository's CI and tools/run_all_checks.sh to add the OPF prompt-pack members to the rule corpus, and pinned by .github/check_cited_standards_contract.py; tracked, not shipped. Run without --config, the gate applies its built-in default corpus (the rule files alone) and reads no default file. The shipped tools/run_all_checks.sh still passes --config, so in a tree without this file (an adopter install) its cited-standards gate exits 2 (cannot evaluate) and the runner ends RESULT: FAIL, as its newtab-repo-contract gate and its two cited-standards-repo-contract gate lines do there (their .github scripts are not shipped)."
+
+[[exclusion]]
+path = ".aiqt/license-qualification.toml"
+reason = "Repository-local licence-qualification gate configuration (the declared licence identity plus the class-3 exception list) read by tools/check_license_qualification.py; tracked, not shipped. Adopters own their configuration (an absent file applies no declaration and no exceptions), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
+# The authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL): tracked here, never shipped. gen_manifest
+# refuses either path a release class, requires both tracked together under these exact literals, and allows
+# this one exclusion over a gensrc-registered kind=file target; every other gensrc target stays refused.
+
+[[exclusion]]
+path = ".claude/settings.json"
+reason = "Repository-local project hook registration (the gensrc-edit-guard dogfood wiring), generated whole and drift-gated by tools/gen_hooks.py in the authoring tree only, and gensrc-registered. Tracked, never shipped, so no release, pin or install can carry it over an adopter's own project settings."
+
+[[exclusion]]
+path = ".aiqt/authoring.toml"
+reason = "The authoring-tree marker tools/gen_hooks.py reads before it renders .claude/settings.json. Tracked, never shipped, so an adopter tree never carries it and an adopter run never touches its own .claude/settings.json."
 
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
@@ -229,6 +249,10 @@ path = "GEMINI.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = "INSTRUCTION-BUDGET.md"
+class = "pack-immutable"
+
+[[release-class]]
 path = "LICENSE"
 class = "pack-immutable"
 
@@ -388,6 +412,11 @@ class = "pack-immutable"
 path = ".aiqt/derived-command-parameters.toml"
 class = "adopter-state"
 note = "Adopter-authored configuration for tools/check_derived_command_parameters.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE)."
+
+[[namespace-class]]
+path = ".aiqt/relied-exit-pipes.toml"
+class = "adopter-state"
+note = "Adopter-authored configuration for tools/check_relied_exit_pipes.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE)."
 
 [[namespace-class]]
 path = ".aiqt/pin.toml"

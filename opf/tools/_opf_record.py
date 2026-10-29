@@ -6,13 +6,14 @@
   opf record transition ID STATE --actor KIND[:ID] [--reason S] [--decision S --decided-by S]
                     [--supersedes PD-ID] [--channel S --delivery-ref S] [--receipt-ref S] [--root DIR]
   opf record done-with-receipt BI-ID --actor maintainer[:ID] [--summary S] [--root DIR]
+  opf record receipt-repair BI-ID --actor maintainer[:ID] --reason S [--summary S] [--root DIR]
   opf record worklog-append --kind K --summary S --actor KIND[:ID] [--detail S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--root DIR]
   _opf_record.py --self-test         the unit leg (also registered in opf.py --self-test)
 
-`create`, `transition`, and `done-with-receipt` each append their own worklog entry (spec 6.2: one entry
-per change) in the SAME journaled transaction as the change. The entry's `detail` opens with a fixed
-lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): an informational
+`create`, `transition`, `done-with-receipt`, and `receipt-repair` each append their own worklog entry (spec
+6.2: one entry per change) in the SAME journaled transaction as the change. The entry's `detail` opens with a
+fixed lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): an informational
 record of the lifecycle (spec 8.3), never rejection evidence. `transition` takes the target STATE only: an
 assistant or automation author landing a terminal or gated state gets `/proposed` (spec 8.4), and the verb
 then writes the state the record held at that moment into the record's own `proposed_from` field (spec
@@ -34,11 +35,13 @@ maintainer's ratification of `decided/proposed`) may supersede the current resol
 act: --supersedes PD-n appends the `supersedes` link to the record's `links` (spec 8.5). Before anything is
 planned further, the target must be a pending_decision seated once in the index or the archive, schema-valid,
 at unqualified `decided` (so never the record itself, which is not yet decided), and the head of its chain (no
-pending_decision already links `supersedes` to it, so the chain never forks), and its own chain must not lead
-back to the record (no cycle); these target checks read the chain rule's record set below, so a decided chain
-head rotated to the archive can be superseded. --supersedes is refused on every other transition, a
-`/proposed` landing included: the doctor counts a `supersedes` link from a proposal too, so it would leave the
-superseded chain with no current resolution. Every landing at unqualified `decided`, with or without
+pending_decision not authored by an importer already links `supersedes` to it, so the chain never forks; an
+importer-authored one's link removes no current authority, spec 8.6, and a row whose actor kind is not exactly
+`importer` counts), and its own chain must not lead back to the record (no cycle); these target checks read
+the chain rule's record set below, so a decided chain head rotated to the archive can be superseded.
+--supersedes is refused on every other transition, a `/proposed` landing included: the doctor counts a
+`supersedes` link from a proposal too, so it would leave the superseded chain with no current resolution.
+Every landing at unqualified `decided`, with or without
 --supersedes, then recomputes the doctor's own chain rule (_opf_check.decision_chains, C-DECISION-CHAINS) over
 the planned index and every archived record: the chain the record belongs to afterwards must have exactly one
 current effective resolution, or the transition refuses with every byte untouched. That also refuses the
@@ -60,10 +63,31 @@ proposal wrote, and its rejection back to `sent` removes those two keys again.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
-`done`, so no ratified item can exist without its receipt.
+`done`, so this verb never ratifies an item without its receipt.
+`receipt-repair` is the maintainer's reviewed repair of a backlog item that is nonetheless at unqualified
+`done` with no clean receipt authored by a non-importer actor (a reviewed hand edit put it there, or its
+only receipts are importer-authored, spec 8.6): maintainer-only and requiring --reason, both refused
+before the store is touched, it mints the missing `done` receipt, linked `receipt_of`, and its own
+worklog entry in one publication, rewriting counters.toml, done.index.toml and worklog.toml only; the
+backlog index is read, never rewritten, and no status changes (spec 8.8). Its new id is claimed through
+the run's irrevocable id reservation (spec 8.2), which only a homes-2 store has, so on a homes-1 store
+it refuses, recording nothing (_require_reservation_home; like every subcommand, it first reconciles any
+interrupted earlier run, and that recovery, where one is needed, writes the store before the run refuses);
+while SUPPORTED_HOMES is 1 (below) that is every store this build writes, so the shipped verb refuses it
+until activation. The item must be seated once in the active backlog index at unqualified `done`,
+schema-valid and authored by a clean-series author, and its row must be exactly the row the prior commit
+(HEAD) holds, read through the doctor's own prior-snapshot reader (_require_committed_item) while planning
+and read again under the held lease immediately before anything is reserved or published
+(_require_committed_held): the final doctor accepts no pending status change for this subcommand, so the
+reviewed edit is committed first. A clean receipt authored by a non-importer actor that already names
+the item, in the active done index or the archive (read through the doctor's own archive walk), refuses
+(_require_unreceipted), and an archive the walk does not pass refuses too, never skipped, as does an
+active backlog or done row the doctor's receipt join cannot read or interpret (_require_interpreted_rows),
+which leaves that join not evaluated, and a done row that would count as the item's receipt but whose id
+is not a string, a malformed row the join does not count.
 
-Every subcommand runs ONE shared operation sequence (_run_operation), the `opf upgrade` shell applied to
-record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
+Every subcommand runs ONE shared operation sequence (_run_operation), the in-place writer shell applied to
+record authoring (spec 8.8 is normative):
   1. resolve the store; reconcile any interrupted `opf record` journal FIRST. Recovery writes the store,
      so it runs only under the single-writer lease (a held lease refuses before any recovery write and is
      never seized) and only when every open transaction's operand still holds a state the journal explains (an intervening
@@ -71,23 +95,30 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      so the operator inspects it before anything new is written;
   2. read the manifest; a `create --type` that is not an enabled baseline type, or a `transition` id
      outside every enabled transitionable type's namespace, refuses here, before any operand path is built
-     from it; read counters.toml, worklog.toml, and the operand index (the type's `<type>.index.toml`, plus
-     done.index.toml for a receipt), plus version.toml for the released-span boundary;
+     from it, and a `receipt-repair` on a store with no reservation home (any generation but homes 2)
+     refuses here, before any operand is read; read counters.toml, worklog.toml, and the operand index (the
+     type's `<type>.index.toml`, plus done.index.toml for a receipt; done.index.toml for a receipt repair,
+     which also reads backlog_item.index.toml and never rewrites it), plus version.toml for the
+     released-span boundary;
   3. PRECONDITION: re-emitting each operand's UNCHANGED parsed model reproduces its on-disk bytes exactly
      (a file carrying comments or non-canonical serialization refuses, bytes untouched; a hand edit or
      merge that leaves canonical bytes is NOT detectable by this check);
   4. plan the new models: claim the ids through the ONE allocation seam (claim_ids); require the
-     CURRENT row a transition or done-with-receipt acts on to be schema-valid, its proposed_from
-     included, BEFORE it is trusted or overwritten (_require_valid_current); compose and validate each
-     record through the _opf_schema primitives (validate_transition for a status change); refuse an
-     append into a released span;
+     CURRENT row a transition, done-with-receipt or receipt-repair acts on to be schema-valid, its
+     proposed_from included, BEFORE it is trusted or overwritten (_require_valid_current), and authored by
+     a clean-series author, so importer-authored history is never an operand (_require_clean_author, spec
+     8.6/8.8); compose and validate each record through the _opf_schema primitives (validate_transition
+     for a status change); refuse an append into a released span;
   5. POSTCONDITION: each emitted document, reparsed, equals its prior bytes, reparsed, plus exactly the
      allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
      True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
      and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
      write or removal, a pending_decision's resolution bundle write or removal, a contribution's delivery
      bundle or receipt write or removal, and the `supersedes` link a decision landing unqualified `decided`
-     appends. The delta is
+     appends; a handoff create additionally supersedes the one prior clean current handoff in the same
+     act (spec 8.5): that row's `status` to `superseded` for a maintainer post, or to
+     `superseded/proposed` with `proposed_from` for an assistant or automation post (spec 8.4), its
+     `updated_at`, plus the `supersedes` link appended to the new record. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -95,7 +126,8 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
   7. ONE journaled transaction publishes every operand (counters first), rooted at the generation's
      record journal home (.aiqt/record/journal at homes 1; the typed capability home
      .working/journals/record/journal at homes 2, written through the capability-bound _opf_journal
-     API), each operand pinned to the exact bytes it was planned from;
+     API, and preceded there by the run's irrevocable id reservation under the same held capability
+     and run id, _reserve_claim, spec 8.2), each operand pinned to the exact bytes it was planned from;
   8. render the declared views (--write), then require a full doctor VALID (a status change may leave
      only doctor's cannot-evaluate for exactly that record and from/to pair, pending until commit, and
      never a finding: _snapshot_pending);
@@ -104,10 +136,37 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
 
 The allocation seam: homes 1 claims each id by advancing counters.toml as an operand INSIDE the journaled
 transaction, under the held lease, and reports ids only after the COMPLETE frame, so a rollback restores
-the counters without ever un-publishing an observed id. Homes 2 (the irrevocable
-journals/<kind>/allocations reservation, spec 4.2) is not active in this build (the record reservation
-is a separate later change), and the seam refuses it fail-closed rather than claim through the homes-1
-path, so on a homes-2 store every subcommand still refuses before publication. A legacy
+the counters without ever un-publishing an observed id. Homes 2 derives each next id per counter key as
+one more than the maximum of the counters.toml high-water and every reservation's [claims] value for
+that key across every journal kind's journals/<kind>/allocations home (the homes enumerated from
+_opf_store.JOURNAL_KINDS, each reservation validated against its own kind and file name; spec 8.2),
+so a reserved number is treated as issued even where no published record carries it. Planning derives
+it to build the plan; the binding derivation is the reservation seam's own:
+_opf_journal.reserve_allocation, called BEFORE the journaled publication (_reserve_claim) with this
+run's demand and the planned claims as `expected`, reads counters.toml and every reservation again
+under the SAME held operation capability that publishes the reservation, so two runs never receive the
+same id: a peer's reservation landing between planning and the capability changes the derivation and
+refuses this run (re-run), never a duplicate. The homes-2 publication boundary itself
+(_publish_homes2) refuses to
+open a transaction unless the canonical reservation of the run id it publishes under stands with this
+plan's claims. An unreadable, malformed or conflicting reservation refuses (exit 2),
+never a silent fallback to the homes-1 counters path; a run killed after reserving and before
+publishing leaves its reservation standing, its numbers conservatively still reserved, and the next run
+derives above them. The final doctor reads the reservations (the read-only read spec 4.2 at 2.0.0
+names for the spec 8.2 counter checks) and does not report a reserved number missing where the prior
+commit held no record with that id, so a reservation's [claims] number grades as issued and that next
+run records. A reservation keeps
+only its run's new high-water per key, so where an orphaned run claimed several numbers under one key,
+its lower numbers are still reported missing and the next run is held at the post-publication gate
+(conservative). A deletion already committed in HEAD is visible only to a doctor run before that commit:
+a published record whose number a reservation records and whose deletion is committed is then graded as
+an orphaned reservation's number and not reported missing, unlike homes 1, where the counters high-water
+keeps that deletion a C-NO-DELETION finding. Spec 8.2 settles this direction: the doctor treats a
+reserved number as issued wherever its checks would otherwise report it missing. This homes-2 path is
+reached only once activation sets
+_opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+SUPPORTED_HOMES is 1, every subcommand refuses a store declaring homes 2 before any reconciliation or
+write (_probe_homes), so the shipped verb claims through homes 1 only. A legacy
 .aiqt/record/journal found on a homes-2 store is refused and never recovered: homes 2 has no homes
 migration to carry it (spec 4.2).
 
@@ -117,8 +176,18 @@ is doctor's own finding code).
 
 DISCLOSED RESIDUALS: there is no pre-doctor, so a store invalid in a way the preconditions do not inspect
 fails only at the final doctor, after publication (the change is then left for review with scoped
-recovery text, as `opf upgrade` does); a completed transaction's journal directory is retained under
-the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target (no
+recovery text); receipt-repair reads the prior commit (HEAD) for its committed-row check while planning
+and again under the held lease immediately before anything is reserved or published, so a HEAD moved
+after planning to a commit that no longer holds the item's row at done refuses with nothing written, but
+git takes no lease, so a HEAD moved after that second read and before the post-publication render and
+final doctor read it (a commit, reset or checkout in another shell) is not re-checked: where the moved
+HEAD holds the item at a status other than done, the post-publication render, which validates the store
+first, and the final doctor accept no pending status change for this subcommand, so the run refuses after
+publication and the change is left for review the same way; where the moved HEAD does not hold the item
+at all, the doctor's history check, which walks only the records the prior commit holds, never reaches
+it, so the final doctor passes and the run reports the receipt recorded (exit 0) over an item HEAD does
+not hold; a completed transaction's journal directory
+is retained under the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target (no
 sync runtime in this build, so the guarantee is single-host single-writer); a signal
 delivered at any point may leave a lease, an operation capability record or a journal lock in place,
 which the next run's recovery handles (an asynchronous interrupt makes any narrower promise
@@ -190,8 +259,33 @@ transition changes `status` and `updated_at` only, plus `proposed_from` (written
 (written by `proposed -> sent`, removed by the rejection of `sent/proposed`) and its receipt keys (written
 by `sent -> acknowledged` with --receipt-ref, removed by the rejection of `acknowledged/proposed`), and the
 `supersedes` link a decision landing unqualified `decided` appends, so a target state that requires any
-other field refuses at validate_record; posting a new handoff does not supersede the previous one in the
-same act. Three contribution cases stay outside this verb: an assistant or automation send under a
+other field refuses at validate_record. Posting a new handoff supersedes the previous one in the same act
+(spec 8.5): a `create --type handoff`, which lands unqualified `current` whatever the actor, moves the one
+clean current handoff of the active index to the status the transition grammar derives for the posting
+actor (spec 8.4: a maintainer post lands the unqualified terminal `superseded`; an assistant or
+automation post, a terminal transition, lands `superseded/proposed` with `proposed_from` recording
+`current`, awaiting a maintainer's ratification) in the same journaled transaction, appends one
+`supersedes` link to the new record after its requested links (a requested `supersedes` link naming that
+same handoff refuses, duplicate-supersedes-link: the writer appends the posting's own link itself), and
+reports that status change as the plan's transition, so the final gate accepts its one pending snapshot
+comparison exactly as it does a transition's; a first handoff, with no current handoff to supersede,
+supersedes nothing. The current-handoff set this reads is the section 8.5 join over the records the
+doctor reads (the active handoff index and every archived record, through the doctor's own archive
+walk), restricted to clean records authored by non-importer actors (spec 8.6): an importer-authored
+current handoff is readable history that neither blocks the posting nor receives the supersession, its
+bytes untouched. A prior state the spec forbids refuses with every byte untouched before anything is
+written, each refusal carrying a named diagnostic: more than one clean current handoff
+(two-current-handoffs, a C-HANDOFF finding already) and a current handoff found in the archive, which
+never holds one (archived-current-handoff, spec 12). The same join guards the one transition that lands
+a handoff back at `current`, the maintainer rejection of a supersession proposal: spec 8.8 fixes the
+rejection's restore target (exactly the recorded `proposed_from`) and bounds its delta to the one named
+record, and no spec section settles what that rejection does to a newer current handoff whose posting
+proposed the supersession, so this verb invents no second status change: while another clean current
+handoff stands, the rejection refuses whole (two-current-handoffs, nothing written), keeping the
+section 8.5 at-most-one-current rule over every reachable sequence; the operator ratifies the proposal
+instead, or posts a new handoff restating the rejected one, which supersedes the newer post in its own
+act. Three contribution cases stay outside this verb:
+an assistant or automation send under a
 standing authorization (spec 8.4) still lands `sent/proposed`, since the verb does not read the
 declaration; a planned delivery at `proposed` cannot be written (create takes no `delivery`) and a row
 carrying one refuses the send (the way out is to withdraw that record and create a new contribution,
@@ -228,6 +322,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import base64
 import binascii
+import collections
 import copy
 import datetime
 import hashlib
@@ -258,7 +353,7 @@ EXIT_OK = 0
 EXIT_MALFORMED = 2
 
 VERB = "record"
-SUBCOMMANDS = ("create", "transition", "done-with-receipt", "worklog-append")
+SUBCOMMANDS = ("create", "transition", "done-with-receipt", "receipt-repair", "worklog-append")
 # The HOMES-1 journal root, at the STORE root and outside `.working/`, so it is never a store operand
 # and never enters the containment walk (the .aiqt/import/journal precedent). Homes 2 keeps its record
 # journal in the typed capability home instead (_record_journal_rel; spec 4.2/8.8).
@@ -266,6 +361,7 @@ JOURNAL_REL = ".aiqt/record/journal"
 SESSION_ID = "opf-record"
 CLEAN_SCOPE = "record and render destinations"
 # Record authors. An importer records imported history through `opf import`, never through this verb.
+# The record a transition or done-with-receipt acts on must carry one of these too (_require_clean_author).
 AUTHOR_KINDS = ("maintainer", "assistant", "automation")
 # Baseline types minted by another subcommand, never by `create`.
 _OTHER_SUBCOMMAND = {"done": "done-with-receipt", "worklog": "worklog-append"}
@@ -277,13 +373,15 @@ _OPTIONS = {
     "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by", "--supersedes", "--channel",
                    "--delivery-ref", "--receipt-ref"),
     "done-with-receipt": ("--root", "--actor", "--summary"),
+    "receipt-repair": ("--root", "--actor", "--reason", "--summary"),
     "worklog-append": ("--root", "--kind", "--summary", "--actor", "--detail", "--link", "--ref"),
 }
 _REQUIRED = {"create": ("--type", "--title", "--actor"), "transition": ("--actor",),
-             "done-with-receipt": ("--actor",), "worklog-append": ("--kind", "--summary", "--actor")}
+             "done-with-receipt": ("--actor",), "receipt-repair": ("--actor", "--reason"),
+             "worklog-append": ("--kind", "--summary", "--actor")}
 _REPEATED = frozenset(("--link", "--ref", "--field", "--scope"))
 # The leading positional operands, named for the usage refusal.
-_POSITIONALS = {"transition": ("ID", "STATE"), "done-with-receipt": ("BI-ID",)}
+_POSITIONALS = {"transition": ("ID", "STATE"), "done-with-receipt": ("BI-ID",), "receipt-repair": ("BI-ID",)}
 _ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
 BACKLOG = "backlog_item"
 # The first line of every auto-appended worklog entry's `detail`: a fixed grammar recording the change,
@@ -299,8 +397,10 @@ PENDING_DECISION = "pending_decision"
 # The resolution bundle a pending_decision's `open -> decided` writes (spec 8.5, 8.8): all-or-none, all
 # three keys on `decided`, none on `open` or `withdrawn`.
 DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
-# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6).
+# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6),
+# and the one a handoff create appends to the handoff it supersedes in the same act (spec 8.5).
 SUPERSEDES = "supersedes"
+HANDOFF = "handoff"
 CONTRIBUTION = "contribution"
 # The delivery bundle a contribution's `proposed -> sent` writes (spec 8.5, 8.8), and the receipt keys
 # --receipt-ref adds to it on `sent -> acknowledged` (legal only at acknowledged).
@@ -370,6 +470,15 @@ def _require_maintainer(actor):
                           "ratifies".format(actor["kind"]))
 
 
+def _require_repair_maintainer(actor):
+    """receipt-repair is maintainer-only: it is the maintainer's reviewed repair (spec 8.8), never an
+    assistant or automation act, so any other actor refuses before the store is touched."""
+    if actor["kind"] != "maintainer":
+        raise RecordError("receipt-repair is maintainer-only (spec 8.8): it records the maintainer's reviewed "
+                          "repair of a ratified backlog item that holds no receipt; an {} cannot run "
+                          "it".format(actor["kind"]))
+
+
 def _require_decision_pair(seen):
     """--decision and --decided-by come together (the resolution bundle, spec 8.5), never one without the
     other: a usage refusal, before any store is touched."""
@@ -389,8 +498,9 @@ def parse_request(argv):
     """Parse `opf record <subcommand> ...` into a Request, or raise RecordError (a usage refusal, exit 2).
     Every option value must be present, non-empty, and must not start with `--` (so a swallowed next
     option is refused rather than read as a value); a single-valued option given twice refuses. The
-    positional operands of `transition` and `done-with-receipt` come first and are grammar-checked here,
-    and a non-maintainer `done-with-receipt` refuses here, all before any store is touched."""
+    positional operands of `transition`, `done-with-receipt` and `receipt-repair` come first and are
+    grammar-checked here, and a non-maintainer `done-with-receipt` or `receipt-repair` refuses here, all
+    before any store is touched."""
     if not argv:
         raise RecordError("a subcommand is required: one of {}".format(", ".join(SUBCOMMANDS)))
     sub = argv[0]
@@ -449,6 +559,10 @@ def parse_request(argv):
         _require_maintainer(req.actor)
         if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
             raise RecordError("done-with-receipt: {} is not a backlog item id".format(req.positionals[0]))
+    if sub == "receipt-repair":
+        _require_repair_maintainer(req.actor)
+        if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
+            raise RecordError("receipt-repair: {} is not a backlog item id".format(req.positionals[0]))
     return req
 
 
@@ -502,12 +616,28 @@ def _require_canonical(operand):
     serialized and comment-free, so a whole-document regeneration loses nothing. A file carrying comments
     or non-canonical serialization refuses and is left untouched. It proves SERIALIZATION only: a hand edit
     or hand merge that leaves canonical bytes is not detectable here, so spec 5.7's integration-base merge
-    policy remains a separate requirement this check does not enforce."""
-    if _emit_bytes(operand.model) != operand.raw:
+    policy remains a separate requirement this check does not enforce. A file an earlier emitter wrote with
+    a literal U+2028 or U+2029 inside a basic string still passes, and only when that is its sole difference
+    (_opf_emit.matches_store_bytes); this operation's write re-spells it with the escapes."""
+    if not _opf_emit.matches_store_bytes(operand.raw, _emit_bytes(operand.model)):
         raise RecordError("{} is not in canonical new-document form (it carries comments or non-canonical "
                           "serialization); refusing a whole-document rewrite that could lose content. "
                           "Restore it from the integration base and redo the operation there (spec 5.7); "
                           "nothing written (fail-closed)".format(operand.rel))
+
+
+def _require_within_read_cap(rel, data):
+    """PRECONDITION (store-read cap, applied to every file this operation publishes): the emitted bytes
+    must stay readable by the store reader, which refuses any store file LARGER than
+    _opf_store.MAX_STORE_READ_BYTES (a file of exactly that size still reads, so only a larger emission
+    refuses here). The appended rows, and the re-spelling of a literal U+2028/U+2029 as its six-byte
+    escape, both grow the emission, so a file near the cap could otherwise be rewritten into one the
+    resolver and doctor then refuse. Refusing before publication leaves the store byte-for-byte
+    unchanged."""
+    if len(data) > _opf_store.MAX_STORE_READ_BYTES:
+        raise RecordError("{} would be {} bytes after this write, over the {}-byte store-read cap its "
+                          "reader enforces; nothing written (fail-closed)".format(
+                              rel, len(data), _opf_store.MAX_STORE_READ_BYTES))
 
 
 # --- the store context ------------------------------------------------------------------------------
@@ -515,7 +645,8 @@ def _require_canonical(operand):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "import_status", "counters", "version", "worklog", "done_index", "journal_rel")
+                 "import_status", "counters", "version", "worklog", "done_index", "backlog", "journal_rel", "demand",
+                 "claims")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -531,7 +662,10 @@ class Context:
         self.counters = None
         self.version = None
         self.worklog = None        # the worklog operand: every subcommand appends one entry
-        self.done_index = None     # the done index operand, read by done-with-receipt only
+        self.done_index = None     # the done index operand, read by done-with-receipt and receipt-repair
+        self.backlog = None        # the backlog index receipt-repair reads, never rewrites
+        self.demand = None         # the one claim of this operation (set by _claim): its namespaces,
+        self.claims = None         # and at homes 2 the claimed high per namespace (_reserve_claim reads both)
 
     def rel(self, name):
         return "{}/{}".format(self.machine_rel, name)
@@ -539,15 +673,17 @@ class Context:
 
 def _load_manifest(ctx):
     """Read and validate the manifest (never an operand of this verb). It must be doctor-grade VALID at
-    the tooling spec_version, in the inline layout: an older store takes `opf upgrade` first."""
+    the tooling spec_version, in the inline layout. Validation already refuses an older store (spec 9.2),
+    so the version refusal below meets only a VALID store at another version, the reserved homes-2 pair,
+    which no upgrade carries back: such a store takes the tooling that implements its version."""
     manifest = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
-    mv = _opf_store.validate_manifest(manifest)
+    mv = _opf_store.validate_manifest(manifest, manifest_rel=ctx.rel(_opf_store.MANIFEST_NAME))
     if mv.status != _opf_store.VALID:
         raise RecordError("the store manifest is not VALID ({}); fail-closed".format("; ".join(mv.findings)))
     base = manifest.get(_opf_store.STANDARD_TOKEN)
     if base.get("spec_version") != _opf_store.SUPPORTED_SPEC_VERSION:
-        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; run opf upgrade "
-                          "first (fail-closed)".format(base.get("spec_version"),
+        raise RecordError("the store declares spec_version {!r}, not the tooling's {}; use the tooling "
+                          "that implements it (fail-closed)".format(base.get("spec_version"),
                                                        _opf_store.SUPPORTED_SPEC_VERSION))
     if base.get("layout") != "inline":
         raise RecordError("layout {!r} is not supported by this build (inline only); fail-closed".format(
@@ -564,47 +700,136 @@ def _counter_state(ctx, counters_model):
     """(high, findings): the counters map validated with the COMPLETENESS control (every enabled type's
     namespace must carry a high-water, the C-COUNTERS rule). Empty findings is the proof that licenses
     next_id(..., known_complete=True): an absent counter can then never read as high-water 0 and reuse an
-    existing id (spec 8.2)."""
+    existing id (spec 8.2). Where the manifest activates the imported series (_opf_check.imported_series_active,
+    the flag the doctor's C-COUNTERS reads), the proof is that C-COUNTERS rule too: one "imported:<NS>" row
+    per enabled type except legacy_fragment is required and preserved, and this verb never claims or
+    rewrites one."""
     return _opf_schema.validate_counters(
         counters_model, known_namespaces=frozenset(ctx.types.values()),
-        optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()))
+        optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()),
+        imported_namespaces=(_opf_check._imported_counter_namespaces(ctx.types)
+                             if _opf_check.imported_series_active(ctx.manifest) else None))
 
 
-def claim_ids(homes, high, demand, known_complete):
+def claim_ids(homes, high, demand, known_complete, reserved=None):
     """THE allocation seam (exactly one). `demand` is the ordered list of namespaces to claim; returns
-    (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map; the caller
-    publishes the counters advance as an operand INSIDE the journaled transaction under the held lease, so
-    the claim is one atomic act (spec 8.2) and ids are reported only after COMPLETE. Homes 2 delegates to
-    the irrevocable journals/<kind>/allocations reservation (spec 4.2), which is not active in this build:
-    it refuses fail-closed rather than claim through the homes-1 path."""
-    if homes != 1:
-        raise RecordError("homes-{} id allocation (an irrevocable journals/<kind>/allocations reservation, "
-                          "spec 4.2) is not active in this build; refusing rather than claiming ids through "
-                          "the homes-1 counters path (fail-closed)".format(homes))
+    (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map, with
+    `reserved` refused (the homes-1 counters path takes no reservation input); the caller publishes the
+    counters advance as an operand INSIDE the journaled transaction under the held lease, so the claim is
+    one atomic act (spec 8.2) and ids are reported only after COMPLETE. Homes 2: `reserved` is REQUIRED,
+    the per-counter-key maximum over every existing reservation in every journal kind's
+    journals/<kind>/allocations home (_reservation_high, each one a [claims] map, values in
+    1..2**63 - 1, the reservation contract's TOML integer range), and the next id per demanded counter
+    key is one more than the maximum of the counters high-water and that key's reserved value (the
+    spec 8.2 next-ID derivation; a reserved value under any other key, an imported:<NS> line
+    included, never moves it), so a reserved number is never issued again even where no published
+    record carries it; a next id past 2**63 - 1 could never be reserved, so that exhausted range
+    refuses here. The caller then publishes the run's own irrevocable reservation BEFORE the
+    journaled publication (_reserve_claim, through _opf_journal.reserve_allocation, which derives the
+    claims again under the held capability and refuses a plan they no longer match; this function
+    derives the plan only). A homes-2 call without the
+    reservation scan, a malformed or out-of-range scan, and any other generation each refuse
+    fail-closed rather than claim through the homes-1 counters path."""
+    if type(homes) is int and homes == 1:
+        if reserved is not None:
+            raise RecordError("the homes-1 counters path takes no reservation input; fail-closed")
+        base = {}
+    elif type(homes) is int and homes == 2:
+        if reserved is None:
+            raise RecordError("homes-2 id allocation requires the journals/<kind>/allocations "
+                              "reservation scan (spec 8.2); refusing rather than claiming ids through "
+                              "the homes-1 counters path (fail-closed)")
+        if not (isinstance(reserved, dict) and all(
+                isinstance(k, str) and type(v) is int and 1 <= v <= _opf_journal._CLAIM_VALUE_MAX
+                for k, v in reserved.items())):
+            raise RecordError("the reservation scan must map counter keys to high-water integers of at "
+                              "least 1 and at most 2**63 - 1; fail-closed")
+        base = reserved
+    else:
+        raise RecordError("homes generation {!r} is unknown to this build; refusing rather than "
+                          "claiming ids through the homes-1 counters path (fail-closed)".format(homes))
     cur = dict(high)
+    for key in demand:
+        if isinstance(key, str) and base.get(key, 0) > cur.get(key, 0):
+            cur[key] = base[key]
     ids = []
     for ns in demand:
         try:
             rid, n = _opf_schema.next_id(cur, ns, known_complete=known_complete)
         except ValueError as exc:
             raise RecordError("cannot claim an id: {}; fail-closed".format(exc))
+        if homes == 2 and n > _opf_journal._CLAIM_VALUE_MAX:
+            raise RecordError("cannot claim an id: the next {} number exceeds 2**63 - 1, the largest "
+                              "value an id reservation can carry (spec 8.2), so the range is "
+                              "exhausted; fail-closed".format(ns))
         cur[ns] = n
         ids.append(rid)
     return ids, cur
 
 
+def _allocations_rel(kind):
+    """The homes-2 reservation home of one journal kind (_opf_journal._allocations_rel, the one
+    derivation the reservation seam's own scan uses). Raises KeyError or ValueError for a kind the
+    store grammar does not admit."""
+    return _opf_journal._allocations_rel(kind)
+
+
+# The reservation home this verb's own runs publish into.
+_ALLOCATIONS_REL = _allocations_rel("record")
+
+
+def _read_reservation(afd, kind, entry):
+    """One reservation of `kind`, read fail-closed beneath that kind's already-open allocations
+    directory fd (_opf_journal._read_reservation, the reader the reservation seam's own scan uses),
+    returning its validated claims map; an unreadable, non-regular, misnamed, malformed or conflicting
+    entry refuses (RecordError, the seam's own message), never a silent fallback."""
+    try:
+        return _opf_journal._read_reservation(afd, kind, entry)
+    except _journal.JournalError as exc:
+        raise RecordError(str(exc))
+
+
+def _reservation_high(ctx):
+    """The per-counter-key maximum over EVERY existing id reservation in EVERY journal kind's
+    allocations home (_opf_journal.reservation_high, the scan the reservation seam itself derives
+    from under the held capability). Planning (_claim) and the postcondition (_expected_delta) read
+    it. An absent home reads as no reservations of that kind; a kind whose home cannot be derived,
+    and an unreadable, non-regular, misnamed, malformed or conflicting entry in any home, refuse
+    (exit 2 through cli, the seam's own message), never a silent fallback to the homes-1 counters
+    path."""
+    try:
+        return _opf_journal.reservation_high(ctx.root_fd)
+    except _journal.JournalError as exc:
+        raise RecordError(str(exc))
+
+
+def _kind_reservation_high(ctx, kind, home):
+    """The per-counter-key maximum over the reservations in one kind's allocations home `home`
+    (_opf_journal._kind_reservation_high); a refusal is a RecordError with the seam's own message."""
+    try:
+        return _opf_journal._kind_reservation_high(ctx.root_fd, kind, home)
+    except _journal.JournalError as exc:
+        raise RecordError(str(exc))
+
+
 def _claim(ctx, demand):
-    """Claim `demand` against the counters operand: the proof, then the seam, then the new model."""
+    """Claim `demand` against the counters operand: the proof, then the seam, then the new model. At
+    homes 2 the seam additionally reads every existing reservation (_reservation_high), and the claimed
+    map is kept on the context (ctx.demand, ctx.claims) for _reserve_claim, which re-derives and
+    publishes it under the held capability."""
     high, findings = _counter_state(ctx, ctx.counters.model)
     if findings:
         raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
             "; ".join(findings)))
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True)
+    reserved = _reservation_high(ctx) if ctx.homes == 2 else None
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
     new_model = copy.deepcopy(ctx.counters.model)
     new_model["counters"] = dict(new_model.get("counters") or {})
     for ns in demand:
         new_model["counters"][ns] = new_high[ns]
     ctx.counters.new_model = new_model
+    ctx.demand = list(demand)
+    ctx.claims = {ns: new_high[ns] for ns in demand} if ctx.homes == 2 else None
     return ids
 
 
@@ -693,13 +918,37 @@ def _require_valid_current(row, rtype, ctx, rid, rel):
     verb trusts or overwrites it: a rejection restores the row's recorded `proposed_from`, a proposing
     transition writes the field, and leaving a proposal removes it, so acting on a schema-invalid row (a
     `proposed_from` naming an illegal predecessor, or a stray one on an unqualified status, each a doctor
-    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence (QA4 F1).
+    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence.
     Refused with every byte untouched; the operator repairs the record first (spec 5.7)."""
     rv = _opf_schema.validate_record(row, expected_type=rtype, registered_vendors=ctx.vendors)
     if rv.status != _opf_store.VALID:
         raise RecordError("{} in {} is not schema-valid as it stands ({}); a transition never trusts or "
                           "overwrites an invalid record (repair it under opf doctor first); nothing "
                           "written (fail-closed)".format(rid, rel, "; ".join(rv.findings)))
+
+
+def _require_clean_author(row, rid, rel, verb):
+    """The record a clean-series subcommand changes must be authored by a clean-series author
+    (AUTHOR_KINDS): spec 8.6 has the clean-series writer refuse a transition on an importer-authored
+    record in either series, and spec 8.8 has every clean-series subcommand refuse one as its operand;
+    acting on that history is a new clean record linking back. Keyed on the row's own provenance, never
+    on its series: a legacy importer-authored row in the clean index refuses here (an imported-series id
+    never reaches this check, since the operand grammar admits clean <NS>-<n> ids only, parse_request).
+    An allow-list, so an absent or malformed actor, or any kind outside AUTHOR_KINDS, refuses too and
+    nothing unreadable reads as clean. The operand only: a --supersedes target is read and linked, never
+    changed (_require_valid_target), so a clean decision superseding an importer-authored resolution, the
+    spec 8.6 remedy for such a chain, stays open. There is no carve-out for a `/proposed` status a clean
+    actor already landed on such a record (by a writer without this check): its ratification and its
+    rejection refuse here too, so that proposal stays as recorded, stranded (spec 8.6/8.8 name no
+    exception). Refused with every byte untouched."""
+    actor = row.get("actor")
+    kind = actor.get("kind") if isinstance(actor, dict) else None
+    if not (isinstance(kind, str) and kind in AUTHOR_KINDS):
+        raise RecordError("{} refused (importer-authored-operand): {} in {} carries actor.kind {}, not a "
+                          "clean-series author ({}); the clean-series writer never acts on importer-authored "
+                          "history (spec 8.6, 8.8). Act on it with a new clean record linking back to it; "
+                          "nothing written (fail-closed)".format(verb, rid, rel, _opf_store._safe_display(kind),
+                                                                 ", ".join(AUTHOR_KINDS)))
 
 
 def _recorded_pre_proposal(ctx, row, rid, status):
@@ -782,18 +1031,100 @@ def _require_create_type(rtype, ctx):
 
 def _check_request(req, ctx):
     """The request checks that need the manifest but must precede every operand read: the index path is
-    built from `create --type` or from a `transition` id's namespace."""
+    built from `create --type` or from a `transition` id's namespace, and a `receipt-repair` refuses a
+    store with no reservation home."""
     if req.subcommand == "create":
         _require_create_type(req.values["--type"], ctx)
     elif req.subcommand == "transition":
         _operand_rel(req, ctx)
+    elif req.subcommand == "receipt-repair":
+        _require_reservation_home(ctx)
+
+
+def _current_handoffs(ctx, rows, verb="create handoff"):
+    """The current handoffs of the section 8.5 at-most-one-current join (a handoff at `current` with no
+    qualifier, authored by a non-importer actor: spec 8.6 requires every current-state join to evaluate
+    only clean records authored by non-importer actors, so an importer-authored row is readable history
+    here, never a current handoff), gathered over the records the doctor reads: the active handoff index
+    (`rows`, as _opf_check._make_rec views), then every archived record through the doctor's own archive
+    walk (_opf_check.archived_records). A current handoff the walk finds rotated to the archive, which
+    never holds one (spec 12), refuses with the named archived-current-handoff diagnostic; any other
+    archive input the walk finds missing, unreadable or malformed refuses with the walk's own problems,
+    never skipped (spec 8.8, 12). Either refusal lands before anything is written, named for the acting
+    `verb` (the handoff create's posting join, and the sole-current rule a transition landing a handoff
+    at `current` applies, _require_sole_current_handoff)."""
+    archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
+                                                     ctx.import_status, homes=ctx.homes)
+    recs = [_opf_check._make_rec(r, HANDOFF, "active") for r in rows if isinstance(r, dict)] + archived
+    current = [rec for rec in recs if rec.rtype == HANDOFF and rec.state == "current" and rec.qual is None
+               and rec.actor_kind != "importer"]
+    rotated = [rec for rec in current if rec.location != "active"]
+    if rotated:
+        raise RecordError("{} refused (archived-current-handoff): the current handoff {} sits "
+                          "in {}; the current handoff never rotates (spec 12), this verb writes the "
+                          "active index only, and the at-most-one-current rule (spec 8.5) is judged over "
+                          "the records the doctor reads. Repair the rotation first; nothing written "
+                          "(fail-closed)".format(verb, _opf_store._safe_display(rotated[0].id),
+                                                 rotated[0].location))
+    if problems:
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this {} "
+                          "is refused: the at-most-one-current handoff rule (spec 8.5) reads the records "
+                          "the doctor reads, every archived record included. Nothing written; "
+                          "fail-closed".format("; ".join(problems), verb))
+    return current
+
+
+def _handoff_supersession(ctx, operand, ts):
+    """The supersession a handoff create performs in the same act (spec 8.5): the id of the ONE clean
+    current handoff the new record supersedes, or None when none exists (a first handoff supersedes
+    nothing, and an importer-authored current handoff is history outside every current-state join, spec
+    8.6, so it neither blocks the posting nor receives the supersession: its bytes stay untouched). The
+    current set is the section 8.5 join of _current_handoffs, which also carries the named
+    archived-current-handoff refusal and the archive-walk refusal, so a prior state the spec forbids,
+    which the final doctor would refuse only after publication, refuses HERE with every byte untouched:
+      two-current-handoffs: more than one clean current handoff stands (spec 8.5 allows at most one; the
+        store is already a C-HANDOFF finding and no supersession target is determinable);
+      archived-current-handoff (raised by _current_handoffs): the current handoff was rotated to the
+        archive, which never holds one (spec 12), and this verb writes the active index only.
+    The superseded row is seated once (_locate), schema-valid before it is trusted or overwritten
+    (_require_valid_current), and dated before the clock (_require_later)."""
+    current = _current_handoffs(ctx, _index_rows(operand))
+    if not current:
+        return None
+    if len(current) > 1:
+        raise RecordError("create handoff refused (two-current-handoffs): {} current handoffs stand ({}); "
+                          "at most one current handoff exists across the store (spec 8.5, C-HANDOFF), so "
+                          "no supersession target is determinable. Repair the store under opf doctor "
+                          "first; nothing written (fail-closed)".format(
+                              len(current), ", ".join(_opf_store._safe_display(rec.id) for rec in current)))
+    rec = current[0]
+    if not isinstance(rec.id, str):
+        raise RecordError("the current handoff carries a malformed id ({}); a transition never trusts or "
+                          "overwrites an invalid record (repair it under opf doctor first); nothing "
+                          "written (fail-closed)".format(_opf_store._safe_display(rec.id)))
+    row = _locate(operand, rec.id)
+    _require_valid_current(row, HANDOFF, ctx, rec.id, operand.rel)
+    _require_later(row, ts)
+    return rec.id
 
 
 def _plan_create(req, ctx, operand, now):
     """`create`: one new record of a baseline type in its initial state. An assistant or automation
     author entering a gated initial state lands `/proposed` (spec 8.4); a created-terminal factual type
     (reference, autonomous_decision, maintainer_decision) carries no qualifier. The id is claimed through
-    the seam; the record is validated by validate_record before anything is planned further."""
+    the seam; the record is validated by validate_record before anything is planned further. A handoff,
+    which lands unqualified `current` whatever the actor, supersedes the one prior clean current handoff
+    in the same act (spec 8.5, _handoff_supersession): that row lands at the status this verb's own
+    transition grammar derives for the posting actor (spec 8.4, _derived_status: a maintainer post lands
+    the unqualified terminal `superseded`; an assistant or automation post, a terminal transition, lands
+    `superseded/proposed` with the pre-proposal state written into `proposed_from`, awaiting a
+    maintainer's ratification) with this operation's `updated_at`, the new record appends one
+    `supersedes` link to it after its requested links (a requested `supersedes` link naming that same
+    handoff refuses: the writer appends the posting's own link itself, duplicate-supersedes-link), the
+    worklog entry records it, and the plan reports that status change; a first handoff supersedes
+    nothing, an importer-authored current handoff is history outside the join (spec 8.6: it neither
+    blocks nor receives the supersession), and a prior state the spec forbids refuses with every byte
+    untouched (the named diagnostics of _handoff_supersession and _current_handoffs)."""
     rtype = req.values["--type"]
     spec = _require_create_type(rtype, ctx)
     rows = _index_rows(operand)
@@ -815,15 +1146,44 @@ def _plan_create(req, ctx, operand, now):
         if "scopes" not in spec.extra_keys:
             raise RecordError("--scope applies to block records only, not {}; fail-closed".format(rtype))
         record["scopes"] = list(req.scopes)
+    superseded = _handoff_supersession(ctx, operand, ts) if rtype == HANDOFF and qual is None else None
+    landing = None
+    if superseded is not None:
+        if any(link["rel"] == SUPERSEDES and link["id"] == superseded for link in req.links):
+            raise RecordError("create handoff refused (duplicate-supersedes-link): --link supersedes={0} "
+                              "names the handoff this posting itself supersedes; the writer appends that "
+                              "link in the same act (spec 8.5), so the request must not repeat it. Nothing "
+                              "written (fail-closed)".format(superseded))
+        landing = _derived_status(req.actor["kind"], spec, "current", "superseded")
+        tc = _opf_schema.validate_transition(HANDOFF, "current", landing, req.actor["kind"])
+        if tc.status != _opf_store.VALID:
+            raise RecordError("the supersession {} current -> {} by a {} is {}: {} (fail-closed)".format(
+                superseded, landing, req.actor["kind"], tc.status, "; ".join(tc.findings)))
+        record["links"] = list(record.get("links", [])) + [{"rel": SUPERSEDES, "id": superseded}]
     _validated(record, rtype, ctx)
+    detail = "opf-record create {} {}".format(rid, record["status"])
+    related = [{"rel": "relates", "id": rid}]
+    if superseded is not None:
+        detail += "\nsupersedes: " + superseded
+        related.append({"rel": "relates", "id": superseded})
     entry = _lifecycle_entry(ctx, wid, now, req.actor, "added",
                              "created {} ({}) at {}".format(rid, rtype, record["status"]),
-                             "opf-record create {} {}".format(rid, record["status"]),
-                             [{"rel": "relates", "id": rid}])
+                             detail, related)
     operand.new_model = copy.deepcopy(operand.model)
+    if superseded is not None:
+        fields = {"status": landing, "updated_at": ts}
+        # Landing a `/proposed` status records the pre-proposal state in the record itself (spec 8.8),
+        # exactly as a transition's landing does; the unqualified maintainer landing writes no such key.
+        if landing.endswith("/proposed"):
+            fields[PROPOSED_FROM] = "current"
+        for prior in operand.new_model["record"]:
+            if isinstance(prior, dict) and prior.get("id") == superseded:
+                prior.update(fields)
+                _validated(prior, HANDOFF, ctx)
     operand.new_model["record"] = list(operand.new_model.get("record", [])) + [record]
     _append_worklog(ctx, entry)
-    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid])
+    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid],
+                transition=None if superseded is None else (superseded, "current", landing))
 
 
 def _plan_worklog_append(req, ctx, operand, now):
@@ -1003,20 +1363,61 @@ def _require_superseded_decided(trow, target):
 
 def _superseders(rows, target):
     """The ids of the rows that already link `supersedes` to `target`, whatever their status (the doctor
-    counts every one)."""
-    return [r.get("id") for r in rows if isinstance(r, dict) and any(
-        isinstance(link, dict) and link.get("rel") == SUPERSEDES and link.get("id") == target
-        for link in (r.get("links") if isinstance(r.get("links"), list) else []))]
+    counts every one), apart from an importer-authored row: the doctor's firewalled chain derivation
+    (_opf_check.decision_chains) lets an importer-authored pending_decision's `supersedes` link remove no
+    current authority (spec 8.6), so a target only such rows supersede is still its chain's current
+    resolution, and a head a new decision may supersede (spec 8.8). Only the exact kind `importer` is
+    exempt, as there: a row whose actor kind is absent, unreadable or a lookalike counts, fail-closed."""
+    return [r.get("id") for r in rows if isinstance(r, dict)
+            and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer") and any(
+                isinstance(link, dict) and link.get("rel") == SUPERSEDES and link.get("id") == target
+                for link in (r.get("links") if isinstance(r.get("links"), list) else []))]
+
+
+def _chain_current(rows, target):
+    """The current effective resolutions of the chain `target` belongs to, by the doctor's own firewalled
+    derivation (_opf_check.decision_chains) over `rows` (_target_rows), or [] when the derivation lists no
+    such chain (none of its decided members counts)."""
+    recs = [_opf_check._make_rec(r, PENDING_DECISION, "active") for r in rows if isinstance(r, dict)]
+    by_id = {}
+    for rec in recs:
+        if isinstance(rec.id, str):
+            by_id.setdefault(rec.id, rec)    # the first seated record, active first, as the doctor's map keeps it
+    return next((current for members, current in _opf_check.decision_chains(recs, by_id) if target in members), [])
+
+
+def _head_remedy(rows, target):
+    """The head-check refusal's remedy for `target`: the chain's one current effective resolution
+    (_chain_current), named only when this same head check finds no superseder of it (_superseders), so
+    the name is a head the check accepts; the text says the other target checks and the chain rule still
+    apply to it (that resolution can still lead back to the record, a cycle, or fail schema validation, so
+    the name never promises that a supersede of it plans). The doctor's derivation seats only a record whose
+    id is a string, while the head check counts any row, so a malformed row can supersede that one
+    resolution: the remedy then names its superseders and no target. A chain with none or several current
+    resolutions names no target."""
+    current = _chain_current(rows, target)
+    if len(current) != 1:
+        return ("The chain has {} current effective resolutions ({}) under the doctor's chain rule "
+                "(C-DECISION-CHAINS), so no target is named in its place".format(
+                    len(current), ", ".join(current) or "none"))
+    above = _superseders(rows, current[0])
+    if above:
+        return ("The chain's one current effective resolution, {}, is itself already superseded by {} under "
+                "this check, so no target is named in its place".format(current[0], ", ".join(map(str, above))))
+    return ("{} is the chain's one current effective resolution, the head this check accepts in its place (the "
+            "other target checks and the chain rule still apply to it)".format(current[0]))
 
 
 def _require_chain_head(rows, target, rel):
-    """The superseded resolution must be the head of its chain: no pending_decision already supersedes it,
-    so the new link never forks the chain into two current resolutions (spec 8.5, C-DECISION-CHAINS)."""
+    """The superseded resolution must be the head of its chain: no pending_decision not authored by an
+    importer already supersedes it (_superseders), so the new link never forks the chain into two current
+    resolutions (spec 8.5, C-DECISION-CHAINS). The refusal names a target in its place only when that
+    target is a head this same check accepts (_head_remedy)."""
     held = _superseders(rows, target)
     if held:
         raise RecordError("{} in {} is already superseded by {}; exactly one current effective resolution exists "
-                          "per chain, so a second successor would fork it (spec 8.5). Supersede the chain's "
-                          "current resolution instead; fail-closed".format(target, rel, ", ".join(map(str, held))))
+                          "per chain, so a second successor would fork it (spec 8.5). {}; fail-closed".format(
+                              target, rel, ", ".join(map(str, held)), _head_remedy(rows, target)))
 
 
 def _require_acyclic(rows, rid, target, rel):
@@ -1136,13 +1537,37 @@ def _require_one_current_resolution(ctx, rows, rid, rel):
                                   if held else ""))
 
 
+def _require_sole_current_handoff(ctx, rows, rid, rel):
+    """A transition that lands a handoff at unqualified `current` (the maintainer rejection of a
+    supersession proposal, which must restore exactly the recorded `proposed_from` state, spec 8.8) must
+    leave the store with at most one clean current handoff (spec 8.5; spec 8.6 keeps importer-authored
+    history outside the join): the section 8.5 join of _current_handoffs, run over the planned index
+    (`rows`, the restored row included) together with every archived record, before anything is written.
+    Spec 8.8 fixes the rejection's restore target and bounds its delta to the one named record, and no
+    section settles what such a rejection does to a NEWER current handoff (one whose posting proposed
+    this supersession, spec 8.5), so no second status change is invented here: while another clean
+    current handoff stands, the restore refuses whole, fail-closed, and the operator either ratifies the
+    proposal or posts a new handoff restating it, which supersedes the newer one in its own act."""
+    current = _current_handoffs(ctx, rows, verb="transition to current")
+    others = [rec.id for rec in current if rec.id != rid]
+    if others:
+        raise RecordError("transition refused (two-current-handoffs): restoring {} to current would "
+                          "stand it beside the current handoff {} in {}; at most one current handoff "
+                          "exists across the store (spec 8.5, C-HANDOFF), and a rejection restores only "
+                          "the one named record (spec 8.8), never re-superseding another. Ratify the "
+                          "proposal to superseded, or post a new handoff restating it (which supersedes "
+                          "the newer one in its own act); nothing written (fail-closed)".format(
+                              rid, ", ".join(_opf_store._safe_display(o) for o in others), rel))
+
+
 def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
     `/proposed`, and the record's pre-proposal state is then written into its own `proposed_from` field in
     the same act (spec 8.8). The current row must be schema-valid before it is trusted or overwritten
-    (_require_valid_current). Leaving a `/proposed` status is maintainer-only: a rejection (--reason
-    required) must return to exactly the recorded `proposed_from` state, and rejection and ratification
+    (_require_valid_current), and authored by a clean-series author (_require_clean_author: importer-authored
+    history is never an operand, spec 8.6/8.8). Leaving a `/proposed` status is maintainer-only: a rejection
+    (--reason required) must return to exactly the recorded `proposed_from` state, and rejection and ratification
     each remove the field. A proposed record that carries no `proposed_from` (proposed outside
     `transition`, a record created at a `/proposed` initial state included) cannot be rejected here, and
     no predecessor is inferred or invented; the worklog lifecycle line is informational, never evidence. A
@@ -1155,7 +1580,10 @@ def _plan_transition(req, ctx, operand, now):
     index and the archive). A contribution's `proposed -> sent` writes its delivery bundle (_delivery_fields)
     and the rejection of `sent/proposed` removes it (_proposal_keys); `sent -> acknowledged` with
     --receipt-ref adds the receipt keys, and the rejection of `acknowledged/proposed` removes them
-    (_rejected_delivery). The change is `status`, `updated_at`, the
+    (_rejected_delivery). A transition that lands a handoff at unqualified `current` (the rejection of a
+    supersession proposal) must leave at most one clean current handoff across the planned index and the
+    archive (_require_sole_current_handoff, spec 8.5/8.6): while another clean current handoff stands,
+    the rejection refuses whole with nothing written. The change is `status`, `updated_at`, the
     `proposed_from` write or removal, those bundle writes or removals, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
@@ -1165,6 +1593,7 @@ def _plan_transition(req, ctx, operand, now):
     if spec is None or ctx.types.get(rtype) != _ID_RE.match(rid).group(1):
         raise RecordError("{} in {} does not carry its index's baseline type; fail-closed".format(rid, operand.rel))
     _require_valid_current(row, rtype, ctx, rid, operand.rel)
+    _require_clean_author(row, rid, operand.rel, "transition")
     current = row.get("status")
     parsed, err = _opf_schema.parse_status(current, spec)
     if parsed is None:
@@ -1218,6 +1647,9 @@ def _plan_transition(req, ctx, operand, now):
     if rtype == PENDING_DECISION and to_status == "decided":
         _require_one_current_resolution(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
                                               for r in _index_rows(operand)], rid, operand.rel)
+    if rtype == HANDOFF and to_status == "current":
+        _require_sole_current_handoff(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
+                                            for r in _index_rows(operand)], rid, operand.rel)
     (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
@@ -1237,15 +1669,18 @@ def _plan_transition(req, ctx, operand, now):
 def _plan_done_with_receipt(req, ctx, operand, now):
     """`done-with-receipt BI-ID` (maintainer-only, checked by the parser and again here): `active -> done`,
     or the ratification `done/proposed -> done`, AND the one-to-one `done` receipt linked `receipt_of`,
-    both in this one publication (spec 8.5). A backlog item that already has a receipt refuses."""
+    both in this one publication (spec 8.5). The item must be schema-valid and authored by a clean-series
+    author (_require_valid_current, _require_clean_author). A backlog item that already has a receipt
+    refuses."""
     (rid,) = req.positionals
     _require_maintainer(req.actor)
     row = _locate(operand, rid)
     current = row.get("status")
     if row.get("type") != BACKLOG or current not in ("active", "done/proposed"):
-        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {!r} "
-                          "(fail-closed)".format(rid, current))
+        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {} "
+                          "(fail-closed)".format(rid, _opf_store._safe_display(current)))
     _require_valid_current(row, BACKLOG, ctx, rid, operand.rel)
+    _require_clean_author(row, rid, operand.rel, "done-with-receipt")
     tc = _opf_schema.validate_transition(BACKLOG, current, "done", req.actor["kind"])
     if tc.status != _opf_store.VALID:
         raise RecordError("{} {} -> done is {}: {} (fail-closed)".format(rid, current, tc.status,
@@ -1287,8 +1722,194 @@ def _plan_done_with_receipt(req, ctx, operand, now):
                 transition=(rid, current, "done"))
 
 
+def _require_reservation_home(ctx):
+    """receipt-repair claims its receipt's id only through the run's irrevocable id reservation (spec
+    8.2), and only a homes-2 store has a reservation home, so any other generation refuses before any
+    operand is read, with nothing written, never claiming through the homes-1 counters path. The
+    comparison is type-exact: a bool or float never reads as a generation."""
+    if not (type(ctx.homes) is int and ctx.homes == 2):
+        raise RecordError("receipt-repair claims its receipt's id through an irrevocable id reservation (spec "
+                          "8.2), which only a homes-2 store has; this store is homes {}, so the repair is "
+                          "refused; nothing written (fail-closed)".format(_opf_store._safe_display(ctx.homes)))
+
+
+def _require_done_item(row, rid):
+    """A receipt repair acts only on a backlog item at unqualified `done`: an item still open, active or
+    dropped is owed no receipt, and one at `done/proposed` is ratified with its receipt by
+    done-with-receipt, never repaired. Refused with every byte untouched."""
+    current = row.get("status")
+    if row.get("type") != BACKLOG or current != "done":
+        raise RecordError("receipt-repair adds the missing receipt of a backlog item at unqualified done; {} is "
+                          "{}{} (fail-closed)".format(
+                              rid, _opf_store._safe_display(current),
+                              "; a done/proposed item is ratified with its receipt by opf record "
+                              "done-with-receipt" if current == "done/proposed" else ""))
+
+
+def _committed_prior(ctx):
+    """The prior committed snapshot (HEAD), read through the doctor's own prior-snapshot reader
+    (_opf_observe.gather, the observations the final doctor grades the store against), or a refusal when
+    it cannot be read: whether the reviewed edit is committed then cannot be told."""
+    try:
+        observations, notes = _opf_observe.gather(ctx.res)
+    except Exception as exc:  # noqa: BLE001  an observation escape is cannot-evaluate, never a pass
+        raise RecordError("receipt-repair cannot read the prior committed snapshot ({!r}), so whether the "
+                          "reviewed edit is committed cannot be told; nothing written (fail-closed)".format(exc))
+    prior = observations.get("prior")
+    if not isinstance(prior, dict):
+        raise RecordError("receipt-repair cannot read the prior committed snapshot ({}), so whether the "
+                          "reviewed edit is committed cannot be told; nothing written (fail-closed)".format(
+                              "; ".join(notes) or "no snapshot was observed"))
+    return prior
+
+
+def _require_committed_item(ctx, row, rid):
+    """The reviewed edit that put the item at `done` must be committed: the item's current row must be
+    exactly the row the prior commit (HEAD) holds, at `done`, by the doctor's own body digest. This
+    subcommand changes no status, so its final doctor accepts no pending snapshot comparison
+    (_snapshot_pending), and an uncommitted status change would otherwise fail only after publication.
+    Refused with every byte untouched."""
+    prior = _committed_prior(ctx)
+    records = prior.get("records") if isinstance(prior.get("records"), dict) else {}
+    digests = prior.get("digests") if isinstance(prior.get("digests"), dict) else {}
+    try:
+        same = _opf_check._record_digest_matches(row, digests.get(rid))
+    except _opf_emit.EmitError as exc:
+        raise RecordError("receipt-repair cannot compute the body digest of {} ({}); nothing written "
+                          "(fail-closed)".format(rid, exc))
+    if records.get(rid) != (BACKLOG, "done") or not same:
+        raise RecordError("receipt-repair refused (uncommitted-item): {} in {} is not exactly the row the prior "
+                          "commit (HEAD) holds at done; commit the reviewed edit first, then repair its "
+                          "receipt (this subcommand changes no status, so its final doctor accepts no "
+                          "pending status change); nothing written (fail-closed)".format(rid, ctx.backlog.rel))
+
+
+def _require_committed_held(ctx, req):
+    """A receipt repair's committed-row check (_require_committed_item), run again under the held lease
+    immediately before anything is reserved or published, over the item's row in the backlog index the
+    held re-read has just confirmed unchanged: git takes no lease, so a HEAD moved after planning (a
+    commit, reset or checkout in another shell) to a commit that holds the item at another state, or does
+    not hold it at all, refuses here with nothing written. A HEAD moved after this read is still not
+    re-checked (the module's residuals). Every other subcommand passes without reading the prior commit."""
+    if req.subcommand != "receipt-repair":
+        return
+    (rid,) = req.positionals
+    try:
+        _require_committed_item(ctx, _locate(ctx.backlog, rid), rid)
+    except RecordError as exc:
+        raise RecordError("under the held lease, immediately before publication, the prior commit (HEAD) was "
+                          "read again: {}".format(exc))
+
+
+def _receipt_records(ctx, rows):
+    """The done records the doctor's C-RECEIPTS join reads, in its order: the active done index (`rows`,
+    as _opf_check._make_rec views), then every archived record through the doctor's own archive walk
+    (_opf_check.archived_records). An archive input the walk finds missing, unreadable or malformed
+    refuses before anything is written, never skipped: a receipt rotated to the archive still counts
+    toward the one-to-one rule (spec 8.5, 12)."""
+    archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
+                                                     ctx.import_status, homes=ctx.homes)
+    if problems:
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this "
+                          "receipt-repair is refused: the one-to-one receipt rule (spec 8.5) reads the "
+                          "records the doctor reads, every archived record included. Nothing written; "
+                          "fail-closed".format("; ".join(problems)))
+    return [_opf_check._make_rec(r, "done", "active") for r in rows if isinstance(r, dict)] + archived
+
+
+def _require_interpreted_rows(rows, rtype, rel, rid):
+    """Every active backlog or done row (`rtype`) must be one the doctor's receipt join reads whole: a row
+    that is not a table is never seated, and a row whose status or links _opf_check._make_rec cannot
+    interpret (its `unparsed`, the actor kind excepted, as _opf_check._check_receipts excepts it) leaves
+    that join CANNOT-EVALUATE and not run (spec 8.5), so whether the item already holds a receipt cannot
+    be told. Refused naming the row and the cause, with every byte untouched."""
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            cause = "is not a table"
+        else:
+            unread = sorted(_opf_check._make_rec(row, rtype, "active").unparsed - {"actor"})
+            if not unread:
+                continue
+            cause = "has {} that cannot be interpreted".format(" and ".join(unread))
+        raise RecordError("receipt-repair refused: the {} record row {}#{} {}, so the doctor's receipt join "
+                          "(C-RECEIPTS) is not evaluated and whether {} already holds a receipt cannot be told "
+                          "(spec 8.5); repair that row first; nothing written (fail-closed)".format(
+                              rtype, rel, i + 1, cause, rid))
+
+
+def _require_unreceipted(ctx, operand, rid):
+    """The item must hold no clean receipt authored by a non-importer actor, in the active done index or
+    the archive, so a repair never stands a second receipt beside one. Counted as the doctor's C-RECEIPTS
+    join (_opf_check._check_receipts) counts: every clean `done` with a string id naming the item
+    `receipt_of` whose actor kind is not exactly `importer`, an unreadable kind included (fail-closed). This
+    check refuses, rather than count over a partial set, where an active backlog or done row is not a table
+    or has a status or links the doctor cannot interpret (_require_interpreted_rows: the join is then not
+    run), and where the archive does not pass the doctor's own archive walk (_receipt_records). A done row
+    that would otherwise count but whose id is not a string is a malformed row, not a receipt (the join
+    does not count it), so it refuses naming that cause. An importer-authored receipt is not counted (spec
+    8.6: it never satisfies a non-importer item), so the item whose only receipts are importer-authored is
+    repaired."""
+    _require_interpreted_rows(_index_rows(ctx.backlog), BACKLOG, ctx.backlog.rel, rid)
+    rows = _index_rows(operand)
+    _require_interpreted_rows(rows, "done", operand.rel, rid)
+    naming = [rec for rec in _receipt_records(ctx, rows)
+              if rec.rtype == "done" and rec.location != "imported" and rec.actor_kind != "importer"
+              and ("receipt_of", rid) in rec.links]
+    held = [rec.id for rec in naming if isinstance(rec.id, str)]
+    if held:
+        raise RecordError("receipt-repair refused: {} already holds the clean done receipt {} (in {} or the "
+                          "archive); the receipt is one-to-one (spec 8.5), so there is nothing to repair; "
+                          "nothing written (fail-closed)".format(
+                              rid, ", ".join(_opf_store._safe_display(h) for h in held), operand.rel))
+    if naming:
+        rec = naming[0]
+        raise RecordError("receipt-repair refused: a done record naming {} receipt_of (in {}) has the id {}, "
+                          "which is not a string, so it is a malformed row, not a receipt: the doctor's "
+                          "receipt join (C-RECEIPTS) does not count it (spec 8.5); repair that row first; "
+                          "nothing written (fail-closed)".format(
+                              rid, operand.rel if rec.location == "active" else "the archive, " + rec.location,
+                              _opf_store._safe_display(rec.id)))
+
+
+def _plan_receipt_repair(req, ctx, operand, now):
+    """`receipt-repair BI-ID --reason S` (maintainer-only, checked by the parser and again here): the
+    missing one-to-one `done` receipt of a backlog item already at unqualified `done`, linked
+    `receipt_of`, and its own worklog entry, in one publication; `operand` is the done index. The item is
+    read from the backlog index (ctx.backlog), never rewritten: it must be seated once, at unqualified
+    `done`, schema-valid, clean-authored, committed as it stands (_require_committed_item, read again under
+    the held lease by _require_committed_held), and hold no clean receipt (_require_unreceipted). The claim
+    runs only at homes 2 (_require_reservation_home)."""
+    (rid,) = req.positionals
+    _require_repair_maintainer(req.actor)
+    _require_reservation_home(ctx)
+    row = _locate(ctx.backlog, rid)
+    _require_done_item(row, rid)
+    _require_valid_current(row, BACKLOG, ctx, rid, ctx.backlog.rel)
+    _require_clean_author(row, rid, ctx.backlog.rel, "receipt-repair")
+    _require_committed_item(ctx, row, rid)
+    _require_unreceipted(ctx, operand, rid)
+    ts = _rfc3339(now)
+    did, wid = _claim(ctx, [_opf_store.BASELINE_TYPES["done"], _opf_release.WL_NAMESPACE])
+    _require_unseated(_index_rows(operand), did, operand.rel)
+    receipt = {"id": did, "type": "done", "status": "recorded", "title": row.get("title"), "created_at": ts,
+               "updated_at": ts, "actor": dict(req.actor), "links": [{"rel": "receipt_of", "id": rid}]}
+    if "--summary" in req.values:
+        receipt["summary"] = req.values["--summary"]
+    _validated(receipt, "done", ctx)
+    entry = _lifecycle_entry(ctx, wid, now, req.actor, "changed",
+                             "repaired {} with receipt {}".format(rid, did),
+                             "opf-record create {} recorded\nreceipt_of: {}\nreason: {}".format(
+                                 did, rid, req.values["--reason"]),
+                             [{"rel": "relates", "id": rid}, {"rel": "relates", "id": did}])
+    operand.new_model = copy.deepcopy(operand.model)
+    operand.new_model["record"] = list(operand.new_model.get("record", [])) + [receipt]
+    _append_worklog(ctx, entry)
+    return Plan([ctx.counters, operand, ctx.worklog], [did, wid])
+
+
 _PLANNERS = {"create": _plan_create, "transition": _plan_transition,
-             "done-with-receipt": _plan_done_with_receipt, "worklog-append": _plan_worklog_append}
+             "done-with-receipt": _plan_done_with_receipt, "receipt-repair": _plan_receipt_repair,
+             "worklog-append": _plan_worklog_append}
 
 
 def _postcondition_failed(what):
@@ -1305,7 +1926,8 @@ def _reparse(raw, rel):
 
 def _expected_rels(req, ctx):
     """The operand set the request implies, in journal order: counters first, the worklog last, and between
-    them the record index a create or a status change rewrites (plus done.index.toml for a receipt)."""
+    them the record index a create or a status change rewrites (plus done.index.toml for a receipt), or
+    done.index.toml alone for a receipt repair, which never rewrites the backlog index."""
     worklog = ctx.rel(_opf_check.WORKLOG_NAME)
     if req.subcommand == "worklog-append":
         return [ctx.counters.rel, worklog]
@@ -1333,7 +1955,8 @@ def _expected_delta(req, ctx, raws, now):
     """The allowed delta, derived INDEPENDENTLY of the planner's output: ([(rel, expected model)] in
     journal order, the expected ids, the expected (id, from, to) of a status change or None). The inputs
     are the request (the caller passes a copy taken before planning), the allocation result (claim_ids
-    over the high-water map reparsed from the bytes the plan was made from), the clock value, the
+    over the high-water map reparsed from the bytes the plan was made from, plus its own reservation
+    scan at homes 2, _reservation_high), the clock value, the
     planned-from bytes, and the schema rules (the type's namespace, initial state, terminal and gated
     states, and the proposer kinds of spec 8.4). Every baseline, including the one row a status change
     rewrites and its prior status, is reparsed from the planned-from bytes, so no expected row or table is
@@ -1350,7 +1973,7 @@ def _expected_delta(req, ctx, raws, now):
         rtype = req.values["--type"]
         spec = _opf_schema.BASELINE_SPECS[rtype]
         demand = [spec.namespace, wl]
-    elif sub == "done-with-receipt":
+    elif sub in ("done-with-receipt", "receipt-repair"):
         demand = [_opf_store.BASELINE_TYPES["done"], wl]
     else:
         demand = [wl]
@@ -1358,11 +1981,13 @@ def _expected_delta(req, ctx, raws, now):
     high, findings = _counter_state(ctx, counters)
     if findings:
         raise _postcondition_failed("the prior counters.toml cannot license the claim")
-    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True)
+    reserved = _reservation_high(ctx) if ctx.homes == 2 else None
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True, reserved=reserved)
     table = dict(counters.get("counters") or {})
     for ns in demand:
-        if new_high[ns] != table.get(ns, 0) + 1:
-            raise _postcondition_failed("the claim does not advance {} by exactly one".format(ns))
+        if new_high[ns] != max(table.get(ns, 0), (reserved or {}).get(ns, 0)) + 1:
+            raise _postcondition_failed("the claim does not advance {} by exactly one above "
+                                        "the counter and reservation high".format(ns))
         table[ns] = new_high[ns]
     counters["counters"] = table
     wid = ids[-1]
@@ -1388,10 +2013,52 @@ def _expected_delta(req, ctx, raws, now):
             row["refs"] = [{"kind": ref["kind"], "locator": ref["locator"], "note": ref["note"]}
                            for ref in req.refs]
         if sub == "create":
+            detail = "opf-record create {} {}".format(ids[0], row["status"])
+            targets = [ids[0]]
+            # The handoff posting rule (spec 8.5/8.8), derived here on its own, apart from the planner: a
+            # handoff created at unqualified `current` supersedes the one prior clean current handoff of
+            # the prior index (type `handoff`, status exactly `current`, not importer-authored: spec 8.6
+            # keeps imported history outside every current-state join, so such a row is never a candidate
+            # and never changes): that row's `status` moves to `superseded` for a maintainer post, or to
+            # `superseded/proposed` with `proposed_from` recording `current` when the posting actor's kind
+            # is a proposer kind (spec 8.4: an assistant or automation terminal transition lands
+            # `/proposed`), with `updated_at` at the clock value; the new row appends one `supersedes`
+            # link to it after its requested links (a request already linking `supersedes` to that same
+            # handoff is the planner's duplicate-supersedes-link refusal and never an expected delta), the
+            # worklog entry adds a `supersedes:` detail line and a `relates` link to it, and the expected
+            # status change is that supersession. Whether the write is legal (the archive walk, a second
+            # current handoff) is the planner's refusal and is not judged again here.
+            if rtype == "handoff" and not proposed:
+                prior_rows = docs[rels[1]].get("record")
+                cands = [r for r in (prior_rows if isinstance(prior_rows, list) else [])
+                         if isinstance(r, dict) and r.get("type") == "handoff"
+                         and r.get("status") == "current"
+                         and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer")]
+                if len(cands) > 1:
+                    raise _postcondition_failed("the prior {} holds more than one current handoff".format(
+                        rels[1]))
+                if cands:
+                    hid = cands[0].get("id")
+                    if not isinstance(hid, str):
+                        raise _postcondition_failed("the prior current handoff in {} carries no string "
+                                                    "id".format(rels[1]))
+                    if any(link["rel"] == "supersedes" and link["id"] == hid for link in req.links):
+                        raise _postcondition_failed("the request itself links supersedes to the handoff "
+                                                    "the posting supersedes")
+                    if req.actor["kind"] in _opf_schema.PROPOSER_KINDS:
+                        cands[0].update({"status": "superseded/proposed", "updated_at": ts,
+                                         "proposed_from": "current"})
+                        transition = (hid, "current", "superseded/proposed")
+                    else:
+                        cands[0].update({"status": "superseded", "updated_at": ts})
+                        transition = (hid, "current", "superseded")
+                    row["links"] = list(row.get("links", [])) + [{"rel": "supersedes", "id": hid}]
+                    detail += "\nsupersedes: " + hid
+                    targets.append(hid)
             docs[rels[1]]["record"] = list(docs[rels[1]].get("record", [])) + [row]
             entry = _expected_entry(wid, ts, req.actor, "added",
                                     "created {} ({}) at {}".format(ids[0], rtype, row["status"]),
-                                    "opf-record create {} {}".format(ids[0], row["status"]), [ids[0]])
+                                    detail, targets)
         else:
             entry = row
     elif sub == "transition":
@@ -1464,6 +2131,25 @@ def _expected_delta(req, ctx, raws, now):
                                 "{} {} from {} to {}".format(verb, rid, current, to_status), detail,
                                 [rid] + ([superseded] if superseded is not None else []))
         transition = (rid, current, to_status)
+    elif sub == "receipt-repair":
+        # The receipt repair (spec 8.8), derived here on its own, apart from the planner: exactly one
+        # receipt appended to the done index, its title the item's own, read from the bytes the plan read
+        # the backlog index from (an input the plan never rewrites), and one entry whose lifecycle line
+        # records the receipt's creation; the backlog index is no operand and no status changes. Whether
+        # the repair is legal (the item's state, the committed row, an existing receipt) is the planner's
+        # refusal and is not judged again here.
+        (rid,) = req.positionals
+        did = ids[0]
+        item = _prior_row(_reparse(ctx.backlog.raw, ctx.backlog.rel), rid, ctx.backlog.rel)
+        receipt = {"id": did, "type": "done", "status": "recorded", "title": item.get("title"),
+                   "created_at": ts, "updated_at": ts, "actor": dict(req.actor),
+                   "links": [{"rel": "receipt_of", "id": rid}]}
+        if "--summary" in req.values:
+            receipt["summary"] = req.values["--summary"]
+        docs[rels[1]]["record"] = list(docs[rels[1]].get("record", [])) + [receipt]
+        entry = _expected_entry(wid, ts, req.actor, "changed", "repaired {} with receipt {}".format(rid, did),
+                                "opf-record create {} recorded\nreceipt_of: {}\nreason: {}".format(
+                                    did, rid, req.values["--reason"]), [rid, did])
     else:
         (rid,) = req.positionals
         did = ids[0]
@@ -1491,7 +2177,7 @@ def _strict_equal(a, b):
     """The postcondition's comparator: strict, TYPE-AWARE structural equality (_opf_emit._model_equal, the
     round-trip comparator emit_checked already proves itself with), never Python's ==. Ordinary equality
     let a mutation that changed only a value's type (True for 1, 1.0 for 1) read as the allowed delta and
-    publish (codex QA3 F2); here bool is never a bare int, int is never a float, and datetime is never a
+    publish (an exact-type rule); here bool is never a bare int, int is never a float, and datetime is never a
     date, so such a mutation refuses before anything is written."""
     return _opf_emit._model_equal(a, b)
 
@@ -1505,7 +2191,10 @@ def _postcondition(plan, req, ctx, now):
     schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
     `updated_at`, the `proposed_from` write or removal, a pending_decision's resolution bundle write or
     removal, a contribution's delivery bundle or receipt write or removal, and its `supersedes` link
-    append of the one named record; the counters advanced by
+    append of the one named record; for a handoff create additionally the one prior clean current
+    handoff's supersession (spec 8.5: its `status` to `superseded`, or to `superseded/proposed` with
+    `proposed_from` when the posting actor's kind is a proposer kind (spec 8.4), its `updated_at`, the
+    `supersedes` link appended to the new record, and that status change reported); the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -1540,7 +2229,8 @@ def _record_journal_rel(homes):
         return JOURNAL_REL
     if type(homes) is int and homes == 2:
         return _opf_store.journal_root("record")
-    raise RecordError("unknown homes generation {!r} for the record journal; fail-closed".format(homes))
+    raise RecordError("unknown homes generation {} for the record journal; fail-closed".format(
+        _opf_store._safe_display(homes)))
 
 
 def _probe_homes(ctx):
@@ -1578,11 +2268,12 @@ def _probe_homes(ctx):
     base = model.get(_opf_store.STANDARD_TOKEN) if isinstance(model, dict) else None
     declared = base.get("homes", 1) if isinstance(base, dict) else 1
     if type(declared) is not int or declared != generation:
-        raise RecordError("the store manifest declares homes generation {!r}, which this tooling does not "
+        raise RecordError("the store manifest declares homes generation {}, which this tooling does not "
                           "activate (it activates homes {} at most, and homes 2 only with spec_version {}), "
                           "so the record journal home cannot be told and reconciling a legacy journal could "
                           "write under .aiqt/ on a homes-2 store. Nothing written (fail-closed)".format(
-                              declared, _opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION))
+                              _opf_store._safe_display(declared), _opf_store.SUPPORTED_HOMES,
+                              _opf_store.HOMES2_SPEC_VERSION))
     return generation
 
 
@@ -1741,11 +2432,12 @@ def _leftover_lock_outcome(owner, states):
 def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed for RECOVERY through
     _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
-    live-holder rule applied to exactly the present-lease refusal. A leftover lease whose complete
-    well-formed payload names a holder on THIS host confirmed dead (positive evidence only) is released
-    through this reconciliation and the claim retried once; a lease held by a live or possibly-live
-    holder, a cross-host holder, or one with a malformed payload refuses before any recovery write and is
-    never seized, and releasing any such lease stays the operator's explicit reconciliation step. A
+    never-seize and dead-run release clauses applied to exactly the present-lease refusal. A leftover
+    lease whose complete well-formed payload names a holder on THIS host confirmed dead (positive
+    evidence only) is released through this reconciliation and the claim retried once; a lease held by a
+    live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
+    recovery write and is never seized, and releasing any such lease stays the operator's explicit
+    reconciliation step. A
     released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
     RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
     clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
@@ -2179,7 +2871,8 @@ def _removal_parts(recovered, operation, staging_removed, created_removed=()):
     if recovered:
         parts.append("the stale operation capability {} of a holder its recovery gate confirmed dead "
                      "({})".format(" and ".join(recovered), "its recorded operation not reported"
-                                   if operation is None else "its recorded operation {!r}".format(operation)))
+                                   if operation is None else "its recorded operation {}".format(
+                                       _opf_store._safe_display(operation))))
     parts.extend(created_removed)
     return parts
 
@@ -2232,7 +2925,7 @@ def _reclaimed_outcome(cap, pending):
     line = ("recovery cleared the operation capability's {}, left by an interrupted {} run whose holder "
             "its recovery gate confirmed dead, under the held capability".format(
                 " and ".join(cap.recovered), "(recorded operation not reported)" if operation is None
-                else repr(operation)))
+                else _opf_store._safe_display(operation)))
     if not pending:
         line += (" with no record journal work pending (read under the held capability: no "
                  "transaction open, every terminal one in the homes record grammar having an entry at its "
@@ -2241,8 +2934,8 @@ def _reclaimed_outcome(cap, pending):
     if cap.staging_removed:
         line += "; the acquisition also removed {}".format("; ".join(cap.staging_removed))
     if operation is not None and operation != VERB:
-        line += ("; this run reconciles only the opf record journal, so any journal work of the {!r} "
-                 "operation is not examined here".format(operation))
+        line += ("; this run reconciles only the opf record journal, so any journal work of the {} "
+                 "operation is not examined here".format(_opf_store._safe_display(operation)))
     if pending:
         return line
     return line + (". A COMPLETE transaction's publication was applied when it committed; its "
@@ -2352,7 +3045,99 @@ _FAILED_STATE = {"open": "still open",
                  "complete": "COMPLETE (its publication is present, with its render and final doctor never run)"}
 
 
-def _publish(ctx, plan, subcommand, cap=None):
+def _check_planned_ids(ctx, plan):
+    """The plan's ordered ids must be exactly the ones its demand and planned claims imply, checked
+    purely (no store read): under each demanded key, the demanded count of numbers ending at the
+    planned claim, issued in demand order (claim_ids over the high-water just below each claim). The
+    seam compares only the claims, and plan.ids is a separate input the run reports and publishes, so
+    a plan whose ids differ (another number, another order, an id missing or extra) refuses here,
+    before anything is reserved. On the record path this is a second guard: _postcondition already
+    refuses such a plan before the lease, and nothing changes plan.ids between the two; this check
+    keeps the reservation step itself from reserving for ids its claims do not imply."""
+    counts = collections.Counter(ctx.demand)
+    implied = None
+    if isinstance(ctx.claims, dict) and set(ctx.claims) == set(counts) and all(
+            type(ctx.claims[ns]) is int and ctx.claims[ns] >= n for ns, n in counts.items()):
+        try:
+            implied, _high = claim_ids(ctx.homes, {ns: ctx.claims[ns] - n for ns, n in counts.items()},
+                                       ctx.demand, known_complete=True, reserved={})
+        except RecordError:
+            implied = None
+    if implied is None or list(plan.ids) != implied:
+        raise RecordError("the plan's ids {!r} are not the ids its demand and planned claims imply ({!r} "
+                          "for {!r}); nothing written (fail-closed)".format(
+                              list(plan.ids), implied, ctx.claims))
+
+
+def _reserve_claim(ctx, plan, cap, run_id):
+    """Publish the run's irrevocable id reservation (spec 4.2/8.2) UNDER the held operation
+    capability. The counters completeness proof (every enabled type's namespace carries a high-water,
+    which needs the manifest) is re-checked here, and so is the plan's own ids against its demand and
+    planned claims (_check_planned_ids); the derivation itself is the seam's: reserve_allocation
+    reads counters.toml and a FRESH reservation scan under the same capability that publishes, derives
+    the claims from this run's demand, and refuses (nothing written) when they differ from the planned
+    ctx.claims, so a reservation that landed between planning and the capability refuses this run
+    (re-run), never a duplicate id. The reservation is published BEFORE the journaled publication: a
+    run that dies between the two leaves the reservation standing, its numbers conservatively still
+    reserved and never issued again. A reservation refusal (an existing conflicting entry included)
+    refuses the run with nothing recorded."""
+    if ctx.demand is None or ctx.claims is None:
+        raise RecordError("no claim was planned for this operation; nothing written (fail-closed)")
+    _high, findings = _counter_state(ctx, ctx.counters.model)
+    if findings:
+        raise RecordError("counters.toml cannot license an allocation: {} (fail-closed)".format(
+            "; ".join(findings)))
+    _check_planned_ids(ctx, plan)
+    try:
+        _opf_journal.reserve_allocation(cap, "record", run_id, dict(collections.Counter(ctx.demand)),
+                                        expected=ctx.claims)
+    except _opf_journal.ReservationDerivationChanged:
+        raise RecordError("the homes-2 id derivation changed between planning and the held capability "
+                          "(an id reservation landed in between); nothing written; re-run (fail-closed)")
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("the homes-2 id reservation {} for {} could not be derived or published ({}); "
+                          "nothing is offered as recorded: a refusal while deriving writes nothing, and "
+                          "a reservation a failed publication may have left standing is irrevocable, "
+                          "its numbers conservatively reserved (fail-closed)".format(
+                              _opf_store.allocation_record("record", run_id), run_id, exc))
+
+
+def _require_reservation(ctx, run_id):
+    """The homes-2 publication boundary's reservation evidence (spec 8.2), judged under the held
+    capability before the transaction opens: the record reservation at allocation_record("record",
+    run_id) must stand, read fail-closed and byte-exact against the canonical payload its name and
+    content declare (_read_reservation), with claims equal to exactly this plan's (ctx.claims, set by
+    _claim). An absent, unreadable, non-canonical or differently claiming reservation, an invalid run
+    id, and a context with no planned claim each refuse, with no transaction opened."""
+    if ctx.claims is None:
+        raise RecordError("the homes-2 publication {} has no planned claim to judge its id reservation "
+                          "against; no transaction is opened and nothing written (fail-closed)".format(run_id))
+    try:
+        rel = _opf_store.allocation_record("record", run_id)
+    except ValueError as exc:
+        raise RecordError("the homes-2 publication run id {!r} is not a record run id ({}); no transaction "
+                          "is opened and nothing written (fail-closed)".format(run_id, exc))
+    try:
+        pfd, name = _journal._open_parent(ctx.root_fd, rel)
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("the homes-2 publication {} requires its id reservation {}, whose home cannot be "
+                          "opened ({}); no transaction is opened and nothing written (fail-closed)".format(
+                              run_id, rel, exc))
+    try:
+        try:
+            claims = _read_reservation(pfd, "record", name)
+        except RecordError as exc:
+            raise RecordError("the homes-2 publication {} requires its id reservation ({}); no transaction "
+                              "is opened and nothing written (fail-closed)".format(run_id, exc))
+    finally:
+        _journal._close_fd_quietly(pfd)
+    if claims != ctx.claims:
+        raise RecordError("the homes-2 publication {} requires its id reservation {} to claim exactly this "
+                          "plan's numbers ({!r}), but it claims {!r}; no transaction is opened and nothing "
+                          "written (fail-closed)".format(run_id, rel, ctx.claims, claims))
+
+
+def _publish(ctx, plan, subcommand, cap=None, run_id=None):
     """ONE journaled transaction publishes every operand, in dependency order (counters first). On a
     homes-2 store the publication runs through the capability-bound API in the typed journal home
     instead (_publish_homes2); the homes-1 path below is unchanged. Each
@@ -2376,7 +3161,7 @@ def _publish(ctx, plan, subcommand, cap=None):
     the lock for the next run's reconciliation, and a lock acquisition failing after its O_EXCL
     create, whose refusal says the created lock may be left in place (PR D fix 10)."""
     if ctx.journal_rel != JOURNAL_REL:
-        return _publish_homes2(ctx, plan, subcommand, cap)
+        return _publish_homes2(ctx, plan, subcommand, cap, run_id)
     root_fd = ctx.root_fd
     journal_root = _journal_root(ctx)
     try:
@@ -2482,7 +3267,7 @@ def _publish(ctx, plan, subcommand, cap=None):
         _journal._close_fd_quietly(jr_fd)
 
 
-def _publish_homes2(ctx, plan, subcommand, cap=None):
+def _publish_homes2(ctx, plan, subcommand, cap=None, run_id=None):
     """The homes-2 publication: ONE capability-bound _opf_journal.run_transaction in the typed record
     journal home (spec 4.2/8.8), the run id minted in the homes record- grammar, and the INTENT header
     carrying the planned bytes (staged, kind record only, D-a4) so a later recovery can tell a torn
@@ -2490,15 +3275,24 @@ def _publish_homes2(ctx, plan, subcommand, cap=None):
     txn_record("record", run_id) in the same act. The operation capability's mandatory lease leg IS the
     single-writer lease, so publication under it composes with no separately held write-guard lease: a
     caller that already holds the capability passes it, and a direct caller without one takes and
-    releases its own. Unreachable through _run_operation while claim_ids refuses homes 2 (the record
-    id reservation is a separate later change)."""
+    releases its own. The boundary REQUIRES reservation evidence for the run id it publishes under
+    (spec 8.2): _run_operation passes the run id its id reservation was published under
+    (_reserve_claim), so the reservation and the transaction share one run identity, and under the
+    held capability, before the transaction opens, _require_reservation re-reads that run's
+    canonical reservation and requires its claims to be this plan's. A call naming no run id, or one
+    whose reservation is absent, unreadable, non-canonical or claims other numbers, refuses with no
+    transaction opened. _run_operation reaches this only once activation sets
+    _opf_store.SUPPORTED_HOMES to 2 (and _load_manifest admits the homes-2 spec_version); while
+    SUPPORTED_HOMES is 1, _probe_homes refuses a store declaring homes 2 first."""
     try:
         _journal.require_containment()
     except (_journal.JournalError, OSError) as exc:
         raise RecordError("cannot prepare the record journal {} ({}); nothing written (fail-closed)".format(
             ctx.journal_rel, exc))
-    token = os.urandom(16).hex()
-    run_id = _record_run_id(token)
+    if run_id is None:
+        raise RecordError("a homes-2 publication requires the run id its irrevocable id reservation was "
+                          "published under (spec 8.2); none was supplied, so no transaction is opened "
+                          "and nothing written (fail-closed)")
     ops = []
     content = {}
     staged = []
@@ -2519,6 +3313,7 @@ def _publish_homes2(ctx, plan, subcommand, cap=None):
             raise RecordError("cannot take the operation capability for the record journal {} ({}). {} "
                               "(fail-closed)".format(ctx.journal_rel, exc, _acquisition_removals(exc)))
     try:
+        _require_reservation(ctx, run_id)
         try:
             _opf_journal.run_transaction(cap, "record", run_id, ops,
                                          lambda op: content[op["path"]], staged=staged)
@@ -2753,13 +3548,16 @@ def _conclude(ctx, lease, report, released):
 
 def _operand_rel(req, ctx):
     """The primary operand: the type index a record is created in or transitioned in (the type named by
-    the id's namespace), the backlog index for a receipt, or the worklog itself."""
+    the id's namespace), the backlog index for a receipt, the done index for a receipt repair, or the
+    worklog itself."""
     if req.subcommand == "worklog-append":
         return ctx.rel(_opf_check.WORKLOG_NAME)
     if req.subcommand == "create":
         return ctx.rel(req.values["--type"] + _opf_check.INDEX_SUFFIX)
     if req.subcommand == "done-with-receipt":
         return ctx.rel(BACKLOG + _opf_check.INDEX_SUFFIX)
+    if req.subcommand == "receipt-repair":
+        return ctx.rel("done" + _opf_check.INDEX_SUFFIX)
     ns = _ID_RE.match(req.positionals[0]).group(1)
     owners = [t for t, n in ctx.types.items() if n == ns]
     if len(owners) != 1 or owners[0] not in _opf_schema.BASELINE_SPECS:
@@ -2768,6 +3566,12 @@ def _operand_rel(req, ctx):
     if _opf_schema.BASELINE_SPECS[owners[0]].reduced:
         raise RecordError("a worklog entry records a fact and does not transition (spec 8.4); fail-closed")
     return ctx.rel(owners[0] + _opf_check.INDEX_SUFFIX)
+
+
+def _planned_from(ctx, plan):
+    """The files the plan was built from, which must still hold the bytes read under the held lease: every
+    operand, then a file the plan only read (a receipt repair's backlog index, the item's row and title)."""
+    return list(plan.operands) + ([ctx.backlog] if ctx.backlog is not None else [])
 
 
 def _run_operation(req):
@@ -2810,6 +3614,10 @@ def _run_operation(req):
         operand = ctx.worklog if rel == ctx.worklog.rel else _read_operand(root_fd, rel)
         if req.subcommand == "done-with-receipt":
             ctx.done_index = _read_operand(root_fd, ctx.rel("done" + _opf_check.INDEX_SUFFIX))
+        elif req.subcommand == "receipt-repair":
+            # The repair rewrites the done index (its operand) and only reads the backlog index.
+            ctx.done_index = operand
+            ctx.backlog = _read_operand(root_fd, ctx.rel(BACKLOG + _opf_check.INDEX_SUFFIX))
         # 3. PRECONDITION: every file this operation rewrites is canonical (byte reproduction).
         for op in (ctx.counters, operand, ctx.worklog, ctx.done_index):
             if op is not None:
@@ -2821,6 +3629,7 @@ def _run_operation(req):
         plan = _PLANNERS[req.subcommand](req, ctx, operand, now)
         for op in plan.operands:
             op.new_raw = _emit_bytes(op.new_model)
+            _require_within_read_cap(op.rel, op.new_raw)
         _postcondition(plan, request, ctx, now)
         # 6. the planned-destination cleanliness gate, then the single-writer lease.
         scope = _opf_write_guard.plan_write_scope(ctx.machine_rel, ctx.manifest,
@@ -2840,13 +3649,23 @@ def _run_operation(req):
         lease = _acquire_guard(ctx)
         try:
             # Under the held lease, the operands must still hold the exact bytes planned from (the
-            # journal's capture pin re-checks the same bytes under its own lock).
-            for op in plan.operands:
+            # journal's capture pin re-checks the same bytes under its own lock), and so must a file
+            # the plan only read (a receipt repair's backlog index).
+            for op in _planned_from(ctx, plan):
                 if _read_operand(root_fd, op.rel).raw != op.raw:
                     raise RecordError("{} changed after it was read; nothing written (fail-closed)".format(op.rel))
-            # 7. ONE journaled publication; 8. render, then the final doctor.
-            _publish(ctx, plan, req.subcommand,
-                     cap=lease if ctx.journal_rel != JOURNAL_REL else None)
+            # A receipt repair reads the prior commit (HEAD) again here, before anything is reserved or
+            # published: git takes no lease, so HEAD may have moved since planning.
+            _require_committed_held(ctx, req)
+            # 7. at homes 2 the run's irrevocable id reservation FIRST (_reserve_claim, under the
+            # held capability, spec 8.2), then ONE journaled publication under the same run id;
+            # 8. render, then the final doctor.
+            if ctx.journal_rel != JOURNAL_REL:
+                run_id = _record_run_id(os.urandom(16).hex())
+                _reserve_claim(ctx, plan, lease, run_id)
+                _publish(ctx, plan, req.subcommand, cap=lease, run_id=run_id)
+            else:
+                _publish(ctx, plan, req.subcommand)
             try:
                 _render(root, plan.transition)
                 snapshot_pending = _final_gate(root, plan.transition)
@@ -2910,10 +3729,11 @@ def cli(argv):
 
 def self_test():
     """Unit vectors over synthetic models: the argument grammar, the allocation seam (homes 1 live, homes 2
-    refusing), the counters completeness proof, the four planners (the derived `/proposed`, the recorded
-    pre-proposal state and --reason of a rejection, the one-to-one receipt), the released-span check, the
-    byte-reproduction precondition, and the allowed-delta postcondition. Judged on returned
-    values and refusals, never by grepping output. Returns 0 clean, 1 on a failure, 2 on a harness error."""
+    deriving over the reservation scan, spec 8.2), the counters completeness proof, the five planners
+    (the derived `/proposed`, the recorded
+    pre-proposal state and --reason of a rejection, the one-to-one receipt, the receipt repair), the
+    released-span check, the byte-reproduction precondition, and the allowed-delta postcondition. Judged on
+    returned values and refusals, never by grepping output. Returns 0 clean, 1 on a failure, 2 on a harness error."""
     failures = []
     checked = [0]
 
@@ -2934,8 +3754,8 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "transitions, resolution bundle, supersession, receipts, released span, precondition, "
-          "postcondition)".format(checked[0]))
+          "transitions, resolution bundle, supersession, handoff posting, receipts, importer-authored operands, "
+          "receipt repairs, released span, precondition, postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -2977,6 +3797,19 @@ def _self_test_units(check):
                         (["done-with-receipt", "BI-1", "--actor", "assistant:c"], "maintainer-only"),
                         (["done-with-receipt", "BI-1", "--actor", "automation"], "maintainer-only"),
                         (["done-with-receipt", "FN-1", "--actor", "maintainer"], "not a backlog item"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer"], "missing required"),
+                        (["receipt-repair", "BI-1", "--reason", "r"], "missing required"),
+                        (["receipt-repair", "--actor", "maintainer", "--reason", "r"], "requires the operand"),
+                        (["receipt-repair", "BI-1", "--actor", "assistant:c", "--reason", "r"], "maintainer-only"),
+                        (["receipt-repair", "BI-1", "--actor", "automation", "--reason", "r"], "maintainer-only"),
+                        (["receipt-repair", "FN-1", "--actor", "maintainer", "--reason", "r"], "not a backlog item"),
+                        (["receipt-repair", "imported:BI-1", "--actor", "maintainer", "--reason", "r"],
+                         "not a record id"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "a", "--reason", "b"],
+                         "more than once"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", ""], "requires"),
+                        (["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "r", "--link",
+                          "relates=BI-2"], "unrecognized argument"),
                         (["create", "--type", "backlog_item", "--title", "t"], "missing required"),
                         (["create", "--type", "a", "--type", "b", "--title", "t", "--actor", "maintainer"],
                          "more than once"),
@@ -2994,11 +3827,54 @@ def _self_test_units(check):
           and req.actor == {"kind": "assistant"})
     req = parse_request(["done-with-receipt", "BI-3", "--actor", "maintainer:j"])
     check("parse done-with-receipt", req.positionals == ["BI-3"] and req.actor == {"kind": "maintainer", "id": "j"})
+    req = parse_request(["receipt-repair", "BI-3", "--actor", "maintainer:j", "--reason", "r", "--summary", "s"])
+    check("parse receipt-repair", req.positionals == ["BI-3"] and req.actor == {"kind": "maintainer", "id": "j"}
+          and req.values == {"--reason": "r", "--summary": "s"})
 
     # -- the allocation seam and the completeness proof ----------------------------------------------------
     ids, high = claim_ids(1, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True)
     check("homes-1 claims sequential ids", ids == ["BI-5", "BI-6", "WL-1"] and high == {"BI": 6, "WL": 1})
-    check("homes-2 refuses fail-closed", _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True), "homes-2"))
+    check("homes-1 refuses a reservation input",
+          _refuses(lambda: claim_ids(1, {"BI": 0}, ["BI"], True, reserved={}), "no reservation input"))
+    check("homes 2 without the reservation scan refuses fail-closed",
+          _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True), "reservation scan"))
+    ids, high = claim_ids(2, {"BI": 4, "WL": 2}, ["BI", "WL"], True, reserved={})
+    check("a homes-2 claim no longer raises (no reservations)",
+          ids == ["BI-5", "WL-3"] and high["BI"] == 5 and high["WL"] == 3)
+    ids, high = claim_ids(2, {"BI": 4, "WL": 2}, ["BI", "WL"], True, reserved={"BI": 9, "WL": 1})
+    check("homes 2 derives one above the max of counters and reservations (spec 8.2)",
+          ids == ["BI-10", "WL-3"] and high["BI"] == 10 and high["WL"] == 3)
+    for res, want in ((3, "BI-5"), (4, "BI-5"), (5, "BI-6")):
+        ids, _hw = claim_ids(2, {"BI": 4}, ["BI"], True, reserved={"BI": res})
+        check("homes-2 reservation boundary {} claims {}".format(res, want), ids == [want])
+    check("a malformed reservation scan refuses",
+          _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True, reserved={"BI": True}),
+                   "high-water integers"))
+    top = 2 ** 63 - 1
+    for value, ok in ((0, False), (1, True), (top, True), (top + 1, False)):
+        if ok:
+            ids, _hw = claim_ids(2, {"BI": 0, "WL": 0}, ["WL"], True, reserved={"BI": value})
+            check("a reserved value of {} is admitted as scan input".format(value), ids == ["WL-1"])
+        else:
+            check("a reserved value of {} refuses".format(value),
+                  _refuses(lambda value=value: claim_ids(2, {"BI": 0, "WL": 0}, ["WL"], True,
+                                                         reserved={"BI": value}), "at most 2**63 - 1"))
+    ids, _hw = claim_ids(2, {"BI": 0}, ["BI"], True, reserved={"BI": top - 1})
+    check("a reserved high one below the ceiling claims the last number", ids == ["BI-{}".format(top)])
+    check("a reserved high at the ceiling refuses the exhausted range",
+          _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True, reserved={"BI": top}), "exhausted"))
+    ids, _hw = claim_ids(2, {"BI": top - 1}, ["BI"], True, reserved={})
+    check("a counters high one below the ceiling claims the last number", ids == ["BI-{}".format(top)])
+    check("a counters high at the ceiling refuses the exhausted range",
+          _refuses(lambda: claim_ids(2, {"BI": top}, ["BI"], True, reserved={}), "exhausted"))
+    check("a second claim past the ceiling refuses the exhausted range",
+          _refuses(lambda: claim_ids(2, {"BI": top - 1}, ["BI", "BI"], True, reserved={}), "exhausted"))
+    ids, _hw = claim_ids(2, {"BI": 4}, ["BI"], True, reserved={"imported:BI": 9, "WL": 7})
+    check("a reserved value under another counter key never moves the claimed key (spec 8.2)",
+          ids == ["BI-5"])
+    for bad in (0, 3, True, "2", None):
+        check("an unknown homes generation refuses the claim ({!r})".format(bad),
+              _refuses(lambda bad=bad: claim_ids(bad, {"BI": 0}, ["BI"], True), "unknown"))
     check("an absent counter without the proof refuses",
           _refuses(lambda: claim_ids(1, {"WL": 0}, ["BI"], known_complete=False), "cannot claim"))
     check("a non-taxonomy namespace refuses", _refuses(lambda: claim_ids(1, {"ZZ": 0}, ["ZZ"], True)))
@@ -3011,6 +3887,23 @@ def _self_test_units(check):
     for bad in (0, 3, None, "2", True):
         check("an unknown homes generation refuses the journal home ({!r})".format(bad),
               _refuses(lambda bad=bad: _record_journal_rel(bad), "unknown homes generation"))
+    # Deep values: a homes declaration nested 100,000 levels deep (what tomllib builds from
+    # a dotted [opf.homes.a.a ...] header) still refuses as a RecordError with a bounded message; pre-fix its
+    # {!r} render raised RecursionError out of the refusal.
+    _deep_homes = _deep_cur = {}
+    for _ in range(100000):
+        _deep_cur["a"] = {}
+        _deep_cur = _deep_cur["a"]
+    _deep_refusal = None
+    try:
+        _record_journal_rel(_deep_homes)
+    except RecordError as exc:
+        _deep_refusal = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    check("a deeply nested homes generation refuses the journal home with a bounded message",
+          _deep_refusal is not None and "unknown homes generation" in _deep_refusal
+          and "nested deeper than" in _deep_refusal and len(_deep_refusal) <= 2048)
     token = os.urandom(16).hex()
     rid = _record_run_id(token)
     check("the minted run id is the homes record- grammar bound to the lock token",
@@ -3034,6 +3927,81 @@ def _self_test_units(check):
     finally:
         os.close(empty_fd)
         os.rmdir(empty)
+    # The manifest route: _probe_homes reads the manifest through
+    # _read_operand, and tomllib builds a dotted [opf.homes.a.a ...] header of 100,000 parts into a
+    # 100,000-level nested table. The refusal naming that declaration renders it bounded; pre-fix its {!r}
+    # render raised RecursionError out of the probe. CPython 3.14.8 and later refuse a TOML key of more than
+    # 1,000 dotted parts, so the table is built directly and iteratively, in the shape tomllib gives that
+    # header (compared below with tomllib's own parse of the header at 999 parts, under that cap), and
+    # _read_operand is replaced for the probe by one that returns it, so the check runs on every supported
+    # interpreter and parses no longer key.
+    from types import SimpleNamespace
+    deep_homes = {"b": 1}
+    for _ in range(100000):
+        deep_homes = {"a": deep_homes}
+    deep_model = {_opf_store.STANDARD_TOKEN: {"homes": deep_homes}}
+    shape_homes = {"b": 1}
+    for _ in range(997):
+        shape_homes = {"a": shape_homes}
+    deep_shape = (tomllib.loads("[{}.homes".format(_opf_store.STANDARD_TOKEN) + ".a" * 997 + "]\nb = 1\n")
+                  == {_opf_store.STANDARD_TOKEN: {"homes": shape_homes}})
+    deep_globals = globals()
+    deep_read = deep_globals["_read_operand"]
+    deep_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, deep_model)
+    deep_probe = None
+    try:
+        _probe_homes(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        deep_probe = str(exc)
+    except RecursionError:
+        pass                 # the pre-fix escape: the check below then fails rather than aborting the suite
+    finally:
+        deep_globals["_read_operand"] = deep_read
+    check("a deeply nested manifest homes declaration refuses the homes probe with a bounded message",
+          deep_shape and deep_probe is not None and "declares homes generation" in deep_probe
+          and "nested deeper than" in deep_probe
+          and len(deep_probe) <= 512 + _opf_store._DISPLAY_MAX_CHARS + _opf_store._DISPLAY_MARKER_MAX)
+
+    # The below-supported spec_version refusal read through this verb names the manifest's own
+    # path (validate_manifest's manifest_rel, here the resolved machine store's manifest); falling
+    # back to the unnamed "the store manifest" wording is red. The operand read is replaced the
+    # way the deep homes probe replaces it, so the refusal is _load_manifest's own.
+    old_model = {_opf_store.STANDARD_TOKEN: {
+                     "standard": _opf_store.STANDARD_TOKEN, "spec_version": "1.1.0",
+                     "layout": "inline", "posture": "required", "import_status": "none"},
+                 "types": {"worklog": {"namespace": "WL"}}}
+    old_globals = globals()
+    old_read = old_globals["_read_operand"]
+    old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, old_model)
+    old_refusal = None
+    try:
+        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        old_refusal = str(exc)
+    finally:
+        old_globals["_read_operand"] = old_read
+    check("an older manifest refusal names the manifest path",
+          old_refusal is not None
+          and "'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'" in old_refusal)
+
+    # The one VALID manifest at another spec_version, the reserved homes-2 pair, reaches the version
+    # refusal, which is pinned whole: offering an upgrade, which never carries the pair back, is red.
+    import _opf_init
+    pair_model = tomllib.loads(_opf_init.build_manifest())
+    pair_model[_opf_store.STANDARD_TOKEN]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+    pair_model[_opf_store.STANDARD_TOKEN]["homes"] = 2
+    old_globals["_read_operand"] = lambda root_fd, rel: Operand(rel, b"", 0o644, pair_model)
+    pair_refusal = None
+    try:
+        _load_manifest(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1))
+    except RecordError as exc:
+        pair_refusal = str(exc)
+    finally:
+        old_globals["_read_operand"] = old_read
+    check("a VALID manifest at another spec_version is refused toward the tooling that implements it",
+          _opf_store.validate_manifest(pair_model).status == _opf_store.VALID
+          and pair_refusal == "the store declares spec_version '2.0.0', not the tooling's 1.2.0; use the "
+                              "tooling that implements it (fail-closed)")
 
 
 def _self_test_contexts(check, root_fd, now):
@@ -3057,7 +4025,45 @@ def _self_test_contexts(check, root_fd, now):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
-    # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
+    # Where the imported series is active (the graded 2.0.0 / homes = 2 declaration under the tooling's
+    # imported-series support, the manifest here) the proof is the C-COUNTERS rule of
+    # that series (spec 8.2): the zero imported rows are accepted and each is required. Inactive
+    # (support below the series), an imported row still breaks it: at the shipped constants, and on
+    # the same 2.0.0 manifest with homes 2 supported but not the imported series.
+    imported_full = dict(full, **{"imported:" + ns: 0 for ns in full})
+    pair = {"opf": {"spec_version": _opf_store.HOMES2_SPEC_VERSION, "homes": 2}}
+    prev_gates = (_opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION)
+    try:
+        _opf_store.SUPPORTED_HOMES = 2
+        ctx = ctx_of(imported_full)
+        ctx.manifest = pair
+        check("an imported row breaks the proof without imported-series support",
+              _counter_state(ctx, ctx.counters.model)[1] != [])
+        _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
+        check("the active-series proof holds with every imported row",
+              _counter_state(ctx, ctx.counters.model)[1] == [])
+        # A homes-1 store declaring the imported series' own spec_version 1.3.0 stays off under both
+        # toggles: the imported series activates only inside the homes-2 declaration, so an imported row
+        # breaks the proof and the clean map alone proves it (red when the flag drops homes_generation >= 2).
+        ctx = ctx_of(imported_full)
+        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+        homes1_rows = _counter_state(ctx, ctx.counters.model)[1] != []
+        ctx = ctx_of(full)
+        ctx.manifest = {"opf": {"spec_version": _opf_store.IMPORTED_SPEC_VERSION, "homes": 1}}
+        check("an imported row breaks the proof on a 1.3.0 homes-1 manifest with imported-series support",
+              homes1_rows and _counter_state(ctx, ctx.counters.model)[1] == [])
+        imported_partial = dict(imported_full)
+        del imported_partial["imported:BI"]
+        ctx = ctx_of(imported_partial)
+        ctx.manifest = pair
+        check("a missing imported row breaks the active-series proof",
+              _counter_state(ctx, ctx.counters.model)[1] != [])
+    finally:
+        _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = prev_gates
+    ctx = ctx_of(imported_full)
+    check("an imported row breaks the proof at the shipped support",
+          _counter_state(ctx, ctx.counters.model)[1] != [])
+    # Schema markers are exact integers everywhere this verb reads one (the same rule at every site):
     # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
     for marker in (True, 1.0):
         check("a non-integer index schema marker refuses ({!r})".format(marker), _refuses(
@@ -3067,7 +4073,16 @@ def _self_test_contexts(check, root_fd, now):
         ctx.worklog = _model_operand(ctx.worklog.rel, dict(schema=marker, entry=[]))
         check("a non-integer worklog schema marker refuses ({!r})".format(marker),
               _refuses(lambda ctx=ctx: _worklog_entries(ctx), "schema-1"))
-    _self_test_planners(check, ctx_of, full, now)
+    # The planner fixtures claim against the clean map on an inactive store, so a proof that wrongly
+    # requires imported rows there refuses their first claim: that refusal is this named failure, never a
+    # harness error that hides the proof vectors above (red when the record gate is dropped).
+    planners_ran = False
+    try:
+        _self_test_planners(check, ctx_of, full, now)
+        planners_ran = True
+    except RecordError:
+        pass
+    check("the planner fixtures claim against the clean map without a refusal", planners_ran)
 
 
 def _model_operand(rel, model):
@@ -3148,6 +4163,17 @@ def _self_test_planners(check, ctx_of, full, now):
           _require_canonical(Operand("x", canonical, 0o644, {"schema": 1, "record": []})) is None)
     check("a comment-bearing operand refuses", _refuses(lambda: _require_canonical(Operand(
         "x", b"# note\n" + canonical, 0o644, {"schema": 1, "record": []})), "canonical"))
+    # An earlier emitter wrote U+2028 and U+2029 literally inside a basic string: that spelling passes, and
+    # only when it is the sole difference (a literal one in a comment or a literal string still refuses).
+    sep_model = {"schema": 1, "record": [{"id": "BI-1", "summary": "a\u2028b\u2029c"}]}
+    sep_prior = _emit_bytes(sep_model).replace(b"\\u2028", "\u2028".encode("utf-8")).replace(
+        b"\\u2029", "\u2029".encode("utf-8"))
+    check("an operand in the earlier separator spelling passes",
+          b"\\u2028" not in sep_prior and _require_canonical(Operand("x", sep_prior, 0o644, sep_model)) is None)
+    for label, raw in (("a comment", "# n\u2028\n".encode("utf-8") + sep_prior),
+                       ("a literal string", sep_prior.replace(b'"a', b"'a").replace(b'c"', b"c'"))):
+        check("a literal separator in {} refuses".format(label),
+              _refuses(lambda raw=raw: _require_canonical(Operand("x", raw, 0o644, sep_model)), "canonical"))
     base_rows = [{"id": "BI-1", "title": "kept"}]
     argv = ["create", "--type", "backlog_item", "--title", "b", "--actor", "maintainer"]
     p, c, op = plan(argv, rows=base_rows, counters=dict(full, BI=1))
@@ -3189,6 +4215,194 @@ def _self_test_planners(check, ctx_of, full, now):
     check("the postcondition refuses a plan missing the counters operand",
           _refuses(lambda: post(p, c, argv), "operand set"))
     _self_test_transitions(check, plan, post, full, now)
+    _self_test_receipt_repair(check, ctx_of, full, now)
+
+
+def _self_test_receipt_repair(check, ctx_of, full, now):
+    """receipt-repair over synthetic models (spec 8.8): the missing receipt of an item at unqualified `done`
+    and its own entry, the backlog index read and never rewritten, no status change, homes 2 only; the
+    importer-only receipt case repaired; each refusal (homes 1 or any generation but exactly the int 2, in
+    the planner and in the request check, the item's state, its validity and author, an uncommitted row, an
+    active or archived clean receipt, an active backlog or done row the receipt join cannot read or
+    interpret, a done row naming the item whose id is not a string, an archive the walk does not pass); the
+    committed-row check read again under the held lease (_require_committed_held); and the independent
+    oracle refusing a drifted plan. The committed snapshot reader and the archive walk are replaced for the
+    planner, so no git or archive tree is read here."""
+    earlier = "2026-09-26T00:00:00Z"
+    counters = dict(full, BI=1, WL=1)
+    item = {"id": "BI-1", "type": BACKLOG, "status": "done", "title": "t", "created_at": earlier,
+            "updated_at": earlier, "actor": {"kind": "maintainer"}}
+    argv = ["receipt-repair", "BI-1", "--actor", "maintainer:j", "--reason", "ratified in review"]
+    held = {"id": "DN-1", "type": "done", "status": "recorded", "title": "t", "created_at": earlier,
+            "updated_at": earlier, "actor": {"kind": "maintainer"}, "links": [{"rel": "receipt_of", "id": "BI-1"}]}
+    seams = globals()
+    real_prior, real_archive = seams["_committed_prior"], _opf_check.archived_records
+
+    def snapshot_of(rows):
+        return {"records": {r["id"]: (BACKLOG, r["status"]) for r in rows},
+                "digests": {r["id"]: _opf_check._record_digest(r) for r in rows}}
+
+    def plan(args=argv, items=(item,), dones=(), homes=2, prior=None, archived=([], []), dn=0):
+        c = ctx_of(dict(counters, DN=dn))
+        c.homes = homes
+        c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX),
+                                   {"schema": 1, "record": copy.deepcopy(list(items))})
+        c.done_index = _model_operand(c.done_index.rel, {"schema": 1, "record": copy.deepcopy(list(dones))})
+        r = parse_request(list(args))
+        snap = snapshot_of(items) if prior is None else prior
+        seams["_committed_prior"] = lambda ctx: snap
+        _opf_check.archived_records = lambda *a, **k: archived
+        try:
+            return _PLANNERS[r.subcommand](r, c, c.done_index, now), c
+        finally:
+            seams["_committed_prior"] = real_prior
+            _opf_check.archived_records = real_archive
+
+    def post(p, c, args=argv):
+        for o in p.operands:
+            o.new_raw = _emit_bytes(o.new_model)
+        return _postcondition(p, parse_request(list(args)), c, now)
+
+    p, c = plan()
+    receipt = c.done_index.new_model["record"][-1]
+    entry = c.worklog.new_model["entry"][-1]
+    check("receipt-repair appends one receipt_of receipt and its entry, rewriting no backlog row",
+          p.ids == ["DN-1", "WL-2"] and p.transition is None
+          and [o.rel for o in p.operands] == [c.counters.rel, c.done_index.rel, c.worklog.rel]
+          and c.backlog.new_model is None
+          and receipt == {"id": "DN-1", "type": "done", "status": "recorded", "title": "t",
+                          "created_at": "2026-09-27T01:02:03Z", "updated_at": "2026-09-27T01:02:03Z",
+                          "actor": {"kind": "maintainer", "id": "j"},
+                          "links": [{"rel": "receipt_of", "id": "BI-1"}]}
+          and entry["detail"] == "opf-record create DN-1 recorded\nreceipt_of: BI-1\nreason: ratified in review"
+          and entry["kind"] == "changed" and entry["summary"] == "repaired BI-1 with receipt DN-1"
+          and entry["links"] == [{"rel": "relates", "id": "BI-1"}, {"rel": "relates", "id": "DN-1"}]
+          and c.counters.new_model["counters"] == dict(counters, DN=1, WL=2)
+          and post(p, c) is None)
+    importer_held = dict(held, actor={"kind": "importer"})
+    p, c = plan(dones=[importer_held], dn=1)
+    check("receipt-repair adds the clean receipt beside an importer-authored one (spec 8.6)",
+          p.ids == ["DN-2", "WL-2"] and c.done_index.new_model["record"][0] == importer_held and post(p, c) is None)
+    archived_held = _opf_check._make_rec(held, "done", "archive/2026")
+    for label, kw, needle in (
+            ("a homes-1 store", {"homes": 1}, "only a homes-2 store has"),
+            ("an unknown generation", {"homes": True}, "only a homes-2 store has"),
+            ("a float generation", {"homes": 2.0}, "only a homes-2 store has"),
+            ("an absent item", {"items": [dict(item, id="BI-2")]}, "is not a record in"),
+            ("an item seated twice", {"items": [item, item]}, "seated 2 times"),
+            ("an active item", {"items": [dict(item, status="active")]}, "at unqualified done"),
+            ("an open item", {"items": [dict(item, status="open")]}, "at unqualified done"),
+            ("a dropped item", {"items": [dict(item, status="dropped")]}, "at unqualified done"),
+            ("a done/proposed item", {"items": [dict(item, status="done/proposed", proposed_from="active")]},
+             "ratified with its receipt by opf record done-with-receipt"),
+            ("a schema-invalid item", {"items": [dict(item, proposed_from="active")]}, "not schema-valid"),
+            ("an importer-authored item", {"items": [dict(item, actor={"kind": "importer"})]},
+             "importer-authored-operand"),
+            ("an item uncommitted at done", {"prior": snapshot_of([dict(item, status="active")])},
+             "uncommitted-item"),
+            ("an item whose committed row differs", {"prior": snapshot_of([dict(item, title="other")])},
+             "uncommitted-item"),
+            ("an item the prior commit never held", {"prior": snapshot_of([])}, "uncommitted-item"),
+            ("an item the prior commit records at another state",
+             {"prior": dict(snapshot_of([item]), records={"BI-1": (BACKLOG, "active")})}, "uncommitted-item"),
+            ("an active clean receipt", {"dones": [held], "dn": 1}, "already holds the clean done receipt 'DN-1'"),
+            ("an active done row that is not a table", {"dones": [7]}, "done.index.toml#1 is not a table"),
+            ("a receipt whose links cannot be interpreted",
+             {"dones": [dict(held, links={"rel": "receipt_of", "id": "BI-1"})], "dn": 1},
+             "done.index.toml#1 has links that cannot be interpreted"),
+            ("a receipt whose link rel cannot be interpreted",
+             {"dones": [dict(held, links=[{"rel": "receipt-of", "id": "BI-1"}])], "dn": 1},
+             "done.index.toml#1 has links that cannot be interpreted"),
+            ("a done record whose status cannot be interpreted",
+             {"dones": [dict(held, status="bogus", links=[{"rel": "receipt_of", "id": "BI-2"}])], "dn": 1},
+             "done.index.toml#1 has status that cannot be interpreted"),
+            ("a receipt of unreadable provenance", {"dones": [dict(held, actor={})], "dn": 1},
+             "already holds the clean done receipt 'DN-1'"),
+            ("a done row naming the item whose id is not a string", {"dones": [dict(held, id=7)], "dn": 1},
+             "has the id 7, which is not a string, so it is a malformed row, not a receipt"),
+            ("a backlog row whose status cannot be interpreted",
+             {"items": [item, dict(item, id="BI-2", status="bogus")], "prior": snapshot_of([item])},
+             "backlog_item.index.toml#2 has status that cannot be interpreted"),
+            ("a backlog row whose links cannot be interpreted",
+             {"items": [item, dict(item, id="BI-2", links=[{"rel": "receipt-of", "id": "BI-1"}])],
+              "prior": snapshot_of([item])},
+             "backlog_item.index.toml#2 has links that cannot be interpreted"),
+            ("an archived clean receipt", {"archived": ([archived_held], []), "dn": 1},
+             "already holds the clean done receipt 'DN-1'"),
+            ("an archive the walk does not pass", {"archived": ([], ["C-ARCHIVE-ENUM: unreadable bucket"])},
+             "doctor's own archive walk")):
+        check("receipt-repair refuses {}".format(label),
+              _refuses(lambda kw=kw: plan(**kw), needle))
+    check("a done row whose id is not a string is never reported as a held receipt",
+          not _refuses(lambda: plan(dones=[dict(held, id=7)], dn=1), "already holds"))
+    # A TOML array mixing a table and an integer parses, but has no canonical emission, so this row is
+    # checked directly rather than through a synthetic operand.
+    check("receipt-repair refuses a backlog row that is not a table",
+          _refuses(lambda: _require_interpreted_rows([item, 7], BACKLOG, "b.toml", "BI-1"),
+                   "the backlog_item record row b.toml#2 is not a table"))
+
+    def held_recheck(prior, args=argv):
+        c = ctx_of(counters)
+        c.homes = 2
+        c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX),
+                                   {"schema": 1, "record": [dict(item)]})
+        seams["_committed_prior"] = prior
+        try:
+            return _require_committed_held(c, parse_request(list(args)))
+        finally:
+            seams["_committed_prior"] = real_prior
+
+    def unreadable(ctx):
+        raise RecordError("receipt-repair cannot read the prior committed snapshot (probe)")
+    moved = "under the held lease, immediately before publication, the prior commit (HEAD) was read again: "
+    for label, prior, needle in (
+            ("a HEAD moved after planning to a commit not holding the item", lambda ctx: snapshot_of([]),
+             moved + "receipt-repair refused (uncommitted-item): BI-1"),
+            ("a HEAD moved after planning to a commit holding the item at active",
+             lambda ctx: snapshot_of([dict(item, status="active")]),
+             moved + "receipt-repair refused (uncommitted-item)"),
+            ("a prior commit unreadable under the lease", unreadable, moved + "receipt-repair cannot read")):
+        check("the held committed-row re-check refuses {}".format(label),
+              _refuses(lambda prior=prior: held_recheck(prior), needle))
+    check("the held committed-row re-check passes the item HEAD still holds at done",
+          held_recheck(lambda ctx: snapshot_of([item])) is None)
+    check("the held committed-row re-check never reads the prior commit for another subcommand",
+          held_recheck(unreadable, ["transition", "BI-1", "active", "--actor", "maintainer"]) is None)
+    assistant = parse_request(["receipt-repair", "BI-1", "--actor", "maintainer", "--reason", "r"])
+    assistant.actor = {"kind": "assistant"}
+    c = ctx_of(counters)
+    c.homes = 2
+    c.backlog = _model_operand(c.rel(BACKLOG + _opf_check.INDEX_SUFFIX), {"schema": 1, "record": [dict(item)]})
+    check("the receipt-repair planner refuses a non-maintainer again",
+          _refuses(lambda: _plan_receipt_repair(assistant, c, c.done_index, now), "maintainer-only"))
+    for homes in (1, True, 2.0):
+        c.homes = homes
+        check("the request check refuses a receipt-repair at homes {!r}, before any operand is read".format(homes),
+              _refuses(lambda: _check_request(parse_request(argv), c), "only a homes-2 store has"))
+    c.homes = 2
+    check("the request check passes a receipt-repair at homes 2", _check_request(parse_request(argv), c) is None)
+    from types import SimpleNamespace
+    check("an unreadable prior committed snapshot refuses the repair",
+          _refuses(lambda: _committed_prior(Context(SimpleNamespace(machine_rel=".working/toml"), ".", -1)),
+                   "cannot read the prior committed snapshot"))
+    for label, mutate in (
+            ("a repaired receipt with another title",
+             lambda p, c: c.done_index.new_model["record"][-1].__setitem__("title", "x")),
+            ("a repaired receipt linked to another item",
+             lambda p, c: c.done_index.new_model["record"][-1].__setitem__("links", [{"rel": "receipt_of",
+                                                                                      "id": "BI-2"}])),
+            ("a second repaired receipt", lambda p, c: c.done_index.new_model["record"].append(
+                dict(c.done_index.new_model["record"][-1], id="DN-2"))),
+            ("a repair counter over-advanced", lambda p, c: c.counters.new_model["counters"].__setitem__("DN", 2)),
+            ("a repair entry without its reason", lambda p, c: c.worklog.new_model["entry"][-1].__setitem__(
+                "detail", "opf-record create DN-1 recorded\nreceipt_of: BI-1")),
+            ("a repair that also rewrites the backlog row", lambda p, c: (
+                c.backlog.__setattr__("new_model", dict(c.backlog.model, record=[dict(item, updated_at=earlier)])),
+                p.operands.insert(1, c.backlog))),
+            ("a repair reporting a status change", lambda p, c: setattr(p, "transition", ("BI-1", "done", "done")))):
+        p, c = plan()
+        mutate(p, c)
+        check("the postcondition refuses {}".format(label), _refuses(lambda: post(p, c), "postcondition failed"))
 
 
 def _self_test_transitions(check, plan, post, full, now):
@@ -3302,7 +4516,7 @@ def _self_test_transitions(check, plan, post, full, now):
           and _recorded_pre_proposal(None, bi("done/proposed"), "BI-1", "done/proposed") is None
           and _recorded_pre_proposal(None, dict(bi("done/proposed"), proposed_from=3), "BI-1",
                                      "done/proposed") is None)
-    # -- the current row is validated before it is trusted or overwritten (QA4 F1) ------------------------------
+    # -- the current row is validated before it is trusted or overwritten ---------------------------------------
     check("a rejection refuses a schema-invalid proposed_from on the current row",
           _refuses(lambda: plan(reject, rows=[pbi(pre="open")], counters=counters), "not schema-valid"))
     check("done-with-receipt refuses a schema-invalid proposed_from on the current row",
@@ -3350,7 +4564,9 @@ def _self_test_transitions(check, plan, post, full, now):
             needle))
     _self_test_decisions(check, plan, post, full, now)
     _self_test_supersession(check, plan, post, full, now)
+    _self_test_handoff(check, plan, post, full, now)
     _self_test_delivery(check, plan, post, full, now)
+    _self_test_importer_operand(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
 
@@ -3508,7 +4724,7 @@ def _self_test_supersession(check, plan, post, full, now):
           op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}])
     # The doctor's chain rule over the planned index, on every landing at unqualified decided: the record
     # already superseded by an open successor (with or without --supersedes, and on a ratification), a
-    # link to a chain head that still leaves the joined chain with none (QA1 Case A), and a plain decide
+    # link to a chain head that still leaves the joined chain with none, and a plain decide
     # that would make a second current resolution each refuse; the same shapes keeping one current pass.
     plain = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide
     shadowed = [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2")])]
@@ -3533,6 +4749,184 @@ def _self_test_supersession(check, plan, post, full, now):
         p, c, op = plan(plain, rows=rows, counters=counters)
         check("a decide that leaves one current resolution passes: {}".format(label),
               op.new_model["record"][1]["status"] == "decided" and post(p, c, plain) is None)
+    # An importer-authored decision's `supersedes` link removes no current authority (spec 8.6, the doctor's
+    # firewalled decision_chains), so it never makes its target a non-head (spec 8.8). With a maintainer
+    # PD-1 decided and an importer-authored PD-2 decided superseding it, PD-1 is the chain's one current
+    # resolution: a maintainer PD-3 superseding PD-1 plans with both untouched (red when the head check
+    # counts the importer-authored superseder again), and superseding PD-2 instead still refuses, PD-1 and
+    # PD-3 both current (red when the chain rule is dropped). A maintainer superseder still makes its target
+    # a non-head (red when the head check counts no superseder), and that refusal names the chain's one
+    # current resolution, which here then plans as the target (red when the remedy names none). With PD-1
+    # and PD-2 both importer-authored, PD-2 superseding PD-1, a maintainer PD-3 superseding PD-1 plans and
+    # is then the chain's one current resolution under the doctor (red when the head check counts every
+    # superseder). A superseder whose actor kind is a lookalike (a case variant or `importer-legacy`), absent
+    # (no actor, or an actor table with no kind) or unreadable (a non-table actor, or a non-string kind)
+    # still counts, fail-closed (each red when the exemption reads that one shape as `importer`). Each
+    # revert replaces one module attribute and is restored after its rows.
+    module = sys.modules[__name__]
+    mine = {"kind": "maintainer"}
+    stuck = [pd(1, "decided", actor=mine), pd(2, "decided", links=[("supersedes", "PD-1")], actor={"kind": "importer"}),
+             pd(3, "open", actor=mine)]
+    s_argv = ["transition", "PD-3", "decided", "--actor", "maintainer"] + decide + ["--supersedes", "PD-1"]
+    forked = [pd(1, "decided", actor=mine), pd(2, "open", actor=mine),
+              pd(3, "decided", links=[("supersedes", "PD-1")], actor=mine)]
+
+    def stuck_plans():
+        try:
+            p, c, op = plan(s_argv, rows=stuck, counters=counters)
+            return (op.new_model["record"][:2] == stuck[:2] and op.new_model["record"][2]["status"] == "decided"
+                    and op.new_model["record"][2]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}]
+                    and post(p, c, s_argv) is None)
+        except RecordError:
+            return False
+
+    def second_head_refused():
+        return _refuses(lambda: plan(s_argv[:-1] + ["PD-2"], rows=stuck, counters=counters),
+                        "(PD-1, PD-2, PD-3) with 2 current effective resolutions (PD-1, PD-3)")
+
+    def maintainer_fork_refused():
+        return _refuses(lambda: plan(m_argv, rows=forked, counters=counters),
+                        "is already superseded by PD-3; exactly one")
+
+    def remedy_accepted():
+        named = _refuses(lambda: plan(m_argv, rows=forked, counters=counters),
+                         "PD-3 is the chain's one current effective resolution, the head this check accepts in "
+                         "its place (the other target checks and the chain rule still apply to it); fail-closed")
+        try:
+            p, c, op = plan(sup + ["PD-3"], rows=forked, counters=counters)
+            planned = (op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-3"}]
+                       and post(p, c, sup + ["PD-3"]) is None)
+        except RecordError:
+            planned = False
+        return named and planned
+
+    imported = {"kind": "importer"}
+    all_imported = [pd(1, "decided", actor=imported),
+                    pd(2, "decided", links=[("supersedes", "PD-1")], actor=imported), pd(3, "open", actor=mine)]
+
+    def imported_chain_plans():
+        try:
+            p, c, op = plan(s_argv, rows=all_imported, counters=counters)
+            planned = op.new_model["record"]
+            return (planned[:2] == all_imported[:2] and planned[2]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}]
+                    and post(p, c, s_argv) is None and _chain_current(planned, "PD-3") == ["PD-3"])
+        except RecordError:
+            return False
+
+    def odd(actor):
+        return pd(2, "open", links=[("supersedes", "PD-1")], actor=actor)
+
+    def kind_of(actor):
+        return actor.get("kind") if isinstance(actor, dict) else None
+
+    no_actor = {k: v for k, v in odd(None).items() if k != "actor"}
+    # Each shape with the one loosening of the exact-kind exemption that would exempt it.
+    odd_kinds = (("a lookalike kind", odd({"kind": "Importer"}),
+                  lambda actor: isinstance(kind_of(actor), str) and kind_of(actor).lower() == "importer"),
+                 ("a lookalike kind with a suffix", odd({"kind": "importer-legacy"}),
+                  lambda actor: isinstance(kind_of(actor), str) and "importer" in kind_of(actor)),
+                 ("an actor table with no kind", odd({}),
+                  lambda actor: isinstance(actor, dict) and actor.get("kind", "importer") == "importer"),
+                 ("a non-string kind", odd({"kind": ["importer"]}),
+                  lambda actor: "importer" in (kind_of(actor) or ())),
+                 ("an absent actor", no_actor, lambda actor: actor is None),
+                 ("an unreadable actor", odd("importer"), lambda actor: actor == "importer"))
+
+    def odd_kind_refused(row):
+        return _refuses(lambda: plan(s_argv, rows=[pd(1, "decided", actor=mine), row, pd(3, "open", actor=mine)],
+                                     counters=counters), "is already superseded by PD-2; exactly one")
+
+    def exempting(loose):
+        return lambda rows, target: [r.get("id") for r in rows if isinstance(r, dict)
+                                     and not (kind_of(r.get("actor")) == "importer" or loose(r.get("actor")))
+                                     and {"rel": SUPERSEDES, "id": target} in (r.get("links") or [])]
+
+    # A row whose id is not a string supersedes the chain's one current resolution PD-3: the doctor's
+    # derivation does not seat it, so PD-3 stays current there, but the head check refuses PD-3 as a
+    # target, and the refusal must not name it as the head this check accepts (red when the remedy names
+    # the one current resolution without asking the head check).
+    shadow = forked + [dict(pd(5, "open", links=[("supersedes", "PD-3")], actor=mine), id=["PD-5"])]
+
+    def shadowed_remedy_named_none():
+        named_none = _refuses(lambda: plan(m_argv, rows=shadow, counters=counters),
+                              "The chain's one current effective resolution, PD-3, is itself already superseded "
+                              "by ['PD-5'] under this check, so no target is named in its place; fail-closed")
+        return named_none and _refuses(lambda: plan(sup + ["PD-3"], rows=shadow, counters=counters),
+                                       "is already superseded by ['PD-5']; exactly one")
+
+    def unasked_remedy(rows, target):
+        current = _chain_current(rows, target)
+        if len(current) == 1:
+            return ("{} is the chain's one current effective resolution, the head this check accepts in its "
+                    "place (the other target checks and the chain rule still apply to it)".format(current[0]))
+        return "no target is named in its place"
+
+    check("a decide superseding the chain's current resolution, superseded only by an importer-authored "
+          "decision, plans with both untouched", stuck_plans())
+    check("a maintainer decide superseding an importer-authored PD-1 that an importer-authored PD-2 supersedes "
+          "plans, and the doctor's chain view then has one current resolution, the new decision",
+          imported_chain_plans())
+    for label, row, _loose in odd_kinds:
+        check("a superseder with {} still makes its target a non-head, fail-closed".format(label),
+              odd_kind_refused(row))
+    check("a decide superseding that importer-authored decision still refuses (a second current resolution)",
+          second_head_refused())
+    check("a maintainer superseder still makes its target a non-head", maintainer_fork_refused())
+    check("the head-check refusal names the chain's one current resolution with its scope, here a target "
+          "that plans",
+          remedy_accepted())
+    check("the head-check refusal of a chain with no current resolution names no target",
+          _refuses(lambda: plan(m_argv, rows=base + [pd(3, "open", links=[("supersedes", "PD-1")])],
+                                counters=counters),
+                   "The chain has 0 current effective resolutions (none) under the doctor's chain rule "
+                   "(C-DECISION-CHAINS), so no target is named in its place; fail-closed"))
+    check("the head-check refusal names no target when the chain's one current resolution is itself "
+          "superseded by a row the doctor does not seat, and that resolution is then refused as a target",
+          shadowed_remedy_named_none())
+    head_rule, chain_rule, current_rule, remedy_rule = (_superseders, _require_one_current_resolution,
+                                                        _chain_current, _head_remedy)
+    module._superseders = lambda rows, target: [r.get("id") for r in rows if isinstance(r, dict) and {
+        "rel": SUPERSEDES, "id": target} in (r.get("links") or [])]
+    try:
+        check("red on revert: a head check counting every superseder refuses the stuck chain", not stuck_plans())
+        check("red on revert: a head check counting every superseder refuses the importer-authored chain",
+              not imported_chain_plans())
+    finally:
+        module._superseders = head_rule
+    for label, row, loose in odd_kinds:
+        module._superseders = exempting(loose)
+        try:
+            check("red on revert: a head check exempting {} lets the fork through".format(label),
+                  not odd_kind_refused(row))
+        finally:
+            module._superseders = head_rule
+    module._require_one_current_resolution = lambda ctx, rows, rid, rel: None
+    try:
+        check("red on revert: with the chain rule dropped the second current resolution is not refused",
+              not second_head_refused())
+    finally:
+        module._require_one_current_resolution = chain_rule
+    module._superseders = lambda rows, target: []
+    try:
+        check("red on revert: a head check counting no superseder lets the maintainer's target through",
+              not maintainer_fork_refused())
+    finally:
+        module._superseders = head_rule
+    module._chain_current = lambda rows, target: []
+    try:
+        check("red on revert: a refusal naming no current resolution names no target that plans",
+              not remedy_accepted())
+    finally:
+        module._chain_current = current_rule
+    module._head_remedy = unasked_remedy
+    try:
+        check("red on revert: a remedy naming the one current resolution without asking the head check names "
+              "a target that check refuses", not shadowed_remedy_named_none())
+    finally:
+        module._head_remedy = remedy_rule
+    check("the head check, the chain rule and the remedy are restored after the revert vectors",
+          module._superseders is head_rule and module._require_one_current_resolution is chain_rule
+          and module._chain_current is current_rule and module._head_remedy is remedy_rule)
     for label, argv, mutate in (
             ("a supersede that writes no link", m_argv,
              lambda op: op.new_model["record"][1]["links"].pop()),
@@ -3547,6 +4941,183 @@ def _self_test_supersession(check, plan, post, full, now):
         mutate(op)
         check("the postcondition refuses {}".format(label),
               _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))
+
+
+def _self_test_handoff(check, plan, post, full, now):
+    """The supersession a handoff create performs in the same act (spec 8.5): a second handoff supersedes
+    the first in one plan, landing the status the transition grammar derives for each posting actor kind
+    (spec 8.4: a maintainer post lands unqualified `superseded`; an assistant or automation post lands
+    `superseded/proposed` with `proposed_from`), a first handoff supersedes nothing, importer-authored
+    history neither blocks the posting nor receives the supersession (spec 8.6), each prior state the
+    spec forbids refuses with its named diagnostic, and the postcondition vectors that discriminate a
+    planner drifting from the rule (the delta is derived by the oracle on its own, so each drift refuses
+    with nothing written)."""
+    earlier = "2026-09-26T00:00:00Z"
+    ts = _rfc3339(now)
+    counters = dict(full, HO=1)
+
+    def ho(n, status, kind="assistant", **kw):
+        return dict({"id": "HO-{}".format(n), "type": HANDOFF, "status": status, "title": "t",
+                     "created_at": earlier, "updated_at": earlier, "actor": {"kind": kind}}, **kw)
+
+    proposed = dict(status="superseded/proposed", updated_at=ts, proposed_from="current")
+    argv = ["create", "--type", "handoff", "--title", "h", "--actor", "assistant", "--link", "relates=HO-1"]
+    p, c, op = plan(argv, rows=[ho(1, "current")], counters=counters)
+    old, new = op.new_model["record"]
+    entry = c.worklog.new_model["entry"][-1]
+    check("an assistant post supersedes the first handoff in the same plan, landing superseded/proposed "
+          "with the pre-proposal state, the link after its requested links",
+          old == dict(ho(1, "current"), **proposed)
+          and new["status"] == "current"
+          and new["links"] == [{"rel": "relates", "id": "HO-1"}, {"rel": SUPERSEDES, "id": "HO-1"}]
+          and p.ids == ["HO-2", "WL-1"] and p.transition == ("HO-1", "current", "superseded/proposed")
+          and post(p, c, argv) is None)
+    check("the posting's worklog entry names and relates the superseded handoff",
+          entry["detail"] == "opf-record create HO-2 current\nsupersedes: HO-1"
+          and entry["links"] == [{"rel": "relates", "id": "HO-2"}, {"rel": "relates", "id": "HO-1"}])
+    auto = ["create", "--type", "handoff", "--title", "h", "--actor", "automation"]
+    p, c, op = plan(auto, rows=[ho(1, "current")], counters=counters)
+    check("an automation post lands the supersession at superseded/proposed with the pre-proposal state",
+          op.new_model["record"][0] == dict(ho(1, "current"), **proposed)
+          and p.transition == ("HO-1", "current", "superseded/proposed") and post(p, c, auto) is None)
+    first = ["create", "--type", "handoff", "--title", "h", "--actor", "maintainer"]
+    p, c, op = plan(first, rows=[ho(1, "current")], counters=counters)
+    check("a maintainer post lands the supersession at unqualified superseded with no proposed_from",
+          op.new_model["record"][0] == dict(ho(1, "current"), status="superseded", updated_at=ts)
+          and p.transition == ("HO-1", "current", "superseded") and post(p, c, first) is None)
+    p, c, op = plan(first)
+    check("a first handoff supersedes nothing",
+          op.new_model["record"] == [{"id": "HO-1", "type": HANDOFF, "status": "current", "title": "h",
+                                      "created_at": ts, "updated_at": ts, "actor": {"kind": "maintainer"}}]
+          and p.ids == ["HO-1", "WL-1"] and p.transition is None and post(p, c, first) is None)
+    plain = first[:-2] + ["--actor", "assistant"]
+    p, c, op = plan(plain, rows=[ho(1, "superseded")], counters=counters)
+    check("a store holding only superseded handoffs is a first-handoff case",
+          "links" not in op.new_model["record"][-1] and p.transition is None and post(p, c, plain) is None)
+    legacy = ho(1, "current", kind="importer")
+    p, c, op = plan(plain, rows=[legacy], counters=counters)
+    check("an importer-authored current handoff neither blocks the posting nor receives the supersession",
+          op.new_model["record"][0] == legacy and "links" not in op.new_model["record"][-1]
+          and p.transition is None and post(p, c, plain) is None)
+    p, c, op = plan(plain, rows=[legacy, ho(2, "current")], counters=dict(counters, HO=2))
+    check("a mixed store supersedes the one clean current handoff and leaves importer history untouched",
+          op.new_model["record"][0] == legacy
+          and op.new_model["record"][1] == dict(ho(2, "current"), **proposed)
+          and op.new_model["record"][-1]["links"] == [{"rel": SUPERSEDES, "id": "HO-2"}]
+          and p.transition == ("HO-2", "current", "superseded/proposed") and post(p, c, plain) is None)
+    cont = plain + ["--link", "supersedes=HO-9"]
+    p, c, op = plan(cont, rows=[ho(1, "current"), ho(9, "superseded")], counters=dict(counters, HO=9))
+    check("a requested supersedes link to another handoff stays, the automatic link appended after it",
+          op.new_model["record"][-1]["links"] == [{"rel": SUPERSEDES, "id": "HO-9"},
+                                                  {"rel": SUPERSEDES, "id": "HO-1"}]
+          and p.transition == ("HO-1", "current", "superseded/proposed") and post(p, c, cont) is None)
+    for label, rows, argv2, needle in (
+            ("two current handoffs", [ho(1, "current"), ho(2, "current")], plain, "two-current-handoffs"),
+            ("a requested supersedes link naming the handoff the posting supersedes", [ho(1, "current")],
+             plain + ["--link", "supersedes=HO-1"], "duplicate-supersedes-link"),
+            ("a current handoff with a malformed id", [dict(ho(1, "current"), id=3)], plain, "malformed id"),
+            ("a schema-invalid current handoff", [dict(ho(1, "current"), title="   ")], plain,
+             "not schema-valid"),
+            ("a duplicate-seated current handoff", [ho(1, "current"), ho(1, "superseded")], plain,
+             "seated 2 times"),
+            ("a clock not past the current handoff", [ho(1, "current", updated_at="2026-09-28T00:00:00Z")],
+             plain, "must follow")):
+        check("a handoff create refuses {} ({})".format(label, needle), _refuses(
+            lambda rows=rows, argv2=argv2: plan(argv2, rows=rows, counters=dict(counters, HO=2)), needle))
+    walk = _opf_check.archived_records
+    for label, archived, problems, needle in (
+            ("a current handoff rotated to the archive (the named diagnostic, ahead of the walk's own "
+             "problems)", [_opf_check._make_rec(ho(1, "current"), HANDOFF, "archive/2026")],
+             ["C-ROTATION: archived record 'HO-1' (handoff) is not in an unqualified terminal state"],
+             "archived-current-handoff"),
+            ("an importer-authored archived current handoff (outside the join, so the walk's problems "
+             "refuse)", [_opf_check._make_rec(ho(1, "current", kind="importer"), HANDOFF, "archive/2026")],
+             ["C-ROTATION: archived record 'HO-1' (handoff) is not in an unqualified terminal state"],
+             "doctor's own archive walk"),
+            ("an archive the walk cannot read", [],
+             ["C-ARCHIVE-ENUM: the 2026 bucket is unreadable"], "doctor's own archive walk")):
+        _opf_check.archived_records = lambda *a, **kw: (list(archived), list(problems))
+        try:
+            check("a handoff create refuses {} ({})".format(label, needle), _refuses(
+                lambda: plan(plain, counters=counters), needle))
+        finally:
+            _opf_check.archived_records = walk
+    base = [ho(1, "current"), ho(2, "superseded")]
+    for label, poster, mutate in (
+            ("a supersession that leaves the old handoff current", plain,
+             lambda p, op: (op.new_model["record"][0].pop(PROPOSED_FROM),
+                            op.new_model["record"][0].update({"status": "current", "updated_at": earlier}))),
+            ("an assistant supersession landed unqualified (the ratification skipped)", plain,
+             lambda p, op: (op.new_model["record"][0].pop(PROPOSED_FROM),
+                            op.new_model["record"][0].__setitem__("status", "superseded"))),
+            ("a proposal written without its pre-proposal state", plain,
+             lambda p, op: op.new_model["record"][0].pop(PROPOSED_FROM)),
+            ("a maintainer supersession landed as a proposal", first,
+             lambda p, op: op.new_model["record"][0].update(
+                 {"status": "superseded/proposed", PROPOSED_FROM: "current"})),
+            ("a supersession that writes no link", plain,
+             lambda p, op: op.new_model["record"][-1].pop("links")),
+            ("a supersession that touches the already-superseded sibling", plain,
+             lambda p, op: op.new_model["record"][1].__setitem__("updated_at", ts)),
+            ("a plan that reports no status change", plain,
+             lambda p, op: setattr(p, "transition", None))):
+        p, c, op = plan(poster, rows=copy.deepcopy(base), counters=dict(counters, HO=2))
+        mutate(p, op)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda p=p, c=c, poster=poster: post(p, c, poster), "postcondition failed"))
+    p, c, op = plan(plain, rows=[legacy, ho(2, "current")], counters=dict(counters, HO=2))
+    op.new_model["record"][0]["updated_at"] = ts
+    check("the postcondition refuses a supersession that touches importer-authored history",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    p, c, op = plan(plain, rows=[legacy], counters=counters)
+    op.new_model["record"][0].update(proposed)
+    op.new_model["record"][-1]["links"] = [{"rel": SUPERSEDES, "id": "HO-1"}]
+    check("the postcondition refuses a supersession written onto the importer-authored handoff",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    p, c, op = plan(plain, rows=[ho(1, "superseded")], counters=counters)
+    op.new_model["record"][-1]["links"] = [{"rel": SUPERSEDES, "id": "HO-1"}]
+    check("the postcondition refuses a supersedes link written on a first handoff",
+          _refuses(lambda: post(p, c, plain), "postcondition failed"))
+    # -- the rejection of a supersession proposal is bounded by the at-most-one-current rule ---------------
+    # Spec 8.8 fixes the restore target (exactly the recorded proposed_from) and bounds the delta to the
+    # one named record; spec 8.5 allows at most one clean current handoff. While another clean current
+    # handoff stands, the rejection refuses whole (_require_sole_current_handoff), and with none it
+    # restores current as any rejection does.
+    reject = ["transition", "HO-1", "current", "--actor", "maintainer", "--reason", "the old one stands"]
+    pending = dict(ho(1, "superseded/proposed"), proposed_from="current")
+    check("a rejection that would stand the restored handoff beside another clean current one refuses "
+          "(two-current-handoffs)",
+          _refuses(lambda: plan(reject, rows=[pending, ho(2, "current")], counters=dict(counters, HO=2)),
+                   "two-current-handoffs"))
+    p, c, op = plan(reject, rows=[pending], counters=counters)
+    check("a rejection with no other clean current handoff restores exactly the recorded pre-proposal "
+          "state and passes the postcondition",
+          op.new_model["record"][0]["status"] == "current"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and p.transition == ("HO-1", "superseded/proposed", "current") and post(p, c, reject) is None)
+    p, c, op = plan(reject, rows=[pending, ho(2, "current", kind="importer")],
+                    counters=dict(counters, HO=2))
+    check("an importer-authored current handoff is history outside the rejection's join (spec 8.6)",
+          op.new_model["record"][0]["status"] == "current" and post(p, c, reject) is None)
+    ratify = ["transition", "HO-1", "superseded", "--actor", "maintainer"]
+    p, c, op = plan(ratify, rows=[pending, ho(2, "current")], counters=dict(counters, HO=2))
+    check("the ratification of the proposal lands superseded beside the newer current handoff",
+          op.new_model["record"][0]["status"] == "superseded"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and p.transition == ("HO-1", "superseded/proposed", "superseded") and post(p, c, ratify) is None)
+    for label, archived, problems, needle in (
+            ("a current handoff rotated to the archive", [_opf_check._make_rec(ho(2, "current"), HANDOFF,
+                                                                               "archive/2026")],
+             ["C-ROTATION: archived record 'HO-2' (handoff) is not in an unqualified terminal state"],
+             "archived-current-handoff"),
+            ("an archive the walk cannot read", [],
+             ["C-ARCHIVE-ENUM: the 2026 bucket is unreadable"], "doctor's own archive walk")):
+        _opf_check.archived_records = lambda *a, **kw: (list(archived), list(problems))
+        try:
+            check("a rejection refuses {} ({})".format(label, needle), _refuses(
+                lambda: plan(reject, rows=[pending], counters=dict(counters, HO=2)), needle))
+        finally:
+            _opf_check.archived_records = walk
 
 
 def _self_test_delivery(check, plan, post, full, now):
@@ -3715,6 +5286,67 @@ def _self_test_delivery(check, plan, post, full, now):
         check("the {} refusal on {} from {} {} the ratification".format(
             needle, " ".join(argv[1:3]), rows[0]["status"], "names" if keeps else "does not name"),
             needle in text and ("a ratification keeps" in text) == keeps)
+
+
+def _self_test_importer_operand(check, plan, post, full, now):
+    """The operand firewall (spec 8.6, 8.8): transition and done-with-receipt refuse an importer-authored
+    record as their operand, whatever the acting author and target state, a proposal a clean actor already
+    landed on one included; the author allow-list refuses an absent, malformed or unknown actor kind too;
+    an imported-series id never parses as an operand; and an importer-authored --supersedes target, read
+    and linked but never changed, stays open to the clean decision that resolves its chain (spec 8.6)."""
+    earlier = "2026-09-26T00:00:00Z"
+    later = "2026-09-26T12:00:00Z"
+    counters = dict(full, BI=1, HO=1, PD=2, WL=1)
+
+    def rec(rid, rtype, status, kind="importer", **kw):
+        return dict({"id": rid, "type": rtype, "status": status, "title": "t", "created_at": earlier,
+                     "updated_at": earlier, "actor": {"kind": kind}}, **kw)
+
+    for label, argv, rows in (
+            ("a maintainer transition", ["transition", "BI-1", "active", "--actor", "maintainer"],
+             [rec("BI-1", BACKLOG, "open")]),
+            ("an assistant proposal", ["transition", "BI-1", "done", "--actor", "assistant"],
+             [rec("BI-1", BACKLOG, "active")]),
+            ("an automation proposal", ["transition", "BI-1", "dropped", "--actor", "automation"],
+             [rec("BI-1", BACKLOG, "open")]),
+            ("the ratification of a proposal already landed on it",
+             ["transition", "BI-1", "dropped", "--actor", "maintainer"],
+             [rec("BI-1", BACKLOG, "dropped/proposed", updated_at=later, proposed_from="open")]),
+            ("the rejection of a proposal already landed on it",
+             ["transition", "BI-1", "open", "--actor", "maintainer", "--reason", "not ours to drop"],
+             [rec("BI-1", BACKLOG, "dropped/proposed", updated_at=later, proposed_from="open")]),
+            ("a handoff supersession", ["transition", "HO-1", "superseded", "--actor", "maintainer"],
+             [rec("HO-1", HANDOFF, "current")]),
+            ("done-with-receipt", ["done-with-receipt", "BI-1", "--actor", "maintainer"],
+             [rec("BI-1", BACKLOG, "active")])):
+        check("{} refuses an importer-authored operand".format(label), _refuses(
+            lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=counters), "importer-authored-operand"))
+    for label, row in (("no actor", {}), ("a non-table actor", {"actor": "importer"}), ("no kind", {"actor": {}}),
+                       ("a non-string kind", {"actor": {"kind": ["importer"]}}),
+                       ("an unknown kind", {"actor": {"kind": "robot"}}),
+                       ("the importer", {"actor": {"kind": "importer"}})):
+        check("the author allow-list refuses {}".format(label), _refuses(
+            lambda row=row: _require_clean_author(row, "BI-1", "x", "transition"), "importer-authored-operand"))
+    check("the author allow-list admits every clean-series author",
+          all(_require_clean_author({"actor": {"kind": k}}, "BI-1", "x", "transition") is None for k in AUTHOR_KINDS))
+    check("an imported-series id never parses as an operand",
+          _refuses(lambda: parse_request(["transition", "imported:BI-1", "active", "--actor", "maintainer"]),
+                   "not a record id")
+          and _refuses(lambda: parse_request(["done-with-receipt", "imported:BI-1", "--actor", "maintainer"]),
+                       "not a record id"))
+    decide = ["transition", "PD-2", "decided", "--actor", "maintainer", "--decision", "use Y", "--decided-by",
+              "the board", "--supersedes", "PD-1"]
+    held = rec("PD-1", PENDING_DECISION, "decided", decision="use X", decided_at=earlier, decided_by="the board")
+    try:
+        p, c, op = plan(decide, rows=[held, rec("PD-2", PENDING_DECISION, "open", kind="maintainer")],
+                        counters=counters)
+        planned = (op.new_model["record"][0] == held and op.new_model["record"][1]["status"] == "decided"
+                   and op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}]
+                   and post(p, c, decide) is None)
+    except RecordError:
+        planned = False
+    check("a clean decide superseding an importer-authored resolution plans with the target untouched (a "
+          "--supersedes target is read and linked, never the operand)", planned)
 
 
 def _self_test_pending(check):

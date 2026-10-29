@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""OPF import batch parser (OPF-SPEC 1.3.0 sections 8.3 and 8.8): pure, canonical and INERT. No command,
-gate leg or writer calls parse_batch in this release; it ships ahead of the import write mode (`opf record
-import --batch`), and it writes nothing: parse_batch performs no I/O (no file, clock, environment,
+"""OPF import batch parser (OPF-SPEC 1.3.0 sections 8.3 and 8.8): pure, canonical and INERT. No command or
+writer calls parse_batch in this release; it ships ahead of the import write mode (`opf record import
+--batch`), its one gate caller is check_opf_prompt_pack.py, which parses the prompt pack's import
+examples read-only, and it writes nothing: parse_batch performs no I/O (no file, clock, environment,
 network or process; importing the module resolves its own file path to reach its sibling modules, and the
 self-test and CLI print their verdicts; the self-test builds its byte vectors in memory).
 
@@ -82,8 +83,8 @@ other baseline member holds a record id. A `scopes` entry spelling a minted plac
 name (scopes resolve no batch-local key: a scope names a record that already exists in the store, never a
 row of its own batch). The importer-only
 legacy_fragment type is refused (spec 8.1/8.2: new imports use the imported series, never LF
-quarantine), and a module-tier type is refused in this release (decision
-D-OPF-PLAN-BATCH-ACCEPT D6: the first imported-series release supports baseline types only).
+quarantine), and a module-tier type is refused in this release (the first
+imported-series release supports baseline types only).
 
 Outcome model (single-sourced from _opf_store): CANNOT-EVALUATE for an input this unit cannot read under
 v1 assumptions (not exactly bytes, over the byte bound, not UTF-8, not TOML, an over-long integer

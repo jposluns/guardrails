@@ -1170,7 +1170,10 @@ def _classify_git_entry(store_root_fd, store_root):
 def _git_rev_parse_output(store_root, *options):
     """The whole decoded output of ONE git rev-parse invocation of `options` at `store_root`, asked
     of git itself with an explicit -C binding and a scrubbed environment (every GIT_* variable
-    removed, so an ambient GIT_DIR, GIT_COMMON_DIR, or GIT_WORK_TREE cannot redirect the answer).
+    removed, so an ambient GIT_DIR, GIT_COMMON_DIR, or GIT_WORK_TREE cannot redirect the answer),
+    with trace forced off through the GIT_TRACE2* / GIT_TRACE* variables, which outrank trace2.*
+    config, so an adopter's trace2.eventTarget cannot turn this read into a file write (the
+    toggles _opf_observe._TRACE_OFF pins for init's ignore probe).
     Any failure (missing git, launch failure, timeout, nonzero exit, or undecodable output)
     refuses; the control root is never guessed and never falls back to the repository root. The
     caller (_git_view) splits the output on its record terminators only."""
@@ -1180,6 +1183,8 @@ def _git_rev_parse_output(store_root, *options):
         raise OpLockError("git binary not found on PATH while the store or an enclosing directory "
                           "carries a .git entry; refusing (the control root is never guessed)")
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_TRACE="0", GIT_TRACE_PACKET="0", GIT_TRACE_PERFORMANCE="0", GIT_TRACE_SETUP="0",
+               GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
     try:
         proc = subprocess.run(
             [git, "--no-replace-objects", "-C", str(store_root), "rev-parse"] + list(options),
@@ -3783,9 +3788,12 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
             if not recover:
                 stale = ", ".join(n for n, s in ((ACTIVE_NAME, stale_active),
                                                  (_opf_check.LEASE_NAME, stale_lease)) if s)
+                # This refusal reaches the `opf init` command line, so it names the CLI flag
+                # --recover first; recover=True is the same switch at this API.
                 raise OpLockError(
                     "stale operation record(s) under a free anchor ({}); refusing without EXPLICIT "
-                    "recovery (recover=True), which itself proceeds only when the recorded holder "
+                    "recovery (--recover on the opf command line; recover=True from the API), "
+                    "which itself proceeds only when the recorded holder "
                     "is confirmed dead".format(stale))
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
                 _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,

@@ -25,11 +25,15 @@ jobs:
     name: Offline staleness audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
 
       # Real audit against today's date: exit 1 (a manifest past its FAIL threshold) or exit 2 (a
       # malformed manifest / unparseable date) paints this scheduled run red. It ships green today

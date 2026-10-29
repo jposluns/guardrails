@@ -14,10 +14,23 @@ signed; the independently published digest is the authenticated reference.
 
 ## Steps
 
+Each pull request below, like every pull request into main, gets a Quality run only when a label is
+added to it (the merge lane adds the `merge-train` label), and its heavy jobs run only when its head is
+a `merge-train-*` branch of this repository, so "merged on green" means green on such a labelled train
+pull request (CLAUDE.md, Gates and CI).
+
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
-   `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site links to, and
-   `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
+   `bash tools/run_all_checks.sh` is green at the freeze commit. That run FAILS when gitleaks is not on
+   PATH or reports another version than the `Secrets (gitleaks)` step of `.github/workflows/quality.yml`
+   pins (the gitleaks-pin gate), and on any CPython patch
+   release other than the one `.aiqt/python-host.toml` names (the python-host-pin gate), so run it on that
+   release; when the host interpreter has changed, first land one change that updates `python-host-patch`
+   there and the `python-version` pin of every host-patch job (`opf-host-patch`,
+   `git-fixture-env-core-host-patch`, `git-fixture-env-config-combined-host-patch`,
+   `git-fixture-env-config-malformed-host-patch` and `git-fixture-env-config-system-host-patch`) in
+   `.github/workflows/quality.yml` together. After the freeze the
+   release artifacts (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site
+   links to, and `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
    byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
    --check` compares each to disk, so they cannot diverge). The

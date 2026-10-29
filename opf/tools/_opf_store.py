@@ -77,6 +77,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import collections.abc
+import datetime
 import operator
 import os
 import posixpath
@@ -139,21 +140,19 @@ GITIGNORE_BEGIN = "# >>> opf-managed >>>"
 GITIGNORE_END = "# <<< opf-managed <<<"
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
+COUNTERS_NAME = "counters.toml"        # the machine store's id high-water ledger (spec 8.2)
 STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
-PRIOR_STANDARD_TOKEN = "devprocess"    # the RETIRED 1.0.0 discovery token (base table [devprocess]); the
-                                       # OPFiles rebrand (1.1.0) renamed it to STANDARD_TOKEN. It is
-                                       # recognized ONLY by `opf upgrade`, which passes it via accept_tokens
-                                       # so a legacy 1.0.0 store can still be located and migrated (spec 9.2).
-                                       # No other tool accepts it; the base table name always equals the
-                                       # token the base declares, so acceptance is expressed as a token set.
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x),
+                                       # finding stating that no store upgrade reaches 2.0.0,
+                                       # naming the hand step that makes its tree foreign content (spec 9.2),
                                        # and one declaring a NEWER spec_version is fail-closed with an
                                        # upgrade-the-tooling finding, except only the reserved homes-2
-                                       # declaration pair, which stays gated on activation (spec 9.2/4.2)
+                                       # declaration pair (spec_version 2.0.0 with homes = 2), which this
+                                       # tooling grades under its 1.2.0 rules (spec 16.1) and which
+                                       # homes_generation() keeps at generation 1 while SUPPORTED_HOMES is 1
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -247,7 +246,7 @@ def _home_kind(kind, kinds=None):
     # vocabulary is honoured wherever it is read.
     kinds = STAGING_KINDS if kinds is None else kinds
     if not isinstance(kind, str) or kind not in kinds:
-        raise ValueError("unknown homes kind: {!r}".format(kind))
+        raise ValueError("unknown homes kind: {}".format(_safe_display(kind)))
     return kind
 
 
@@ -255,7 +254,7 @@ def _home_run(kind, run_id, kinds=None):
     kind = _home_kind(kind, kinds)
     pattern = _HOME_RUN_PREFIXES[kind] + _HOME_RUN_SUFFIX
     if not isinstance(run_id, str) or re.fullmatch(pattern, run_id) is None:
-        raise ValueError("invalid {} run-id: {!r}".format(kind, run_id))
+        raise ValueError("invalid {} run-id: {}".format(kind, _safe_display(run_id)))
     return "{}/{}".format(kind, run_id)
 
 
@@ -266,7 +265,7 @@ def _home_file(path):
             or re.match(r"^[A-Za-z]:", path)
             or any(c in ("", ".", "..") for c in path.split("/"))
             or any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f or c in ("\u2028", "\u2029") for c in path)):
-        raise ValueError("invalid homes file path: {!r}".format(path))
+        raise ValueError("invalid homes file path: {}".format(_safe_display(path)))
     return path
 
 
@@ -312,10 +311,14 @@ def allocation_record(kind, run_id):
 
 def evidence_inventory(kind, run_id, phase=None):
     """Store-root-relative inventory of one evidence bundle. A later phase adds its own
-    inventory-<phase>.toml beside the first; an inventory is never rewritten."""
+    inventory-<phase>.toml beside the first; an inventory is never rewritten. The phase type is checked
+    BEFORE the file name is built, so a non-str phase (a deeply nested table, an oversized int) refuses
+    through the bounded renderer and is never formatted raw."""
+    if phase is not None and type(phase) is not str:
+        raise ValueError("invalid evidence inventory phase: {}".format(_safe_display(phase)))
     name = "inventory.toml" if phase is None else "inventory-{}.toml".format(phase)
     if not is_evidence_inventory_name(name):
-        raise ValueError("invalid evidence inventory phase: {!r}".format(phase))
+        raise ValueError("invalid evidence inventory phase: {}".format(_safe_display(phase)))
     return "{}/{}".format(evidence_run(kind, run_id), name)
 
 
@@ -340,11 +343,86 @@ def homes_generation(manifest_data):
                  and version == HOMES2_SPEC_VERSION) else 1
 
 
+# The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
+# IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
+# enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
+# imported index. Inert until activation: the gate below requires this tooling's OWN support
+# (SUPPORTED_SPEC_VERSION, currently 1.2.0, at or above IMPORTED_SPEC_VERSION), never the declared
+# version alone, because C-MANIFEST ACCEPTS one newer declaration today, the reserved spec_version
+# 2.0.0 / homes = 2 pair (spec 4.2).
+IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
+IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
+IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
+# The namespaces the imported series admits: the baseline and module-tier bindings, never the
+# importer-only legacy_fragment (LF), the reserved-excluded transaction (TX), or the unassigned CL
+# (spec 8.1/8.2). _opf_schema.IMPORTED_NAMESPACES is built from these SAME taxonomy maps (that module
+# imports this one, so the set is mirrored here rather than imported); the opf-check self-test
+# reconciles the two rosters so they cannot drift.
+_IMPORTED_SERIES_NAMESPACES = (frozenset(BASELINE_TYPES.values())
+                               | frozenset(ns for ns, _module in MODULE_TYPES.values()))
+
+
+def imported_series_supported():
+    """True when this tooling ITSELF supports the imported series: SUPPORTED_SPEC_VERSION at or
+    above IMPORTED_SPEC_VERSION, through the house SemVer parser. The ONE support comparison,
+    shared by the imported_series_declared gate below and by the opf-check activation predicate
+    imported_content_checks_landed, so the gate and that predicate cannot disagree about when
+    the series is supported."""
+    return _parse(SUPPORTED_SPEC_VERSION) >= _parse(IMPORTED_SPEC_VERSION)
+
+
+def imported_series_declared(manifest_data):
+    """True when the [opf] base table declares a spec_version of IMPORTED_SPEC_VERSION or later AND
+    this tooling itself supports that series (imported_series_supported: SUPPORTED_SPEC_VERSION
+    at or above IMPORTED_SPEC_VERSION): the version-and-support half of the activation flag the
+    imported-series registrations read (spec 8.2/4.2). That flag, _opf_check.imported_series_active,
+    also requires the graded homes-2 declaration (homes_generation), since the imported series
+    activates only inside the 2.0.0 declaration.
+    Graded through the house SemVer parser; an absent, non-string, or unparseable spec_version reads
+    False (manifest validation, not this helper, reports it). The tooling-support condition mirrors
+    homes_generation's gate on SUPPORTED_HOMES: validate_manifest does NOT fail every newer
+    declaration closed (it accepts the reserved HOMES2_SPEC_VERSION / homes = 2 pair, spec 4.2), so a
+    VALID store can declare 2.0.0 today, and reading the declaration alone would register the
+    imported leaves on it while every imported-content check is still deferred. Raising
+    SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION is the spec 1.3.0 activation; this helper
+    needs no edit then, but activation must also land the imported-content checks (C-IMPORTED-*):
+    the opf-check activation tripwire refuses to certify an active imported series while that
+    roster is empty, so raising the constant alone cannot ship."""
+    opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
+    version = opf.get("spec_version") if isinstance(opf, dict) else None
+    parsed = _parse(version) if isinstance(version, str) else None
+    return (parsed is not None and parsed >= _parse(IMPORTED_SPEC_VERSION)
+            and imported_series_supported())
+
+
+def imported_leaf_names(enabled_types):
+    """The imported-series managed-leaf FILENAMES for `enabled_types` (an iterable of enabled
+    section-8.1 type names, e.g. the C-ROSTER type -> namespace mapping): one
+    `<type>.imported.index.toml` per enabled non-ledger type, and worklog.imported.toml for the worklog
+    ledger, whose imported home is a worklog-shaped ledger file, not an index (spec 4.2; the first
+    imported-series release keeps these leaves inline in either layout). A type whose normative
+    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- the importer-only legacy_fragment (LF) -- and
+    a name outside the section-8.1 roster contribute NO leaf (fail-closed), so the leaf roster derives
+    from the same namespace set as the imported id and counter grammar and the two cannot drift
+    (spec 8.2)."""
+    names = set()
+    for tname in enabled_types:
+        namespace = BASELINE_TYPES.get(tname)
+        if namespace is None and tname in MODULE_TYPES:
+            namespace = MODULE_TYPES[tname][0]
+        if namespace is None and tname in IMPORTER_TYPES:
+            namespace = IMPORTER_TYPES[tname]
+        if namespace not in _IMPORTED_SERIES_NAMESPACES:
+            continue
+        names.add(IMPORTED_WORKLOG_NAME if tname == "worklog" else tname + IMPORTED_INDEX_SUFFIX)
+    return frozenset(names)
+
+
 def store_control_roots(homes):
     """Store-relative control roots for a homes generation. A legacy store reserves only the
     imports staging tree; the homes-2 names are ordinary store paths there."""
     if type(homes) is not int or homes not in (1, 2):
-        raise ValueError("unknown homes generation: {!r}".format(homes))
+        raise ValueError("unknown homes generation: {}".format(_safe_display(homes)))
     names = RESERVED_MACHINE_SUBDIRS if homes == 2 else RESERVED_MACHINE_SUBDIRS[:1]
     return tuple("{}/{}".format(WORKING_DIRNAME, n) for n in names)
 
@@ -354,7 +432,7 @@ def overlaps_home(path, home):
     is byte-exact: on a case-insensitive or normalizing filesystem a differently cased or composed
     spelling can alias a home and is not caught here (disclosed residual, spec 4.2)."""
     if not _is_contained_relpath(path):
-        raise ValueError("not a contained store-relative path: {!r}".format(path))
+        raise ValueError("not a contained store-relative path: {}".format(_safe_display(path)))
     path = posixpath.normpath(path)
     return path == "." or path == home or path.startswith(home + "/") or home.startswith(path + "/")
 
@@ -364,7 +442,7 @@ def require_ordinary_target(path):
     the held capability. Only homes-2 entry points call this (the capability-bound journal API and
     homes-2 view planning); legacy transactions keep their legacy operand handling."""
     if overlaps_home(path, JOURNALS_REL):
-        raise ValueError("ordinary operation target {!r} overlaps the journal home".format(path))
+        raise ValueError("ordinary operation target {} overlaps the journal home".format(_safe_display(path)))
 
 
 def render_homes_gitignore():
@@ -555,13 +633,15 @@ def _close_fd_exc_safe(fd):
     inside an `except` handler of the SAME function would read that handled exception as in flight (as in
     #378), and no call site is nested that way; a platform that keeps the descriptor on a failed close
     (HP-UX, and POSIX.1-2024 as close(2) reports it) leaks it until exit, which Linux does not, and macOS
-    is assumed not to."""
+    is assumed not to. A close error raised leaves marked (_journal._mark_fd_release_raised), so a handler
+    reading OSError as a signal raises it (_journal._fd_release_fault)."""
     tb = sys.exc_info()[2]
     in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
     try:
         os.close(fd)
-    except OSError:
+    except OSError as exc:
         if not in_flight:
+            _journal._mark_fd_release_raised(exc)
             raise
 
 
@@ -571,11 +651,12 @@ def _close_fd_on_exit(fd, exc_type, exc, tb):
     exception it is unwinding (the body's, or an earlier callback's close error), so the close is quiet
     while one is and propagates fail-closed when none is. One os.close either way (P1, as
     _close_fd_exc_safe): a raising close has released the number, which is never probed or closed again.
-    Returns None, so it never suppresses."""
+    Returns None, so it never suppresses. A close error raised leaves marked, as _close_fd_exc_safe's."""
     try:
         os.close(fd)
-    except OSError:
+    except OSError as cexc:
         if exc is None:
+            _journal._mark_fd_release_raised(cexc)
             raise
 
 
@@ -648,15 +729,25 @@ def _open_dir_nofollow(abspath, *, traverse_only=False):
         for index, comp in enumerate(parts[1:], 1):
             access = final_access if index == last else _WALK_O_TRAVERSE
             held.append(os.open(comp, access | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
-            _journal._close_fd_propagating(held.pop(-2))
+            try:
+                _journal._close_fd_propagating(held.pop(-2))
+            except BaseException as cexc:  # noqa: BLE001  marked: a caller never reads it as an open error
+                _journal._mark_fd_release_raised(cexc)
+                raise
         return held.pop()
     except BaseException as exc:
+        closing = []    # what a close raised that is not an OSError: resolved against `exc` below
         while held:
             try:
                 _journal._close_fd_propagating(held.pop())
             except OSError as cexc:
                 exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
                     cexc))
+            except BaseException as cexc:   # noqa: BLE001  keep closing; resolved below, never dropped
+                closing.append(cexc)
+        # the one first-interrupt selection: an interrupt in flight keeps propagating as itself, each
+        # close exception noted on it, and none replaces it (_journal._yield_close_exceptions)
+        _journal._yield_close_exceptions(exc, closing)
         raise
 
 
@@ -695,6 +786,7 @@ def _read_store_bytes_contained(root_fd, relpath, allowance=None):
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _lstat_contained walks the contained parents no-follow and can raise JournalError (a backslash,
         # control-character, or refused/unreadable intermediate component) or OSError; neither is a
         # StoreError, so an unwrapped raise escapes resolve_store/discover/load_manifest uncaught. Map it to
@@ -738,6 +830,7 @@ def _read_store_bytes_contained(root_fd, relpath, allowance=None):
         else:
             data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True, cap=limit)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
         # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
         # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
@@ -830,7 +923,13 @@ def _immediate_subdirs(store_root_fd, working_rel):
     try:
         return _list_real_subdirs(wfd, working_rel)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
 def _open_working_dir_fd(store_root_fd, working_rel):
@@ -841,9 +940,11 @@ def _open_working_dir_fd(store_root_fd, working_rel):
     _immediate_subdirs: a present non-directory or a refused symlink fails closed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, working_rel)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is never read as absent
         return None
     except (OSError, _journal.JournalError) as exc:
+        _journal._fd_release_fault(exc)    # nor as a cannot-evaluate
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
     wfd = None
     try:
@@ -863,12 +964,15 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         # is _close_fd_exc_safe's single os.close (P1: a raising close has released its number, close(2),
         # and it is never touched again), and its close error propagates fail-closed unless an exception is
         # already in flight here, which then keeps propagating in its place.
+        inflight = _journal._in_flight_in(sys._getframe())
         try:
             _close_fd_exc_safe(pfd)
         except OSError:
             if wfd is not None:
                 _journal._close_fd_quietly(wfd)
             raise
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     return wfd
 
 
@@ -883,6 +987,7 @@ def _list_real_subdirs(wfd, working_rel):
     try:
         names = sorted(_journal._listdir_fresh(wfd, working_rel))
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
         # an empty (no-store) directory (check-fails-closed-on-unreadable).
         raise StoreError("cannot list {} ({})".format(working_rel, exc))
@@ -899,7 +1004,7 @@ def _list_real_subdirs(wfd, working_rel):
 
 # --- discovery (spec 4.5) ----------------------------------------------------------------------------
 
-def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
+def discover_machine_store(store_root_fd, store_root):
     """Locate the single machine store under `.working/`. Returns (status, machine_dir, detail):
       "one"      exactly one immediate `.working/` subdir carries an opf manifest (machine_dir set)
       "absent"   `.working/` is absent (no store tree here at all: a genuinely un-adopted location)
@@ -911,24 +1016,19 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     result is otherwise unique, is reported as the machine_dir), but a second stray store is NOT masked
     (spec 4.5, residual 17).
 
-    `accept_tokens` is the set of discovery tokens accepted here; None means the sole current
-    STANDARD_TOKEN (the frozen general contract, spec 4.5). `opf upgrade` passes the legacy
-    PRIOR_STANDARD_TOKEN alongside it so a 1.0.0 store carrying the retired `[devprocess]` base can be
-    located for migration (spec 9.2). Because the base table name always equals the token the base
-    declares, a candidate matches when, for some accepted token, `[<token>].standard == <token>`."""
-    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
+    A candidate matches when `[opf].standard == "opf"` (STANDARD_TOKEN, the frozen general contract,
+    spec 4.5); no other token is accepted."""
     subdirs = _immediate_subdirs(store_root_fd, WORKING_DIRNAME)
     if subdirs is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
-    matches, legacy = _classify_working_names(
+    matches = _classify_working_names(
         subdirs,
         lambda name: _read_toml_contained(          # StoreError propagates (fail-closed)
-            store_root_fd, "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)),
-        accept)
-    return _discovery_result(matches, legacy)
+            store_root_fd, "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)))
+    return _discovery_result(matches)
 
 
-def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None):
+def discover_machine_store_fd(store_root_fd, allowance=None):
     """Descriptor-bound sibling of discover_machine_store (round-5 defect 1): the `.working` LISTING
     descriptor is held for the whole discovery and every listed name's manifest is read BENEATH it,
     so a `.working` swapped in after the listing is never read (the rounds-2-4 invariant: every name
@@ -936,10 +1036,9 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None)
     (status, machine_dir, detail, manifest_raw): the discover_machine_store triple plus, when the
     status is "one", the resolved manifest's EXACT bytes as read through the held descriptor (None
     otherwise), so a descriptor-bound caller (resolve_store_fd, the adoption planner) parses the very
-    bytes discovery matched rather than re-opening the manifest by path. Statuses, details, StoreError
-    behaviour and `accept_tokens` are exactly discover_machine_store's. `allowance` meters each manifest
-    read (_read_store_bytes_contained); None reads unmetered."""
-    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
+    bytes discovery matched rather than re-opening the manifest by path. Statuses, details and StoreError
+    behaviour are exactly discover_machine_store's. `allowance` meters each manifest read
+    (_read_store_bytes_contained); None reads unmetered."""
     wfd = _open_working_dir_fd(store_root_fd, WORKING_DIRNAME)
     if wfd is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME), None
@@ -956,57 +1055,45 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None, allowance=None)
             raws[name] = data
             return parsed
 
-        matches, legacy = _classify_working_names(names, load, accept)
-        status, machine_dir, detail = _discovery_result(matches, legacy)
+        matches = _classify_working_names(names, load)
+        status, machine_dir, detail = _discovery_result(matches)
         return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
-def _classify_working_names(names, load, accept):
+def _classify_working_names(names, load):
     """The candidate classification both discovery variants share. `load(name)` returns the parsed
     `.working/<name>/manifest.toml` (None when absent) through that variant's own read binding, raising
-    StoreError fail-closed on an unreadable or unparseable manifest. Returns (matches, legacy)."""
+    StoreError fail-closed on an unreadable or unparseable manifest. Returns the matching names."""
     matches = []
-    legacy = []
     for name in names:
         data = load(name)
         if data is None:
             continue
-        matched = False
-        for token in accept:
-            base = data.get(token)
-            if isinstance(base, dict) and base.get("standard") == token:
-                matches.append(name)
-                matched = True
-                break
-        # m2: when the CURRENT discovery accepts no legacy token but a candidate carries the RETIRED
-        # [devprocess] 1.0.0 base, collect it so the operator-facing detail can name the `opf upgrade`
-        # remedy (spec 9.2), mirroring the older-spec finding _validate_base already surfaces. This only
-        # ENRICHES the detail; the status stays "present", so resolution stays CANNOT-EVALUATE (fail-closed).
-        if not matched and PRIOR_STANDARD_TOKEN not in accept:
-            legacy_base = data.get(PRIOR_STANDARD_TOKEN)
-            if isinstance(legacy_base, dict) and legacy_base.get("standard") == PRIOR_STANDARD_TOKEN:
-                legacy.append(name)
-    return matches, legacy
+        base = data.get(STANDARD_TOKEN)
+        if isinstance(base, dict) and base.get("standard") == STANDARD_TOKEN:
+            matches.append(name)
+    return matches
 
 
-def _discovery_result(matches, legacy):
+def _discovery_result(matches):
     """The (status, machine_dir, detail) verdict both discovery variants share (spec 4.5); raises
     StoreError for a reserved sole match."""
     if not matches:
-        base_detail = "{}/ is present but no {}/*/{} declares standard = {!r}".format(
+        return "present", None, "{}/ is present but no {}/*/{} declares standard = {!r}".format(
             WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
-        if legacy:
-            locs = ", ".join("{}/{}".format(WORKING_DIRNAME, n) for n in sorted(legacy))
-            base_detail += ("; a retired [{}] 1.0.0 store is present at {} (run `opf upgrade` to migrate "
-                            "it, spec 9.2)".format(PRIOR_STANDARD_TOKEN, locs))
-        return "present", None, base_detail
     if len(matches) > 1:
         return "multiple", None, "{} machine stores declare the opf token: {}".format(
             len(matches), ", ".join(sorted(matches)))
     # Retain the legacy staging reservation as well as the inert homes-2 names.
-    # A reserved sole match is never a machine store, including during legacy-token discovery.
+    # A reserved sole match is never a machine store.
     if matches[0] in RESERVED_MACHINE_SUBDIRS:
         raise StoreError("the machine subdirectory name {!r} is reserved for store-level control "
                          "area {}/{} (spec 4.4); it cannot name the machine store".format(
@@ -1093,14 +1180,10 @@ def _read_pointer_target(product_root_fd, relpath, allowance=None):
 
 # --- resolution (spec 4.3) ---------------------------------------------------------------------------
 
-def resolve_store(product_root, accept_tokens=None):
+def resolve_store(product_root):
     """Resolve the machine store from a product repository root (spec 4.3). Never raises for an expected
-    outcome; returns a Resolution whose status is RESOLVED, NOT_ADOPTED, or CANNOT_EVALUATE.
-
-    `accept_tokens` selects the discovery tokens accepted during machine-store discovery; None is the
-    frozen general contract (the sole current STANDARD_TOKEN, spec 4.5). Only `opf upgrade` widens it,
-    passing (STANDARD_TOKEN, PRIOR_STANDARD_TOKEN) so a legacy 1.0.0 `[devprocess]` store resolves for
-    migration (spec 9.2); every other caller keeps the default single-token discovery.
+    outcome; returns a Resolution whose status is RESOLVED, NOT_ADOPTED, or CANNOT_EVALUATE. Discovery
+    accepts the sole STANDARD_TOKEN (spec 4.5).
 
     Order (spec 4.3): the local override first, then the committed pointer; where NEITHER pointer file
     exists, the default location (`.working/` at the product root) is tried. A pointer that exists but
@@ -1147,9 +1230,16 @@ def resolve_store(product_root, accept_tokens=None):
             # override already settled (MAJOR 1).
             committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
-        _close_fd_exc_safe(product_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(product_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if local is not None or committed is not None:
         # A pointer named the store: the override wins wholesale, else it completes with the committed
@@ -1159,19 +1249,20 @@ def resolve_store(product_root, accept_tokens=None):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root)
-        res = _resolve_at(store_root, source, target, pointer=True, accept_tokens=accept_tokens)
+        res = _resolve_at(store_root, source, target, pointer=True)
         res.product_root = product_root
         return res
 
     # Neither pointer file exists: try the default in-repo location.
-    res = _resolve_at(product_root, "default", None, pointer=False, accept_tokens=accept_tokens)
+    res = _resolve_at(product_root, "default", None, pointer=False)
     res.product_root = product_root
     return res
 
 
-def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
+def _resolve_at(store_root, source, target, pointer):
     """Open the store root and run discovery there. `pointer` selects the fail-closed policy: a pointer
     that resolves to a root with no (or multiple) machine store is CANNOT-EVALUATE, while the default
     fallback reports NOT-ADOPTED for a genuinely empty location (spec 4.3/4.5)."""
@@ -1197,17 +1288,27 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
         # root or ancestor is refused, MAJOR 2); the default location is the trusted product-root anchor.
         store_root_fd = _open_store_root_fd(store_root, pointer)
     except OSError as exc:
+        _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, "cannot open store root {} ({})".format(store_root, exc),
                           target=target, pointer_source=source)
     try:
         try:
-            status, machine_dir, detail = discover_machine_store(
-                store_root_fd, store_root, accept_tokens=accept_tokens)
+            status, machine_dir, detail = discover_machine_store(store_root_fd, store_root)
         except StoreError as exc:
+            # a close's exception (marked as it left the close helper) is raised as itself, every fault
+            # recorded on it kept, never this cannot-evaluate posture (_store_posture_or_refuse admits a
+            # cannot-evaluate default location once fresh discovery succeeds, so it would vanish there)
+            _journal._fd_release_fault(exc)
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if status == "one":
         return Resolution(RESOLVED, detail, store_root=store_root, machine_dir=machine_dir,
@@ -1232,7 +1333,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
                       store_root=store_root, pointer_source=source)
 
 
-def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowance=None):
+def resolve_store_fd(product_root_fd, product_root, allowance=None):
     """Descriptor-bound resolve_store (round-5 defect 1), for a caller that already HOLDS the product
     root open and keeps that descriptor for every subsequent read (the adoption planner, which opened
     it with the _open_dir_nofollow walk). Nothing is re-resolved by path: the pointer files are read
@@ -1246,7 +1347,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
     manifest's exact bytes as read through the listing descriptor (None unless RESOLVED), so the
     caller parses the same bytes discovery matched instead of re-opening the manifest by path.
     `product_root` is the path the held descriptor was opened from, used only for pointer-target
-    resolution and reporting; `accept_tokens` as in resolve_store. `allowance` meters every pointer and
+    resolution and reporting. `allowance` meters every pointer and
     manifest read (_read_store_bytes_contained), so a caller that charged resolution to its own budget
     (source discovery) is never read past that charge; a read that does not fit is CANNOT-EVALUATE. None
     (investigation and every other caller) reads unmetered. Statuses and details follow
@@ -1260,6 +1361,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
         # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
         committed = _read_pointer_target(product_root_fd, POINTER_REL, allowance) if local is None else None
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
     pointer = local is not None or committed is not None
     target = local if local is not None else committed
@@ -1269,6 +1371,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root), None
         if store_root != product_root:
@@ -1279,8 +1382,9 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None, allowanc
                 target=target, pointer_source=source, product_root=product_root), None
     try:
         status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
-            product_root_fd, accept_tokens=accept_tokens, allowance=allowance)
+            product_root_fd, allowance=allowance)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
                           pointer_source=source, product_root=product_root), None
     if status == "one":
@@ -1414,26 +1518,492 @@ def _sorted_key_names(keys):
     return sorted(_safe_str(k) for k in keys)
 
 
-def _safe_display(value):
-    """Render a value for a FINDING MESSAGE (or a controlled-refusal message) without tripping CPython's
-    integer-string-conversion limit. tomllib parses a hexadecimal, octal, or binary integer literal
-    (0x.../0o.../0b...) into an arbitrarily-large Python int with NO digit limit (the limit applies to
-    base-10 only), so a value read from a parsed manifest, counters, or version file can be an oversized
-    int whose repr() (or the repr() of a container holding one) raises ValueError; a message that formats
-    such a value with {!r}/{}/str()/repr() would then crash with an uncontrolled ValueError. This returns
-    repr(value) for every value whose repr is well-formed, byte for byte, so a small or normal value
-    renders exactly as it did before; only for a value whose repr trips the limit does it return a
-    deterministic, bounded marker, so the message is produced rather than crashing (fail-closed;
-    guard-input-soundness). It is the shared message-rendering guard for the finding-message idiom across
-    the three OPF pass-A validators (store, schema, release). Like _sorted_key_names it is for MESSAGE
-    rendering ONLY; it is deliberately NOT used on the byte-stable coverage digest, where an oversized int
-    fails closed with a ReleaseError instead (a marker in the digest would change the bytes; spec 6.1)."""
+_DISPLAY_MAX_DEPTH = 32      # container levels a finding-message render descends before a depth marker
+_DISPLAY_MAX_NODES = 512     # values (containers and scalars) a render copies before it stops
+_DISPLAY_FULL_MAX_CHARS = 65536   # widest whole, uncut repr() a value within the two bounds above renders as
+_DISPLAY_MAX_CHARS = 1024    # characters of bounded-render content before a cut (on a whole escape) and a marker
+_DISPLAY_MARKER_MAX = 37     # longest marker ending a bounded rendering: "...<str of N chars>", N at sys.maxsize
+_DISPLAY_NAME_MAX = 64       # characters of a type or timezone name a marker or a rendered datetime may carry
+_DISPLAY_CONTAINERS = (dict, list, tuple, set, frozenset)       # exact types; a subclass is unsupported
+_DISPLAY_TIMES = (datetime.datetime, datetime.date, datetime.time)   # exact types, as tomllib builds them
+_DISPLAY_ATOM = re.compile(r"\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8}|.)|.", re.DOTALL)
+_DISPLAY_ATOM_MAX = 10       # the longest _DISPLAY_ATOM: a backslash, U and eight hex digits
+_DISPLAY_STOP = ("stop",)    # the _display_snapshot entry where the copy reached _DISPLAY_MAX_NODES values
+_DISPLAY_FULL_INT_BITS = 4 * _DISPLAY_FULL_MAX_CHARS   # an int of more bits has more digits than that width
+_DISPLAY_INT_CEILING = 10 ** _DISPLAY_MAX_CHARS          # the least positive int whose repr() is too wide
+_DISPLAY_INT_FLOOR = -(10 ** (_DISPLAY_MAX_CHARS - 1))   # the greatest negative int whose repr() is too wide
+_DISPLAY_INT_BUDGET_BITS = 32 * _DISPLAY_FULL_INT_BITS   # int bits one render may convert, its conversions summed
+_DISPLAY_SPENT = "...<int conversion budget spent>"   # ends a bounded rendering stopped at an int past that budget
+_TYPE_NAME = type.__dict__["__name__"]   # the getter of type itself, so a metaclass __name__ never runs
+
+
+def _display_kind(kind, kinds):
+    """True when `kind` IS one of `kinds`. An identity test, never `in`: tuple membership falls back to ==, and a
+    metaclass can define __eq__, so `in` could run caller code."""
+    for k in kinds:
+        if kind is k:
+            return True
+    return False
+
+
+def _display_time_ok(value):
+    """True when an exact date, datetime or time renders through the built-in repr() and str() alone: a date
+    always; a datetime or time when its tzinfo is None, or an exact datetime.timezone whose offset is an exact
+    timedelta and whose name is an exact str of at most _DISPLAY_NAME_MAX characters (tomllib builds only
+    these). Any other tzinfo would have its own methods called, so such a value is unsupported."""
+    if type(value) is datetime.date:
+        return True
+    tz = value.tzinfo
+    if tz is None:
+        return True
+    if type(tz) is not datetime.timezone:
+        return False
+    name = tz.tzname(None)
+    return (type(tz.utcoffset(None)) is datetime.timedelta and type(name) is str
+            and len(name) <= _DISPLAY_NAME_MAX)
+
+
+def _display_scalar_ok(value):
+    """True when `value` is a supported non-container value, one whose built-in repr() runs no method a caller
+    can define: an exact str, bytes, int, float or bool, None, or an exact date, datetime or time that
+    _display_time_ok admits. Each is immutable and its type cannot be reassigned, so the answer, once given,
+    holds for as long as the value is referenced."""
+    kind = type(value)
+    return (kind is str or kind is bytes or kind is int or kind is float or kind is bool or value is None
+            or (_display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value)))
+
+
+def _display_spend(budget, value):
+    """True when the bit length of the exact int `value` fits in the bits the render may still convert
+    (budget[0], which starts at _DISPLAY_INT_BUDGET_BITS), and then charges it; False, charging nothing, when it
+    does not. Every conversion of an int the value holds is charged here first, so one render converts at
+    most _DISPLAY_INT_BUDGET_BITS bits of such ints in all (a count the renderer formats itself, such as a
+    bit length in a marker, is not charged). `budget` is the render's own list, [bits left, cleared],
+    cleared being True once _display_full has tested every int of a complete copy and none trips."""
+    bits = value.bit_length()
+    if bits > budget[0]:
+        return False
+    budget[0] -= bits
+    return True
+
+
+def _display_int(value, budget):
+    """The bounded rendering of an exact int: its repr() when that is at most _DISPLAY_MAX_CHARS characters,
+    decided exactly before any conversion: it is exactly when _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING
+    (a negative int spends one character on its sign), and CPython compares two ints of different lengths by
+    their lengths alone, so the test does not grow with the size of the int. A wider int, or one whose repr()
+    trips the integer-string-conversion limit (which can be set as low as 640 digits), renders as the
+    type-and-size marker <oversized-int: N bits>, built from the bit length without converting the int. Only
+    the int that is the whole value, or one that does not trip the limit, reaches here with that marker:
+    _display_render renders a container whose rendering reaches an int that trips the limit as
+    <oversized-value> as a whole. None when the conversion budget cannot cover the conversion
+    (_display_spend): the caller stops there with _DISPLAY_SPENT."""
+    if _DISPLAY_INT_FLOOR < value < _DISPLAY_INT_CEILING:
+        if not _display_spend(budget, value):
+            return None
+        try:
+            return repr(value)
+        except ValueError:
+            pass
+    return "<oversized-int: {} bits>".format(value.bit_length())
+
+
+def _display_int_trips(value, budget):
+    """True when repr() of the exact int `value` raises ValueError under the integer-string-conversion limit
+    in force (sys.get_int_max_str_digits(), 0 for none): the oversized int of the whole-value rule, which
+    renders alone as <oversized-int: N bits> and makes a container holding it <oversized-value>. An int of at
+    most three bits per limit digit has at most that many digits and never trips. One of more than
+    _DISPLAY_FULL_INT_BITS bits has more digits than any limit of at most _DISPLAY_FULL_MAX_CHARS digits, the
+    default 4,300 among them, and CPython refuses it before converting, so it trips under such a limit; under
+    a higher limit it is taken as not tripping without converting it (the residual _safe_display item 6
+    names). Any other int is asked through repr() itself, so the answer is CPython's own: no count of digits
+    can stand in for asking, since CPython 3.14.4 converts some ints of more digits than the limit
+    (10 ** 10000, of 10,001 digits, under a limit of 10,000). That conversion is at most
+    _DISPLAY_FULL_INT_BITS bits and is charged to the render's budget first (_display_spend); None, the int
+    untested, when the budget cannot cover it."""
+    limit = sys.get_int_max_str_digits()
+    bits = value.bit_length()
+    if not limit or bits <= 3 * limit:
+        return False
+    if bits > _DISPLAY_FULL_INT_BITS:
+        return limit <= _DISPLAY_FULL_MAX_CHARS
+    if not _display_spend(budget, value):
+        return None
     try:
-        return repr(value)
+        repr(value)
     except ValueError:
-        if isinstance(value, int) and not isinstance(value, bool):
-            return "<oversized-int: {} bits>".format(value.bit_length())
-        return "<oversized-value>"
+        return True
+    return False
+
+
+def _display_take(out, room, text):
+    """Append to `out` the longest prefix of `text` that fits in `room` characters and ends on a whole atom (a
+    backslash escape in the x, u or U hex form, a backslash and the one character it escapes, or any other
+    single character), so a cut never splits an escape repr() or _escape_line_unsafe wrote. Only the first
+    room + _DISPLAY_ATOM_MAX characters are scanned. Returns (characters appended, whether all of `text` fit)."""
+    if len(text) <= room:
+        out.append(text)
+        return len(text), True
+    taken = 0
+    for atom in _DISPLAY_ATOM.findall(text, 0, room + _DISPLAY_ATOM_MAX):
+        if taken + len(atom) > room:
+            break
+        out.append(atom)
+        taken += len(atom)
+    return taken, False
+
+
+def _display_unsupported(value):
+    """The fixed marker for a value whose exact type is not on the allow-list: <unrenderable NAME>, NAME being
+    its type name read through the __name__ getter of type itself (_TYPE_NAME, so a metaclass __name__ never
+    runs), escaped and cut to _DISPLAY_NAME_MAX characters (a trailing ... marks a cut). A type name can be a
+    str subclass of any length, so it is read only through the str slots themselves (str.__len__, and
+    str.__getitem__ for an exact-str copy of its first _DISPLAY_NAME_MAX characters): no method of that
+    subclass runs and the copy is bounded whatever the name length. Nothing else is read: the __repr__, __str__
+    and __format__ of the value are never called."""
+    name = _TYPE_NAME.__get__(type(value))
+    head = str.__getitem__(name, slice(0, _DISPLAY_NAME_MAX))
+    text, count = _escape_bounded(head, _DISPLAY_NAME_MAX)
+    return "<unrenderable {}{}>".format(text, "" if count == str.__len__(name) else "...")
+
+
+def _display_leaf(value, budget):
+    """The bounded rendering of one non-container value, its work bounded by _DISPLAY_MAX_CHARS whatever the
+    value size, because every supported scalar is sized BEFORE it is converted: a str is cut on the value to its
+    first _DISPLAY_MAX_CHARS characters before repr() and, when cut, reports its length (...<str of N chars>);
+    a bytes longer than _DISPLAY_MAX_CHARS renders as <oversized-bytes: N bytes> and an int whose repr() would
+    be wider than _DISPLAY_MAX_CHARS characters (an exact test, _display_int) as <oversized-int: N bits>,
+    neither building its repr() (an int inside a container that trips the integer-string-conversion limit
+    never reaches here: _display_render renders the container as <oversized-value>); None, a bool, a float
+    and a supported date or time render through their built-in repr(); any other value is unsupported
+    (_display_unsupported). The text can exceed _DISPLAY_MAX_CHARS (a cut str repr() with its escapes); the
+    caller bounds it with _display_take. None for an int the conversion budget cannot cover (_display_int)."""
+    kind = type(value)
+    if kind is str:
+        if len(value) > _DISPLAY_MAX_CHARS:
+            return "{}...<str of {} chars>".format(repr(value[:_DISPLAY_MAX_CHARS]), len(value))
+        return repr(value)
+    if kind is bytes:
+        if len(value) > _DISPLAY_MAX_CHARS:
+            return "<oversized-bytes: {} bytes>".format(len(value))
+        return repr(value)
+    if kind is int:
+        return _display_int(value, budget)
+    if _display_scalar_ok(value):
+        return repr(value)
+    return _display_unsupported(value)
+
+
+def _display_brackets(kind, size):
+    """The (open, close) text repr() puts around a built-in container of the exact type `kind` holding `size`
+    members, so _display_render spells every container it renders exactly as repr() does."""
+    if kind is dict:
+        return "{", "}"
+    if kind is list:
+        return "[", "]"
+    if kind is tuple:
+        return "(", ",)" if size == 1 else ")"
+    if not size:
+        return kind.__name__ + "(", ")"
+    return ("{", "}") if kind is set else (kind.__name__ + "({", "})")
+
+
+def _display_snapshot(value):
+    """One bounded private copy of `value`, taken before anything is rendered: _display_render reads only this
+    copy, so a member another thread replaces after it was read is never rendered. Each member is read once
+    for each occurrence the walk reaches: a container the value holds more than once (aliased, repeated, or
+    on a cycle) is read again at each occurrence, each read checked as it is made, so its occurrences can
+    differ when another thread changes it in between. An entry is ("leaf", v) for a supported scalar
+    (_display_scalar_ok, so v is immutable and stays supported); ("text", marker) for an unsupported value (its
+    _display_unsupported marker, built at once); ("deep", marker) for a container _DISPLAY_MAX_DEPTH levels
+    deep (a depth marker, which _display_full reads as an incomplete copy); ("box", kind, members) for a
+    container of an exact _DISPLAY_CONTAINERS type, members being a fresh list of the entries of its members
+    (a dict as key, value, key, value); and _DISPLAY_STOP where the copy reached _DISPLAY_MAX_NODES values.
+    The walk is depth first in rendering order, iterative, and steps through each container with its built-in
+    iterator, so it copies at most _DISPLAY_MAX_NODES values and holds at most 2 * _DISPLAY_MAX_DEPTH + 1
+    iterators whatever the size, depth or width of the input. A frame ends when its iterator raises
+    StopIteration, never on a member compared with a marker, so any value supplied as data, an object of this
+    module included, is copied as a member like any other. It reads only exact built-in types (never len() of
+    a live container), so no method a caller can define runs."""
+    nodes = 0
+    top = []
+    frames = [(iter((value,)), top, 0, False)]   # (member iterator, entries copied, member depth, dict pairs)
+    while frames:
+        members, copied, depth, pairs = frames[-1]
+        try:
+            item = next(members)
+        except StopIteration:
+            frames.pop()
+            continue
+        if pairs:
+            frames.append((iter(item), copied, depth, False))   # a (key, value) pair from dict.items()
+        else:
+            nodes += 1
+            if nodes > _DISPLAY_MAX_NODES:
+                copied.append(_DISPLAY_STOP)
+                break
+            kind = type(item)
+            if not _display_kind(kind, _DISPLAY_CONTAINERS):
+                copied.append(("leaf", item) if _display_scalar_ok(item)
+                              else ("text", _display_unsupported(item)))
+            elif depth >= _DISPLAY_MAX_DEPTH:
+                copied.append(("deep", "<{} nested deeper than {} levels>".format(kind.__name__,
+                                                                                  _DISPLAY_MAX_DEPTH)))
+            else:
+                box = []
+                copied.append(("box", kind, box))
+                frames.append((iter(item.items() if kind is dict else item), box, depth + 1, kind is dict))
+    return top[0]
+
+
+def _display_render(snapshot, escape, budget):
+    """The bounded rendering of a _display_snapshot, spelled as repr() spells it: a leaf through _display_leaf,
+    a marker as itself, a box with the brackets and separators repr() writes. Rendering stops at
+    _DISPLAY_MAX_CHARS characters, cut on a whole escape (_display_take) and followed by ...<truncated>;
+    _DISPLAY_STOP stops it the same way. A container whose rendering reaches an int whose repr() trips the
+    integer-string-conversion limit (_display_int_trips) before the cut renders as <oversized-value> as a
+    whole, as _safe_display renders a complete copy holding one; an int past the cut is never read. An int
+    the render's conversion budget cannot cover, to test or to render (_display_spend), stops the rendering
+    where it stands, followed by _DISPLAY_SPENT; once _display_full has tested every int of a complete copy
+    and none trips (budget[1]), no int is tested again. With `escape`, each piece is escaped
+    (_escape_line_unsafe) BEFORE the cut, so escaping can never take the result over the bound; only the
+    first room + _DISPLAY_ATOM_MAX characters of a piece are escaped, since no more of it can fit. It keeps
+    its own work stack and never recurses; it reads only the snapshot."""
+    out = []
+    used = 0
+    marker = ""
+    stack = [snapshot]
+    while stack:
+        entry = stack.pop()
+        if entry is _DISPLAY_STOP:
+            marker = "...<truncated>"
+            break
+        if entry[0] == "leaf":
+            value = entry[1]
+            if entry is not snapshot and type(value) is int and not budget[1]:
+                trips = _display_int_trips(value, budget)
+                if trips:
+                    return "<oversized-value>"
+                if trips is None:
+                    marker = _DISPLAY_SPENT
+                    break
+            piece = _display_leaf(value, budget)
+            if piece is None:
+                marker = _DISPLAY_SPENT
+                break
+        elif entry[0] != "box":
+            piece = entry[1]   # a "text" or a "deep" marker
+        else:
+            kind, members = entry[1], entry[2]
+            piece, close = _display_brackets(kind, len(members))
+            stack.append(("text", close))
+            for i in range(len(members) - 1, -1, -1):
+                stack.append(members[i])
+                if i:
+                    stack.append(("text", ": " if kind is dict and i % 2 else ", "))
+        room = _DISPLAY_MAX_CHARS - used
+        if escape:
+            piece = _escape_line_unsafe(piece[:room + _DISPLAY_ATOM_MAX])
+        taken, whole = _display_take(out, room, piece)
+        used += taken
+        if not whole:
+            marker = "...<truncated>"
+            break
+    return "".join(out) + marker
+
+
+def _display_full_leaf(value, room, budget):
+    """The whole repr() of one supported scalar when that is at most `room` characters, else None, each sized
+    BEFORE it is converted so the work stays bounded by _DISPLAY_FULL_MAX_CHARS: a str whose length, with
+    the two quotes, already exceeds `room` and a bytes whose length, with b and the quotes, does, are never
+    converted, nor is an int of more than _DISPLAY_FULL_INT_BITS bits (more digits than any room) or one the
+    render's conversion budget cannot cover (_display_spend). None, a bool, a float and a supported date or
+    time have a short built-in repr()."""
+    kind = type(value)
+    if kind is str and len(value) + 2 > room:
+        return None
+    if kind is bytes and len(value) + 3 > room:
+        return None
+    if kind is int and (value.bit_length() > _DISPLAY_FULL_INT_BITS or not _display_spend(budget, value)):
+        return None
+    text = repr(value)
+    return text if len(text) <= room else None
+
+
+def _display_full(snapshot, escape, budget):
+    """The whole-value rendering of a COMPLETE _display_snapshot (no depth marker, no _DISPLAY_STOP: every
+    container at most _DISPLAY_MAX_DEPTH deep and at most _DISPLAY_MAX_NODES values in all), read from that
+    copy alone, or None when the copy is not complete, when the render's conversion budget cannot cover a
+    conversion the rendering needs (_display_spend), or when the rendering would be wider than
+    _DISPLAY_FULL_MAX_CHARS characters, where the caller renders the bounded form (_display_render). The copy
+    is found complete before any int is tested, so an incomplete copy renders in the bounded form whatever
+    ints it holds. Within those limits it is what repr() gives: every int is tested first, so when any int
+    the copy holds trips the integer-string-conversion limit (_display_int_trips) the result is
+    <oversized-int: N bits> for the int that is the whole value and <oversized-value> for a container,
+    whatever its width, as repr() raising ValueError gives; otherwise it records in budget[1] that no int
+    trips, and the result is the repr() of the copy, uncut, each leaf through _display_full_leaf and each
+    container with the brackets and separators repr() writes. With `escape`, each piece is escaped
+    (_escape_line_unsafe) and the width counts the escaped text. It keeps its own work stack and never
+    recurses."""
+    todo = [snapshot]
+    ints = []
+    while todo:
+        entry = todo.pop()
+        if entry is _DISPLAY_STOP or entry[0] == "deep":
+            return None
+        if entry[0] == "box":
+            todo.extend(entry[2])
+        elif entry[0] == "leaf" and type(entry[1]) is int:
+            ints.append(entry)
+    for entry in ints:
+        trips = _display_int_trips(entry[1], budget)
+        if trips is None:
+            return None
+        if trips:
+            if entry is snapshot:
+                return "<oversized-int: {} bits>".format(entry[1].bit_length())
+            return "<oversized-value>"
+    budget[1] = True
+    out = []
+    used = 0
+    stack = [snapshot]
+    while stack:
+        entry = stack.pop()
+        if entry[0] == "leaf":
+            piece = _display_full_leaf(entry[1], _DISPLAY_FULL_MAX_CHARS - used, budget)
+            if piece is None:
+                return None
+        elif entry[0] == "text":
+            piece = entry[1]
+        else:
+            kind, members = entry[1], entry[2]
+            piece, close = _display_brackets(kind, len(members))
+            stack.append(("text", close))
+            for i in range(len(members) - 1, -1, -1):
+                stack.append(members[i])
+                if i:
+                    stack.append(("text", ": " if kind is dict and i % 2 else ", "))
+        if escape:
+            piece = _escape_line_unsafe(piece)
+        used += len(piece)
+        if used > _DISPLAY_FULL_MAX_CHARS:
+            return None
+        out.append(piece)
+    return "".join(out)
+
+
+def _safe_display(value):
+    """Render a value for a FINDING MESSAGE (or a controlled-refusal message), BOUNDED in work and output and
+    NEVER RAISING (the one residual is item 6 below). Three hazards reach a message from a parsed manifest,
+    counters, version, worklog or record file. First, tomllib parses a hexadecimal, octal, or binary integer
+    literal (0x.../0o.../0b...) into an arbitrarily-large Python int with NO digit limit (the
+    integer-string-conversion limit applies to base-10 only, and sys.set_int_max_str_digits(0) lifts it), so
+    repr() of such an int either raises ValueError or runs in time and memory proportional to its size.
+    Second, tomllib builds a dotted table header or dotted key iteratively, so a header such as
+    [id.a.a ... .a] with 100,000 parts parses into a 100,000-level nested table whose repr() overflows the
+    stack (a RecursionError, "Stack overflow ... while getting the repr of an object", on CPython 3.14;
+    CPython 3.14.8 and later refuse a key of more than 1,000 dotted parts, so there one header nests at
+    most 1,000 levels, still past any depth bound here). Third, a wide array or a long string or bytes
+    value makes repr() run to megabytes. The contract:
+      1. Supported types are an explicit allow-list of EXACT types: None, bool, int, float, str, bytes,
+         datetime.date, datetime.datetime and datetime.time (with a tzinfo _display_time_ok admits), and
+         dict, list, tuple, set and frozenset. Any other value, a subclass of a supported type included,
+         renders as the fixed marker <unrenderable NAME> naming only its type (_display_unsupported): its
+         __repr__, __str__, __format__, __eq__ and __hash__ are never called, and no metaclass method runs.
+      2. Every supported scalar is sized BEFORE it is converted: against _DISPLAY_FULL_MAX_CHARS in the
+         whole rendering (_display_full_leaf), and against _DISPLAY_MAX_CHARS in the bounded one
+         (_display_leaf, where a bytes or an int over that bound renders a type-and-size marker without
+         building its repr(), and a str is cut on the value).
+      3. No container is passed to repr() or str(). The renderer takes ONE bounded copy first
+         (_display_snapshot: exact types only, at most _DISPLAY_MAX_NODES values and _DISPLAY_MAX_DEPTH
+         container levels) and renders only that copy (_display_full, else _display_render), spelling each
+         value as repr() does. A member another thread replaces after it was read is never rendered, and no
+         method a caller can define runs on the value. Each member is read once for each occurrence the copy
+         reaches, so a container the value holds more than once (aliased, repeated, or on a cycle) is read at
+         each occurrence, each read checked as it is made, and its occurrences can differ when another thread
+         changes it in between.
+      4. A value whose members are all supported and whose containers nest at most _DISPLAY_MAX_DEPTH deep
+         and hold at most _DISPLAY_MAX_NODES values in all renders by the whole-value rule (_display_full):
+         when an int it holds trips the integer-string-conversion limit (_display_int_trips), as
+         <oversized-int: N bits> if it is that int and as <oversized-value> if it is a container, whatever
+         its width (unless the conversion budget of item 5 runs out first, item 6); otherwise, when its
+         repr() is at most _DISPLAY_FULL_MAX_CHARS characters, as repr(value), byte for byte and uncut. That
+         is the whole byte-identity guarantee, and the conversion budget never stops such a value (item 5).
+         Past any of those limits (depth, values, width), or when the budget cannot cover a conversion the
+         whole-value rule needs, it renders in the bounded form (_display_render): content cut on a whole
+         escape at _DISPLAY_MAX_CHARS characters and followed by ...<truncated>, a container whose rendering
+         reaches an int that trips the limit before the cut rendered as <oversized-value> as a whole, an int
+         wider than _DISPLAY_MAX_CHARS characters that does not trip it shown in place as its
+         <oversized-int: N bits> size marker, and an int the budget cannot cover stopping the rendering
+         there, followed by ...<int conversion budget spent>. So a value past a limit differs from repr() even when
+         short (a scalar nested 33 levels deep shows a depth marker; a cyclic list shows its expansion up to
+         the bounds). A str renders as repr() when that is at most _DISPLAY_FULL_MAX_CHARS characters, and
+         otherwise as the longest whole-escape prefix of at most _DISPLAY_MAX_CHARS characters of the repr()
+         of its first _DISPLAY_MAX_CHARS characters, followed by ...<str of N chars>.
+      5. The result is at most _DISPLAY_FULL_MAX_CHARS characters: a whole rendering is at most that, and a
+         bounded one at most _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX characters (content of at most
+         _DISPLAY_MAX_CHARS characters, cut on a whole escape, and the one marker that ends it: ...<truncated>,
+         14 characters, ...<int conversion budget spent>, 32, or ...<str of N chars>, at most 37, N being a str
+         length and so at most sys.maxsize). The work is bounded by the _DISPLAY_ constants whatever the size,
+         depth or width of the input, with one exception (below). An int is converted only when it has at
+         most _DISPLAY_FULL_INT_BITS bits, and each conversion is charged its bit length to the render's
+         budget before it is made (_display_spend), so the conversions of one render total at most
+         _DISPLAY_INT_BUDGET_BITS bits (8,388,608). A value the byte-identity guarantee covers converts fewer
+         than 440,000 bits: each int it converts, at most twice, has its digits in a repr() of at most
+         _DISPLAY_FULL_MAX_CHARS characters. The exception: a set or dict
+         whose table deletions left sparse is scanned by its built-in iterator up to the size the table
+         reached, so stepping through its members takes time in proportion to that size, not to the members
+         left. A value tomllib builds holds no set and no table it deleted from, so a parsed value cannot
+         reach this.
+      6. Residual: a MemoryError, a RuntimeError (another thread resizing a dict or set while it is copied) or
+         a ValueError (another thread changing the integer-string-conversion limit during a render among
+         them) yields the fixed placeholder <unrenderable-value>; an asynchronous exception (KeyboardInterrupt,
+         or one a signal handler raises) is not caught and propagates. A container another thread changes
+         while it is copied, in a way its iterator does not refuse (a list, a replaced dict value, a set
+         changed at the same size), renders the members the copy read, each checked as it was read. A
+         finalizer the garbage collector runs during a render is outside the value and is not prevented. With
+         the integer-string-conversion limit raised above _DISPLAY_FULL_MAX_CHARS digits, an int of more than
+         _DISPLAY_FULL_INT_BITS bits is never converted, so whether its repr() trips that limit is not
+         decided: it is taken as not tripping, and, being wider than _DISPLAY_FULL_MAX_CHARS characters, it
+         renders in the bounded form, as its size marker in place, where repr() could raise ValueError. The
+         conversion budget changes no output with no limit or with a limit of at most the default 4,300
+         digits: with no limit no int is converted to test it, and under such a limit an int that does not
+         trip has at most 4,300 digits (14,285 bits), so a render converts at most 7,547,494 bits (the worst
+         case tests 510 such ints before one of _DISPLAY_FULL_INT_BITS bits that trips), within
+         _DISPLAY_INT_BUDGET_BITS. With the limit raised, a value whose ints need more than the budget
+         to test or to render renders in the bounded form and stops at the first int the budget cannot cover,
+         with ...<int conversion budget spent>, where without the budget it renders as <oversized-value> when
+         an int it holds trips the limit and otherwise in the bounded form with each int in place.
+    So the message is always produced and the caller still records its finding or refusal (fail-closed;
+    guard-input-soundness). It is the shared message-rendering guard for the finding-message idiom across
+    the three OPF pass-A validators (store, schema, release), the doctor and the record verb. Like
+    _sorted_key_names it is for MESSAGE rendering ONLY; it is deliberately NOT used on the byte-stable
+    coverage digest, where an oversized int or a too-deep value fails closed with a ReleaseError instead (a
+    marker in the digest would change the bytes; spec 6.1)."""
+    try:
+        budget = [_DISPLAY_INT_BUDGET_BITS, False]
+        if type(value) is str:
+            text = _display_full_leaf(value, _DISPLAY_FULL_MAX_CHARS, budget)
+            if text is not None:
+                return text
+            out = []
+            _display_take(out, _DISPLAY_MAX_CHARS, repr(value[:_DISPLAY_MAX_CHARS]))
+            return "{}...<str of {} chars>".format("".join(out), len(value))
+        snapshot = _display_snapshot(value)
+        text = _display_full(snapshot, False, budget)
+        return _display_render(snapshot, False, budget) if text is None else text
+    except (MemoryError, RuntimeError, ValueError):
+        return "<unrenderable-value>"
+
+
+def _escape_char(ch):
+    """One character as _escape_line_unsafe writes it: itself when printable, else its backslash escape."""
+    if ch.isprintable():
+        return ch
+    o = ord(ch)
+    return ("\\x{:02x}".format(o) if o <= 0xff
+            else "\\u{:04x}".format(o) if o <= 0xffff
+            else "\\U{:08x}".format(o))
 
 
 def _escape_line_unsafe(s):
@@ -1443,37 +2013,69 @@ def _escape_line_unsafe(s):
     ordinary space) byte-for-byte. `str.isprintable()` is the authority for what may sit on a single
     diagnostic line. This keeps an untrusted value from forging an extra finding line ('x\\nFORGED') or
     hiding/steering text with format characters (codex round-6; guard-input-soundness / no-concealed-failure
-    applied to a diagnostic renderer)."""
+    applied to a diagnostic renderer). Its output is unbounded (up to ten characters per input character);
+    a finding message bounds it through _escape_bounded or _display_take."""
+    return "".join(_escape_char(ch) for ch in s)
+
+
+def _escape_bounded(s, room):
+    """(text, count): _escape_line_unsafe of the longest prefix of the exact str `s` whose escaped form fits in
+    `room` characters, cut only between whole escapes, and the number of characters of `s` it covers (equal
+    to len(s) when nothing was cut). At most `room` characters of `s` are read, since each escapes to at
+    least one character."""
     out = []
-    for ch in s:
-        if ch.isprintable():
-            out.append(ch)
-        else:
-            o = ord(ch)
-            out.append("\\x{:02x}".format(o) if o <= 0xff
-                       else "\\u{:04x}".format(o) if o <= 0xffff
-                       else "\\U{:08x}".format(o))
-    return "".join(out)
+    used = 0
+    count = 0
+    for ch in s[:room]:
+        piece = _escape_char(ch)
+        used += len(piece)
+        if used > room:
+            break
+        out.append(piece)
+        count += 1
+    return "".join(out), count
 
 
 def _safe_str(value):
     """The str()-style companion of _safe_display, for a finding-message position that renders a value with
     {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
-    (<version>)` label, for instance. Returns str(value) with any NON-PRINTABLE character escaped to a
+    (<version>)` label, for instance. It shares the allow-list, the sizing before conversion, the bounded copy,
+    the limits, the conversion budget and the residual of _safe_display, and its result is likewise at most
+    _DISPLAY_FULL_MAX_CHARS characters. A str renders with every NON-PRINTABLE character escaped to a
     backslash form (_escape_line_unsafe), so a value carrying a control character cannot inject a second
-    diagnostic line; a value whose str is entirely printable (a normal string or int) renders exactly as it
-    did before, byte for byte. Only a value whose str trips the base-10 integer-string-conversion limit (an
-    oversized non-decimal int parsed from TOML, or a container holding one) returns the same bounded marker
-    _safe_display uses (fail-closed). Unlike _safe_display, which renders through repr() and so already
+    diagnostic line; a str whose ESCAPED form is at most _DISPLAY_FULL_MAX_CHARS characters renders as that
+    escaped form, uncut, byte for byte, and a longer one is cut on a whole escape at _DISPLAY_MAX_CHARS
+    characters (_escape_bounded) and followed by ...<str of N chars>. A supported date or time renders as its
+    built-in str(). Every other value renders from its _display_snapshot as _safe_display renders it, by the
+    whole-value rule within the limits (_display_full) and in the bounded form past them (_display_render),
+    with each piece escaped BEFORE the width is measured or the cut is made, so escaping never takes the
+    result over either bound: a built-in container renders as _safe_display does (its str() IS its repr(),
+    and repr() escapes every character str.isprintable() rejects, so the escape changes nothing), an exact
+    int, float, bool, None or bytes as its repr() (which equals its str()), an int that trips the
+    integer-string-conversion limit as the oversized-int marker alone and as <oversized-value> for a
+    container holding it, and an unsupported type as <unrenderable NAME>, and no __str__ or __repr__ a caller
+    can define is called.
+    Unlike _safe_display, which renders through repr() and so already
     escapes controls, this str()-based renderer must escape them itself (the store/release sibling the
     schema newline-hardening left exposed; codex round-6). It is for MESSAGE rendering only, never the
     byte-stable coverage digest."""
     try:
-        return _escape_line_unsafe(str(value))
-    except ValueError:
-        if isinstance(value, int) and not isinstance(value, bool):
-            return "<oversized-int: {} bits>".format(value.bit_length())
-        return "<oversized-value>"
+        kind = type(value)
+        if kind is str:
+            if len(value) <= _DISPLAY_FULL_MAX_CHARS:
+                text, count = _escape_bounded(value, _DISPLAY_FULL_MAX_CHARS)
+                if count == len(value):
+                    return text
+            text, count = _escape_bounded(value, _DISPLAY_MAX_CHARS)
+            return "{}...<str of {} chars>".format(text, len(value))
+        if _display_kind(kind, _DISPLAY_TIMES) and _display_time_ok(value):
+            return _escape_line_unsafe(str(value))
+        snapshot = _display_snapshot(value)
+        budget = [_DISPLAY_INT_BUDGET_BITS, False]
+        text = _display_full(snapshot, True, budget)
+        return _display_render(snapshot, True, budget) if text is None else text
+    except (MemoryError, RuntimeError, ValueError):
+        return "<unrenderable-value>"
 
 
 def _is_item_collection(value):
@@ -1515,9 +2117,12 @@ def _materialize_majors(value):
     return out
 
 
-def validate_manifest(data, supported_profiles=None):
+def validate_manifest(data, supported_profiles=None, *, manifest_rel=None):
     """Validate a parsed manifest against the base schema and, for each SUPPORTED profile, the profile
     schema. Returns a ManifestValidation.
+
+    manifest_rel is the store-relative path the manifest was read from, where the caller knows it; the
+    refusal of an older spec_version names it (spec 9.2), and None names "the store manifest" instead.
 
     supported_profiles is a mapping {profile_name: iterable of supported MAJOR ints}; empty or None
     means BASE-ONLY (every declared profile is recorded as present-but-unevaluated, never enforced,
@@ -1580,7 +2185,7 @@ def validate_manifest(data, supported_profiles=None):
 
     findings = []
     _validate_top_level(data, findings)
-    spec_tuple = _validate_base(base, findings)
+    spec_tuple = _validate_base(base, findings, manifest_rel)
     _validate_store_section(data.get("store"), findings)
     modules_enabled = _validate_modules(data.get("modules"), findings)
     registered_vendors = _validate_vendors(data.get("vendors"), findings)
@@ -1650,8 +2255,9 @@ def _check_enum(table, key, allowed, where, findings):
     return value
 
 
-def _validate_base(base, findings):
-    """Validate the [opf] base table; returns the parsed spec_version tuple or None."""
+def _validate_base(base, findings, manifest_rel=None):
+    """Validate the [opf] base table; returns the parsed spec_version tuple or None. manifest_rel is
+    the path validate_manifest was given, named by the older-spec_version refusal."""
     extra = set(base) - OPF_KEYS - OPF_OPTIONAL_KEYS
     if extra:
         findings.append("[opf] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
@@ -1678,11 +2284,19 @@ def _validate_base(base, findings):
             # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
             # a message selected above a shared censused append keeps each wording reviewable without
             # widening that set.
+            # The older refusal names the manifest path and the declared spec_version, states that no
+            # store upgrade reaches spec_version 2.0.0 (spec 9.2 defines none, and the 1.0.0 and 1.1.0
+            # route to 1.2.0 is not one), and states the hand step spec 9.2 gives a tree under a refused older
+            # manifest: the operator moves that manifest aside by hand (no OPF command writes it), after
+            # which its files are ordinary foreign content for a first adoption.
             if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
-                mismatch = ("[opf].spec_version {} is older than the {} this tooling implements; "
-                            "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
-                            "(spec 9.x; fail-closed)".format(
-                                _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
+                where = "the store manifest" if manifest_rel is None else _safe_display(manifest_rel)
+                mismatch = ("{} declares [opf].spec_version {}, older than the {} this tooling "
+                            "implements; no store upgrade reaches spec_version 2.0.0, so the store is "
+                            "refused; to adopt this tree instead, first move {} aside by hand: "
+                            "its files are then ordinary foreign content for a first adoption "
+                            "(spec 9.2; fail-closed)".format(
+                                where, _safe_display(sv), SUPPORTED_SPEC_VERSION, where))
             else:
                 mismatch = ("[opf].spec_version {} is above the {} this tooling implements; "
                             "upgrade the tooling before operating on this store "
@@ -1699,11 +2313,25 @@ def _validate_base(base, findings):
     # value is a fail-closed finding. Absence means generation 1 and is not a finding: the key becomes
     # REQUIRED only when homes 2 activates (L4). This validates the DECLARATION; homes_generation()
     # decides ACTIVATION and does not activate while SUPPORTED_HOMES == 1.
+    # homes = 2 is a valid declaration only inside the homes-2 declaration pair, spec_version
+    # HOMES2_SPEC_VERSION with homes = 2 (spec 4.2 / 9.2), so homes = 2 beside any other spec_version,
+    # an absent or unparseable one included, is a fail-closed finding for every caller of
+    # validate_manifest, not only for the record verb's journal-home probe. The check keys on the
+    # declared pair alone, never on SUPPORTED_SPEC_VERSION or SUPPORTED_HOMES. A malformed homes value
+    # keeps its own finding and never reaches the pair check. Both findings share this ONE censused
+    # emission site, as the spec_version mismatch findings above do.
     if "homes" in base:
         homes = base["homes"]
+        homes_finding = None
         if type(homes) is not int or homes not in (1, 2):
-            findings.append("[opf].homes {} is not an integer generation (1 or 2)".format(
-                _safe_display(homes)))
+            homes_finding = "[opf].homes {} is not an integer generation (1 or 2)".format(
+                _safe_display(homes))
+        elif homes == 2 and sv != HOMES2_SPEC_VERSION:
+            homes_finding = ("[opf].homes = 2 is declared with spec_version {}, but homes 2 is "
+                             "declared only by spec_version {} with homes = 2 (spec 4.2 / 9.2; "
+                             "fail-closed)".format(_safe_display(sv), HOMES2_SPEC_VERSION))
+        if homes_finding is not None:
+            findings.append(homes_finding)
     return spec_tuple
 
 
@@ -2060,13 +2688,20 @@ def load_manifest(resolution, supported_profiles=None):
     try:
         data = _read_toml_contained(store_root_fd, manifest_rel)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])
-    return validate_manifest(data, supported_profiles)
+    return validate_manifest(data, supported_profiles, manifest_rel=manifest_rel)
 
 
 # --- self-test ---------------------------------------------------------------------------------------
@@ -2226,7 +2861,7 @@ def self_test():
         root = build_store(make_working=False)
         check("no-store-not-adopted", resolve_store(root).status == NOT_ADOPTED)
 
-        # 3b (codex BLOCKER 1, TOCTOU): the product root is a readable directory when resolve_store opens
+        # 3b (TOCTOU): the product root is a readable directory when resolve_store opens
         # its fd, then is renamed/removed at the resolution boundary before the default-location check. That
         # disappearance is a product root that could no longer be evaluated (CANNOT-EVALUATE, exit 2), NEVER
         # a false NOT-ADOPTED that render --check would report as a clean NOT-APPLICABLE (exit 0). Simulate
@@ -2283,16 +2918,16 @@ def self_test():
         root = build_store(manifest=manifest_text(standard="dev-process"))
         check("typo-token-default-cannot-eval", resolve_store(root).status == CANNOT_EVALUATE)
 
-        # 6c (m2): a RETIRED [devprocess] 1.0.0 store discovered with the DEFAULT tokens is present-but-
-        # legacy: resolution is CANNOT-EVALUATE (fail-closed, never resolved on the retired token) and the
-        # operator-facing detail names the `opf upgrade` migration remedy (spec 9.2), mirroring the older-
-        # spec finding _validate_base surfaces on an already-[opf] store.
-        legacy_manifest = ('[devprocess]\nstandard = "devprocess"\nspec_version = "1.0.0"\n'
-                           'layout = "inline"\nposture = "required"\nimport_status = "none"\n')
-        legacy_res = resolve_store(build_store(manifest=legacy_manifest))
-        check("legacy-devprocess-default-cannot-eval", legacy_res.status == CANNOT_EVALUATE)
-        check("legacy-devprocess-names-upgrade-remedy",
-              "devprocess" in legacy_res.detail and "opf upgrade" in legacy_res.detail)
+        # 6c: a manifest whose base table is not [opf] (here a [devprocess] table declaring that token) is
+        # no discovery match: resolution is CANNOT-EVALUATE (fail-closed, never resolved), and the detail
+        # is the plain no-match detail, recognizing no other token and naming no upgrade route.
+        other_manifest = ('[devprocess]\nstandard = "devprocess"\nspec_version = "1.0.0"\n'
+                          'layout = "inline"\nposture = "required"\nimport_status = "none"\n')
+        other_res = resolve_store(build_store(manifest=other_manifest))
+        check("other-token-default-cannot-eval", other_res.status == CANNOT_EVALUATE)
+        check("other-token-detail-names-no-route",
+              other_res.detail == ".working/ is present but no .working/*/manifest.toml declares "
+                                  "standard = 'opf'")
 
         # 7: an unresolvable pointer (target dir absent) -> CANNOT-EVALUATE, no default fallback.
         root = build_store(manifest=manifest_text(),      # a valid default store IS present...
@@ -2426,15 +3061,41 @@ def self_test():
         check("wrong-typed-posture-named", any("posture must be a string" in f for f in aware.findings))
 
         # 10g: a store declaring a spec_version OLDER than SUPPORTED_SPEC_VERSION is fail-closed with a
-        # distinct migration-needed finding naming the `opf upgrade` remedy (not the confusing roster
-        # cascade); a store at the current spec_version is clean.
+        # distinct finding stating that no store upgrade reaches 2.0.0 (not the confusing roster
+        # cascade, and naming no upgrade command); a store at the current spec_version is clean.
         m_old = _t.loads(manifest_text(spec_version="1.0.0"))
         mv_old = validate_manifest(m_old)
         check("spec-version-floor-invalid", mv_old.status == INVALID)
         check("spec-version-floor-named",
-              any("older than the" in f and "opf upgrade" in f for f in mv_old.findings))
+              any("older than the" in f and "no store upgrade reaches spec_version 2.0.0" in f
+                  and "opf upgrade" not in f for f in mv_old.findings))
+        # The older refusal names the manifest path and the declared spec_version, states that no
+        # store upgrade reaches 2.0.0 and that the store is refused, and states the hand step
+        # (spec 9.2), pinned whole: rewording it, dropping the path or the hand step, or offering an
+        # upgrade again, is red.
+        floor_rel = ".working/toml/manifest.toml"
+        floor_message = (
+            "'.working/toml/manifest.toml' declares [opf].spec_version '1.0.0', older than the 1.2.0 "
+            "this tooling implements; no store upgrade reaches spec_version 2.0.0, so the store is "
+            "refused; to adopt this tree instead, first move '.working/toml/manifest.toml' "
+            "aside by hand: its files are then ordinary foreign content for a first adoption "
+            "(spec 9.2; fail-closed)")
+        check("spec-version-floor-message-pinned",
+              SUPPORTED_SPEC_VERSION == "1.2.0"
+              and floor_message in validate_manifest(m_old, manifest_rel=floor_rel).findings)
+        check("spec-version-floor-message-unnamed-path",
+              any(f.startswith("the store manifest declares [opf].spec_version '1.0.0',")
+                  and "no store upgrade reaches spec_version 2.0.0, so the store is refused" in f
+                  and "first move the store manifest aside by hand" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
+        # 10g1: load_manifest threads the RESOLVED manifest's own path into validation, so the
+        # older-spec_version refusal read through store resolution names that path, never the
+        # "the store manifest" fallback.
+        mv_old_loaded = load_manifest(resolve_store(
+            build_store(manifest=manifest_text(spec_version="1.0.0"))))
+        check("spec-version-floor-load-manifest-names-path",
+              mv_old_loaded.status == INVALID and floor_message in mv_old_loaded.findings)
 
         # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SUPPORTED_SPEC_VERSION is fail-closed at
         # validation with its own named finding, so older tooling never certifies a newer store (a bare
@@ -2458,7 +3119,8 @@ def self_test():
               validate_manifest(_t.loads(above_pair)).status == INVALID)
 
         # 10h: [opf].homes is an optional, validated integer generation declaration.
-        # Recognition does not activate homes 2 or require a declaration in legacy manifests.
+        # Recognition does not activate homes 2 or require a declaration in legacy manifests, and
+        # homes = 2 is valid only inside the homes-2 declaration pair (spec 4.2 / 9.2).
         homes_manifest_text = manifest_text(spec_version=SUPPORTED_SPEC_VERSION)
         homes_anchor = 'import_status = "none"'
         check("homes-fixture-anchor", homes_manifest_text.count(homes_anchor) == 1)
@@ -2472,16 +3134,35 @@ def self_test():
         check("homes-absent-legacy-generation",
               homes_generation(m_homes_absent) == 1)
 
-        for generation in (1, 2):
-            m_homes = _t.loads(homes_manifest_text.replace(
-                homes_anchor, homes_anchor + "\nhomes = {}".format(generation)))
-            mv_homes = validate_manifest(m_homes)
-            check("homes-{}-valid".format(generation),
-                  type(m_homes["opf"].get("homes")) is int
-                  and m_homes["opf"]["homes"] == generation
-                  and mv_homes.status == VALID
-                  and not any("unknown key" in f or "[opf].homes" in f
-                              for f in mv_homes.findings))
+        m_homes = _t.loads(homes_manifest_text.replace(homes_anchor, homes_anchor + "\nhomes = 1"))
+        mv_homes = validate_manifest(m_homes)
+        check("homes-1-valid",
+              type(m_homes["opf"].get("homes")) is int
+              and m_homes["opf"]["homes"] == 1
+              and mv_homes.status == VALID
+              and not any("unknown key" in f or "[opf].homes" in f
+                          for f in mv_homes.findings))
+
+        # homes = 2 outside the declaration pair is INVALID with exactly one named finding: at this
+        # tooling's spec_version, below it, above it, unparseable, and with spec_version absent. The
+        # versions are literals, never SUPPORTED_SPEC_VERSION, so each stays off the pair whatever that
+        # constant becomes. Each vector rebuilds only the [opf] table of the manifest parsed above.
+        for label, version in (("base", "1.2.0"), ("older", "1.0.0"), ("above", "1.3.0"),
+                               ("unparseable", "bad"), ("absent", None)):
+            opf_off_pair = dict(m_homes["opf"], homes=2, spec_version=version)
+            if version is None:
+                del opf_off_pair["spec_version"]
+            mv_off_pair = validate_manifest(dict(m_homes, opf=opf_off_pair))
+            check("homes-2-off-pair-{}-invalid-named".format(label),
+                  mv_off_pair.status == INVALID
+                  and sum("[opf].homes = 2 is declared with spec_version" in f
+                          and HOMES2_SPEC_VERSION in f for f in mv_off_pair.findings) == 1)
+        # The pair itself stays VALID (spec-version-ceiling-homes2-pair-recognized, above) and carries
+        # no homes finding.
+        check("homes-2-pair-no-homes-finding",
+              not any("[opf].homes" in f for f in validate_manifest(
+                  dict(m_homes, opf=dict(m_homes["opf"], homes=2,
+                                         spec_version=HOMES2_SPEC_VERSION))).findings))
 
         for label, rhs in (
                 ("zero", "0"),
@@ -3657,6 +4338,575 @@ def self_test():
         check("r6-safe-str-controls-composed",
               all(chr(10) not in _safe_str(k) for k in ("a" + chr(10) + "b", "plain")))
 
+        # Deep, wide and long values: _safe_display and _safe_str are bounded and never raise, and within the
+        # bounds they spell a value as repr() does. A table nested 100,000 levels deep (what tomllib builds from
+        # a 100,000-part dotted header) runs in a bounded child, so a RecursionError ("Stack overflow ... while
+        # getting the repr of an object") that escapes a renderer is the ERROR:RecursionError sentinel, never a
+        # crash of this suite. Each check and a faulty renderer that turns it red: deep-table-bounded, one that
+        # calls repr() on the table (the RecursionError, a RuntimeError, renders the placeholder
+        # <unrenderable-value>) or has no depth bound (no depth marker then); wide-array-bounded and
+        # long-str-bounded, one that never cuts at _DISPLAY_MAX_CHARS characters; small-values-byte-identical
+        # (a value within the bounds whose repr() is at most _DISPLAY_FULL_MAX_CHARS characters renders as
+        # repr(), uncut, and a str whose escaped form is that short as the escaped str()), one that spells a
+        # supported value otherwise, a one-member tuple without its comma for instance;
+        # depth-at-bound-byte-identical, a depth bound one level lower; depth-past-bound-marker, a depth bound
+        # one level higher. A value past a limit renders in the bounded form by design (see _safe_display), so
+        # a message is byte-identical to its earlier form only when every value it renders is within them.
+        _dr_cap = _DISPLAY_MAX_CHARS + _DISPLAY_MARKER_MAX
+
+        def _dr_deep_render():
+            deep = cur = {}
+            for _ in range(100000):
+                cur["a"] = {}
+                cur = cur["a"]
+            shown, text = _safe_display(deep), _safe_str(deep)
+            return "{}|{}".format(len(shown) <= _dr_cap and "nested deeper than" in shown,
+                                  len(text) <= _dr_cap and "nested deeper than" in text)
+        check("deeprender-deep-table-bounded", run_bounded(_dr_deep_render, timeout_s=60) == "True|True")
+        _dr_wide = list(range(1000000))
+        check("deeprender-wide-array-bounded",
+              len(_safe_display(_dr_wide)) == _DISPLAY_MAX_CHARS + len("...<truncated>")
+              and _safe_display(_dr_wide).endswith("...<truncated>")
+              and _safe_str(_dr_wide) == _safe_display(_dr_wide))
+        _dr_long = "x" * 1000000
+        check("deeprender-long-str-bounded",
+              _safe_display(_dr_long) == chr(39) + "x" * (_DISPLAY_MAX_CHARS - 1) + "...<str of 1000000 chars>"
+              and _safe_str(_dr_long) == "x" * _DISPLAY_MAX_CHARS + "...<str of 1000000 chars>")
+        _dr_hour = datetime.timedelta(hours=5)
+        _dr_small = [None, True, 7, 1.5, "BI-1", "x" + chr(10) + "y", [1, "x", {"a": 2}], {"k": (1,)}, (), (1,),
+                     set(), frozenset(), {3}, frozenset({4}), {"a": [[[]]]}, "x" * 1000, b"a" + bytes(2),
+                     datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc), datetime.time(1, 2, 3),
+                     datetime.date(2026, 1, 2), datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone(-_dr_hour))]
+        check("deeprender-small-values-byte-identical",
+              all(_safe_display(v) == repr(v) for v in _dr_small)
+              and all(_safe_str(v) == _escape_line_unsafe(str(v)) for v in _dr_small))
+        _dr_nest = _dr_cur = []
+        for _ in range(_DISPLAY_MAX_DEPTH - 1):
+            _dr_cur.append([])
+            _dr_cur = _dr_cur[0]
+        check("deeprender-depth-at-bound-byte-identical", _safe_display(_dr_nest) == repr(_dr_nest))
+        check("deeprender-depth-past-bound-marker", _safe_display([_dr_nest]) == "[" * _DISPLAY_MAX_DEPTH
+              + "<list nested deeper than {} levels>".format(_DISPLAY_MAX_DEPTH) + "]" * _DISPLAY_MAX_DEPTH)
+        # The ESCAPED output is bounded exactly. Past the width limit (_DISPLAY_FULL_MAX_CHARS
+        # characters of repr() or of escaped str()), content is cut on a whole escape at _DISPLAY_MAX_CHARS
+        # characters, never splitting one, and followed by its marker (each marker is measured on renderer
+        # output by deeprender-marker-max-is-the-longest-marker, below); at the width limit the escaped form is
+        # whole, and one character more is cut. Each input is past the width limit (16,385 NULs escape to
+        # 65,540 characters, 6,554 astral characters to 65,540). The escaped-str check is red on a renderer that
+        # escapes after its cut, without a budget, and the whole-escape check on one whose cut splits an escape
+        # (each piece it cuts is already a repr(), whose escapes are printable text).
+        _dr_nul, _dr_astral = chr(0) * 16385, chr(0x1000C) * 6554
+        check("deeprender-escaped-str-bound-exact",
+              _safe_str(_dr_nul) == "\\x00" * 256 + "...<str of 16385 chars>"
+              and _safe_str(_dr_astral) == "\\U0001000c" * 102 + "...<str of 6554 chars>"
+              and _safe_str(chr(10) * 20000) == "\\x0a" * 256 + "...<str of 20000 chars>"
+              and _safe_display(_dr_nul) == chr(39) + "\\x00" * 255 + "...<str of 16385 chars>"
+              and _safe_str(chr(0) * 16384) == "\\x00" * 16384
+              and _safe_display("x" * (_DISPLAY_FULL_MAX_CHARS - 2)) == repr("x" * (_DISPLAY_FULL_MAX_CHARS - 2))
+              and _safe_display("x" * (_DISPLAY_FULL_MAX_CHARS - 1))
+              == chr(39) + "x" * (_DISPLAY_MAX_CHARS - 1) + "...<str of 65535 chars>"
+              and all(len(f(v)) <= _dr_cap for f in (_safe_display, _safe_str)
+                      for v in (_dr_nul, _dr_astral, chr(0x2028) * 11000, bytes(16384), [_dr_astral] * 4)))
+        check("deeprender-cut-on-whole-escape",
+              _safe_display([chr(0x1000C) * 6554]) == "[" + chr(39) + "\\U0001000c" * 102 + "...<truncated>"
+              and _safe_str([bytes(1024), "x" * _DISPLAY_FULL_MAX_CHARS])
+              == "[b" + chr(39) + "\\x00" * 255 + "...<truncated>")
+        # Every supported scalar is sized BEFORE it is converted, so rendering a bytes or an int far
+        # over the bound neither builds its repr() nor allocates in proportion to it (a convert-first renderer
+        # allocated about 2 MB for a 1,000,000-byte value, and about 1.7 MB for a 100,000-digit hexadecimal int
+        # under a lifted integer-string limit). The traced peak covers the renders only. With the limit
+        # lifted neither value trips it, and each is past the width limit, so the pair renders in the bounded
+        # form with each size marker in place (an int that trips the limit makes its container
+        # <oversized-value> instead, checked next).
+        import tracemalloc
+        _dr_bytes = b"x" * 1000000
+        _dr_idlimit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(0)
+        _dr_trace = not tracemalloc.is_tracing()
+        if _dr_trace:
+            tracemalloc.start()
+        try:
+            _dr_hex = int("f" * 100000, 16)
+            tracemalloc.reset_peak()
+            _dr_base = tracemalloc.get_traced_memory()[0]
+            _dr_sized = (_safe_display(_dr_bytes), _safe_str(_dr_bytes), _safe_display(_dr_hex),
+                         _safe_str(_dr_hex), _safe_display([_dr_hex, _dr_bytes]))
+            _dr_peak = tracemalloc.get_traced_memory()[1] - _dr_base
+        finally:
+            if _dr_trace:
+                tracemalloc.stop()
+            sys.set_int_max_str_digits(_dr_idlimit)
+        check("deeprender-scalars-sized-before-repr",
+              _dr_sized == ("<oversized-bytes: 1000000 bytes>",) * 2 + ("<oversized-int: 400000 bits>",) * 2
+              + ("[<oversized-int: 400000 bits>, <oversized-bytes: 1000000 bytes>]",) and _dr_peak < 65536)
+        # The whole-value rule for an int whose repr() trips the integer-string-conversion limit: alone it
+        # renders as <oversized-int: N bits>, and a container holding it renders as <oversized-value> as a
+        # whole, as repr() raising ValueError gives. That holds within the limits, whatever the width (a
+        # 70,000-character str beside the int changes nothing), and past them for an int the bounded rendering
+        # reaches before its cut (the list of 601 values is past the value bound); an int the copy never
+        # reaches is never read. The int-to-str limit is pinned to the default and restored, so the verdict
+        # comes from the code under test. Red on a renderer that skips the whole-value test of a complete copy
+        # ([10 ** 5000] then renders as the placeholder <unrenderable-value>, its conversion raising) and on
+        # one whose bounded form does not test the ints it reaches (the list of 601 values then shows the
+        # int's size marker in place).
+        _dr_idlimit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(4300)
+        try:
+            _dr_unread = _safe_display([0] * 600 + [10 ** 5000])
+            check("deeprender-oversized-int-in-container-whole-value-marker",
+                  _safe_display(10 ** 5000) == "<oversized-int: 16610 bits>"
+                  and _safe_str(10 ** 5000) == "<oversized-int: 16610 bits>"
+                  and _safe_display([10 ** 5000]) == _safe_str([10 ** 5000]) == "<oversized-value>"
+                  and _safe_display(["x" * 70000, 10 ** 5000]) == "<oversized-value>"
+                  and _safe_display([10 ** 5000] + [0] * 600) == _safe_str([10 ** 5000] + [0] * 600)
+                  == "<oversized-value>"
+                  and _dr_unread.startswith("[0, 0, ") and _dr_unread.endswith("...<truncated>"))
+            # A copy that is not complete (here it holds a depth marker) renders in the bounded form, and the
+            # copy is found incomplete before any int is tested, so an int past the cut is never read: the int
+            # below follows a 2,000-character str that the cut ends in. Red on a renderer that tests the ints
+            # while it looks for a depth marker: it reaches the int, which trips the limit, before the marker,
+            # and renders the whole value as <oversized-value>.
+            _dr_past = [_dr_nest, "x" * 2000, 10 ** 5000]
+            _dr_past_shown = (_safe_display(_dr_past), _safe_str(_dr_past))
+        finally:
+            sys.set_int_max_str_digits(_dr_idlimit)
+        _dr_past_head = ("[" * _DISPLAY_MAX_DEPTH
+                         + "<list nested deeper than {} levels>".format(_DISPLAY_MAX_DEPTH)
+                         + "]" * (_DISPLAY_MAX_DEPTH - 1) + ", " + chr(39))
+        check("deeprender-incomplete-copy-int-unread", _dr_past_shown
+              == (_dr_past_head + "x" * (_DISPLAY_MAX_CHARS - len(_dr_past_head)) + "...<truncated>",) * 2)
+        # A type off the allow-list (a container subclass, any other object) never has its __repr__,
+        # __str__, metaclass __name__ or metaclass __eq__ run, so neither renderer can raise on it; it renders
+        # a fixed marker naming only its type. A renderer that calls repr() raises RuntimeError from the
+        # subclass __repr__/__str__.
+
+        class _DrBad(list):
+            def __repr__(self):
+                raise RuntimeError("repr called")
+
+            def __str__(self):
+                raise RuntimeError("str called")
+
+        class _DrMeta(type):
+            @property
+            def __name__(cls):
+                raise RuntimeError("metaclass name called")
+
+            def __eq__(cls, other):
+                raise RuntimeError("metaclass eq called")
+            __hash__ = type.__hash__
+
+        class _DrOdd(metaclass=_DrMeta):
+            pass
+
+        class _DrTZ(datetime.tzinfo):
+            def utcoffset(self, dt):
+                raise RuntimeError("utcoffset called")
+
+            def __repr__(self):
+                raise RuntimeError("tzinfo repr called")
+        _dr_unsupported = []
+        _dr_tzbad = datetime.datetime(2026, 1, 1, tzinfo=_DrTZ())
+        for _dr_v in (_DrBad(), [1, _DrBad()], _DrOdd(), {"k": _DrOdd()}, _dr_tzbad):
+            try:
+                _dr_unsupported.append((_safe_display(_dr_v), _safe_str(_dr_v)))
+            except Exception as exc:  # noqa: BLE001  a subclass method escape: recorded, so the check fails
+                _dr_unsupported.append(type(exc).__name__)
+        check("deeprender-unsupported-types-never-called", _dr_unsupported == [
+            ("<unrenderable _DrBad>",) * 2, ("[1, <unrenderable _DrBad>]",) * 2, ("<unrenderable _DrOdd>",) * 2,
+            ("{" + chr(39) + "k" + chr(39) + ": <unrenderable _DrOdd>}",) * 2, ("<unrenderable datetime>",) * 2])
+        # The store path helpers: a deeply nested value reaching a path helper refuses through the
+        # bounded renderer. evidence_inventory checks the phase type before it formats the phase into a file
+        # name, and store_control_roots renders its refusal through _safe_display. Red when evidence_inventory
+        # formats the phase before that check, or store_control_roots renders the value with {!r}: either
+        # raises RecursionError on the nested value. Bounded children.
+
+        def _dr_path_helper(fn, prefix):
+            def thunk():
+                deep = cur = {}
+                for _ in range(100000):
+                    cur["a"] = {}
+                    cur = cur["a"]
+                try:
+                    fn(deep)
+                except ValueError as exc:
+                    return "{}|{}|{}".format(str(exc).startswith(prefix), "nested deeper than" in str(exc),
+                                             len(str(exc)) <= len(prefix) + _dr_cap)
+                return "accepted"
+            return thunk
+        _dr_run = "imp-20260101T000000Z-" + "0" * 16
+        check("deeprender-evidence-inventory-deep-phase-refused", run_bounded(_dr_path_helper(
+            lambda v: evidence_inventory("import", _dr_run, v), "invalid evidence inventory phase: "),
+            timeout_s=60) == "True|True|True")
+        check("deeprender-store-control-roots-deep-homes-refused", run_bounded(_dr_path_helper(
+            store_control_roots, "unknown homes generation: "), timeout_s=60) == "True|True|True")
+        # A renderer reads each live member once per occurrence, into one bounded private copy,
+        # and renders only that copy. A profile hook stands in for another thread: it replaces a member at the
+        # N-th profile event of one render, for every N an unmutated render reaches, so each interleaving at
+        # event granularity is tried deterministically. Wherever the replacement lands, the member read is the
+        # original or the replacement, checked as it was read, so the result is one of two exact strings (both
+        # must occur, so the hook is known to land) and the replacement __repr__ never runs. Red on a
+        # renderer that runs repr() on the live container after a separate preflight: on the dict case, 24
+        # interleavings of each renderer ran the replacement __repr__ (1,000 NULs, raw from _safe_display, and
+        # 4,007 characters escaped from _safe_str).
+        _dr_calls = []
+
+        class _DrRace:
+            def __repr__(self):
+                _dr_calls.append("repr")
+                return chr(0) * 1000
+            __str__ = __repr__
+
+        def _dr_race_sweep(render, make, mutate, allowed):
+            events = [0]
+
+            def count(frame, event, arg):
+                events[0] += 1
+            prior = sys.getprofile()
+            sys.setprofile(count)
+            try:
+                render(make())
+            finally:
+                sys.setprofile(prior)
+            shown_all, bad = set(), []
+            for target in range(1, events[0] + 1):
+                value, seen = make(), [0]
+
+                def hook(frame, event, arg):
+                    seen[0] += 1
+                    if seen[0] == target:
+                        mutate(value)
+                del _dr_calls[:]
+                sys.setprofile(hook)
+                try:
+                    shown = render(value)
+                except Exception as exc:  # noqa: BLE001  an escape is recorded, so the check fails
+                    shown = type(exc).__name__
+                finally:
+                    sys.setprofile(prior)
+                shown_all.add(shown)
+                if _dr_calls or shown not in allowed:
+                    bad.append(target)
+            return not bad and shown_all == set(allowed)
+        _dr_q = chr(39)
+        _dr_kq = "{" + _dr_q + "k" + _dr_q + ": "
+        _dr_cases = ((lambda: {"k": 1}, lambda v: v.__setitem__("k", _DrRace()),
+                      (_dr_kq + "1}", _dr_kq + "<unrenderable _DrRace>}")),
+                     (lambda: [1], lambda v: v.__setitem__(0, _DrRace()), ("[1]", "[<unrenderable _DrRace>]")))
+        check("deeprender-member-replaced-mid-render-never-rendered",
+              all(_dr_race_sweep(f, make, put, allowed) for f in (_safe_display, _safe_str)
+                  for make, put, allowed in _dr_cases))
+        # Another thread resizing a dict or set while it is copied makes its iterator raise RuntimeError,
+        # which both renderers turn into the fixed placeholder <unrenderable-value>. A profile hook grows a dict
+        # and a set at each profile event of one render, as above, so the result is the original, the grown
+        # value or the placeholder, and all three must occur. Red when RuntimeError is dropped from the except
+        # clause of either renderer: the RuntimeError escapes.
+        _dr_grown = ((lambda: {"k": 1}, lambda v: v.__setitem__("n", 2),
+                      (_dr_kq + "1}", _dr_kq + "1, " + _dr_q + "n" + _dr_q + ": 2}", "<unrenderable-value>")),
+                     (lambda: {1}, lambda v: v.add(2), ("{1}", "{1, 2}", "<unrenderable-value>")))
+        check("deeprender-resized-mid-copy-placeholder",
+              all(_dr_race_sweep(f, make, grow, allowed) for f in (_safe_display, _safe_str)
+                  for make, grow, allowed in _dr_grown))
+        # A type name is escaped, so a newline in it cannot forge a line, and since it can be a str
+        # subclass of any length it is read only through the str slots: no method of the subclass runs and only
+        # _DISPLAY_NAME_MAX characters are copied. The copy check (deeprender-type-name-copy-bounded) is red on
+        # a renderer that copies a str-subclass name whole (about 1 MB traced for a 1,000,000-character
+        # name); the escape check passes there and is red when the type name is not escaped.
+
+        class _DrName(str):
+            def __len__(self):
+                raise RuntimeError("name len called")
+
+            def __getitem__(self, key):
+                raise RuntimeError("name getitem called")
+
+            def __iter__(self):
+                raise RuntimeError("name iter called")
+
+            def __str__(self):
+                raise RuntimeError("name str called")
+
+        def _dr_named(name):
+            kind = type("_DrNamed", (), {})
+            kind.__name__ = name
+            return kind()
+        _dr_forged = "a" + chr(10) + "FORGED"
+        check("deeprender-type-name-escaped",
+              [f(_dr_named(n)) for f in (_safe_display, _safe_str) for n in (_dr_forged, _DrName(_dr_forged))]
+              == ["<unrenderable a\\x0aFORGED>"] * 4)
+        _dr_named_long = _dr_named(_DrName("N" * 1000000))
+        _dr_trace = not tracemalloc.is_tracing()
+        if _dr_trace:
+            tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            _dr_base = tracemalloc.get_traced_memory()[0]
+            _dr_names = (_safe_display(_dr_named_long), _safe_str(_dr_named_long))
+            _dr_peak = tracemalloc.get_traced_memory()[1] - _dr_base
+        finally:
+            if _dr_trace:
+                tracemalloc.stop()
+        check("deeprender-type-name-copy-bounded",
+              _dr_names == ("<unrenderable " + "N" * _DISPLAY_NAME_MAX + "...>",) * 2 and _dr_peak < 65536)
+        # The copy is bounded by count as well as by depth. A wide, shallow value of zero-cost leaves
+        # (17 lists of 170 lists of 170 None: 491,300 None leaves and 2,908 lists, 494,208 values as the copy
+        # counts them, one per occurrence) is copied only up to _DISPLAY_MAX_NODES values and renders the
+        # exact bounded prefix. The text is the same with or without the count bound (the character
+        # bound cuts first), so the copied-entry count is what goes red when the count bound is removed.
+
+        def _dr_entries(entry):
+            count, todo = 0, [entry]
+            while todo:
+                item = todo.pop()
+                if item is not _DISPLAY_STOP:
+                    count += 1
+                    if item[0] == "box":
+                        todo.extend(item[2])
+            return count
+        _dr_shallow = [[[None] * 170] * 170] * 17
+        check("deeprender-wide-shallow-copy-bounded",
+              _guard(lambda: _dr_entries(_display_snapshot(_dr_shallow))) == _DISPLAY_MAX_NODES
+              and _safe_display(_dr_shallow) == "[[[" + ", ".join(["None"] * 170) + "], ...<truncated>")
+        # A cut never splits a u-form escape (the x and U forms are checked above), in a container, in a
+        # str rendered with repr() and in a str rendered escaped. 11,000 separators escape to 66,000
+        # characters, past the width limit. Red on a renderer that cuts at the character bound inside an
+        # escape: through _display_take for the container and the repr() str, through _escape_bounded for the
+        # escaped str.
+        _dr_sep = chr(0x2028) * 11000
+        check("deeprender-cut-on-whole-u-escape",
+              _safe_display([_dr_sep]) == "[" + chr(39) + "\\u2028" * 170 + "...<truncated>"
+              and _safe_display(_dr_sep) == chr(39) + "\\u2028" * 170 + "...<str of 11000 chars>"
+              and _safe_str(_dr_sep) == "\\u2028" * 170 + "...<str of 11000 chars>")
+        # Escaping keeps the output budget for a container as for a scalar: _safe_str escapes each
+        # piece BEFORE the cut, so the result stays within the bound however a piece escapes. No supported value
+        # renders a non-printable character, so a leaf rendering of 2,000 NULs is substituted to reach that path
+        # (escaping the whole rendered container after its cut, with no budget, overruns it). Each value has a str
+        # past the width limit, so it renders in the bounded form, the one that reads _display_leaf.
+        _dr_globals = globals()
+        _dr_leaf = _dr_globals["_display_leaf"]
+        _dr_globals["_display_leaf"] = lambda value, budget: chr(0) * 2000
+        try:
+            _dr_escaped = (_safe_str([None, "x" * _DISPLAY_FULL_MAX_CHARS]),
+                           _safe_str({"k": None, "w": "x" * _DISPLAY_FULL_MAX_CHARS}))
+        finally:
+            _dr_globals["_display_leaf"] = _dr_leaf
+        check("deeprender-container-escape-keeps-budget",
+              _dr_escaped == ("[" + "\\x00" * 255 + "...<truncated>", "{" + "\\x00" * 255 + "...<truncated>"))
+        # The int width test is exact at the width limit: an int whose repr() is exactly
+        # _DISPLAY_FULL_MAX_CHARS characters (2 ** 217705, the largest power of two that wide, among them) or
+        # one character less renders as repr(), uncut, and one a character wider renders in the bounded form,
+        # as its size marker; a negative int spends one character on its sign. The bounded form's own test is
+        # exact at _DISPLAY_MAX_CHARS too (an estimate from the bit length is not exact, so an int whose repr() is
+        # exactly 1,024 characters, 2 ** 3401 among them, could render the marker): in a list past the value
+        # bound, such an int renders as its digits, cut, and 10 ** 1024 as its marker. The int-to-str limit is
+        # lifted and restored, so the width, not that limit, decides and the verdict comes from the code under
+        # test.
+        _dr_idlimit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(0)
+        try:
+            _dr_fit = (2 ** 217705, 10 ** 65535, -(10 ** 65534), 10 ** 65536 - 1, -(10 ** 65535) + 1)
+            _dr_inside = (10 ** 65535 - 1, -(10 ** 65534) + 1)
+            check("deeprender-int-width-exact-at-bound",
+                  all(len(repr(v)) == _DISPLAY_FULL_MAX_CHARS and _safe_display(v) == _safe_str(v) == repr(v)
+                      for v in _dr_fit)
+                  and all(len(repr(v)) == _DISPLAY_FULL_MAX_CHARS - 1
+                          and _safe_display(v) == _safe_str(v) == repr(v) for v in _dr_inside)
+                  and [f(v) for f in (_safe_display, _safe_str) for v in (10 ** 65536, -(10 ** 65535))]
+                  == ["<oversized-int: 217706 bits>", "<oversized-int: 217703 bits>"] * 2
+                  and _safe_display([2 ** 3401] + [0] * 600)
+                  == "[" + repr(2 ** 3401)[:_DISPLAY_MAX_CHARS - 1] + "...<truncated>"
+                  and _safe_display([10 ** 1024] + [0] * 600).startswith("[<oversized-int: 3402 bits>, 0, 0"))
+        finally:
+            sys.set_int_max_str_digits(_dr_idlimit)
+        # A timezone renders through repr() only when it holds nothing a caller defines and its name is
+        # at most _DISPLAY_NAME_MAX characters. A 64-character name renders as repr(), byte for byte; a
+        # 65-character name, a timedelta-subclass offset and a str-subclass name each render the fixed marker
+        # from both renderers, and no subclass __repr__ runs. Red on a renderer whose name-length test admits
+        # 65 characters, and on one that admits an offset that is not an exact timedelta or a name that is not
+        # an exact str: _safe_display then runs the subclass __repr__, whose RuntimeError renders the
+        # placeholder <unrenderable-value>, and _safe_str renders the datetime as text.
+
+        class _DrDelta(datetime.timedelta):
+            def __repr__(self):
+                raise RuntimeError("offset repr called")
+
+        class _DrZoneName(str):
+            def __repr__(self):
+                raise RuntimeError("zone name repr called")
+        _dr_at = datetime.datetime(2026, 1, 2, 3, 4, 5)
+        _dr_zone64 = _dr_at.replace(tzinfo=datetime.timezone(_dr_hour, "N" * _DISPLAY_NAME_MAX))
+        _dr_zones = (_dr_at.replace(tzinfo=datetime.timezone(_dr_hour, "N" * (_DISPLAY_NAME_MAX + 1))),
+                     _dr_at.replace(tzinfo=datetime.timezone(_DrDelta(hours=5))),
+                     _dr_at.replace(tzinfo=datetime.timezone(_dr_hour, _DrZoneName("n"))))
+        check("deeprender-timezone-admission-exact",
+              _safe_display(_dr_zone64) == repr(_dr_zone64) and _safe_display([_dr_zone64]) == repr([_dr_zone64])
+              and [f(v) for f in (_safe_display, _safe_str) for v in _dr_zones] == ["<unrenderable datetime>"] * 6)
+        # require_ordinary_target renders its refusal through _safe_display (a {!r} there renders a long
+        # target whole). The target is a contained path under the journal home, past the width limit (more than
+        # 70,000 characters), so its refusal is bounded.
+        _dr_target = JOURNALS_REL + "/" + "a" * 70000
+        try:
+            require_ordinary_target(_dr_target)
+            _dr_refusal = "accepted"
+        except ValueError as exc:
+            _dr_refusal = str(exc)
+        _dr_expected = "ordinary operation target {}{}...<str of {} chars> overlaps the journal home".format(
+            chr(39), _dr_target[:_DISPLAY_MAX_CHARS - 1], len(_dr_target))
+        check("deeprender-ordinary-target-refusal-bounded", _dr_refusal == _dr_expected)
+        # A frame of the copy ends when its iterator raises StopIteration, never on a member compared
+        # with a marker, so whatever object a value holds renders the same at the root, in a list, as a dict key
+        # and as a dict value. Each bare object() this module holds, a fresh one and the stop entry _DISPLAY_STOP
+        # are tried against their exact renderings, and every other value this module holds renders in a list
+        # and in a dict as it renders alone in a list, so a sentinel held here is caught whatever its type (a
+        # value too long to place with three more members is skipped). Red on a renderer that ends a frame on
+        # a module sentinel (a bare object()): supplied as data, that sentinel raises IndexError at the root,
+        # ends a list or a dict early ([1] for [1, sentinel, 2, 3]) and, as a dict value, renders the next key
+        # as its value.
+
+        def _dr_positions(render, obj, mark):
+            shown = []
+            for value in (obj, [1, obj, 2, 3], {obj: 1}, {"k": obj, "j": 2}):
+                try:
+                    shown.append(render(value))
+                except Exception as exc:  # noqa: BLE001  a sentinel escape: recorded, so the check fails
+                    shown.append(type(exc).__name__)
+            return shown == [mark, "[1, " + mark + ", 2, 3]", "{" + mark + ": 1}",
+                             _dr_kq + mark + ", " + _dr_q + "j" + _dr_q + ": 2}"]
+
+        def _dr_in_place(render, obj):
+            try:
+                inner = render([obj])[1:-1]
+                if len(inner) > 500 or "...<" in inner:
+                    return True   # too long to take three more members inside both bounds
+                try:
+                    keyed = {obj: 1}
+                except TypeError:   # an unhashable value is never a dict key
+                    keyed = None
+                return (render([1, obj, 2, 3]) == "[1, " + inner + ", 2, 3]"
+                        and render({"k": obj, "j": 2}) == _dr_kq + inner + ", " + _dr_q + "j" + _dr_q + ": 2}"
+                        and (keyed is None or render(keyed) == "{" + inner + ": 1}"))
+            except Exception:  # noqa: BLE001  an escape is recorded, so the check fails
+                return False
+        _dr_objects = [(v, "<unrenderable object>") for v in globals().values() if type(v) is object]
+        _dr_objects += [(object(), "<unrenderable object>"), (_DISPLAY_STOP, repr(_DISPLAY_STOP))]
+        check("deeprender-module-objects-render-as-data",
+              all(_dr_positions(f, v, mark) for f in (_safe_display, _safe_str) for v, mark in _dr_objects)
+              and all(_dr_in_place(f, v) for f in (_safe_display, _safe_str) for v in list(globals().values())))
+        # The node bound stops a render with the truncation marker. A list holding one chain of 31
+        # nested lists wrapping 0 sixteen times is 513 values as the copy counts them (each occurrence is copied),
+        # so the copy stops before the last 0 and the render is the 1,007-character prefix of repr() before it,
+        # then ...<truncated>, within the character bound. Red when the stop drops its marker (the same prefix,
+        # unmarked) and when the node bound is removed (1,024 characters, cut by the character bound).
+        _dr_chain = 0
+        for _ in range(31):
+            _dr_chain = [_dr_chain]
+        _dr_link = "[" * 31
+        check("deeprender-node-bound-stop-marked",
+              _safe_display([_dr_chain] * 16) == _safe_str([_dr_chain] * 16)
+              == "[" + ", ".join([_dr_link + "0" + "]" * 31] * 15) + ", " + _dr_link + "...<truncated>")
+        # One render converts at most _DISPLAY_INT_BUDGET_BITS bits of int, all its conversions summed: each
+        # is charged its bit length before it is made, and an int the budget cannot cover stops the bounded
+        # rendering there with _DISPLAY_SPENT. For these renders the module's repr is replaced by one that sums
+        # the bit lengths of the ints passed to it, so the total is measured. With the int-to-str limit raised
+        # to 10,000 digits, each 33,000-bit int below converts without tripping it (9,934 digits), so a list of
+        # 300 of them needs one conversion per int to test: 254 fit the budget, the 255th does not, and the
+        # bounded rendering stops at the first int it reaches, after content of exactly _DISPLAY_MAX_CHARS
+        # characters. Red on a renderer without the budget: it converts every int (10,131,000 bits) and ends in
+        # ...<truncated>. At the default limit the budget is never reached, so it changes no output there: the
+        # worst case, 510 ints of 14,285 bits (the most a 4,300-digit int has) tested before one of
+        # _DISPLAY_FULL_INT_BITS bits that trips, converts exactly 7,547,494 bits, and 511 such ints with none
+        # tripping convert 7,528,195 (511 tested, then 16 converted for the whole rendering until it is too
+        # wide, and none tested again by the bounded one). Red on a budget below that worst case, and on a
+        # bounded rendering that tests again the ints the whole-value test cleared (514,260 bits more). A value
+        # the byte-identity guarantee covers stays far inside the budget at any limit: one int of 65,534
+        # digits in a list, its repr() exactly _DISPLAY_FULL_MAX_CHARS characters, renders as repr() under a
+        # limit of 65,534 digits and converts 435,392 bits (tested once, converted once more for the whole
+        # rendering). Red on a budget below that. The budget admits a conversion of exactly the bits left and
+        # refuses one of a bit more: [5] (3 bits) renders whole under a budget of 4 or 3 bits and stops under
+        # 2. Red on a budget test off by one.
+        _dr_repr = repr
+
+        def _dr_counted(render, value):
+            bits = [0]
+
+            def counting(obj):
+                if type(obj) is int:
+                    bits[0] += obj.bit_length()
+                return _dr_repr(obj)
+            _dr_globals["repr"] = counting
+            try:
+                shown = render(value)
+            finally:
+                del _dr_globals["repr"]
+            return shown, bits[0]
+        _dr_idlimit = sys.get_int_max_str_digits()
+        _dr_budget_bits = _DISPLAY_INT_BUDGET_BITS
+        try:
+            sys.set_int_max_str_digits(10000)
+            _dr_spent_head = "[" + repr("x" * 1019) + ", "
+            _dr_spent = [_dr_counted(f, ["x" * 1019] + [2 ** 32999 + 1] * 300) for f in (_safe_display, _safe_str)]
+            sys.set_int_max_str_digits(4300)
+            _dr_ok, _dr_trip = 10 ** 4300 - 1, 2 ** (_DISPLAY_FULL_INT_BITS - 1)
+            _dr_worst = [_dr_counted(f, v) for f in (_safe_display, _safe_str)
+                         for v in ([_dr_trip] + [_dr_ok] * 510, [_dr_ok] * 511)]
+            sys.set_int_max_str_digits(65534)
+            _dr_whole = [10 ** 65533]
+            _dr_whole_repr = repr(_dr_whole)
+            _dr_identity = [_dr_counted(f, _dr_whole) for f in (_safe_display, _safe_str)]
+            _dr_edges = []
+            for _dr_bits in (4, 3, 2):
+                _dr_globals["_DISPLAY_INT_BUDGET_BITS"] = _dr_bits
+                _dr_edges.append((_safe_display([5]), _safe_str([5])))
+        finally:
+            _dr_globals["_DISPLAY_INT_BUDGET_BITS"] = _dr_budget_bits
+            sys.set_int_max_str_digits(_dr_idlimit)
+        _dr_cut_ints = (("[" + ", ".join(["<oversized-int: 14285 bits>"] * 511))[:_DISPLAY_MAX_CHARS]
+                        + "...<truncated>")
+        check("deeprender-int-budget-bounds-conversions",
+              _dr_spent == [(_dr_spent_head + _DISPLAY_SPENT, 254 * 33000)] * 2
+              and len(_dr_spent_head) == _DISPLAY_MAX_CHARS and 254 * 33000 <= _DISPLAY_INT_BUDGET_BITS)
+        check("deeprender-int-budget-unreached-at-default-limit",
+              _dr_worst == [("<oversized-value>", 7547494), (_dr_cut_ints, 7528195)] * 2
+              and 7547494 <= _DISPLAY_INT_BUDGET_BITS)
+        check("deeprender-int-budget-spares-byte-identity",
+              len(_dr_whole_repr) == _DISPLAY_FULL_MAX_CHARS and _dr_identity == [(_dr_whole_repr, 435392)] * 2)
+        check("deeprender-int-budget-boundary-exact",
+              _dr_edges == [("[5]", "[5]"), ("[5]", "[5]"), ("[" + _DISPLAY_SPENT,) * 2])
+        # Each marker that ends a bounded rendering is measured on renderer output, at its longest reachable
+        # form and after content of exactly _DISPLAY_MAX_CHARS characters: ...<str of N chars> from the str
+        # path of both renderers, with N at sys.maxsize, the most len() returns (for these renders the module's
+        # len is replaced by one that reports sys.maxsize for one 2,000-character str, and each render must
+        # read it); ...<truncated> from the bounded form of both, where that str's own marker falls past the
+        # cut; and ...<int conversion budget spent> from the budget renders above. The longest must be exactly
+        # _DISPLAY_MARKER_MAX characters. Red on a renderer that emits a longer marker (...<str of N
+        # characters>, 42 characters at sys.maxsize, or N with thousands separators, 43) and on a
+        # _DISPLAY_MARKER_MAX other than the longest marker's length.
+        _dr_huge = "x" * 2000
+        _dr_reads = [0]
+        _dr_len = len
+
+        def _dr_len_at_max(obj):
+            if obj is _dr_huge:
+                _dr_reads[0] += 1
+                return sys.maxsize
+            return _dr_len(obj)
+        _dr_ended = []
+        _dr_globals["len"] = _dr_len_at_max
+        try:
+            for _dr_f, _dr_v in ((_safe_display, _dr_huge), (_safe_str, _dr_huge), (_safe_display, [_dr_huge]),
+                                 (_safe_str, [_dr_huge])):
+                _dr_reads[0] = 0
+                _dr_ended.append((_dr_f(_dr_v), _dr_reads[0]))
+        finally:
+            del _dr_globals["len"]
+        _dr_heads = ([chr(39) + "x" * (_DISPLAY_MAX_CHARS - 1), "x" * _DISPLAY_MAX_CHARS]
+                     + ["[" + chr(39) + "x" * (_DISPLAY_MAX_CHARS - 2)] * 2 + [_dr_spent_head] * 2)
+        _dr_ended = [shown for shown, reads in _dr_ended if reads] + [shown for shown, _ in _dr_spent]
+        check("deeprender-marker-max-is-the-longest-marker",
+              len(_dr_ended) == len(_dr_heads)
+              and all(shown[:_DISPLAY_MAX_CHARS] == head for shown, head in zip(_dr_ended, _dr_heads))
+              and max(len(shown) - _DISPLAY_MAX_CHARS for shown in _dr_ended) == _DISPLAY_MARKER_MAX)
+
         # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
         # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
         # pinned small while the real file is over-cap.
@@ -3897,6 +5147,99 @@ def self_test():
                   and "stale" not in hs_seam.views)
         finally:
             os.close(hs_wfd)
+
+        # OPF-IMPORTED-SERIES IS-2: imported_leaf_names derives the imported machine-store leaf names
+        # from an enabled-type roster: one <type>.imported.index.toml per non-ledger type, the worklog
+        # ledger worklog.imported.toml, NO leaf for the importer-only legacy_fragment (its LF
+        # namespace is outside the imported series, spec 8.2), and NO leaf for a name outside the
+        # section-8.1 roster (fail-closed). The agreement with _opf_schema.IMPORTED_NAMESPACES is
+        # reconciled in the opf-check self-test, beside the containment vectors that consume this
+        # roster.
+        _il_base = imported_leaf_names(BASELINE_TYPES)
+        check("imported-leaf-names-baseline",
+              _il_base == frozenset({IMPORTED_WORKLOG_NAME}
+                                    | {t + IMPORTED_INDEX_SUFFIX
+                                       for t in BASELINE_TYPES if t != "worklog"}))
+        check("imported-leaf-names-lf-excluded",
+              imported_leaf_names(dict(BASELINE_TYPES, legacy_fragment="LF")) == _il_base
+              and imported_leaf_names(IMPORTER_TYPES) == frozenset())
+        check("imported-leaf-names-module-tier",
+              imported_leaf_names(("release",)) == frozenset({"release" + IMPORTED_INDEX_SUFFIX}))
+        check("imported-leaf-names-unknown-skipped",
+              imported_leaf_names(("nonsense", "transaction")) == frozenset())
+        # The activation threshold is PINNED: imported_series_declared compares both arms (the
+        # support arm through the shared imported_series_supported helper) against the
+        # IMPORTED_SPEC_VERSION constant, so this equality anchors every sampled point below
+        # (red when the constant itself drifts, e.g. to a multidigit 1.2.100 the interval
+        # samples alone would not see; a drift to the sampled 1.2.10 the matrix already reds).
+        check("imported-spec-version-pinned-130", IMPORTED_SPEC_VERSION == "1.3.0")
+        # imported_series_declared: the activation gate requires BOTH the declared spec_version
+        # (IMPORTED_SPEC_VERSION or later, through the house SemVer parser) AND this tooling's own
+        # support (SUPPORTED_SPEC_VERSION at or above IMPORTED_SPEC_VERSION, the way homes_generation
+        # gates on SUPPORTED_HOMES). A newer declaration ALONE answers False, including the reserved
+        # 2.0.0 / homes = 2 pair validate_manifest accepts today (spec 4.2): without the
+        # tooling-support condition that accepted store would register the imported leaves while
+        # every imported-content check is still deferred. The current 1.2.0, an older, a non-string,
+        # and an unparseable declaration answer False in every case (spec 8.2/4.2), INCLUDING while
+        # support is raised: once the tooling-support clause is satisfied, only the declared-version
+        # comparison keeps them out, so that arm is asserted on its False side under the patch (red
+        # when the comparison is removed, or when its threshold drifts down to a SAMPLED point:
+        # 1.2.0, 1.2.1, 1.2.9, or the multidigit 1.2.10 and 1.2.99 below. The samples establish
+        # those points only, never the whole open 1.2.x range; the threshold constant itself is
+        # pinned to 1.3.0 by its own check above).
+        check("imported-series-declared-false-until-tooling-supports",
+              not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "2.0.0"}})
+              and not imported_series_declared(
+                  {"opf": {"spec_version": HOMES2_SPEC_VERSION, "homes": 2}}))
+        _isd_prev = SUPPORTED_SPEC_VERSION
+        try:
+            globals()["SUPPORTED_SPEC_VERSION"] = IMPORTED_SPEC_VERSION
+            check("imported-series-declared-130-and-later-once-supported",
+                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+            check("imported-series-declared-below-130-false-even-once-supported",
+                  not imported_series_declared({"opf": {"spec_version": "1.2.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.1"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.9"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "one.three"}}))
+            # Multidigit patch declarations below the threshold: the house parser does not stop
+            # at single-digit patches, so 1.2.10 and 1.2.99 parse, sit below 1.3.0, and answer
+            # False under raised support. Sampled points only (red when the declared threshold
+            # drifts down to 1.2.99, or past it to the lower 1.2.10).
+            check("imported-series-declared-multidigit-patch-below-130-false",
+                  not imported_series_declared({"opf": {"spec_version": "1.2.10"}})
+                  and not imported_series_declared({"opf": {"spec_version": "1.2.99"}}))
+            # Support ABOVE the threshold activates too: the support comparison is at-or-above,
+            # not equality (red when its ">=" tightens to "==").
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.3.1"
+            check("imported-series-declared-under-support-above-130",
+                  imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and imported_series_declared({"opf": {"spec_version": "1.3.1"}}))
+            # Support BELOW the threshold stays inactive whatever the declaration: the support
+            # arm also compares against IMPORTED_SPEC_VERSION, so the sampled support values
+            # 1.2.1 and the multidigit 1.2.10 both answer False even for 1.3.0 and 2.0.0
+            # declarations (red when the support threshold drifts down to the interior
+            # multidigit 1.2.10, or past it to the lower 1.2.1). Sampled support points only,
+            # the way the declared arm is sampled above.
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.1"
+            _isd_sup_121 = (not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                            and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.10"
+            check("imported-series-declared-false-under-support-below-130",
+                  _isd_sup_121
+                  and not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
+                  and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
+        finally:
+            globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
+        check("imported-series-declared-current-and-malformed-false",
+              not imported_series_declared({"opf": {"spec_version": SUPPORTED_SPEC_VERSION}})
+              and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
+              and not imported_series_declared({"opf": {"spec_version": "one.three"}})
+              and not imported_series_declared({"opf": {"spec_version": 2}})
+              and not imported_series_declared({"opf": {}})
+              and not imported_series_declared(None))
 
         # tomllib's RecursionError (a deeply-nested value, and a 1001-part key under the emulated cap) is a
         # StoreError naming both causes, so a long dotted key is never reported as nesting alone.

@@ -30,6 +30,10 @@ run_gate() {
   echo
 }
 
+# Child exit status first (see _child_status.py): under an inherited SIGCHLD ignore every gate below would
+# read its failed children as passes, so the probe runs as the first gate and its exit 2 fails the subset.
+run_gate "child-status"                python3 -I -B "$here/_child_status.py"
+run_gate "child-status-selftest"       python3 -I -B "$here/_child_status.py" --self-test
 run_gate "opf-homes-selftest"          python3 -I -B "$here/check_opf_homes.py" --self-test
 run_gate "opf-homes-contract"          python3 -I -B "$here/check_opf_homes.py"
 run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test
@@ -40,11 +44,13 @@ run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py"
 run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test
 run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test
 run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py" --self-test
-run_gate "opf-upgrade-selftest"        python3 -I -B "$here/check_opf_upgrade.py" --self-test
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
 run_gate "opf-adopt-apply-selftest"    python3 -I -B "$here/_opf_adopt_apply.py" --self-test
+run_gate "opf-adopt-state-selftest"    python3 -I -B "$here/_opf_adopt_state.py" --self-test
 run_gate "opf-adopt-hook-selftest"     python3 -I -B "$here/_opf_adopt_hook.py" --self-test
+run_gate "opf-adopt-complete-selftest" python3 -I -B "$here/_opf_adopt_complete.py" --self-test
 run_gate "opf-import-batch-selftest"   python3 -I -B "$here/_opf_import_batch.py" --self-test
+run_gate "opf-import-complete-selftest" python3 -I -B "$here/_opf_import_complete.py" --self-test
 run_gate "opf-pack-manifest-selftest"  python3 -I -B "$here/_opf_pack_manifest.py" --self-test
 run_gate "opf-adopt-observe-selftest"  python3 -I -B "$here/_opf_adopt_observe.py" --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B "$here/_opf_adopt_discover.py" --self-test
