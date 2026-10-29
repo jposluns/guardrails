@@ -583,9 +583,9 @@ ALLOWLIST = (
      "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
      " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
      " code"),
-    ("tools/_load_bound.py", "vector_failures", "shell", 15,
+    ("tools/_load_bound.py", "vector_failures", "shell", 14,
      _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
-     " finally, and one getattr of its _execute_child that the fork-window vector inspects)"),
+     " finally; the fork-window vector also reads its _execute_child through that saved class)"),
     ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
      _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
     ("tools/_load_bound.py", "vector_failures.mid_read_fault", "shell", 1,

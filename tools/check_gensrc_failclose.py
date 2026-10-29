@@ -415,8 +415,13 @@ def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
     interpreter pinned to sys.executable, a sanitized env carrying the per-call HOME/TMPDIR overrides, cwd
     anchored on the sandbox, a load-tolerant bound (timeout load-adjusted seconds, or PROBE_STALL_S wall
     seconds without progress). Module-level so the self-test can substitute it. Raises
-    subprocess.TimeoutExpired (_load_bound.Hung) or OSError on a hung or unlaunchable probe; the caller
-    maps that to cannot-evaluate."""
+    subprocess.TimeoutExpired (_load_bound.Hung) or OSError on a hung or unlaunchable probe; a Hung's
+    returncode is the exit status the generator reached on its own before the stop, or None, and an OSError
+    carries none. _process_entry judges the raise by the function it came through: through _run_baseline
+    it is cannot-evaluate whatever that status (the "error: ..." it records is not a clean 0); through
+    _run_probe an own exit of 0 is a violation (exit 0 on a corrupt target, F-154), a nonzero own exit
+    stands as the rejection and nothing is recorded (_run_probe re-raises the stop only after its
+    post-probe containment validation passed), and no own exit is cannot-evaluate."""
     proc = _load_bound.run([sys.executable, str(script_path), "--check"], budget_s=timeout,
                            stall_s=PROBE_STALL_S, cwd=str(cwd), env=_sanitized_env(env_overrides),
                            clock=_load_bound.LoadClock(factor=lambda: _load_factor()))
@@ -607,8 +612,10 @@ def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_
     exists: an exit status carried beside the stop is judged by _process_entry exactly as a completed
     run, so it must pass the same containment check first, and a containment failure outranks the stop
     (fail-closed). Raises
-    _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all to
-    cannot-evaluate."""
+    _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded. _process_entry files a
+    _ContainmentError as cannot-evaluate, judges a TimeoutExpired/OSError by the generator's own exit
+    status as _run_check states (0 a violation, nonzero the rejection, none cannot-evaluate), and lets
+    _DeadlineExceeded propagate to sweep, which files it as cannot-evaluate."""
     holder, sandbox, env_overrides = _new_sandbox(template)
     try:
         sandbox_real = os.path.realpath(str(sandbox))

@@ -2277,7 +2277,8 @@ def vector_failures(python):
     # round-9 window between the fork returning and Popen's pid binding is owned, not merely
     # disclosed (red when that capture, or the _partial_child fallback reading it, is
     # removed: the injected fault then escapes run() over a running child).
-    exec_child_attr = getattr(subprocess.Popen, "_execute_child", None)
+    saved_fork_cls = subprocess.Popen  # the class inspected and subclassed below, and restored after the run
+    exec_child_attr = getattr(saved_fork_cls, "_execute_child", None)
     exec_child_inner = getattr(exec_child_attr, "__func__", exec_child_attr)
     pid_store_offsets = set()
     if exec_child_inner is not None and "_fork_exec" in getattr(exec_child_inner,
@@ -2288,7 +2289,6 @@ def vector_failures(python):
                              if ins.opname == "STORE_ATTR" and ins.argval == "pid"}
     if os.name == "posix" and pid_store_offsets:
         fork_procs = []
-        saved_fork_cls = subprocess.Popen
 
         class ForkWindowRecorder(saved_fork_cls):
             def __init__(self, *args, **kwargs):
