@@ -30,7 +30,8 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        refuses unless it equals the declared workdir or lies under it (/w/repo/x is under
                        /w/repo, /w/repository is not); when a form along that strip ends in /.. it is
                        judged too, so "/w/repo/..." refuses. Text glued after a quoted span is part of the
-                       word, so "/w/repo/a b"/../../etc/x is /etc/x. This FAILS CLOSED and OVER-REFUSES odd
+                       word, so "/w/repo/a b"/../../../etc/x (/etc/x read as a shell word) refuses: each
+                       judged slash in it gives a path that folds to /etc/x. This FAILS CLOSED and OVER-REFUSES odd
                        words a human would pass: /w/repo//a.md (its // judges /a.md), /w/repo/x~/a.md,
                        "/w/repo/a b"/x.md (the slash after the quote judges /x.md), a // or :// in any
                        non-web scheme (ftp://h/x, file://localhost/w/repo/x) and a quoted span with an
@@ -53,17 +54,25 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        ask; words before it are judged. Negation is LEXICAL, not semantic, so "Never write to
                        the workdir. Read /etc/x." and "Do not stop until you read /etc/x" do not fire. A
                        declaration is a line that opens (once markup is skipped) with Workdir, The workdir or Your
-                       workdir (or work dir, working directory), then optionally is or a colon, then one absolute
-                       path, quoted with " or ` when it holds a space (Workdir /w/repo (read-only). The workdir
-                       is /w/repo. workdir:/w/repo); a line that is only such a lead takes its path from the next
-                       line. A path after the word workdir anywhere else (Do not read outside the workdir, such
-                       as /etc/x) declares nothing. Two declarations of different workdirs, a declaration whose
-                       path is followed by a word (an unquoted space), a bare lead with no path on the next
-                       line, or a declared workdir that normalises to / (/, /., //) or holds a `..` component
-                       (/w/repo/..) is CANNOT_EVALUATE (exit 2) for a family this rule applies to. "undeclared"
-                       and "yes" never fire, and with no declared workdir the rule does not fire.
+                       workdir (or work dir, working directory), then optionally a colon or the word is (before a
+                       space or the line end), then one absolute path, quoted with " or ` when it holds a space
+                       (Workdir /w/repo (read-only). The workdir is /w/repo. workdir:/w/repo); a line that is
+                       only such a lead (Workdir, Workdir:, The workdir is) takes its path from the next line. A
+                       path after the word workdir anywhere else (Do not read outside the workdir, such as
+                       /etc/x) declares nothing. A line whose first word, once markup is skipped, is a workdir
+                       label (Workdir, Work dir, Working directory or Working tree, optionally after The or
+                       Your, in any case, plain or in bold, followed by anything) and that is not such a
+                       declaration (**Workdir**: /w/repo, Workdir = /w/repo, Working tree: /w/repo, The
+                       workdir is read-only) is never ignored. It, two declarations of different workdirs, a
+                       declaration whose path is followed by a word (an unquoted space), a bare lead with no
+                       path on the next line, or a declared workdir that normalises to / (/, /., //) or holds a
+                       `..` component (/w/repo/..) is CANNOT_EVALUATE (exit 2) for a family this rule applies
+                       to. "undeclared" and "yes" never fire, and with no declared workdir the rule does not
+                       fire.
   P3 missing at pin    ADVISORY. A line that opens (once markup is skipped) with REVIEWED HEAD or BRIEF-PIN
-                       (upper case, as written here) is a pin line. Its value must be a commit of 7 to 40 or of
+                       (upper case, as written here) is a pin line; the label may be bold or italic, with the
+                       closing markup before or after its colon (**REVIEWED HEAD:** or **REVIEWED HEAD**:).
+                       Its value must be a commit of 7 to 40 or of
                        64 hex digits not followed by a letter, digit, `_` or `-`; a pin line with any other
                        value (6, 41, 63 or 65 hex digits, a non-hex character, no value) is CANNOT_EVALUATE
                        (exit 2) for every family, never ignored. A lower-case label (Reviewed head:) or a
@@ -1467,6 +1476,12 @@ def cancel_demotion(finding):
 
 WORKDIR_WORD_RE = re.compile(r"(?<![\w-])(?:workdir|work\s+dir|working\s+directory)(?![\w-])", re.I)
 WORKDIR_LEAD_RE = re.compile(r"(?:(?:the|your)\s++)?+(?:workdir|work\s++dir|working\s++directory)(?![\w-])", re.I)
+# the optional link between a declaration lead and its path: a colon, or the word is before a space or the line end
+DECLARATION_LINK_RE = re.compile(r":|is(?=\s|\Z)", re.I)
+# a line whose first word (after markup) is a workdir label is a declaration or cannot be evaluated, never ignored
+# (a `_` after it closes emphasis, as in __Workdir__)
+WORKDIR_LABEL_RE = re.compile(r"(?:(?:the|your)\s++)?+(?:workdir|work\s++dir|working\s++directory|working\s++tree)"
+                              r"(?!-|[^\W_])", re.I)
 QUOTED_ABS_PATH_RE = re.compile(r"\"(/[^\"\n]*+)\"|`(/[^`\n]*+)`")
 ABS_PATH_RE = re.compile(r"(?<![\w.~/:@%-])/[\w.@+-]++(?:/[\w.@+-]++)*+/?+")
 REL_PATH_RE = re.compile(r"(?<![\w.~/:@%-])(?:\.\.?/)?+\.?+[\w@+-][\w.@+-]*+(?:/[\w.@+-]++)++/?+")
@@ -1476,9 +1491,10 @@ WORD_RE = re.compile(r"\S++")
 UNPLACED_LEAD_RE = re.compile(r"[~$][\w{}.-]*+/")
 # a prohibition before a path on its line: the line forbids the path rather than asking for it
 PROHIBITION_RE = re.compile(r"(?<![\w/.-])(?:never|do\s++not|don['\u2019]t|must\s++not|not\s++to)(?![\w/.-])", re.I)
-PIN_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+([0-9a-fA-F]{64}|[0-9a-fA-F]{7,40})(?![\w-])")
+PIN_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)[*_]*+\s*+[:=]?+[*_]*+\s*+[`*_(]*+"
+                    r"([0-9a-fA-F]{64}|[0-9a-fA-F]{7,40})(?![\w-])")
 # a line that opens with a pin label must carry a pin (PIN_RE); a label with anything else cannot be resolved
-PIN_LABEL_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)(?![\w-])")
+PIN_LABEL_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)(?!-|[^\W_])")
 # a slash after a letter, a digit or one of these continues a relative path word, so P2 does not judge it
 PATH_GLUE = frozenset("._")
 # a web address is not a file read; file:// and every other scheme is judged as a path
@@ -1581,8 +1597,9 @@ class PreflightText:
     into the absolute ones and the ones it cannot place (unplaced), each kept only when no prohibition
     (PROHIBITION_RE) precedes it on its line; for relative paths that name a file (a last component with a suffix
     such as `.py`) or open with `./` or `../`; the declared workdirs (see _declaration_rest) and the
-    declarations that name none clearly; the pinned revisions (a line that opens, once markup is skipped, with
-    REVIEWED HEAD or BRIEF-PIN and a commit of 7 to 40 or 64 hex digits) and the lines that open with such a
+    declarations that name none clearly, with every line that opens with a workdir label (WORKDIR_LABEL_RE) but
+    is not a declaration; the pinned revisions (a line that opens, once markup is skipped, with REVIEWED HEAD or
+    BRIEF-PIN, plain or in bold, and a commit of 7 to 40 or 64 hex digits) and the lines that open with such a
     label but carry no such commit (bad_pins); and whether a hand-back file is named (the words hand-back file
     or path and an absolute path on one line)."""
 
@@ -1593,7 +1610,7 @@ class PreflightText:
         self.bad_pins = []   # [line] for a pin label with no valid pin after it
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
         self.handback_named = False
-        bare = None   # the line of a bare Workdir (or Workdir:) whose path is on the next line
+        bare = None   # the line of a bare Workdir (or Workdir:, Workdir is) whose path is on the next line
         for number, line in enumerate(text.split("\n"), 1):
             line = line.rstrip("\r")
             quoted = [match for match in QUOTED_ABS_PATH_RE.finditer(line) if any(
@@ -1615,6 +1632,10 @@ class PreflightText:
             if bare is not None:
                 self._declare(line[start:], number)
             bare, rest = None, _declaration_rest(line, start)
+            if rest is None and WORKDIR_LABEL_RE.match(line, start):
+                self.unclear.append((number, "a line that opens with a workdir label is not a declaration (Workdir, "
+                                     "The workdir or Your workdir, optionally a colon or is, then one absolute "
+                                     "path); write it as one"))
             if rest is not None and not rest[MarkupEnds(rest)(0):]:
                 bare = number
             elif rest is not None:
@@ -1661,17 +1682,18 @@ class PreflightText:
 
 def _declaration_rest(line, start):
     """The text after a workdir declaration that opens `line` at `start`, or None when the line is not one. A
-    declaration is Workdir, The workdir or Your workdir (or work dir, working directory), then optionally is or
-    a colon, then an absolute path, plain or quoted, or nothing (the path is then on the next line). A path
-    anywhere else after the word, as in prose about the workdir, declares nothing."""
+    declaration is Workdir, The workdir or Your workdir (or work dir, working directory), then optionally a
+    colon or the word is (DECLARATION_LINK_RE: is before a space or the line end), then an absolute path, plain
+    or quoted, or nothing (the path is then on the next line). A path anywhere else after the word, as in prose
+    about the workdir, declares nothing; a line that opens with a workdir label (WORKDIR_LABEL_RE) and is not a
+    declaration is unclear (PreflightText)."""
     lead = WORKDIR_LEAD_RE.match(line, start)
     if not lead:
         return None
     rest = line[lead.end():].lstrip()
-    if rest[:1] == ":":
-        rest = rest[1:].lstrip()
-    elif rest[:2].lower() == "is" and rest[2:3].isspace():
-        rest = rest[2:].lstrip()
+    link = DECLARATION_LINK_RE.match(rest)
+    if link:
+        rest = rest[link.end():].lstrip()
     opens = rest[MarkupEnds(rest)(0):]
     if not opens or opens[:1] == "/" or (opens[:1] in ('"', "`") and opens[1:2] == "/"):
         return rest
@@ -1762,8 +1784,9 @@ def rule_p2(names, row, repo):
     """P2 HARD: the family declares reads-outside-workdir = "no" and a word of the brief (path_words) gives a
     path that is not under the declared workdir once normalise folds it, or cannot be placed (unplaced), on a
     line where the word starts before the end of the first prohibition (PROHIBITION_RE, read lexically), or on a
-    line with none. Two declarations that name different workdirs, one whose workdir cannot be read, or one too
-    wide to bound reads (bad_workdir) leave the boundary open: CannotEvaluate, never a pass."""
+    line with none. Two declarations that name different workdirs, one whose workdir cannot be read or is too
+    wide to bound reads (bad_workdir), or a workdir label line that is not a declaration leave the boundary open:
+    CannotEvaluate, never a pass."""
     if row["reads-outside-workdir"] != "no":
         return []
     if names.unclear:
@@ -2384,6 +2407,19 @@ P2_SAME_TWICE = "Workdir /w/repo.\nThe workdir is /w/repo/.\nRead /w/repo/a.md b
 P2_QUOTED = "Workdir \"/w/my repo\".\nRead {} before you answer.\n"
 P2_NEXT_LINE = "Workdir\n/w/repo\nRead {} before you answer.\n"
 P2_COLON = "workdir:/w/repo\nRead {} before you answer.\n"
+# a lead that ends in is takes its path from the next line, like a bare lead or a colon
+P2_IS_END = tuple(lead + "\n/w/repo\nRead {} before you answer.\n" for lead in ("The workdir is", "Your workdir is",
+                                                                              "Workdir is", "The workdir is "))
+# a line that opens with a workdir label but is not a declaration: the boundary is open, never ignored
+P2_LABEL = tuple(line + "\nRead /etc/passwd before you answer.\n" for line in (
+    "**Workdir**: /w/repo", "Workdir = /w/repo", "Working tree: /w/repo (the workdir).", "The workdir is.\n/w/repo",
+    "_YOUR WORKDIR_ - /w/repo"))
+P2_ALSO_MID = ("Workdir /w/repo.\nNote: the workdir is also /etc for this task.\n"
+               "Read /etc/shadow.md before you answer.\n")
+# the word workdir later in a line, or a longer word, is not a label
+P2_NOT_LABEL = ("Workdir /w/repo.\nNote: the workdir is read-only.\nRead /w/repo/a.md before you answer.\n",
+                "Workdir /w/repo.\nWorkdirs are listed below.\nRead /w/repo/a.md before you answer.\n")
+P3_BOLD_PINS = ("**REVIEWED HEAD:** {}\n", "**REVIEWED HEAD**: {}\n", "__BRIEF-PIN__ {}\n", "*BRIEF-PIN*: `{}`\n")
 # a `//`, a `~` segment or an unquoted space ended the previous extraction's path before the `..` that escapes
 P2_ESCAPES = ("/w/repo//../../etc/passwd", "/w/repo/x~/../../../etc/passwd", "/w/repo/a b/../../../etc/x.md")
 P2_UNPLACED = ("~user/notes.md", "$TMPDIR/x.md", "../x.md", ",".join(["/w/repo/a.md"] * 17))
@@ -3482,8 +3518,16 @@ def self_test(report_path=None):
           [0, 0, 0, 1, 1])
     check("preflight/p2-clean-quiet", (p2("/w/repo/docs/notes.md"), _outcome(P2_NO_WORKDIR),
                                        _outcome(P2_OUTSIDE, "alpha"), _outcome(P2_OUTSIDE, "beta")), ((0, []),) * 4)
-    check("preflight/p2-declaration-prose-hard", [_outcome(text) for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO)],
+    check("preflight/p2-declaration-prose-hard", [_outcome(text) for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO_MID)],
           [(1, [("P2", "HARD")])] * 3)
+    # is just before a space or the line end links the lead to its path; is. is not a link (a label: unclear)
+    check("preflight/p2-declaration-is-line-end",
+          [_outcome(form.format(path))[0] for form in P2_IS_END for path in ("/w/repo/a.md", "/etc/x.md")],
+          [0, 1] * 4)
+    check("preflight/p2-workdir-label-cannot-evaluate",
+          [_outcome(text) for text in P2_LABEL + (P2_ALSO,)] + [_outcome(P2_LABEL[0], "beta")],
+          ["CannotEvaluate"] * 6 + [(0, [])])
+    check("preflight/p2-workdir-label-boundary-quiet", [_outcome(text) for text in P2_NOT_LABEL], [(0, [])] * 2)
     check("preflight/p2-declaration-unclear-cannot-evaluate",
           [_outcome(text) for text in (P2_TWO, P2_SPACE_UNQUOTED, P2_BARE_END)] + [_outcome(P2_TWO, "beta")],
           ["CannotEvaluate"] * 3 + [(0, [])])
@@ -3525,6 +3569,11 @@ def self_test(report_path=None):
           [(len(names.pins), len(names.bad_pins)) for names in (PreflightText("BRIEF-PIN {}\n".format("a" * count))
                                                                 for count in (6, 7, 8, 39, 40, 41, 63, 64, 65))],
           [(0, 1), (1, 0), (1, 0), (1, 0), (1, 0), (0, 1), (0, 1), (1, 0), (0, 1)])
+    # a bold pin label is read like a plain one: a pin, or a bad pin when its value is not a commit
+    bold = [PreflightText(form.format(value)) for value, form in [("a" * 12, form) for form in P3_BOLD_PINS]
+            + [("main", P3_BOLD_PINS[0])]]
+    check("preflight/p3-bold-pin", [(names.pins, names.bad_pins) for names in bold],
+          [([(1, "a" * 12)], [])] * 4 + [([], [1])])
     check("preflight/p3-bad-pin-cannot-evaluate",
           [_outcome(P3_PIN_ONLY.format(value), family) for value in P3_BAD_PINS for family in ("alpha", "gamma")]
           + [_outcome("Reviewed head: {}\n".format("a" * 41), "alpha")], ["CannotEvaluate"] * 10 + [(0, [])])
@@ -3622,8 +3671,16 @@ def self_test(report_path=None):
 
         # each guard on its own: the previous parser declares a prose path, so a second workdir appears
         check("revert/p2-declaration-red", *flip(
-            [lambda text=text: _outcome(text) for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO)],
+            [lambda text=text: _outcome(text) for text in (P2_SUCH_AS, P2_OR_PATH, P2_ALSO_MID)],
             ["CannotEvaluate"] * 3, _declaration_rest=path_after_word))
+        # is before the line end is no link without its guard, so the lead is read as an unclear label
+        check("revert/p2-is-line-end-red", *flip(
+            [lambda form=form: _outcome(form.format("/etc/x.md")) for form in P2_IS_END[:3]],
+            ["CannotEvaluate"] * 3, DECLARATION_LINK_RE=re.compile(r":|is(?=\s)", re.I)))
+        # with no label guard a label line that is not a declaration is ignored, so P2 stays off or reads the rest
+        check("revert/p2-workdir-label-red", *flip(
+            [lambda text=text: _outcome(text) for text in P2_LABEL + (P2_ALSO,)],
+            [(0, [])] * 5 + [(1, [("P2", "HARD")])], WORKDIR_LABEL_RE=never))
         # and the previous rule reads every declaration as a workdir and ignores an unclear one
         check("revert/p2-ambiguity-red", *flip(
             [lambda text=text: _outcome(text)[0] for text in (P2_TWO, P2_SPACE_UNQUOTED, P2_BARE_END)],
@@ -3678,8 +3735,13 @@ def self_test(report_path=None):
                                              [(0, [])] * len(P3_BAD_PINS), PIN_LABEL_RE=never))
         check("revert/p3-pin-64-hex-red", *flip([lambda: len(PreflightText(P3_PIN_ONLY.format("a" * 64)).pins)],
                                                 [0], PIN_RE=re.compile(
-                                                    r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+"
+                                                    r"(?:REVIEWED\s+HEAD|BRIEF-PIN)[*_]*+\s*+[:=]?+[*_]*+\s*+[`*_(]*+"
                                                     r"([0-9a-fA-F]{7,40})(?![\w-])")))
+        # no markup between the label and its colon or value: a bold label reads as a pin line with no pin
+        check("revert/p3-bold-pin-red", *flip([lambda form=form: len(PreflightText(form.format("a" * 12)).pins)
+                                               for form in P3_BOLD_PINS[:2]], [0] * 2, PIN_RE=re.compile(
+                                                   r"(?:REVIEWED\s+HEAD|BRIEF-PIN)\s*+[:=]?+\s*+[`*_(]*+"
+                                                   r"([0-9a-fA-F]{64}|[0-9a-fA-F]{7,40})(?![\w-])")))
         check("revert/p3-red", *flip([lambda: p3("docs/absent.md")], [(0, [])], rule_p3=nothing))
         check("revert/p3-cat-file-red", *flip([lambda: p3("docs/untracked.md")], [(0, [])],
                                               exists_at_revision=lambda repo, commit, path: os.path.lexists(
@@ -3711,7 +3773,7 @@ def self_test(report_path=None):
                                            HANDBACK_NAMED_RE=never))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 104)
+    check("revert/every-flip-ran", len(flipped), 107)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -3739,8 +3801,8 @@ def self_test(report_path=None):
           "with the text glued to it, http and https words skipped, file:// judged) from that slash to the word's "
           "end, refuses each one not under the workdir (over-refusing odd words such as /w/repo//a.md) or that it "
           "cannot place, unless the word starts after a prohibition on its line, and exits 2 on a workdir that "
-          "normalises to / or holds `..`; it prints a path missing at a pinned revision of 7 to 40 or 64 hex "
-          "digits read with git cat-file after `..` is folded (P3; an unresolved pin, or a pin label with any "
+          "normalises to / or holds `..` or on a workdir label line that is not a declaration; it prints a "
+          "path missing at a pinned revision of 7 to 40 or 64 hex digits read with git cat-file after `..` is folded (P3; an unresolved pin, or a pin label with any "
           "other value, exits 2), P1 and P4 as ADVISORY, and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
