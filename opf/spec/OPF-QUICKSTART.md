@@ -130,10 +130,17 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    the same way: one last-resort handler catches the exceptions the command lets
    escape from init dispatch onward and prints only the rendered exception type and
    text, so from that point `opf init` reports a rendered line rather than a Python
-   traceback, up to exactly three windows. A failure before init dispatch (a
-   bootstrap fault other than the import or read errors mapped to a rendered
-   cannot-evaluate, or an interrupt before or during dispatch) is outside that
-   handler entirely; an interrupt landing in the boundary handler's own few
+   traceback, up to exactly three windows. Every fault raised while a helper module
+   is imported, a SyntaxError in an installed helper included, is mapped to a
+   rendered cannot-evaluate (exit 2) except a keyboard interrupt, as long as the
+   code opf loads neither ends the process itself nor replaces anything opf uses.
+   That code runs in opf's process with its privileges, at import, when called or
+   later (an atexit hook, a thread, a signal handler, a destructor, or a replaced
+   stream whose flush fails at shutdown, so that the process exits 120), and can do
+   both, so every exit status stated here holds only while it does neither. A
+   failure before init dispatch (a keyboard interrupt while a helper is imported,
+   or any interrupt before or during dispatch) is
+   outside that handler entirely; an interrupt landing in the boundary handler's own few
    statements, after dispatch, escapes it; and an interrupt arriving after that
    handler has returned, in the dispatcher's own return and exit statements, escapes
    it too. Each of the three windows can surface as Python's own traceback or
@@ -141,8 +148,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    caught exception is still being handled, so its traceback can chain that
    exception, with its raw, unrendered text; an interrupt after the handler has
    returned interpolates no init value into its traceback; and a pre-dispatch
-   fault's traceback carries that fault's own text, a SyntaxError message included,
-   unrendered -- the stated bootstrap residual. What the static route gate proves,
+   interrupt's traceback carries that interrupt's own text unrendered -- the stated
+   bootstrap residual. What the static route gate proves,
    and the residual it cannot see (introspection reached at runtime through allowed
    spellings, rendered-type constructions outside the scanned module, and the
    sibling modules the init path calls into), is stated in the tooling docstrings.

@@ -24,14 +24,22 @@ with exit 2). This gate holds where it runs:
      ...) is counted for every name and is never clean: through an alias it can reach the module namespace or
      the function. A rebinding made by a call (setattr, globals().update), by a store inside a function body
      other than through a global declaration, or from another module is not seen.
-  3. entries: each CLI copy's __main__ body is exactly sys.exit(_child_status_refusal_exit("<basename>") or
-     main()), except that of each SELF_TEST_COPIES entry (the three opf/tools self_test modules above), which
-     is exactly opf.py's canonical --self-test statement (SELF_TEST_ENTRY, held to opf.py's own
-     _ENTRY_STATEMENT) then that line, with self_test bound once at module scope (the same count), by one
-     undecorated top-level def whose first statement after the docstring is the guard call
-     _child_status_refusal_exit("<basename>"); the canonical file's entry ends in that line, each
+  3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
+     _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
+     ends the process by raising SystemExit itself, never through sys.exit), and for every other,
+     sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
+     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
+     (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
+     at module scope (the same count), by one undecorated top-level def whose first statement after the
+     docstring is the guard call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives
+     the guard inside that lambda, must call its argument first (one undecorated top-level def _main_exit(main)
+     whose first statement after its docstring is a try whose body is exactly status = main()) and be what the
+     entry line calls: that def is the module's one binding of _main_exit at module scope (the same count), and
+     its own scope holds no yield or yield from (a generator's call runs none of its body); the canonical file's
+     entry ends in its own line of that second form, each
      SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical
-     --self-test statement and then that line (a direct --self-test launch of it is unguarded; the self-test runs
+     --self-test statement and then that second form (a direct --self-test launch of it is unguarded; the
+     self-test runs
      that launch under a process-creation audit hook that records the _posixsubprocess.fork_exec event too, so
      the multiprocessing launches are recorded, and records an import of _interpreters as a launch, as the hook
      cannot see a subinterpreter's own launches; the hook writes each launch as it happens to a private record
@@ -166,7 +174,8 @@ workflow grammar is this gate's own reading of a YAML subset, held to the self-t
 workflows and not compared with the parser GitHub runs, so a file inside it that GitHub reads another way is
 not seen; R16 the binding count of legs 2 and 3 (_bindings) reads the module's own binding statements, so a
 rebinding through a computed name made by a call (setattr on the module, globals().update) or inside a function
-body (a globals() or sys.modules[__name__] store there) is not seen. Whether a real
+body (a globals() or sys.modules[__name__] store there), including one of opf.py's _main_exit or an attribute
+store such as _main_exit.__code__ made there, is not seen. Whether a real
 launcher starts these tools with SIGCHLD ignored, and whether the steps of one CI job share one disposition, are
 not established: each job's probe step reads the disposition of its own step only, so it cannot show what the
 job's other steps inherit.
@@ -238,6 +247,18 @@ SELF_ENTRIES = frozenset((CANONICAL_REL, COVERAGE_REL)
                          + tuple(rel for rel, _name in CLI_COPIES + ENTRY_COPIES + SELF_TEST_FIRST_COPIES)
                          + HOOK_COPIES)
 CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
+# The entries that are not CLI_ENTRY, by basename. opf.py runs the guard first inside _main_exit, which ends the
+# process by raising SystemExit itself (code opf loads can replace sys.exit); a refusal still ends the process at
+# once with its own line and exit 2.
+CLI_ENTRY_BY_NAME = {"opf.py": '_main_exit(lambda: _child_status_refusal_exit("opf.py") or main())'}
+# Such an entry hands the guard to _main_exit inside a lambda, so the guard runs only if _main_exit calls its
+# argument: the module's one top-level MAIN_EXIT is an undecorated function with exactly MAIN_EXIT_DEF's
+# parameters, and its first statement after the docstring is a try whose body is exactly MAIN_EXIT_CALL. The
+# entry line calls it by name, so that def is the module's one binding of MAIN_EXIT, and it holds no yield, so
+# a call runs its body.
+MAIN_EXIT = "_main_exit"
+MAIN_EXIT_DEF = "def _main_exit(main):\n    pass\n"
+MAIN_EXIT_CALL = "status = main()"
 # The CLI copies that are opf/tools self_test modules: opf.py's aggregator requires their __main__ block to start
 # with its canonical --self-test statement (SELF_TEST_ENTRY, opf.py's _ENTRY_STATEMENT), so their __main__ body is
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
@@ -652,14 +673,63 @@ def copy_findings(rel, tree, tmpl, names):
     return out
 
 
+def cli_entry(name):
+    """The CLI entry line of the entry point named name: its CLI_ENTRY_BY_NAME row, or else CLI_ENTRY."""
+    return CLI_ENTRY_BY_NAME.get(name, CLI_ENTRY.format(name))
+
+
 def cli_entry_finding(rel, tree, name, exact=True):
-    """None when the module's __main__ body is exactly the CLI entry line (or, with exact false, ends in it)."""
+    """None when the module's __main__ body is exactly the CLI entry line (or, with exact false, ends in it) and,
+    for a CLI_ENTRY_BY_NAME entry, its _main_exit calls its argument first (main_exit_finding)."""
     block = tree.body[-1] if tree.body and check_entry_guard._is_guard(tree.body[-1]) else None
-    want = ast.dump(ast.parse(CLI_ENTRY.format(name)).body[0])
+    want = ast.dump(ast.parse(cli_entry(name)).body[0])
     if (block is None or not block.body or ast.dump(block.body[-1]) != want
             or (exact and len(block.body) != 1)):
         return "{}: its __main__ entry is not {}{}".format(rel, "exactly " if exact else "ending in ",
-                                                          CLI_ENTRY.format(name))
+                                                          cli_entry(name))
+    return main_exit_finding(rel, tree) if name in CLI_ENTRY_BY_NAME else None
+
+
+def _yields(function):
+    """Whether function's own scope holds a yield or yield from, which makes it a generator whose call runs none of
+    its body. A nested function's or lambda's body is its own scope and is not read; its decorators and defaults,
+    which this scope evaluates, are."""
+    stack = list(function.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack += (getattr(node, "decorator_list", []) + node.args.defaults
+                      + [default for default in node.args.kw_defaults if default is not None])
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def main_exit_finding(rel, tree):
+    """None when the module's MAIN_EXIT calls its argument first and is what the entry line calls: one undecorated
+    top-level function with exactly MAIN_EXIT_DEF's parameters, whose first statement after the docstring is a
+    try whose body is exactly MAIN_EXIT_CALL, whose own scope holds no yield (_yields), and which is the module's
+    one binding of MAIN_EXIT at module scope (_bindings; a rebinding through a computed name is residual R16)."""
+    nodes = _top_definitions(tree, MAIN_EXIT)
+    function = nodes[0] if len(nodes) == 1 and isinstance(nodes[0], ast.FunctionDef) else None
+    body = [] if function is None else function.body[1 if ast.get_docstring(function) is not None else 0:]
+    want = [ast.dump(statement) for statement in ast.parse(MAIN_EXIT_CALL).body]
+    if (function is None or function.decorator_list
+            or ast.dump(function.args) != ast.dump(ast.parse(MAIN_EXIT_DEF).body[0].args)
+            or not body or not isinstance(body[0], ast.Try)
+            or [ast.dump(statement) for statement in body[0].body] != want):
+        return "{}: {} does not call its argument first (one top-level {} whose first statement after its " \
+               "docstring is a try whose body is exactly {})".format(rel, MAIN_EXIT, MAIN_EXIT_DEF.split(":", 1)[0],
+                                                                     MAIN_EXIT_CALL)
+    if _yields(function):
+        return "{}: {} holds a yield or yield from in its own scope, so it is a generator and a call runs none of " \
+               "its body".format(rel, MAIN_EXIT)
+    bindings = _bindings(tree, MAIN_EXIT)
+    if len(bindings) != 1:
+        return "{}: the module binds {} {} times at module scope ({}), not once by its one top-level def, so the " \
+               "entry line may call something else".format(rel, MAIN_EXIT, len(bindings), _forms(bindings))
     return None
 
 
@@ -1783,15 +1853,17 @@ def _inputs():
     trees = {"canonical": ast.parse(real[CANONICAL_REL]), "opf": ast.parse(opf), "selftest": ast.parse(selftest),
              "hook": ast.parse(hook), "declaration": ast.parse(declaration),
              "opf-declaration": ast.parse(opf_declaration)}
-    opf_entry = CLI_ENTRY.format("opf.py")
+    opf_entry = cli_entry("opf.py")
     declaration_guard = "    " + ENTRY_GUARD.format("check_opf_declaration.py") + "\n"
     for key, source in (
             ("opf-drift", _swap(opf, "    if waited != pid or", "    if waited == pid or")),
             ("selftest-missing", _swap(selftest, "def _child_status_refusal_exit(name):",
                                        "def _child_status_refusal_exit_gone(name):")),
             ("hook-drift", _swap(hook, "_CHILD_STATUS_PROBE_CODE = 77", "_CHILD_STATUS_PROBE_CODE = 78")),
-            ("opf-entry-bare", _swap(opf, "    " + opf_entry + "\n", "    sys.exit(main())\n")),
+            ("opf-entry-bare", _swap(opf, "    " + opf_entry + "\n", "    _main_exit(lambda: main())\n")),
             ("opf-entry-extra", _swap(opf, "    " + opf_entry + "\n", "    print('entry')\n    " + opf_entry + "\n")),
+            ("opf-main-exit-global", _swap(opf, "        " + MAIN_EXIT_CALL + "\n",
+                                           "        status = globals()[\"main\"]()\n")),
             ("hook-block-open", _swap(hook, "            return 2\n        signal.signal(signal.SIGCHLD,",
                                       "            return 0\n        signal.signal(signal.SIGCHLD,")),
             ("hook-block-gone", _swap(hook, "    unobservable = _child_status_refusal()\n", "    unobservable = None\n")),
@@ -1821,6 +1893,41 @@ def _inputs():
                 "\n" + statement.format(name) + '\nif __name__ == "__main__":\n'))
     for key, old, new in DECORATED:
         trees[key + "-rebound-decorated"] = ast.parse(_swap(declaration, old, new))
+    # opf.py's own _main_exit and entry block as one small module, unedited and then with one edit each: the
+    # binding count walks the whole module for every vector and mutant, which opf.py's size would make slow.
+    # First each form the count reads that binds _main_exit again, then each shape main_exit_finding refuses.
+    main_exit = ast.get_source_segment(opf, _top_definitions(trees["opf"], MAIN_EXIT)[0]) + "\n"
+    entry = 'if __name__ == "__main__":\n    ' + opf_entry + "\n"
+    stand_in = "lambda main: None"
+    for key, source in (
+            ("main-exit-module", main_exit + entry),
+            ("main-exit-tuple-rebind", main_exit + "_main_exit, _spare = " + stand_in + ", None\n" + entry),
+            ("main-exit-list-rebind", main_exit + "[_main_exit, _spare] = [" + stand_in + ", None]\n" + entry),
+            ("main-exit-try-rebind", main_exit + "try:\n    _main_exit = " + stand_in + "\nexcept NameError:\n"
+                                     "    pass\n" + entry),
+            ("main-exit-if-rebind", main_exit + "if True:\n    _main_exit = " + stand_in + "\n" + entry),
+            ("main-exit-import-alias", main_exit + "from builtins import id as _main_exit\n" + entry),
+            ("main-exit-for-target", main_exit + "for _main_exit in (" + stand_in + ",):\n    pass\n" + entry),
+            ("main-exit-with-target", main_exit + "with open(__file__) as _main_exit:\n    pass\n" + entry),
+            ("main-exit-walrus-target", main_exit + "(_main_exit := " + stand_in + ")\n" + entry),
+            ("main-exit-augmented-target", main_exit + "_main_exit += _spare\n" + entry),
+            ("main-exit-global-rebind", main_exit + "def _rebind():\n    global _main_exit\n    _main_exit = "
+                                        + stand_in + "\n\n\n_rebind()\n" + entry),
+            ("main-exit-match-capture", main_exit + "match None:\n    case _main_exit:\n        pass\n" + entry),
+            ("main-exit-deleted", main_exit + "del _main_exit\n" + entry),
+            ("main-exit-type-alias", main_exit + "type _main_exit = int\n" + entry),
+            ("main-exit-generator", main_exit + "    yield\n" + entry),
+            ("main-exit-decorated", "@(lambda function: " + stand_in + ")\n" + main_exit + entry),
+            ("main-exit-parameter-renamed", _swap(main_exit, "def _main_exit(main):\n", "def _main_exit(entry):\n")
+             + entry),
+            ("main-exit-try-not-first", _swap(main_exit, "    try:\n        " + MAIN_EXIT_CALL + "\n",
+                                              "    if False:\n        " + MAIN_EXIT_CALL + "\n    try:\n"
+                                              "        status = globals()[\"main\"]()\n") + entry),
+            ("main-exit-not-top-level", "if True:\n" + "".join("    " + line if line.strip() else line
+                                                               for line in main_exit.splitlines(True)) + entry),
+            ("main-exit-async", _swap(main_exit, "def _main_exit(main):\n", "async def _main_exit(main):\n")
+             + entry)):
+        trees[key] = ast.parse(source)
     # A self_test module whose __main__ block starts with the CLI entry line (no canonical --self-test statement
     # first), and one whose self_test() lost its guard call.
     state_rel = "opf/tools/_opf_adopt_state.py"
@@ -2049,6 +2156,9 @@ def _vectors(module, trees, texts, canonical_tree):
     def hooks(key):
         return m.hook_registration_findings(texts[key], handlers, events)
 
+    def main_exit(form):
+        return m.cli_entry_finding("opf", trees["main-exit-" + form], "opf.py") is not None
+
     def launchers(**fs):
         return m._shell_launchers(FAKE_ROOT, *_fake_fs(**fs))
 
@@ -2093,6 +2203,7 @@ def _vectors(module, trees, texts, canonical_tree):
                                                         for finding in copies("selftest-guard-import",
                                                                               m.CANONICAL_NAMES))),
         ("entries/real-entries-pass", lambda: m.cli_entry_finding("opf", trees["opf"], "opf.py") is None
+         and not main_exit("module")
          and m.cli_entry_finding("canonical", canonical_tree, "_child_status.py", exact=False) is None
          and m.hook_block_finding("hook", trees["hook"]) is None
          and all(m.self_test_entry_finding(rel, trees[rel], Path(rel).name) is None for rel in m.SELF_TEST_COPIES)
@@ -2118,6 +2229,34 @@ def _vectors(module, trees, texts, canonical_tree):
         ("entries/cli-line-shape", lambda: m.cli_entry_finding("opf", trees["opf-entry-bare"], "opf.py") is not None),
         ("entries/cli-extra-statement",
          lambda: m.cli_entry_finding("opf", trees["opf-entry-extra"], "opf.py") is not None),
+        # _main_exit running main() by its global name, never its argument: the guard in the lambda never runs.
+        ("entries/main-exit-skips-argument",
+         lambda: m.cli_entry_finding("opf", trees["opf-main-exit-global"], "opf.py") is not None),
+        # _main_exit bound again after its def, in each form the binding count reads: the entry line then calls
+        # the new binding, and the guard in the lambda runs only if that calls its argument.
+        ("entries/main-exit-tuple-rebind", lambda: main_exit("tuple-rebind")),
+        ("entries/main-exit-list-rebind", lambda: main_exit("list-rebind")),
+        ("entries/main-exit-try-rebind", lambda: main_exit("try-rebind")),
+        ("entries/main-exit-if-rebind", lambda: main_exit("if-rebind")),
+        ("entries/main-exit-import-alias", lambda: main_exit("import-alias")),
+        ("entries/main-exit-for-target", lambda: main_exit("for-target")),
+        ("entries/main-exit-with-target", lambda: main_exit("with-target")),
+        ("entries/main-exit-walrus-target", lambda: main_exit("walrus-target")),
+        ("entries/main-exit-augmented-target", lambda: main_exit("augmented-target")),
+        ("entries/main-exit-global-rebind", lambda: main_exit("global-rebind")),
+        ("entries/main-exit-match-capture", lambda: main_exit("match-capture")),
+        ("entries/main-exit-deleted", lambda: main_exit("deleted")),
+        ("entries/main-exit-type-alias", lambda: main_exit("type-alias")),
+        # A yield after the final raise: _main_exit is a generator, and the entry's call runs none of its body.
+        ("entries/main-exit-generator", lambda: main_exit("generator")),
+        # Each shape condition alone: a decorator that replaces the function, a parameter not named main (the
+        # body's main() is then the global one), a first statement that is not the try, the def only inside a
+        # block (a finding, not a crash), and an async def, whose call runs none of its body.
+        ("entries/main-exit-decorated", lambda: main_exit("decorated")),
+        ("entries/main-exit-parameter-renamed", lambda: main_exit("parameter-renamed")),
+        ("entries/main-exit-try-not-first", lambda: main_exit("try-not-first")),
+        ("entries/main-exit-not-top-level", lambda: main_exit("not-top-level")),
+        ("entries/main-exit-async", lambda: main_exit("async")),
         ("entries/hook-block-shape", lambda: m.hook_block_finding("hook", trees["hook-block-open"]) is not None),
         ("entries/hook-block-missing", lambda: m.hook_block_finding("hook", trees["hook-block-gone"]) is not None),
         ("entries/entry-function-real-pass", lambda: m.entry_function_finding(
@@ -2402,6 +2541,22 @@ MUTANTS = (
      "if block is None or [ast.dump(statement) for statement in block.body] != expected:",
      "if block is None or [ast.dump(statement) for statement in block.body[:1] + block.body[-1:]] != expected:",
      "entries/self-test-first-extra-statement"),
+    ("main-exit-wired", "    return main_exit_finding(rel, tree) if name in CLI_ENTRY_BY_NAME else None\n",
+     "    return None\n", "entries/main-exit-skips-argument"),
+    ("main-exit-call", "            or [ast.dump(statement) for statement in body[0].body] != want):",
+     "            or False):", "entries/main-exit-skips-argument"),
+    ("main-exit-single", "nodes[0] if len(nodes) == 1 and isinstance(nodes[0], ast.FunctionDef)",
+     "nodes[0] if isinstance(nodes[0], ast.FunctionDef)", "entries/main-exit-not-top-level"),
+    ("main-exit-function", "len(nodes) == 1 and isinstance(nodes[0], ast.FunctionDef)", "len(nodes) == 1",
+     "entries/main-exit-async"),
+    ("main-exit-decorator", "if (function is None or function.decorator_list\n", "if (function is None\n",
+     "entries/main-exit-decorated"),
+    ("main-exit-args", "            or ast.dump(function.args) != ast.dump(ast.parse(MAIN_EXIT_DEF).body[0].args)\n",
+     "", "entries/main-exit-parameter-renamed"),
+    ("main-exit-try", "or not body or not isinstance(body[0], ast.Try)", "or not body",
+     "entries/main-exit-try-not-first"),
+    ("main-exit-no-yield", "    if _yields(function):\n", "    if False:\n", "entries/main-exit-generator"),
+    ("main-exit-bound-once", "    if len(bindings) != 1:\n", "    if False:\n", "entries/main-exit-tuple-rebind"),
     ("self-test-entry", "if block is None or [ast.dump(statement) for statement in block.body] != want:",
      "if block is None:", "entries/self-test-entry-shape"),
     ("self-test-guard", "    if not body or ast.dump(body[0]) != guard:\n", "    if not body:\n",
@@ -2693,7 +2848,7 @@ def _behaviour(probe, base):
     shutil.copytree(ROOT / "opf" / "tools", opf_tree / "opf" / "tools",
                     ignore=shutil.ignore_patterns("__pycache__"))
     opf = _copy("opf/tools/opf.py", opf_tree, _swap((ROOT / "opf/tools/opf.py").read_text(encoding="utf-8"),
-                                                    CLI_ENTRY.format("opf.py"), "sys.exit(main())"))
+                                                    cli_entry("opf.py"), "_main_exit(lambda: main())"))
     got = via("ignore", python + [str(opf), "--help"], cwd=str(opf_tree))
     out.append(("revert/opf-guard-removed-red", not refused(got, "opf.py") and "opf: the OPFiles" in got[2], got))
     declaration_module = _copy("opf/tools/_opf_declaration.py", opf_tree, _swap(
@@ -2871,7 +3026,17 @@ def self_test(lane, report_path=None):
                                 ("entries/self-test-rebound-import", 0), ("entries/self-test-entry-checked", 0),
                                 ("entries/cli-entry-checked", 0), ("entries/self-test-entry-pinned", 0),
                                 ("entries/cli-line-shape", 0),
-                                ("entries/cli-extra-statement", 0), ("entries/hook-block-shape", 0),
+                                ("entries/cli-extra-statement", 0), ("entries/main-exit-skips-argument", 0),
+                                ("entries/main-exit-tuple-rebind", 0), ("entries/main-exit-list-rebind", 0),
+                                ("entries/main-exit-try-rebind", 0), ("entries/main-exit-if-rebind", 0),
+                                ("entries/main-exit-import-alias", 0), ("entries/main-exit-for-target", 0),
+                                ("entries/main-exit-with-target", 0), ("entries/main-exit-walrus-target", 0),
+                                ("entries/main-exit-augmented-target", 0), ("entries/main-exit-global-rebind", 0),
+                                ("entries/main-exit-match-capture", 0), ("entries/main-exit-deleted", 0),
+                                ("entries/main-exit-type-alias", 0), ("entries/main-exit-generator", 0),
+                                ("entries/main-exit-decorated", 0), ("entries/main-exit-parameter-renamed", 0),
+                                ("entries/main-exit-try-not-first", 0), ("entries/main-exit-not-top-level", 0),
+                                ("entries/main-exit-async", 0), ("entries/hook-block-shape", 0),
                                 ("entries/hook-block-missing", 0), ("entries/entry-function-real-pass", 0),
                                 ("entries/entry-function-guard-missing", 0),
                                 ("entries/entry-function-guard-not-first", 0),
