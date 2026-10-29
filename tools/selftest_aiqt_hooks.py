@@ -2501,7 +2501,8 @@ def _test_git_stash_ref(failures):
 
 
 # pgrep_self_match rows (trkasy): each deny row is a process check that can match the shell running it (pgrep
-# -f without -A, pkill -f, ps piped into grep on a pattern); each allow row is one the guard must pass.
+# or pkill with -f, with or without -A, or ps piped into a program given a pattern), found anywhere in the
+# command text; each allow row is one the guard must pass.
 _PSM_DENY_ROWS = (
     ("(psm-d1) pgrep -f guarding the launch it checks", "pgrep -f 'run-x' || dispatch run-x"),
     ("(psm-d2) until-loop on pgrep -f", "until ! pgrep -f job7; do sleep 5; done"),
@@ -2527,7 +2528,7 @@ _PSM_DENY_ROWS = (
     ("(psm-d22) pgrep -O value glued", "pgrep -O5 -f job7"),
     ("(psm-d23) pgrep -f after the pattern", "pgrep job7 -f"),
     ("(psm-d24) pgrep -fx still matches the full line", "pgrep -fx job7"),
-    ("(psm-d25) pkill -A -f, pkill read as keeping ancestors", "pkill -A -f job7"),
+    ("(psm-d25) pkill -A -f", "pkill -A -f job7"),
     ("(psm-d26) time -p prefix", "time -p pgrep -f job7"),
     ("(psm-d27) exec -a NAME prefix", "exec -a x pgrep -f job7"),
     ("(psm-d28) command -p prefix", "command -p pgrep -f job7"),
@@ -2538,46 +2539,106 @@ _PSM_DENY_ROWS = (
     ("(psm-d33) grep through another program in the ps pipeline", "ps aux | awk '{print}' | grep job7"),
     ("(psm-d34) ps piped into grep -c", "ps aux | grep -c job7"),
     ("(psm-d35) pgrep -f in an if condition", "if pgrep -f job7; then echo up; fi"),
-    ("(psm-d36) pgrep -f with -- before the pattern", "pgrep -f -- job7"))
+    ("(psm-d36) pgrep -f with -- before the pattern", "pgrep -f -- job7"),
+    # A quoted command substitution or backticks: the raw text is read, not only the lexer's segments.
+    ("(psm-d37) pgrep -f in a double-quoted substitution", 'x="$(pgrep -f job7)"'),
+    ("(psm-d38) pgrep -f in a quoted test", 'if [ -n "$(pgrep -f job7)" ]; then echo up; fi'),
+    ("(psm-d39) pgrep -f in a quoted while test", 'while [ -n "$(pgrep -f job7)" ]; do sleep 5; done'),
+    ("(psm-d40) pgrep -f in quoted backticks", 'until [ -z "`pgrep -f job7`" ]; do sleep 5; done'),
+    ("(psm-d41) pgrep -f in bare backticks", "echo `pgrep -f job7`"),
+    ("(psm-d42) ps | grep in a double-quoted substitution", 'echo "$(ps aux | grep job7)"'),
+    ("(psm-d43) pkill -f in a double-quoted substitution", 'n="$(pkill -f job7)"'),
+    ("(psm-d44) pgrep -f in test -n", 'test -n "$(pgrep -f job7)"'),
+    ("(psm-d45) pgrep -f in a bash -c string", "bash -c 'pgrep -f job7 || run job7'"),
+    ("(psm-d46) pgrep -f in an eval string", "eval \"pgrep -f job7\""),
+    ("(psm-d47) ps | grep in an sh -c string", "sh -c \"ps aux | grep job7\""),
+    # -A does not leave out a forked pipeline stage or background subshell, which carries the command text.
+    ("(psm-d48) pgrep -A -f piped into a while loop", 'pgrep -A -fa job7 | while read l; do echo "$l"; done'),
+    ("(psm-d49) pgrep -A -f piped into a group", "pgrep -A -fa job7 | { read l; echo $l; }"),
+    ("(psm-d50) pgrep -A -f after a background subshell", "( sleep 2; true ) & pgrep -A -fa job7; wait"),
+    ("(psm-d51) pgrep -A -f into cat", "pgrep -A -fa job7 | cat"),
+    ("(psm-d52) pgrep --ignore-ancestors -f", "pgrep --ignore-ancestors -f job7"),
+    ("(psm-d53) pgrep -Af and -fA clusters", "pgrep -Af job7; pgrep -fA job7"),
+    # ps piped into any program given a pattern, not only grep.
+    ("(psm-d54) ps piped into awk", "ps aux | awk '/job7/'"),
+    ("(psm-d55) ps piped into sed", "ps aux | sed -n /job7/p"),
+    ("(psm-d56) ps piped into rg", "ps aux | rg job7"),
+    ("(psm-d57) ps piped into zgrep", "ps aux | zgrep job7"),
+    ("(psm-d58) ps piped into ag", "ps aux | ag job7"),
+    # An empty pattern or an extra pattern does not hide a real one.
+    ("(psm-d59) grep -e '' -e job7 after ps", "ps -ef | grep -e '' -e job7"),
+    ("(psm-d60) pgrep -f with an empty pattern", "pgrep -f ''"),
+    ("(psm-d61) grep -e job7 -f pats after ps", "ps -ef | grep -e job7 -f pats"),
+    ("(psm-d62) grep -v after ps names a pattern too", "ps aux | grep -v job7"),
+    ("(psm-d63) grep -f after ps", "ps aux | grep -f pats"),
+    ("(psm-d64) glued -e value after ps", "ps aux | grep -ejob7"),
+    # A bracket idiom whose literal the command also writes elsewhere can match its own shell.
+    ("(psm-d65) bracket pattern with its literal elsewhere", "pgrep -f '[j]ob7' || run job7"),
+    ("(psm-d66) a multi-letter class that spells itself", "pgrep -f '[ab]b]'"),
+    ("(psm-d67) a class then a wildcard", "pgrep -f '[j].ob7'"),
+    # A PID selection that also selects another way, and BSD p, are not PID-only.
+    ("(psm-d68) ps -p with -e", "ps -p 1 -e | grep job7"),
+    ("(psm-d69) BSD ps p", "ps p 1 | grep job7"),
+    ("(psm-d70) pgrep -f written in prose, read wherever it stands", "echo 'usage: pgrep -f job7'"),
+    ("(psm-d71) a path to pgrep", "/usr/bin/pgrep -f job7"),
+    ("(psm-d72) pgrep -f with a variable pattern", 'pgrep -f "$P"'),
+    ("(psm-d73) ps with a redirect before the pipe", "ps aux 2>/dev/null | grep job7"),
+    ("(psm-d74) pgrep -f on the line after a here-document", "cat <<E\nx\nE\npgrep -f job7"),
+    ("(psm-d75) pgrep -f after a here-string", "pgrep -f job7 <<<x"),
+    ("(psm-d76) bracket idioms past the judged count", "ps aux | grep" + " -e '[j]ob7'" * 65),
+    ("(psm-d77) ps in a group piped into grep", "( ps aux ) | grep job7"),
+    ("(psm-d78) grep in a group after ps", "ps aux | ( grep job7 )"),
+    ("(psm-d79) a pipe continued on the next line", "ps aux |\n  grep job7"))
 _PSM_ALLOW_ROWS = (
     ("(psm-a1) pgrep without -f", "pgrep job7 || run job7"),
-    ("(psm-a2) pgrep -A -f leaves out the checking shell's ancestors", "pgrep -A -f job7; echo job7"),
-    ("(psm-a3) pgrep --ignore-ancestors -f", "pgrep --ignore-ancestors -f job7"),
-    ("(psm-a4) pgrep -x name", "pgrep -x name; echo name"),
-    ("(psm-a5) pgrep -Af and -fA clusters", "pgrep -Af job7; pgrep -fA job7"),
-    ("(psm-a6) grep -v is an absence filter", "ps aux | grep -v job7; echo job7"),
-    ("(psm-a7) grep not fed by ps", "cat log | grep job7; echo job7"),
-    ("(psm-a8) a disclosed miss: pattern from a variable", 'pgrep -f "$P"; echo $P'),
-    ("(psm-a9) a disclosed miss: pattern from a substitution", "pgrep -f $(cat n); cat n"),
-    ("(psm-a10) a disclosed miss: a command the lexer refuses", "pgrep -f job7 <<<x; echo job7"),
-    ("(psm-a11) grep -f reads patterns from a file", "ps aux | grep -f pats; echo pats"),
-    ("(psm-a12) wait on a PID captured at launch", "job7 & pid=$!; while kill -0 $pid; do sleep 5; done"),
-    ("(psm-a13) ps -p PID piped into grep", "ps -p 1 -o args= | grep job7"),
-    ("(psm-a14) ps --pid PID piped into grep", "ps --pid 1 | grep job7"),
-    ("(psm-a15) pkill without -f", "pkill job7"),
-    ("(psm-a16) a value that spells f", "pgrep -u f job7"),
-    ("(psm-a17) pgrep --ignore-a abbreviation", "pgrep --ignore-a --full job7"))
+    ("(psm-a2) pgrep -x name", "pgrep -x name; echo name"),
+    ("(psm-a3) grep not fed by ps", "cat log | grep job7; echo job7"),
+    ("(psm-a4) wait on a PID captured at launch", "job7 & pid=$!; while kill -0 $pid; do sleep 5; done"),
+    ("(psm-a5) ps -p PID piped into grep", "ps -p 1 -o args= | grep job7"),
+    ("(psm-a6) ps --pid PID piped into grep", "ps --pid 1 | grep job7"),
+    ("(psm-a7) pkill without -f", "pkill job7"),
+    ("(psm-a8) a value that spells f", "pgrep -u f job7"),
+    ("(psm-a9) a -d value that spells f", "pgrep -d f job7"),
+    ("(psm-a10) ps -fp PID piped into grep", "ps -fp 1 | grep job7"),
+    ("(psm-a11) ps -fp PID with -o after it", "ps -fp 123 -o pid,args | grep job7"),
+    ("(psm-a12) ps -o before -fp PID", "ps -o args -fp 1 | grep job7"),
+    ("(psm-a13) ps -p PID alone", "ps -p 1234"),
+    ("(psm-a14) ps -p PID with -o args=", "ps -p 1234 -o args="),
+    ("(psm-a15) grep -F not fed by ps", "grep -F job7 /var/log/x"),
+    ("(psm-a16) ps piped into a counter", "ps aux | wc -l"),
+    ("(psm-a17) ps piped into head with a count", "ps aux | head -n 5"),
+    ("(psm-a18) a wait on a completion file", "until [ -e /run/job7.done ]; do sleep 5; done"),
+    ("(psm-a19) a word that only contains pgrep", "echo xpgrep -f job7; ls pgrep.d"))
+# The bracket idiom ([j]ob7): its first character class keeps it from matching its own text. Each row is red
+# when the idiom exception is removed.
+_PSM_IDIOM_ROWS = (
+    ("(psm-i1) pgrep -f with the bracket idiom", "pgrep -f '[j]ob7'"),
+    ("(psm-i2) ps | grep with the bracket idiom", "ps aux | grep '[j]ob7'"),
+    ("(psm-i3) ps | grep -q with the bracket idiom", "ps aux | grep -q '[j]ob7'"),
+    ("(psm-i4) pkill -f with the bracket idiom", "pkill -f '[j]ob7'"),
+    ("(psm-i5) pgrep -f bracket idiom in a quoted substitution", 'x="$(pgrep -f \'[j]ob7\')"'))
 
 
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; no submitted Bash command is executed. Each deny row must also be red with the
-    hook disabled (its detector _psm_hit patched to find nothing), so the row pins this hook's decision."""
+    hook disabled (its detector _psm_hit patched to find nothing), so the row pins this hook's decision, and
+    each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
     for label, command in _PSM_DENY_ROWS:
         got = _decision(handler, command)
         if got != "deny":
             failures.append("{}: expected deny, got {}".format(label, got))
-    for label, command in _PSM_ALLOW_ROWS:
+    for label, command in _PSM_ALLOW_ROWS + _PSM_IDIOM_ROWS:
         got = _decision(handler, command)
         if got != "allow":
             failures.append("{}: expected silent allow, got {}".format(label, got))
     code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                                          "tool_input": {"command": "pgrep -f job7; echo job7"}})
     reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-    if ("PID or completion file captured at launch" not in reason or "'job7'" not in reason
-            or "pgrep -A -f" not in reason):
-        failures.append("(psm-reason) the deny reason must name the pattern, pgrep -A -f and the "
-                        "launch-captured identifier remedy, got {!r}".format(reason))
+    if ("keys on a PID or completion file captured at launch" not in reason or "'job7'" not in reason
+            or "-A" in reason or "pipeline stage" not in reason):
+        failures.append("(psm-reason) the deny reason must name the pattern, the forked pipeline stage and the "
+                        "launch-captured identifier remedy, and must not recommend -A, got {!r}".format(reason))
     saved = aiqt_hooks._psm_hit
     aiqt_hooks._psm_hit = lambda command: None
     try:
@@ -2587,6 +2648,16 @@ def _test_pgrep_self_match(failures):
     for label, got in disabled:
         if got != "allow":
             failures.append("{}: with the hook disabled this deny row must go red (allow), got {}"
+                            .format(label, got))
+    saved = aiqt_hooks._psm_bracket_idiom
+    aiqt_hooks._psm_bracket_idiom = lambda pattern, lowered: False
+    try:
+        removed = [(label, _decision(handler, command)) for label, command in _PSM_IDIOM_ROWS]
+    finally:
+        aiqt_hooks._psm_bracket_idiom = saved
+    for label, got in removed:
+        if got != "deny":
+            failures.append("{}: with the idiom exception removed this allow row must go red (deny), got {}"
                             .format(label, got))
     for label, data in (
             ("(psm-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
@@ -4010,10 +4081,10 @@ _DEADLINE_SHAPES = {
     "fg_quoted_heredoc_amps": lambda n, base: ("Bash", {"command": "cat > f <<'E'\n" + _repeat(
         "a & b\n", n - 14, "E\n")}),
     "fg_setsid_options": lambda n, base: ("Bash", {"command": "setsid" + _repeat(" -c", n - 6)}),
-    # pgrep_self_match: many pgrep -A -f checks (each judged, none denied), and a self-matching check after a
+    # pgrep_self_match: many pgrep -x checks (each read, none denied), and a self-matching check after a
     # long prefix.
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
-        "pgrep -A -f p{:07d}; ".format(k) for k in range(n // 22))}),
+        "pgrep -x p{:07d}; ".format(k) for k in range(n // 19))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own

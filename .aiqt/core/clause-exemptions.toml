@@ -284,7 +284,7 @@ reason = "Rationale for trkasy.1 and trkasy.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "trkasy"
-text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work as an\nexplicit background dispatch does: its result and failure are lost unless collected."
+text = "Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less\nthan an explicit background dispatch does: the foreground call returns while the detached child runs on,\nso its result and its failure are lost unless they are collected."
 reason = "Classifies a detached child as launched asynchronous work, so trkasy.6 applies; no obligation of its own."
 
 [[exempt]]
