@@ -59,8 +59,8 @@ Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read t
 cover, or is invoked in a context it does not understand, DENIES rather than waving the action through (per
 integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command string, or an
 unreadable required field deny. Every Bash hook reads its command through one shared reader (_bash_command),
-so a tool_input that is missing or not an object, or a command that is missing or not a string, reads the
-same way in each, and a hook that judges the command denies it with a reason naming the malformed field
+so a tool_input that is missing or not an object, or a command that is missing, not a string or holds a NUL
+(bash ends a command string at its first NUL, so the text after it never runs), reads the same way in each, and a hook that judges the command denies it with a reason naming the malformed field
 (_deny_unreadable_command), the convention-nudge Bash hooks (abspth, expbnd) included, since each also has
 a deny tier that may sit in what was not read. The hooks scoped by an orchestration registry, a review
 dispatch binding or a review hold read it that way only inside their scope. A confirmed violation
@@ -437,11 +437,13 @@ def _deny_missing_tool_name(rule):
 def _bash_command(data):
     """The one reader of a Bash payload's command, shared by every Bash hook so that none reads it more
     laxly than the others: (command, None) when tool_input is a JSON object whose command member is a
-    string (an empty string included: it is readable and runs nothing), otherwise (None, detail), where
-    detail names the malformed field and what it held (a tool_input that is missing or not an object, or
-    a command that is missing, null, or an array, number, object or boolean). A hook that judges the
-    command cannot clear what it did not read, so it fails closed on that detail
-    (_deny_unreadable_command)."""
+    string holding no NUL character (an empty string included: it is readable and runs nothing), otherwise
+    (None, detail), where detail names the malformed field and what it held (a tool_input that is missing
+    or not an object, a command that is missing, null, or an array, number, object or boolean, or a
+    command string holding a NUL). bash receives its command as a C string, which ends at the first NUL, so
+    the text before a NUL runs and the text after it never does: no hook can read such a string as the
+    command that runs. A hook that judges the command cannot clear what it did not read, so it fails
+    closed on that detail (_deny_unreadable_command)."""
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
@@ -450,6 +452,10 @@ def _bash_command(data):
     if not isinstance(command, str):
         kind = "missing" if "command" not in tool_input else _orch_json_kind(command)
         return None, "its tool_input.command is {}, not a string".format(kind)
+    if "\x00" in command:
+        return None, ("its tool_input.command holds a NUL character at offset {}, and bash ends a command "
+                      "string at its first NUL, so what runs is not the text a check would read"
+                      .format(command.index("\x00")))
     return command, None
 
 
@@ -5616,8 +5622,8 @@ def bash_absolute_paths(data):
         # An empty command runs nothing: allow with a note (absolute-paths is a convention nudge, not a
         # hazard; hooks never ask).
         return _allow_note(
-            "AIQT guardrail (rule abspth, absolute-paths): the Bash payload carried no readable command "
-            "string, so the relative-cwd check could not run. Allowing; prefer absolute paths so a command "
+            "AIQT guardrail (rule abspth, absolute-paths): the Bash command is empty, so it runs nothing and "
+            "the relative-cwd check had nothing to judge. Allowing; prefer absolute paths so a command "
             "cannot resolve against a working directory that differs between calls.")
     # Partial lex so an unparseable construct (a heredoc, here-string, process substitution, {fd} redirect,
     # or an unbalanced quote or escape) no longer discards every segment before it: a resolvable relative
@@ -7223,9 +7229,9 @@ def git_explicit_binding(data):
                                         "explicit-binding check", unread)
     if not command:
         return _allow_note(
-            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
-            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
-            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command is empty, so it runs nothing "
+            "and names no git target or scope to check. This is a binding convention, not a hazard, so it "
+            "is allowed; prefer an explicit '-C' target and enumerated scope.")
     reads = _SubstHeredocs.reads
     try:
         # Both scans below read only each segment's words, and a segment with no word names no command
@@ -7381,9 +7387,9 @@ def git_stash_ref(data):
                                         unread)
     if not command:
         return _allow_note(
-            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
-            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
-            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command is empty, so it runs nothing "
+            "and names no git target or scope to check. This is a binding convention, not a hazard, so it "
+            "is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
         # and no redirect is not built at all.
@@ -21234,8 +21240,9 @@ def _orch_registry_required():
 
 def _orch_oos_unreadable_input_note(detail):
     """The out-of-scope note for a Bash call whose tool input this guard cannot read (a tool_input that
-    is missing, null or not a JSON object, a command that is missing or not a string, or a
-    run_in_background that is present but not a real boolean): allowed WITH A NOTE naming the field it
+    is missing, null or not a JSON object, a command that is missing, not a string or holds a NUL, as
+    _bash_command reads it, or a run_in_background that is present but not a real boolean): allowed WITH
+    A NOTE naming the field it
     could not read, never the silent allow such a call once was here (a detach such an input carries is
     never scanned, so silence would read ignorance as clean) and never a deny (outside registry scope
     this guard denies nothing)."""
@@ -21275,7 +21282,8 @@ def orch_truncation_guard(data):
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
-    malformed, never read as foreground), and a command that is not a string are each DENIED with a
+    malformed, never read as foreground), and a command that is not a string or holds a NUL (read, as in
+    every Bash hook, through _bash_command) are each DENIED with a
     reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
     fail-closed case): the registry is this suite's scope declaration, located by the UNION of a walk of
     the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
@@ -21310,7 +21318,7 @@ def orch_truncation_guard(data):
     quoted here-document body, a quoted string or a comment, is no detach (as in registry scope) and
     draws no note for that `&` or for a span the second reader cannot read, only for a setsid, nohup
     or disown it names. A call there whose input cannot be read (a tool_input that is missing, null or not an
-    object, a command that is missing or not a string, or a run_in_background that is present but not a
+    object, a command that is missing, not a string or holds a NUL, or a run_in_background that is present but not a
     real boolean) is allowed WITH A NOTE naming the field this guard could not read
     (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
     (run_in_background exactly true) and a readable foreground command neither reader flags are the
@@ -21408,8 +21416,9 @@ def orch_truncation_guard(data):
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A call whose input this
-        # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing
-        # or not a string, or a run_in_background that is present but not a real boolean) is allowed with a
+        # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing,
+        # not a string or holds a NUL, read through the shared _bash_command, or a run_in_background that is
+        # present but not a real boolean) is allowed with a
         # note naming the field it could not read, never silently (a detach such an input carries is never
         # scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case outside
         # registry scope); a readable background dispatch (run_in_background exactly true) keeps the silent
@@ -21423,17 +21432,10 @@ def orch_truncation_guard(data):
         # reading the vouched here-document shapes as data, so a setsid, nohup or disown command word
         # anywhere, a line continuation, an unclosed expansion, and every other cause outside those
         # shapes keeps its note (the single note is the true union of both readers).
-        out_input = data.get("tool_input")
-        if not isinstance(out_input, dict):
-            kind = "missing" if "tool_input" not in data else _orch_json_kind(out_input)
-            return _orch_oos_unreadable_input_note(
-                "its tool_input is {}, not a JSON object, so neither its command nor its "
-                "run_in_background flag can be read".format(kind))
-        out_command = out_input.get("command")
-        if not isinstance(out_command, str):
-            kind = "missing" if "command" not in out_input else _orch_json_kind(out_command)
-            return _orch_oos_unreadable_input_note(
-                "its command is {}, not a string, so it cannot be scanned".format(kind))
+        out_command, out_unread = _bash_command(data)
+        if out_unread is not None:
+            return _orch_oos_unreadable_input_note("{}; it cannot be scanned".format(out_unread))
+        out_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
         out_rib = out_input.get("run_in_background", False)
         if out_rib is True:
             # A readable background dispatch: not a foreground call, so the foreground detach note does
@@ -21546,17 +21548,20 @@ def orch_truncation_guard(data):
             "guard active).",
             "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
             "opened for the orchestration registry (rule trkasy, fail-closed).")
+    # The command comes through the reader every Bash hook shares. A tool_input it cannot read as an object
+    # denies first (neither the command nor run_in_background can be read), a run_in_background that is not
+    # a boolean next, and a command it cannot read then denies in either mode.
+    command, unread = _bash_command(data)
     tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+    if unread is not None and not isinstance(tool_input, dict):
         return _deny(
-            "AIQT rule trkasy (track-launched-work): this Bash call's tool_input is {}, not a JSON object, "
-            "so this guard cannot read its command or its run_in_background flag. A check that cannot read "
+            "AIQT rule trkasy (track-launched-work): this Bash call's input cannot be read ({}), so this "
+            "guard cannot read its command or its run_in_background flag. A check that cannot read "
             "its input fails closed (check-fails-closed-on-unreadable): it is denied rather than allowed "
-            "unread. Re-issue the call with a tool_input object carrying a string command.".format(kind),
-            "AIQT guardrail: denied a Bash call whose tool_input is {}, not an object "
-            "(fail-closed).".format(kind))
-    command = tool_input.get("command")
+            "unread. Re-issue the call with a tool_input object carrying a string command.".format(unread),
+            "AIQT guardrail: denied a Bash call whose tool_input is not a JSON object (fail-closed).")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
     rib = tool_input.get("run_in_background", False)
     if not isinstance(rib, bool):
         return _deny(
@@ -21572,13 +21577,14 @@ def orch_truncation_guard(data):
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
         # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable
-        # (non-string) command fails closed; a non-detaching foreground command is out of scope (ALLOW).
-        if not isinstance(command, str):
+        # command (not a string, or holding a NUL) fails closed; a non-detaching foreground command is out
+        # of scope (ALLOW).
+        if unread is not None:
             return _deny(
-                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
-                "string, so this guard cannot scan it for a bare '&' detach; it is denied rather than "
+                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command cannot be read "
+                "({}), so this guard cannot scan it for a bare '&' detach; it is denied rather than "
                 "allowed unread (check-fails-closed-on-unreadable). Re-issue with a string command."
-                .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
+                .format(unread),
                 "AIQT guardrail: denied a foreground Bash call with no readable command string "
                 "(fail-closed).")
         detach_kind = _orch_foreground_detach_lexed(command)
@@ -21611,9 +21617,10 @@ def orch_truncation_guard(data):
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
-    if not isinstance(command, str) or not command:
+    if unread is not None or not command:
         return _deny(
-            "AIQT rule trkasy: a background dispatch carried no readable command string; failing closed.",
+            "AIQT rule trkasy: a background dispatch carried no readable command string ({}); failing closed."
+            .format(unread or "its tool_input.command is an empty string"),
             "AIQT guardrail: denied an unreadable background dispatch (fail-closed).")
     if _ORCH_PLAIN_COMMAND_RE.fullmatch(command) and not (_ORCH_SHELL_KEYWORDS & set(command.split())):
         return _allow()  # no metacharacter and no reserved word: the full stdout reaches the harness capture

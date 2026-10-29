@@ -983,7 +983,8 @@ def _rdp_cases(tmp):
     _mb = [aiqt_hooks.review_dispatch_pin(dict(hook_event_name="PreToolUse", cwd=str(mf.root), session_id="s1",
                                                tool_name="Bash", **fields)) for fields in _MALFORMED_BASH_FIELDS]
     check("rdp/malformed-command-shapes-unverifiable",
-          [(_rdp_kind(r), "not a JSON object" in _rwh_reason(r) or "not a string" in _rwh_reason(r)) for r in _mb],
+          [(_rdp_kind(r), "not a JSON object" in _rwh_reason(r) or "not a string" in _rwh_reason(r)
+            or "holds a NUL" in _rwh_reason(r)) for r in _mb],
           [("unverifiable", True)] * len(_MALFORMED_BASH_FIELDS))
     real_review_git = aiqt_hooks._review_git
 
@@ -1283,14 +1284,18 @@ def _rwh_without_gate(fn):
         aiqt_hooks._rwh_program_gate = saved
 
 
-# A Bash payload whose command cannot be read: the six malformed command shapes (absent, null, an array, a
-# number, an object, a boolean), then a tool_input that is itself missing or not an object (the same class),
-# as the payload fields beside the event, the tool name and the cwd.
+# A Bash payload whose command cannot be read: the malformed command shapes (absent, null, an array, an
+# integer, a float, an object, an object whose only key is __str__, a boolean, and a string holding a NUL,
+# which bash ends at its first NUL, at the end and at the start), then a tool_input that is itself missing
+# or not an object (the same class), as the payload fields beside the event, the tool name and the cwd.
 _MALFORMED_BASH_FIELDS = (
     {"tool_input": {}}, {"tool_input": {"command": None}}, {"tool_input": {"command": ["git", "push"]}},
-    {"tool_input": {"command": 42}}, {"tool_input": {"command": {"command": "git push"}}},
-    {"tool_input": {"command": True}}, {}, {"tool_input": None}, {"tool_input": ["git push"]},
-    {"tool_input": "git push"})
+    {"tool_input": {"command": 42}}, {"tool_input": {"command": 1.5}},
+    {"tool_input": {"command": {"command": "git push"}}}, {"tool_input": {"command": {"__str__": "git push"}}},
+    {"tool_input": {"command": True}}, {"tool_input": {"command": "git diff\x00"}},
+    {"tool_input": {"command": "\x00sleep 5 &"}},
+    {}, {"tool_input": None}, {"tool_input": ["git push"]}, {"tool_input": "git push"}, {"tool_input": 7})
+_MALFORMED_BASH_COMMAND_SHAPES = 10  # the leading entries above whose tool_input is an object
 
 
 def _lax_bash_command(fn):
@@ -13042,12 +13047,24 @@ def _main_isolated(report_path=None):
               raw({"tool_input": {"command": "ls", "run_in_background": None}}), "deny")
         check("trunc/malformed-fg-command-nonstr-denies", raw({"tool_input": {"command": 42}}), "deny")
         check("trunc/malformed-fg-command-missing-denies", raw({"tool_input": {}}), "deny")
-        # every malformed shape of the class, foreground and (for the six command shapes) background
-        check("trunc/malformed-command-shapes-deny",
-              [raw(fields) for fields in _MALFORMED_BASH_FIELDS] +
-              [raw({"tool_input": dict(fields["tool_input"], run_in_background=True)})
-               for fields in _MALFORMED_BASH_FIELDS[:6]],
-              ["deny"] * (len(_MALFORMED_BASH_FIELDS) + 6))
+        # every malformed shape of the class, foreground and (for the command shapes) background, read
+        # through the shared reader: with it reverted to the lax read that took an unreadable command for
+        # an empty one, every foreground shape goes red (an empty foreground command is allowed), while a
+        # background dispatch still denies on its own empty-command rule
+        def _trunc_shapes():
+            return ([raw(fields) for fields in _MALFORMED_BASH_FIELDS] +
+                    [raw({"tool_input": dict(fields["tool_input"], run_in_background=True)})
+                     for fields in _MALFORMED_BASH_FIELDS[:_MALFORMED_BASH_COMMAND_SHAPES]])
+        check("trunc/malformed-command-shapes-deny", _trunc_shapes(),
+              ["deny"] * (len(_MALFORMED_BASH_FIELDS) + _MALFORMED_BASH_COMMAND_SHAPES))
+        check("trunc/malformed-command-shapes-red-on-lax-read", _lax_bash_command(_trunc_shapes),
+              ["allow"] * len(_MALFORMED_BASH_FIELDS) + ["deny"] * _MALFORMED_BASH_COMMAND_SHAPES)
+        # A NUL in the command names itself in the deny reason, in the foreground and the background.
+        _nul_reasons = [_rwh_reason(aiqt_hooks.orch_truncation_guard(dict(
+            {"hook_event_name": "PreToolUse", "cwd": str(t.root), "session_id": "s1", "tool_name": "Bash"},
+            tool_input=dict(command="git diff\x00", run_in_background=rib)))) for rib in (False, True)]
+        check("trunc/nul-command-reason-names-nul",
+              ["holds a NUL character at offset 8" in reason for reason in _nul_reasons], [True, True])
         check("trunc/rib-omitted-foreground-allows", raw({"tool_input": {"command": "ls -la"}}), "allow")
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
@@ -13058,6 +13075,9 @@ def _main_isolated(report_path=None):
         check("trunc/malformed-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
              "tool_input": None})), "warn")
+        check("trunc/nul-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
+             "tool_input": {"command": "sleep 5\x00 &"}})), "warn")
         # The doctor's default-mode scope report for a no-registry root is pinned the same way: it
         # says the guard denies nothing there, and reports no deny.
         _scope_lines, _scope_denies = aiqt_hooks._orch_guard_scope_report(str(ti.root))

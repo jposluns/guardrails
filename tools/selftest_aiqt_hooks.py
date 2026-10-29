@@ -2506,7 +2506,8 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
-# A Bash payload whose command cannot be read: the six malformed command shapes, then a tool_input that is
+# A Bash payload whose command cannot be read: the malformed command shapes (absent, null, an array, an
+# integer, a float, an object, an object whose only key is __str__, a boolean), then a tool_input that is
 # itself missing or not an object (the same class). Each row is (name, the payload fields beside
 # hook_event_name and tool_name, the phrase the deny reason must hold to name the malformed field).
 _MALFORMED_BASH_INPUTS = (
@@ -2514,12 +2515,32 @@ _MALFORMED_BASH_INPUTS = (
     ("command-null", {"tool_input": {"command": None}}, "tool_input.command is null"),
     ("command-list", {"tool_input": {"command": ["git", "push"]}}, "tool_input.command is an array"),
     ("command-int", {"tool_input": {"command": 42}}, "tool_input.command is a number"),
+    ("command-float", {"tool_input": {"command": 1.5}}, "tool_input.command is a number"),
     ("command-object", {"tool_input": {"command": {"command": "git push"}}}, "tool_input.command is an object"),
+    ("command-str-key-object", {"tool_input": {"command": {"__str__": "git push"}}},
+     "tool_input.command is an object"),
     ("command-bool", {"tool_input": {"command": True}}, "tool_input.command is a boolean"),
     ("tool-input-absent", {}, "tool_input is missing"),
     ("tool-input-null", {"tool_input": None}, "tool_input is null"),
     ("tool-input-list", {"tool_input": ["git push"]}, "tool_input is an array"),
     ("tool-input-string", {"tool_input": "git push"}, "tool_input is a string"),
+    ("tool-input-number", {"tool_input": 7}, "tool_input is a number"),
+)
+# A command string holding a NUL: bash ends a command string at its first NUL, so the text before it runs
+# and the text after it never does. Each row is (name, command, the reverted verdicts that are not deny):
+# the git diff family at the end, at the start, mid-word and in place of a space, then the same places in
+# a plain echo. With the NUL check reverted every echo row goes red in every hook; a git diff row stays a
+# deny where the hook's own fallback for a command its lexer refuses already fails closed, and those
+# hooks are named in the row's revert exceptions.
+_NUL_BASH_COMMANDS = (
+    ("git-diff-nul-end", "git diff\x00", ("gate_weakening",)),
+    ("git-diff-nul-start", "\x00git diff", ()),
+    ("git-diff-nul-mid", "git d\x00iff", ("gate_weakening",)),
+    ("git-diff-nul-space", "git\x00diff", ("gate_weakening", "git_discard", "protected_line", "branch_root")),
+    ("echo-nul-end", "echo hi\x00", ()),
+    ("echo-nul-start", "\x00echo hi", ()),
+    ("echo-nul-mid", "ec\x00ho hi", ()),
+    ("echo-nul-space", "echo\x00hi", ()),
 )
 # The Bash hooks with a deny tier that judge every session's commands. The others read the command only
 # inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
@@ -2566,6 +2587,49 @@ def _test_malformed_bash_payload(failures):
             if _reduce_result(code, stdout_obj) == "deny":
                 failures.append("(mbp-{}-{}-revert) with the shared reader reverted to the lax read the case "
                                 "must go red (not deny), so the deny comes from the reader".format(name, shape))
+
+
+def _test_nul_bash_command(failures):
+    """Every always-on Bash hook with a deny tier denies each _NUL_BASH_COMMANDS command with a reason naming
+    the NUL, and with the shared reader's NUL check reverted (a command holding a NUL read as it stands) each
+    case goes red, except where the row names the hook as already denying on its own fallback; that
+    exception is pinned too, so a row that stops going red, or starts, is reported."""
+    names = _malformed_bash_handlers()
+    for required in ("diff_source_pretool", "gate_weakening", "protected_line", "bash_absolute_paths"):
+        if required not in names:
+            failures.append("(nul-enumeration) {} is not among the always-on Bash hooks {!r}".format(
+                required, names))
+    saved = aiqt_hooks._bash_command
+
+    def nul_lax(payload):
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str) and "\x00" in command:
+            return command, None
+        return saved(payload)
+
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, command, still_denied in _NUL_BASH_COMMANDS:
+            data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(repo_root()),
+                    "tool_input": {"command": command}}
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or "holds a NUL character at offset {}".format(command.index("\x00")) not in reason:
+                failures.append("(nul-{}-{}) a Bash command holding a NUL must deny with a reason naming the "
+                                "NUL; got {} ({!r})".format(name, shape, got, reason))
+            aiqt_hooks._bash_command = nul_lax
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            reverted = _reduce_result(code, stdout_obj)
+            if (reverted == "deny") != (name in still_denied):
+                failures.append("(nul-{}-{}-revert) with the NUL check reverted the case must {}; got {}".format(
+                    name, shape, "still deny on the hook's own fallback" if name in still_denied
+                    else "go red (not deny), so the deny comes from the NUL check", reverted))
 
 
 # === PreToolUse deadline posture ======================================================================
@@ -20589,7 +20653,7 @@ def _main_isolated(monitor):
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
-        # Payload postures: unreadable command ASKS; only the shared missing-tool contract DENIES.
+        # Payload postures: a missing command and a missing tool_name each DENY (fail closed).
         cmdataexpect("(cm-ae) missing command denies",
                      {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "deny")
         cmdataexpect("(cm-af) missing tool_name denies",
@@ -24327,6 +24391,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_malformed_bash_payload(failures)
+        _test_nul_bash_command(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
