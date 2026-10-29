@@ -2901,6 +2901,106 @@ def _alias_unread_reads_failures():
     return out
 
 
+def _per_suffix_checker(argv):
+    """The gatdis note tier's checker reading judged afresh on every _gate_suffix_starts suffix, the reading
+    _gate_checker_suffix replaced (and must agree with)."""
+    return any(aiqt_hooks._is_checker_segment(argv[m:]) or aiqt_hooks._gate_verify_shaped(argv[m:])
+               for m in aiqt_hooks._gate_suffix_starts(argv))
+
+
+def _per_suffix_sink_kind(argv):
+    """The gatdis note tier's sink reading judged afresh on every _gate_suffix_starts suffix, the reading
+    _gate_suffix_sink_kind replaced (and must agree with)."""
+    return next((k for k in (aiqt_hooks._gate_note_sink_kind(argv[m:])
+                             for m in aiqt_hooks._gate_suffix_starts(argv)) if k is not None), None)
+
+
+# Words for the suffix-reading agreement row: wrappers, assignments, '--', '--test', runners and their checker
+# operands, verify options with and without a value, text commands, peeled wrappers and sink words.
+_SUFFIX_WORDS = ("setsid", "nohup", "sudo", "env", "nice", "timeout", "time", "-n", "5", "-c", "-k", "--",
+                 "--test", "--check", "--check=x", "--verify", "--selftestx", "FOO=1", "A+=b", "X=--check",
+                 "python3", "-m", "pytest", "node", "npx", "jest", "make", "test", "bash", "tools/run_all_checks.sh",
+                 "-c-check.py", "/usr/bin/pytest", "\\pytest", "latest", "checks", "echo", "grep", "git", "head",
+                 "tail", "cut", "sed", "-1", "-20", "-m", "1", "-q", "{", "!", "if", "x")
+
+
+@contextlib.contextmanager
+def _suffix_call_record(lengths):
+    """While the block runs, every call of the three per-suffix judges appends the length of the argv it got."""
+    names = ("_is_checker_segment", "_gate_verify_shaped", "_gate_note_sink_kind")
+    saved = dict((name, getattr(aiqt_hooks, name)) for name in names)
+
+    def recording(judge):
+        def judged(argv):
+            lengths.append(len(argv))
+            return judge(argv)
+        return judged
+    for name in names:
+        setattr(aiqt_hooks, name, recording(saved[name]))
+    try:
+        yield
+    finally:
+        for name in names:
+            setattr(aiqt_hooks, name, saved[name])
+
+
+def _suffix_flow_tokens_read(command, checker=None, sink=None):
+    """The argv tokens the three per-suffix judges are handed while _gate_flow_note reads command, with the
+    suffix readings optionally replaced by checker and sink (a wrong reading for the -red rows)."""
+    lengths = []
+    records = aiqt_hooks._lex_command(command)
+    saved = aiqt_hooks._gate_checker_suffix, aiqt_hooks._gate_suffix_sink_kind
+    aiqt_hooks._gate_checker_suffix = checker or saved[0]
+    aiqt_hooks._gate_suffix_sink_kind = sink or saved[1]
+    try:
+        with _suffix_call_record(lengths):
+            aiqt_hooks._gate_flow_note(records, command)
+    finally:
+        aiqt_hooks._gate_checker_suffix, aiqt_hooks._gate_suffix_sink_kind = saved
+    return sum(lengths)
+
+
+def _suffix_reading_failures():
+    """(dl-suffix-*) The note tier reads a wrapper's suffixes in time linear in the command. The other bounded
+    timed rows had no case for it: gate_weakening on fg_setsid_options (a wrapper before a long run of
+    words) once judged every suffix afresh, building all of them at once, about 9.8 to 10.8 s of CPU at 64 KB
+    and a MemoryError at 256 KB under an 8 GiB address-space limit (in-process on a 24-core host, 2026-10-28).
+    dl-suffix-equal and dl-suffix-sink-equal: the one-pass readings agree with the per-suffix readings on
+    3,000 seeded argvs. dl-suffix-calls: on 'setsid' and 1,200 '-c' words, and on the same after 'pytest |',
+    the per-suffix judges are handed at most a few times the command's tokens in all; dl-suffix-calls-red and
+    dl-suffix-sink-calls-red: the per-suffix readings, which hand them about the square of it over two, fail
+    that bound, so the record discriminates."""
+    out = []
+    rng = random.Random(20261028)
+    for _ in range(3000):
+        argv = [rng.choice(_SUFFIX_WORDS) for _ in range(rng.randint(0, 9))]
+        if aiqt_hooks._gate_checker_suffix(argv) != _per_suffix_checker(argv):
+            out.append("(dl-suffix-equal) _gate_checker_suffix gives {} on {!r}, the per-suffix reading {}".format(
+                aiqt_hooks._gate_checker_suffix(argv), argv, _per_suffix_checker(argv)))
+            break
+    for _ in range(3000):
+        argv = [rng.choice(_SUFFIX_WORDS) for _ in range(rng.randint(0, 9))]
+        if aiqt_hooks._gate_suffix_sink_kind(argv) != _per_suffix_sink_kind(argv):
+            out.append("(dl-suffix-sink-equal) _gate_suffix_sink_kind gives {!r} on {!r}, the per-suffix reading "
+                       "{!r}".format(aiqt_hooks._gate_suffix_sink_kind(argv), argv, _per_suffix_sink_kind(argv)))
+            break
+    words = 1201
+    bound = 4 * words
+    plain = "setsid" + " -c" * (words - 1)
+    piped = "pytest | " + plain
+    for label, command, wrong in (("calls", plain, dict(checker=_per_suffix_checker)),
+                                  ("sink-calls", piped, dict(sink=_per_suffix_sink_kind))):
+        read = _suffix_flow_tokens_read(command)
+        if read > bound:
+            out.append("(dl-suffix-{}) the per-suffix judges were handed {} tokens for a {}-word wrapper "
+                       "command, over the linear bound of {}".format(label, read, words, bound))
+        red = _suffix_flow_tokens_read(command, **wrong)
+        if red <= bound:
+            out.append("(dl-suffix-{}-red) the per-suffix reading was handed only {} tokens (bound {}), so the "
+                       "record cannot tell it from the one-pass reading".format(label, red, bound))
+    return out
+
+
 def _read_visit_count(command, cwd, read_segments=None):
     """The _command_start calls one diff_source_pretool call makes on command (with read_segments in place of
     aiqt_hooks._read_segments when given), and the number of the lexer's own records that hold a word."""
@@ -3389,6 +3489,10 @@ def _gate_runtime_cost_failures(cost_inputs):
 
 _GW_FLOOR = 0.1
 _GW_SIZES = 9
+# The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
+# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio).
+_GW_RATIO = 3.0
+_GW_TIMINGS = 3
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -3438,33 +3542,50 @@ def _gw_scan_once(cmd, scan):
     return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan):
+def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
     """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
-    t_2n/t_n. Returns (ratio, t_n, t_2n, length_2n, decisions, (usage_n, usage_2n)), or (None, t_n, None,
-    length, decisions, None) when the floor was never cleared in the bound, so the caller fails 'linearity not
-    evaluated'; decisions lists every timed scan's decision, in order. The input is a command string for the
-    whole-command scan or a word list for the dequoted-word scan."""
+    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
+    each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
+    while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
+    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
+    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
+    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
+    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
+    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
     reps = 4000
     decisions = []
     for _ in range(_GW_SIZES):
-        t_n, decision, use_n = _gw_scan_once(prefix + unit * reps + suffix, scan)
+        cmd_n = prefix + unit * reps + suffix
+        t_n, decision, use_n = once(cmd_n, scan)
         decisions.append(decision)
         if t_n > _GW_FLOOR:
             cmd_2n = prefix + unit * (reps * 2) + suffix
-            t_2n, decision, use_2n = _gw_scan_once(cmd_2n, scan)
+            t_2n, decision, use_2n = once(cmd_2n, scan)
             decisions.append(decision)
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n)
+            timings = 1
+            while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
+                timings += 1
+                again_n, decision, again_use_n = once(cmd_n, scan)
+                decisions.append(decision)
+                again_2n, decision, again_use_2n = once(cmd_2n, scan)
+                decisions.append(decision)
+                if again_n < t_n:
+                    t_n, use_n = again_n, again_use_n
+                if again_2n < t_2n:
+                    t_2n, use_2n = again_2n, again_use_2n
+            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
         reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None
+    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
 
 
 def _gw_lin_failures(cases):
     """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
     timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio over 3 (reporting the usage of both timed calls)."""
+    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
+    least timings came from)."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use = _gw_scan_ratio(unit, prefix, suffix, scan)
+        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
         wrong = [decision for decision in got if decision != want]
         if wrong:
             out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
@@ -3472,10 +3593,43 @@ def _gw_lin_failures(cases):
         if ratio is None:
             out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
                        "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
-        elif ratio > 3.0:
+        elif ratio > _GW_RATIO:
             out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                       "{:.3f}s then {:.3f}s for an input of length {} ({})"
-                       .format(label, ratio, t_n, t_2n, length_2n, _gw_usage_text(*use)))
+                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
+                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+    return out
+
+
+def _gw_retime_failures():
+    """(gw-lin-retime-edge) _gw_scan_ratio over scripted times (no scan runs): the first size's time clears the
+    floor, then each pair is (t_n, t_2n) for one timing of both sizes. A first ratio just under or exactly at
+    _GW_RATIO is final with one timing; one just over it retimes, and a retimed pair at the bound ends the
+    retiming. One slow timing of either size is outvoted by the least of the others (the CI shape: 0.109 s then
+    0.328 s, then 0.115 s then 0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound
+    in all but the last allowed timing passes on that last one, and a ratio over the bound in every timing stops
+    at _GW_TIMINGS timings of each and stays over it."""
+    out = []
+    for name, pairs, want_ratio, want_timings in (
+            ("under", [(0.25, 0.7499)], 0.7499 / 0.25, 1),
+            ("at", [(0.25, 0.75)], 0.75 / 0.25, 1),
+            ("over-then-at", [(0.25, 0.7501), (0.25, 0.75)], 0.75 / 0.25, 2),
+            ("slow-2n", [(0.109, 0.328), (0.115, 0.230)], 0.230 / 0.109, 2),
+            ("slow-n-retimed", [(0.109, 0.33), (0.3, 0.22), (0.11, 0.44)], 0.22 / 0.109, 2),
+            ("over-until-last", [(0.25, 0.7501), (0.25, 0.7502), (0.25, 0.5)], 0.5 / 0.25, _GW_TIMINGS),
+            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45), (0.1, 0.1)], 0.44 / 0.11, _GW_TIMINGS)):
+        times = [t for pair in pairs for t in pair]
+        taken = []
+
+        def once(cmd, _scan):
+            taken.append(len(cmd))
+            return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
+
+        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
+        if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
+                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
+            out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
+                       "{}, want {!r} over {} timings of 4000 then 8000".format(
+                           name, pairs, ratio, timings, taken, want_ratio, want_timings))
     return out
 
 
@@ -3488,6 +3642,36 @@ def _gw_spin_scan(power):
             pass
         return None
     return scan
+
+
+def _gw_slow_once_scan(power):
+    """_gw_spin_scan(power) whose second call (the first timing of the doubled input) also spends 2 * _GW_FLOOR
+    more CPU time, standing in for one timed call charged for stray work."""
+    spin = _gw_spin_scan(power)
+    calls = []
+
+    def scan(cmd):
+        calls.append(None)
+        if len(calls) == 2:
+            until = time.process_time() + 2 * _GW_FLOOR
+            while time.process_time() < until:
+                pass
+        return spin(cmd)
+    return scan
+
+
+def _gw_retime_cpu_failures():
+    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
+    charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
+    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
+    out = []
+    got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
+                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
+    if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
+            or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
+        out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
+                   "{} timings of each".format(got, _GW_TIMINGS))
+    return out
 
 
 @contextlib.contextmanager
@@ -3538,8 +3722,8 @@ def _gw_lin_usage_failures():
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
         want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s for an input of "
-                          r"length 8000 \(" + clause + r"\)\Z")
+                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
+                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
         rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
         if module is not None:
             rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
@@ -4081,7 +4265,8 @@ _DEADLINE_CASES = {
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
-                       "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after"),
+                       "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
+                       "fg_setsid_options"),
     "gensrc_guard": ("write_content", "write_deep_path"),
     "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
@@ -6521,6 +6706,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_procsubst_skip_failures())
     failures.extend(_procsubst_taken_failures())
     failures.extend(_alias_unread_reads_failures())
+    failures.extend(_suffix_reading_failures())
     failures.extend(_read_visit_failures(str(tmp)))
     failures.extend(_join_fast_failures())
     failures.extend(_lex_skip_failures())
@@ -18189,6 +18375,14 @@ def _main_isolated(monitor):
         # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
         # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
         # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
+        # A CI runner later measured gw-lin-span-optgit at 3.01x (0.109 s then 0.327 s, with 2763 then 7290
+        # minor page faults) where 14 local runs gave 2.00 to 2.04x, so one call charged for stray work still
+        # failed a linear row. A ratio over 3 now times both sizes again, at most _GW_TIMINGS timings of each,
+        # and judges the least time of each size: stray work only adds time, so the least timing is the one
+        # nearest the scan's own cost, a linear row needs one clean timing of each size to pass, and a scan that
+        # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
+        # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
+        # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -18259,6 +18453,8 @@ def _main_isolated(monitor):
         )
         failures.extend(_gw_lin_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
+        failures.extend(_gw_retime_failures())
+        failures.extend(_gw_retime_cpu_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -23987,11 +24183,11 @@ def _main_isolated(monitor):
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOF)\necho y > out.txt\nEOF\n))", "deny")
         bcmd("(ap-c100m) an unquoted here-document body in a double-quoted '$(...)' is read for its substitutions "
              "only, so its '->' and a backquoted 'c' allow", 'echo "$(cat <<EOF\nfix: a -> b `c`\nEOF\n)"', "allow")
-        # The second reading reads the command as it models bash's parser (_AbspthReader; its known misses are
-        # disclosed in the residue): a substitution ends at the ')' or '}' its grammar closes it with, and a
-        # here-document body inside '$(...)' or '${ cmd; }' ends early at a line that STARTS with the delimiter
-        # and holds that closer later on. bash 5.3.9 writes out.txt for every deny below, and every one allowed
-        # before this reading; each allow is a shape bash writes no relative file in.
+        # The second reading reads the command as it models bash's parser (_AbspthReader): a substitution ends at
+        # the ')' or '}' its grammar closes it with, and a here-document body inside '$(...)' or '${ cmd; }' ends
+        # early at a line that STARTS with the delimiter and holds that closer later on. bash 5.3.9 writes out.txt
+        # for every deny in the next two loops, and every one allowed before this reading; each allow in them is
+        # a shape bash writes no relative file in.
         for _rd_label, _rd_cmd in (
                 ("a case pattern's ')' in a double-quoted '$(...)'", 'echo "$(case a in a) echo a > out.txt;; esac)"'),
                 ("a case pattern's ')' in an assigned double-quoted '$(...)'",
@@ -24064,6 +24260,233 @@ def _main_isolated(monitor):
              "(disclosed over-deny of the unread-text scan)", "cat <<<y; echo `echo a \\\\\\\\>> out.txt`", "deny")
         bcmd("(ap-c104c) a nested body ended at 'EOFX)' where bash then fails on a syntax error DENIES (disclosed "
              "over-deny)", "x=$(echo $(cat <<'EOF'\nhi\nEOFX)\necho y > out.txt\nEOF\n))", "deny")
+        # Bash expands arithmetic text as if double-quoted, so it runs a substitution between single quotes
+        # there: in '$((...))', '((...))' and 'for ((...))' (not in a bare subscript there, ap-c108c), in a
+        # '${...}' subscript, offset or length of a set variable, in a '${...}' inside arithmetic, and in the
+        # subscript of an array element assignment ('a[...]=1', '+=', an array's '[...]=' element, a declaration
+        # builtin's argument). A truncating redirect whose target word the reader cannot read is judged at its
+        # operator, and a quote glued to the '}' that closes a double-quoted '${ cmd; }' is text of the outer
+        # string. Every deny in these three loops allowed before (each fails with its fix reverted).
+        for _ar_label, _ar_cmd in (
+                ("a '$(...)' between single quotes in '$((...))'", "echo $(( '$(echo a > out.txt)' ))"),
+                ("a '$(...)' between single quotes in a '((...))' command", "(( '$(echo a > out.txt)' ))"),
+                ("a '$(...)' between single quotes in 'for ((...))'",
+                 "for (( i='$(echo a > out.txt)'; 0; )); do :; done"),
+                ("a '$(...)' between single quotes in a double-quoted '$((...))'",
+                 "echo \"$(( '$(echo a > out.txt)' ))\""),
+                ("a backquote substitution between single quotes in '$((...))'", "echo $(( '`echo a > out.txt`' ))"),
+                ("a single-quoted '$(...)' in a '${...}' word inside '$((...))'",
+                 "echo $(( ${u:-'$(echo a > out.txt)'} ))"),
+                ("a single-quoted '$(...)' in a '${...}' subscript", "echo ${a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a '${#...}' subscript", "a=(1); echo ${#a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a '${!...}' subscript", "echo ${!a['$(echo a > out.txt)']}"),
+                ("a single-quoted '$(...)' in a subscript before ':-'", "echo ${a['$(echo a > out.txt)']:-x}"),
+                ("a single-quoted backquote substitution in a '${...}' subscript", "echo ${a['`echo a > out.txt`']}"),
+                ("a single-quoted '$(...)' in a '${...}' offset", "x=abc; echo ${x:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${...}' offset after a blank",
+                 "x=abc; echo ${x: '$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${...}' length", "x=abc; echo ${x:0:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in a '${@:...}' offset", "echo ${@:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an offset after a subscript",
+                 "a=(abc); echo ${a[0]:'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an offset in a '${...}' word",
+                 "x=abc; echo ${u:-${x:'$(echo a > out.txt)'}}"),
+                ("a single-quoted '$(...)' in an 'a[...]=1' subscript", "a['$(echo a > out.txt)']=1"),
+                ("a single-quoted backquote substitution in an 'a[...]=1' subscript", "a['`echo a > out.txt`']=1"),
+                ("a single-quoted '$(...)' in an 'a[...]+=1' subscript", "a['$(echo a > out.txt)']+=1"),
+                ("a single-quoted '$(...)' in a second assignment's subscript", "x=1 a['$(echo a > out.txt)']=1"),
+                ("a single-quoted '$(...)' in a declare argument's subscript",
+                 "declare a['$(echo a > out.txt)']=1"),
+                ("a single-quoted '$(...)' in an array element's subscript", "a=(['$(echo a > out.txt)']=1)"),
+                ("a single-quoted '$(...)' in an 'a[...]=1' subscript in a double-quoted '$(...)'",
+                 "echo \"$(a['$(echo a > out.txt)']=1)\"")):
+            bcmd("(ap-c105) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a '>' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a > $[1])\""),
+                ("a '>|' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a >| $[1])\""),
+                ("a '&>' to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a &> $[1])\""),
+                ("a '>' to a target with '$[...]' glued in a double-quoted '$(...)'", "echo \"$(echo a >x$[1])\""),
+                ("a '>' to a target holding a 'coproc' substitution in a double-quoted '$(...)'",
+                 "echo \"$(echo a > x$(coproc true))\"")):
+            bcmd("(ap-c106) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a single quote glued to the '}' of a double-quoted '${ cmd; }'",
+                 "echo \"${ echo b; }'$(echo a > out.txt)\" \"'\""),
+                ("a single quote glued to the '}' of a double-quoted '${ cmd; }' before a newline",
+                 "echo \"${ echo b; }'$(echo a > out.txt)\"\necho \"'\""),
+                ("a single quote glued to the '}' of a double-quoted '${| cmd; }'",
+                 "echo \"${| echo b; }'$(echo a > out.txt)\" \"'\""),
+                ("a single quote glued to the '}' before a backquote substitution",
+                 "echo \"${ echo b; }'`echo a > out.txt`\" \"'\"")):
+            bcmd("(ap-c107) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # Safe shapes with arithmetic, single quotes or '${ cmd; }' that write no relative file keep their allow.
+        for _ar_label, _ar_cmd in (
+                ("plain '$((...))' arithmetic", "echo $(( 1 + 2 ))"),
+                ("a '((...))' command", "(( i = 1 + 2 ))"),
+                ("a single-quoted '>' in '$((...))'", "echo $(( '1 > 2' ))"),
+                ("a single-quoted '$(...)' with no redirect in '$((...))'", "echo $(( '$(date)' ))"),
+                ("an absolute '>' in a single-quoted '$(...)' in '$((...))'",
+                 "echo $(( '$(echo a > {}/out.txt)' ))".format(rp)),
+                ("an offset and length", "echo ${x:1:2} ${x: -1}"),
+                ("subscripts and lengths", "echo ${a[0]} ${a[i+1]} ${#a[@]} ${!a[@]}"),
+                ("a single-quoted '>' in a '${...}' word", "echo ${u:-'a > b'}"),
+                ("a single-quoted '$(...)' in an unquoted '${...}' word", "echo ${u:-'$(echo a > out.txt)'}"),
+                ("a single-quoted '$(...)' in an unquoted '${...}' pattern", "echo ${x/'$(echo a > out.txt)'/y}"),
+                ("element assignments with single quotes", "a[0]=1; a[i+1]='x > y'; a['k']=2"),
+                ("a single-quoted '$(...)' in an element assignment's value", "a[0]='$(echo a > out.txt)'"),
+                ("a single-quoted '$(...)' in a glob's brackets", "ls a['$(echo a > out.txt)']"),
+                ("a single-quoted '$(...)' in a '${...}' word in a glob's brackets",
+                 "ls a[${u:-'$(echo a > out.txt)'}]"),
+                ("a single-quoted '$(...)' in a '((' bash reads as a subshell", "((echo '$(echo a > out.txt)') )"),
+                ("a single-quoted '$(...)' in a '${...}' word in a '((' bash reads as a subshell",
+                 "((echo ${u:-'$(echo a > out.txt)'}) )"),
+                ("a single-quoted '$(...)' in a '$((' bash reads as a command substitution",
+                 "echo $((echo '$(echo a > out.txt)') )"),
+                ("a double-quoted '${ cmd; }'", "echo \"${ echo b; }\""),
+                ("a single-quoted word glued to a double-quoted '${ cmd; }'", "echo \"${ echo b; }'x'\""),
+                ("a group in a double-quoted '${ cmd; }'", "echo \"${ { echo b; }; }\""),
+                ("absolute targets in and after a double-quoted '${ cmd; }'",
+                 "echo \"${{ echo b > {0}/o; }}\" > {0}/out.txt".format(rp)),
+                ("an append to a '$[...]' target in a double-quoted '$(...)'", "echo \"$(echo a >> $[1])\"")):
+            bcmd("(ap-c108) {} allows".format(_ar_label), _ar_cmd, "allow")
+        bcmd("(ap-c108b) a single-quoted '$(...)' in an 'a[...]=1' word that is echo's argument DENIES (disclosed "
+             "over-deny)", "echo a['$(echo a > out.txt)']=1", "deny")
+        bcmd("(ap-c108c) a single-quoted '$(...)' in a bare subscript inside '$((...))', where bash reports a syntax "
+             "error and writes nothing, DENIES (disclosed over-deny)", "echo $(( a['$(echo a > out.txt)'] ))", "deny")
+        # Single-quoted text held until '))' or ']=' is read from its first character by the fail-closed scan
+        # where the reader gives up later in the same arithmetic or subscript ('$[...]', 'coproc', a nesting
+        # bound), since that scan would start past it. Bash writes out.txt for every deny in this loop and the
+        # next two, and each fails with its own fix reverted.
+        for _ar_label, _ar_cmd in (
+                ("a held '$(...)' before a '$[...]' in '$((...))'", "echo $(( '$(echo a > out.txt)' + $[1] ))"),
+                ("a held '$(...)' before a '$[...]' in '((...))'", "(( '$(echo a > out.txt)' + $[1] ))"),
+                ("a held '$(...)' before a '$[...]' in 'for ((...))'",
+                 "for (( i='$(echo a > out.txt)' + $[1]; 0; )); do :; done"),
+                ("a held '$(...)' in a '${...}' word before a '$[...]' in '$((...))'",
+                 "echo $(( ${u:-'$(echo a > out.txt)'} + $[1] ))"),
+                ("a held '$(...)' before a '$[...]' in an 'a[...]=1' subscript", "a['$(echo a > out.txt)'$[1]]=1"),
+                ("a held '$(...)' before a '$[...]' in an array element's subscript",
+                 "a=(['$(echo a > out.txt)'$[1]]=1)"),
+                ("a held '$(...)' before a double-quoted '$[...]' in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + \"$[1]\" ))"),
+                ("a held '$(...)' before a '$[...]' in a backquote substitution in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + `echo $[1]` ))"),
+                ("a held '$(...)' before a '$[...]' in a double-quoted '$((...))'",
+                 "echo \"$(( '$(echo a > out.txt)' + $[1] ))\""),
+                ("a held '$(...)' before a 'coproc' substitution in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + $(coproc true) ))"),
+                ("a held '$(...)' before a '$[...]' in a '${...}' word in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + ${x:-$[1]} ))"),
+                ("a held '$(...)' before a 'coproc' substitution in an 'a[...]=1' subscript",
+                 "a['$(echo a > out.txt)'+$(coproc :)]=1"),
+                ("a held '$(...)' before seventeen nested '${...}' expansions in '$((...))'",
+                 "echo $(( '$(echo a > out.txt)' + " + "${x:-" * 17 + "1" + "}" * 17 + " ))")):
+            bcmd("(ap-c109) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # An ANSI-C $'...' string's text in arithmetic or a subscript is read as single-quoted text is there.
+        for _ar_label, _ar_cmd in (
+                ("a $'...' '$(...)' in an 'a[...]=1' subscript", "a[$'$(echo a > out.txt)']=1"),
+                ("a $'...' '$(...)' in '$((...))'", "echo $(( $'$(echo a > out.txt)' ))"),
+                ("a $'...' '$(...)' in '((...))'", "(( $'$(echo a > out.txt)' ))"),
+                ("a $'...' '$(...)' in a '${...}' subscript", "echo ${a[$'$(echo a > out.txt)']}"),
+                ("a $'...' '$(...)' in a '${...}' offset", "x=abc; echo ${x:$'$(echo a > out.txt)'}"),
+                ("a $'...' '$(...)' in an array element's subscript", "a=([$'$(echo a > out.txt)']=1)"),
+                ("a $'...' '$(...)' in a double-quoted '$((...))'", "echo \"$(( $'$(echo a > out.txt)' ))\"")):
+            bcmd("(ap-c110) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # Bash removes a backslash-newline before it forms an element assignment word, and reads its subscript
+        # to the ']' as one word.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline before an 'a[...]=1' word's '='", "a['$(echo a > out.txt)']\\\n=1"),
+                ("a backslash-newline in an 'a[...]=1' word's name", "a\\\n['$(echo a > out.txt)']=1"),
+                ("blanks in an 'a[...]+=1' subscript and a backslash-newline before its '+='",
+                 "a[ '$(echo a > out.txt)' ]\\\n+=1"),
+                ("a backslash-newline before a declare argument's '='", "declare a['$(echo a > out.txt)']\\\n=1"),
+                ("a backslash-newline before an array element's '='", "a=(['$(echo a > out.txt)']\\\n=1)")):
+            bcmd("(ap-c111) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # The same shapes as bash's parser reads them, not run under bash: blanks or a metacharacter in an
+        # element assignment's subscript, and a backslash-newline between its '+' and '='.
+        for _ar_label, _ar_cmd in (
+                ("blanks in an 'a[...]+=1' subscript", "a[ '$(echo a > out.txt)' ]+=1"),
+                ("a '|' in an 'a[...]=1' subscript", "a[1|'$(echo a > out.txt)']=1"),
+                ("a backslash-newline between an 'a[...]+=1' word's '+' and '='",
+                 "a['$(echo a > out.txt)']+\\\n=1")):
+            bcmd("(ap-c111b) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a $'...' string in '$((...))'", "echo $(( $'1' + 2 ))"),
+                ("$'...' strings in subscripts", "a[$'k']=1; echo ${a[$'k']}"),
+                ("a backslash-newline before an element assignment's '=' and an absolute '>'",
+                 "a[0]\\\n=1; echo hi > {}/out.txt".format(rp))):
+            bcmd("(ap-c112) {} allows".format(_ar_label), _ar_cmd, "allow")
+        # Bash removes a backslash-newline before it reads '((', '$((', '))', '$(', '${' or a '${...}' name and
+        # operator, so the reader gives up at one there and the fail-closed scan reads on from it. Bash writes
+        # out.txt for every deny in this loop, and each fails with its own give-up reverted.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline inside a '((' command", "(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '((' command on a second line",
+                 "true\n(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '$(('", "echo $(\\\n( '$(echo a > out.txt)' ))"),
+                ("a backslash-newline inside a '$((' before a '$[...]'",
+                 "echo $(\\\n( '$(echo a > out.txt)' + $[1] ))"),
+                ("a backslash-newline inside a double-quoted '$(('", 'echo "$(\\\n( \'$(echo a > out.txt)\' ))"'),
+                ("a backslash-newline inside a '$((' in an 'a[...]=1' subscript",
+                 "a[$(\\\n( '$(echo a > out.txt)' ))]=1"),
+                ("a backslash-newline inside the '))' of a '$((...))'", "echo $(( '$(echo a > out.txt)' )\\\n)"),
+                ("a backslash-newline inside the '))' of a double-quoted '$((...))'",
+                 'echo "$(( \'$(echo a > out.txt)\' )\\\n)"'),
+                ("a backslash-newline after a '${...}' name", "x=abc; echo ${x\\\n:'$(echo a > out.txt)'}"),
+                ("a backslash-newline before a '${...}' name", "x=abc; echo ${\\\nx:'$(echo a > out.txt)'}"),
+                ("a backslash-newline before a '${...}' subscript", "a=(1); echo ${a\\\n['$(echo a > out.txt)']}"),
+                ("a backslash-newline after a '${#...}' '#'", "a=(1); echo ${#\\\na['$(echo a > out.txt)']}"),
+                ("a backslash-newline after a '${@...}' name", "set -- a b; echo ${@\\\n:'$(echo a > out.txt)'}"),
+                ("a backslash-newline between '$' and '{' before an offset",
+                 "x=abc; echo $\\\n{x:'$(echo a > out.txt)'}"),
+                ("a backslash-newline between '$' and '{' before a subscript",
+                 "a=(1); echo $\\\n{a['$(echo a > out.txt)']}")):
+            bcmd("(ap-c113) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        # The same give-ups on shapes not run under bash (each fails with its own give-up reverted): a '$('
+        # or '$[' joined across a backslash-newline, and one before an offset after a '${...}' subscript.
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline between '$' and '(' in a double-quoted string", 'echo "$\\\n(echo a > out.txt)"'),
+                ("a backslash-newline between '$' and '['", "echo $\\\n[ '$(echo a > out.txt)' ]"),
+                ("a backslash-newline after a '${...}' subscript before an offset",
+                 "a=(abc); echo ${a[0]\\\n:'$(echo a > out.txt)'}")):
+            bcmd("(ap-c113b) {} DENIES".format(_ar_label), _ar_cmd, "deny")
+        for _ar_label, _ar_cmd in (
+                ("a backslash-newline in a subshell's text", "(\\\necho hi )"),
+                ("a backslash-newline in a '$(...)' text", "echo $(\\\necho hi )"),
+                ("a backslash-newline after a '${...}' offset's ':'", "x=abc; echo ${x:\\\n1}"),
+                ("a give-up at a backslash-newline before an absolute '>'",
+                 "(\\\n( 1 )); echo hi > {}/out.txt".format(rp))):
+            bcmd("(ap-c113c) {} allows".format(_ar_label), _ar_cmd, "allow")
+        # Known misses the residue discloses (NOT YET JUDGED): a value bash evaluates as arithmetic after quote
+        # removal, in a command's argument or in an assignment to an integer-attribute variable, and a $'...'
+        # escape in arithmetic text that changes what runs. Each allows though bash may truncate out.txt, so a
+        # later fix shows up here as a row change.
+        for _ar_label, _ar_cmd in (
+                ("an integer-attribute variable's assigned value", "declare -i x; x='a[$(echo a > out.txt)]'"),
+                ("a typeset -i variable's assigned value", "typeset -i x; x='a[$(echo a > out.txt)]'"),
+                ("an integer-attribute variable's appended value", "declare -i x=1; x+='a[$(echo a > out.txt)]'"),
+                ("a test -v argument", "test -v 'a[$(echo a > out.txt)]'"),
+                ("a '[ -v' argument", "[ -v 'a[$(echo a > out.txt)]' ]"),
+                ("a '[[ -v' argument", "[[ -v 'a[$(echo a > out.txt)]' ]]"),
+                ("a '[[ ... -lt ... ]]' operand", "[[ 'a[$(echo a > out.txt)]' -lt 1 ]]"),
+                ("a quoted local element assignment", "f() { local 'a[$(echo a > out.txt)]=1'; }; f"),
+                ("a quoted typeset element assignment", "typeset 'a[$(echo a > out.txt)]=1'"),
+                ("a quoted declare -a element assignment", "declare -a 'a[$(echo a > out.txt)]=1'"),
+                ("a declare -i value", "declare -i x='a[$(echo a > out.txt)]'"),
+                ("a local -i value", "f() { local -i x='a[$(echo a > out.txt)]'; }; f"),
+                ("a wait -n -p name", "wait -n -p 'v[$(echo a > out.txt)]'"),
+                ("a let argument", "let 'a[$(echo a > out.txt)]'"),
+                ("a '[[ ... -eq ... ]]' operand", "[[ 'a[$(echo a > out.txt)]' -eq 1 ]]"),
+                ("an unset argument", "unset 'a[$(echo a > out.txt)]'"),
+                ("a read name", "read 'a[$(echo a > out.txt)]' < /dev/null"),
+                ("a printf -v name", "printf -v 'a[$(echo a > out.txt)]' x"),
+                ("a quoted declare element assignment", "declare 'a[$(echo a > out.txt)]=1'"),
+                ("a $'\\c\\' escape in '$((...))'", "echo $(( $'\\c\\$(echo a > out.txt)' ))"),
+                ("a $'\\c\\' escape in an 'a[...]=1' subscript", "a[$'\\c\\$(echo a > out.txt)']=1"),
+                ("a $'\\c\\' escape in a '${...}' subscript", "echo ${a[$'\\c\\$(echo a > out.txt)']}"),
+                ("a $'\\x3e' escape in '$((...))'", "echo $(( $'$(echo a \\x3e out.txt)' ))"),
+                ("a $'\\x24' escape in '$((...))'", "echo $(( $'\\x24(echo a > out.txt)' ))")):
+            bcmd("(ap-c114) {} allows (disclosed known miss)".format(_ar_label), _ar_cmd, "allow")
         # the deny names the target and asks for an absolute one.
         _pt_out = aiqt_hooks.bash_absolute_paths({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": 'echo "$(echo a > out.txt)"'}})
