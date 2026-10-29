@@ -10810,6 +10810,26 @@ def self_test():
             check("history-flag-{}-existing-row-finding".format(_imp_label),
                   verdicts(_impr, "C-VERSION-LEDGER", "C-HISTORY-APPEND-ONLY") == ("PASS", "FINDING")
                   and any("C-HISTORY-APPEND-ONLY" in f and "rewritten" in f for f in _impr.findings))
+        # Imported rows form a prefix of the ledger (spec 6.1): an imported row appended after the witnessed
+        # rows is a C-VERSION-LEDGER finding naming the prefix rule. With the prefix rule removed from
+        # validate_version the same store passes C-VERSION-LEDGER, so the vector is red without it.
+        import _opf_release
+        from unittest.mock import patch as _imp_patch
+
+        def imp_late_run():
+            m = clean_machine()
+            m["version.toml"]["release"] = m["version.toml"]["release"] + [imp_row("9.0.0")]
+            return run(m, obs=copy.deepcopy(clean_prior()))
+
+        _impl = imp_late_run()
+        check("rel-imported-doctor-after-witnessed-finding",
+              verdicts(_impl, "C-VERSION-LEDGER") == ("FINDING",)
+              and any("prefix of the ledger" in f for f in _impl.findings))
+        with _imp_patch.object(_opf_release, "_imported_prefix_findings", lambda releases: []):
+            _impl_off = imp_late_run()
+        check("rel-imported-doctor-after-witnessed-red-without-rule",
+              verdicts(_impl_off, "C-VERSION-LEDGER") == ("PASS",)
+              and not any("prefix of the ledger" in f for f in _impl_off.findings))
         # WHOLE STORE, end to end: a store with a declared VERSION view whose ledger and prior carry an
         # imported row, with the changelog tiling all three releases, grades VALID with no finding and no
         # cant. Every composed ledger reader is on this path: C-VERSION-LEDGER, the changelog gates, the
