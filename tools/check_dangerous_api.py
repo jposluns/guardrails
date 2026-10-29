@@ -575,6 +575,12 @@ ALLOWLIST = (
      _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
      _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
+    ("tools/check_opf_declaration.py", "_mutant", "code", 1,
+     _MUTANT + " (each opf/tools/_opf_declaration.py revert, written to the self-test's temporary directory"
+     " first)"),
+    ("tools/check_opf_declaration.py", "_copy_mutant", "code", 1,
+     _MUTANT + " (each revert of opf/tools/opf.py or of this gate's own source, written to the self-test's"
+     " temporary directory first)"),
 )
 
 

@@ -949,6 +949,13 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_child_status_coverage.py
 
+      - name: OPF declaration self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
+      - name: OPF declaration gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_declaration.py
+
   git-fixture-env-core:
     name: Git-fixture-env core self-test
     if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
