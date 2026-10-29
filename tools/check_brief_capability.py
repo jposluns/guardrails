@@ -85,11 +85,16 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        and never refuses. A pin that does not resolve to one commit (unknown, ambiguous), a git
                        that cannot be launched or times out, or a pin with no repository to read is
                        CANNOT_EVALUATE (exit 2), never a pass, whether or not the brief names a relative path.
-                       The git reads are hermetic: every inherited GIT_ variable is dropped, the system and
-                       global config are pinned to an empty file, and HOME and XDG_CONFIG_HOME name an empty
-                       directory, so an ambient git configuration (malformed or adversarial) cannot change
-                       the answer. A repository that git trusts only through the caller's safe.directory
-                       entry therefore reads CANNOT_EVALUATE.
+                       The git reads are hermetic against system, global, XDG and environment-injected git
+                       configuration: every inherited GIT_ variable is dropped, the system and global config
+                       are pinned to an empty file, and HOME and XDG_CONFIG_HOME name an empty directory, so
+                       such configuration (malformed or adversarial) cannot change the answer. They are NOT
+                       hermetic against the repository's own config or a file an absolute include.path in it
+                       names: a malformed one fails the read, CANNOT_EVALUATE (exit 2). No system or global
+                       safe.directory entry is honoured and none is added (a repository another user owns can
+                       carry config that runs code), so a repository owned by another user reads
+                       CANNOT_EVALUATE, and the message names the cause (dubious ownership) and the remedy:
+                       run the check as the repository owner, or point --repo at a checkout you own.
   P4 no hand-back      ADVISORY. The family's row says handback = "yes", a sentence holds a delivery verb (return,
                        paste, print, send, show, include, quote, ...) not negated and a large output (a whole,
                        entire, full or complete file, source, diff, log or output; a diff; a patch), and no line
@@ -1745,7 +1750,9 @@ def _git_read_env():
     """The caller's environment with every GIT_-prefixed variable dropped, so a caller-supplied GIT_DIR or
     config source cannot point the read at another repository, then made hermetic: the system and global
     config pinned to os.devnull with GIT_CONFIG_NOSYSTEM=1, and HOME and XDG_CONFIG_HOME pointed at an empty
-    directory, so a malformed or adversarial ambient git configuration cannot fail or steer the read."""
+    directory, so a malformed or adversarial system, global, XDG or environment-injected git configuration
+    cannot fail or steer the read. The repository's own config, and a file an absolute include.path in it names,
+    are still read: a malformed one fails the read, CannotEvaluate."""
     env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
     home = _git_read_home()
     env["HOME"] = home
@@ -1756,14 +1763,35 @@ def _git_read_env():
     return env
 
 
+# git's ownership refusal: its first line in English, and the command of its hint, which a translation keeps
+OWNERSHIP_REFUSAL_MARKS = ("detected dubious ownership in repository at ", "--add safe.directory ")
+OWNERSHIP_REMEDY = ("git refused it for dubious ownership: the repository is owned by another user, and this read "
+                    "honours no system or global safe.directory entry; run the check as the repository owner, or "
+                    "point --repo at a checkout you own")
+
+
+def _run_git(repo, *args):
+    """git -C `repo` with `args` under _git_read_env(), output captured."""
+    return subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, timeout=GIT_READ_TIMEOUT,
+                          env=_git_read_env())
+
+
+def _ownership_refused(probe):
+    """Whether a failed git read was git refusing the repository for its ownership."""
+    stderr = probe.stderr.decode("utf-8", "replace")
+    return probe.returncode != 0 and any(mark in stderr for mark in OWNERSHIP_REFUSAL_MARKS)
+
+
 def resolve_revision(repo, rev):
     """The full commit id a pinned revision names in `repo`, or CannotEvaluate: a revision that does not
-    resolve, or a git that cannot be launched or times out, leaves the question open, never a pass."""
+    resolve, a repository git refuses for its ownership (named as such), or a git that cannot be launched or
+    times out, leaves the question open, never a pass."""
     try:
-        probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
-                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+        probe = _run_git(repo, "rev-parse", "--verify", "--quiet", rev + "^{commit}")
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("pinned revision {}: cannot run git in {}: {}".format(rev, repo, exc))
+    if _ownership_refused(probe):
+        raise CannotEvaluate("pinned revision {}: cannot read {}: {}".format(rev, repo, OWNERSHIP_REMEDY))
     commit = probe.stdout.decode("ascii", "replace").strip()
     if probe.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
         raise CannotEvaluate("pinned revision {} does not resolve to a commit in {}".format(rev, repo))
@@ -1772,12 +1800,14 @@ def resolve_revision(repo, rev):
 
 def exists_at_revision(repo, commit, path):
     """Whether `path` exists at `commit` in `repo`, read from the object store with git cat-file -e (never the
-    working tree), or CannotEvaluate when git cannot be launched or times out."""
+    working tree), or CannotEvaluate when git refuses the repository for its ownership, or cannot be launched
+    or times out."""
     try:
-        probe = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
-                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+        probe = _run_git(repo, "cat-file", "-e", commit + ":" + path)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, exc))
+    if _ownership_refused(probe):
+        raise CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, OWNERSHIP_REMEDY))
     return probe.returncode == 0
 
 
@@ -1984,7 +2014,9 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
 
 
 USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] BRIEF\n"
-         "       check_brief_capability.py --self-test | --execution-report ABS_PATH")
+         "       check_brief_capability.py --self-test | --execution-report ABS_PATH\n"
+         "The pin reads (P3) honour no system or global safe.directory entry: a --repo owned by another user exits 2\n"
+         "(dubious ownership); run the check as the repository owner, or point --repo at a checkout you own.")
 
 
 def check_table(path):
@@ -3660,20 +3692,74 @@ def self_test(report_path=None):
             with open(hostile / name, "w", encoding="utf-8") as handle:
                 handle.write("[broken\n")
 
+        def hostile_environ():
+            return _environ(HOME=str(hostile), XDG_CONFIG_HOME=str(hostile), GIT_CONFIG_NOSYSTEM="0",
+                            GIT_CONFIG_GLOBAL=str(hostile / ".gitconfig"),
+                            GIT_CONFIG_SYSTEM=str(hostile / "system-config"))
+
         def under_malformed_config():
-            """A caller's HOME, XDG_CONFIG_HOME, global and system git config name malformed files; the read
-            still gives the normal result."""
-            with _environ(HOME=str(hostile), XDG_CONFIG_HOME=str(hostile), GIT_CONFIG_NOSYSTEM="0",
-                          GIT_CONFIG_GLOBAL=str(hostile / ".gitconfig"),
-                          GIT_CONFIG_SYSTEM=str(hostile / "system-config")):
+            """A caller's HOME, XDG_CONFIG_HOME and global git config name malformed files; the read still gives
+            the normal result. The caller's GIT_CONFIG_SYSTEM goes with the GIT_ scrub, so the system pins are
+            held by read_env_pins, not here."""
+            with hostile_environ():
                 return p3("docs/present.md"), p3("docs/absent.md")
 
         def caller_config_env():
             """The previous scrub: GIT_ variables dropped, the caller's HOME and XDG_CONFIG_HOME kept."""
             return dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
 
+        pins = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "XDG_CONFIG_HOME")
+        real_read_env = _git_read_env
+
+        def read_env_pins():
+            """Each pin of the read environment under the hostile caller environment."""
+            with hostile_environ():
+                env = _git_read_env()
+            return [env.get(name) for name in pins]
+
+        def without_pin(name):
+            """_git_read_env with one pin removed: the caller's value, if any, comes through."""
+            def read_env():
+                env = real_read_env()
+                env.pop(name, None)
+                if not name.startswith("GIT_") and name in os.environ:
+                    env[name] = os.environ[name]
+                return env
+            return read_env
+
+        # git's ownership refusal as it prints it in English, and a translation that keeps only the hint's command
+        ownership_stderr = ("fatal: detected dubious ownership in repository at '{0}'\nTo add an exception for "
+                            "this directory, call:\n\n\tgit config --global --add safe.directory {0}\n",
+                            "fatal: <translated>\n\n\tgit config --global --add safe.directory {0}\n")
+
+        def names_ownership(text):
+            return all(words in text for words in ("dubious ownership", "owned by another user",
+                                                   "run the check as the repository owner",
+                                                   "point --repo at a checkout you own"))
+
+        def ownership_named():
+            """Under each refusal, from an in-process double of the git launch (nothing is launched): the exit
+            code of main, and whether its CANNOT_EVALUATE line and the cat-file read's CannotEvaluate name the
+            cause and the remedy."""
+            out = []
+            for template in ownership_stderr:
+                def refused(repo, *args, template=template):
+                    return subprocess.CompletedProcess(["git"], 128, b"", template.format(repo).encode("utf-8"))
+
+                printed = io.StringIO()
+                with _patched(_run_git=refused), contextlib.redirect_stdout(printed):
+                    code = main(argv)
+                    try:
+                        read = repr(exists_at_revision(repo, head, "docs/present.md"))
+                    except CannotEvaluate as exc:
+                        read = str(exc)
+                out.append((code, names_ownership(printed.getvalue()), names_ownership(read)))
+            return out
+
         check("preflight/p3-git-env-scrubbed", under_foreign_git_env(), ((0, []), (0, [("P3", "ADVISORY")])))
         check("preflight/p3-malformed-config-normal", under_malformed_config(), ((0, []), (0, [("P3", "ADVISORY")])))
+        check("preflight/p3-read-env-pins", read_env_pins(),
+              ["1", os.devnull, os.devnull, _git_read_home(), _git_read_home()])
         check("preflight/p3-git-failure-cannot-evaluate", git_failures(), ["CannotEvaluate"] * 4)
         with open(base / "brief.md", "w", encoding="utf-8") as handle:
             handle.write(P3_BRIEF.format(head[:12], "docs/absent.md"))
@@ -3682,6 +3768,8 @@ def self_test(report_path=None):
         argv = [str(base / "brief.md"), "--family", "alpha", "--table", str(base / "table.toml"), "--repo", str(repo)]
         check("main/preflight-repo-option", (_quiet(main, argv), _quiet(main, argv + ["--repo", str(repo)])),
               (EXIT_OK, EXIT_CANNOT_EVALUATE))
+        # a repository git refuses for its ownership exits 2, and the message names the cause and the remedy
+        check("preflight/p3-dubious-ownership-named", ownership_named(), [(EXIT_CANNOT_EVALUATE, True, True)] * 2)
         # red on revert: each preflight rule, and each guard of its clean shape, patched out flips its fixture
         check("revert/p1-red", *flip([lambda: _outcome(P1_RELATIVE, "alpha")], [(0, [])], rule_p1=nothing))
         check("revert/p1-file-name-red", *flip([lambda: _outcome(P1_NOT_A_PATH, "alpha")],
@@ -3795,6 +3883,21 @@ def self_test(report_path=None):
         # with the caller's HOME kept, the malformed global config there fails every read
         check("revert/p3-hermetic-config-red", *flip([lambda: under_malformed_config()[0]], ["CannotEvaluate"],
                                                      _git_read_env=caller_config_env))
+        # each pin removed from the read environment fails the pin check
+        pinned = ["1", os.devnull, os.devnull, _git_read_home(), _git_read_home()]
+        check("revert/p3-pin-nosystem-red", *flip([read_env_pins], [[None] + pinned[1:]],
+                                                  _git_read_env=without_pin("GIT_CONFIG_NOSYSTEM")))
+        check("revert/p3-pin-system-red", *flip([read_env_pins], [pinned[:1] + [None] + pinned[2:]],
+                                                _git_read_env=without_pin("GIT_CONFIG_SYSTEM")))
+        check("revert/p3-pin-global-red", *flip([read_env_pins], [pinned[:2] + [None] + pinned[3:]],
+                                                _git_read_env=without_pin("GIT_CONFIG_GLOBAL")))
+        check("revert/p3-pin-home-red", *flip([read_env_pins], [pinned[:3] + [str(hostile)] + pinned[4:]],
+                                              _git_read_env=without_pin("HOME")))
+        check("revert/p3-pin-xdg-red", *flip([read_env_pins], [pinned[:4] + [str(hostile)]],
+                                             _git_read_env=without_pin("XDG_CONFIG_HOME")))
+        # without the ownership reading, the refusal reads as an unresolved pin and the cat-file read as missing
+        check("revert/p3-dubious-ownership-red", *flip([ownership_named], [[(EXIT_CANNOT_EVALUATE, False, False)] * 2],
+                                                       _ownership_refused=lambda probe: False))
         real_resolve, real_exists = resolve_revision, exists_at_revision
 
         def resolve_or_pass(repo, rev):
@@ -3816,7 +3919,7 @@ def self_test(report_path=None):
                                            HANDBACK_NAMED_RE=never))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 108)
+    check("revert/every-flip-ran", len(flipped), 114)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
