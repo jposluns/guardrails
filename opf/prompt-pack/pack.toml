@@ -12,16 +12,17 @@
 # are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
 # which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
 # against this manifest yet.
-# The import/examples/<type>.batch.toml members are inert post-adoption import examples, one per baseline
-# record type: each is a canonical opf.record.import-batch/v1 batch that the gate also parses and checks
-# (validate_examples). No writer consumes them in this release; `opf record import --batch` does not exist.
+# import/SKILL.md is the post-adoption import procedure, and the import/examples/<type>.batch.toml members
+# are its inert examples, one per baseline record type: each is a canonical opf.record.import-batch/v1 batch
+# that the gate also parses and checks (validate_examples). No writer consumes them in this release;
+# `opf record import --batch` does not exist, and the procedure marks that step not yet executable.
 format = "opf.prompt-pack/v1"
-version = "0.6.0"
-digest = "sha256:00b03b30b8fb75abe741679894563a38449298ba0209021144080c91caea1b6f"
+version = "0.7.0"
+digest = "sha256:b988a50b5a0be8ec231675064ea2af37a84c74b330d2f511ea287ed86cbc039e"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "0c195a944018aa82499db9cd63e84e6af5b19cf5f03ce0014d3552c43cce9016"
+sha256 = "29b030d481d602a2c4adfff514033004de0c6d9a376149fe15492ff2676a48d0"
 
 [[members]]
 path = "adopt/clean-start.md"
@@ -29,7 +30,11 @@ sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "4786d25957a0cab6766107510e3c5c91f33d18ef22eda49d2ff4aa2353aa6f9f"
+sha256 = "7c915b106b31e31bbd9b0ec8e712af73351e1bd61742e973ee3b469018f8ad8b"
+
+[[members]]
+path = "import/SKILL.md"
+sha256 = "2557ac6f3307e3b520647b540a2108f2a8079c7dab8e4c40393b28bd154c62b6"
 
 [[members]]
 path = "import/examples/autonomous_decision.batch.toml"
