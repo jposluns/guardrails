@@ -364,7 +364,8 @@ PIN_KEY = "python-version"
 # (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
 # equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
 HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
-HOST_JOBS = ("opf-host-patch", "git-fixture-env-host-patch")
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
+             "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
 HOST_SOURCE_REL = ".aiqt/python-host.toml"
 HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
 HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")

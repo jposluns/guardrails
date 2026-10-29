@@ -348,7 +348,8 @@ def _scope(root_fd, root, inputs, charge):
             # MemoryError under pressure (F-TOML-BARE-VALUEERROR-CLASS). Each maps to the discovery
             # PlanError, cannot-evaluate.
             raise planning.PlanError("resolved manifest does not parse: {}".format(exc)) from exc
-        checked = store.validate_manifest(manifest)
+        checked = store.validate_manifest(
+            manifest, manifest_rel=resolution.machine_rel + "/" + store.MANIFEST_NAME)
         if checked.status != store.VALID:
             raise planning.PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
         unmanaged = planning._resolved_unmanaged(manifest, resolution.machine_rel)
@@ -1140,6 +1141,18 @@ def self_test():
             self.store_manifest([".working/notes"])
             self.write(".working/notes/a.md")
             self.assertEqual(self.paths(self.discover().proposals), ["TODO.md"])
+
+        def test_older_manifest_refusal_names_path(self):
+            # The below-supported spec_version refusal read through source discovery names the
+            # resolved manifest's own path (validate_manifest's manifest_rel); falling back to
+            # the unnamed "the store manifest" wording is red.
+            import _opf_init
+            self.write("TODO.md")
+            old_manifest = _opf_init.build_manifest().replace(
+                'spec_version = "' + store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+            self.assertIn('spec_version = "1.1.0"', old_manifest)
+            self.write(".working/toml/manifest.toml", old_manifest.encode("utf-8"))
+            self.refused("'.working/toml/manifest.toml' declares [opf].spec_version '1.1.0'")
 
         def test_resolved_manifest_and_root_refusals(self):
             self.write("TODO.md")
