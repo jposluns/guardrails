@@ -1622,18 +1622,37 @@ def retired_gate_name_findings(tools=None):
 #      `int(homes) == 1`, `m["opf"]["homes"] == 1`) other than ONE `==` between a bare homes read and
 #      the integer 2 or the HOMES constant (element by element in a tuple `==`), or the type guard
 #      `type(<homes read>) is int` (or `is not int`): `== 1`, `< 2`, `!= 2`, `>= 2`, `in (1,)`,
-#      `== True` and a chained comparison all fail;
+#      `== True` and a chained comparison all fail; any call with a homes read anywhere in it whose
+#      callee is a name or attribute in _COMPARISON_CALLS, the comparison dunders and operator's
+#      comparison functions (`homes.__eq__(1)`, `operator.eq(homes, 1)`, and `homes.__eq__(2)` too); and
+#      a mapping pattern keyed by a string ending in `homes`, or a class pattern keyword ending in
+#      `homes`, that matches anything but 2 or HOMES there (`case {'homes': 1}:`, `case C(homes=h):`);
 #   2. a homes-1 fallthrough after a generation test, a test that is only `== 2` comparisons (no tuple
 #      `==`) and type guards joined by `and`, or its `not`: the path a failed test takes (an `if`'s
 #      `else`, its body under `not`, or the statements after an `if` whose body ends in return, raise,
-#      continue or break) must begin with `raise` or with another such test; the false arm of a
-#      conditional expression must be None; no `or` may follow it; and a `match` on a homes read holds
-#      only `case 2:` (or HOMES) arms and a final `case _:` that raises;
-#   3. a literal other than the integer 2 passed for a homes parameter (a keyword ending in `homes`, or
-#      the position of a parameter ending in `homes` of a function that opf/tools defines under that
-#      name), or set as such a parameter's default;
-#   4. a binding of the name HOMES other than _opf_store.py's module-level `HOMES = 2` and
-#      `from _opf_store import HOMES`, or an assignment to an attribute HOMES;
+#      continue or break) must begin with a refusal: a `raise` that is not inside the body of a try
+#      statement in the same function (one of its handlers or its finally clause may swallow it), or
+#      another such test whose own failed path (its body under `not`, its else, or else the statements
+#      after it) begins with a refusal; the false arm of a conditional expression must be None; no `or`
+#      may follow it; and a `match` whose subject holds a homes read must have a bare homes read as its
+#      subject, or a tuple or list display with no starred element whose elements holding a homes read
+#      are bare reads, and holds only arms that match 2 (or HOMES) at those reads with no guard
+#      (`case 2:`, `case ('2.0.0', 2):`) and a final `case _:` whose body begins with such a `raise`;
+#   3. a literal other than the integer 2 passed for a homes parameter (a keyword ending in `homes`, a
+#      key ending in `homes` in a dict display unpacked by `**`, or the position of a parameter ending
+#      in `homes` of a function that opf/tools defines by a def statement under that name), or set as
+#      such a parameter's default, a lambda's included; and a number literal (bool, int, float or
+#      complex) other than the integer 2 bound to a homes read by an assignment, annotated assignment or
+#      `:=` (`homes = 1`, `self.homes = 1`, a class attribute `homes: int = 1`, `m["homes"] = 1`;
+#      element by element where a tuple or list target meets a display of the same length), or given as
+#      the value of a dict display key ending in `homes` (`{"opf": {"homes": 1}}`);
+#   4. a binding or deletion of the name HOMES other than _opf_store.py's module-level `HOMES = 2` and
+#      `from _opf_store import HOMES`; an assignment or deletion of an attribute HOMES on any object
+#      (`x.HOMES = 1`, `del x.HOMES`); and a call that sets or deletes an attribute named by the string
+#      literal "HOMES" on any object: a callee named setattr or delattr given "HOMES" as its second
+#      argument (`setattr(_opf_store, "HOMES", 1)`, `builtins.setattr`, `monkeypatch.setattr`), or a
+#      callee named __setattr__ or __delattr__ given it as its first or second argument
+#      (`_opf_store.__setattr__("HOMES", 1)`, `object.__setattr__(_opf_store, "HOMES", 1)`);
 #   5. a homes parameter or homes read in each adoption validator named in _HOMES1_FREE;
 #   6. any reference to the deleted record journal root: a string or bytes constant other than a
 #      docstring containing .aiqt/record/journal (unless a documented exclusion,
@@ -1641,16 +1660,27 @@ def retired_gate_name_findings(tools=None):
 #      JOURNAL_REL read off the record module (`_opf_record.JOURNAL_REL`, `record.JOURNAL_REL`).
 # Rules 1 to 3 pass a site that is a documented exclusion (_HOMES_COMPARE_EXCLUSIONS, one reason each).
 # RESIDUAL, outside this gate: a generation held in or passed through a differently named variable
-# (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a test that
-# is not a comparison (`if homes:`, `not homes - 1`, a mapping or index keyed by the generation); a
-# `== 2` test joined with any other condition, used as a while or assert condition, or kept as a flag
-# (`is2 = homes == 2`) and branched on later; an `if` with no `else` whose body does not end in return,
-# raise, continue or break (its failed path is the code after it, which the passing path runs too); the
-# reader of a conditional expression's None false arm; a positional generation after a `*args`, or passed
-# to a function that opf/tools does not define under the called name; a comparison, binding or path
-# built at run time (string joins, getattr or setattr with a computed name, patch.object, a globals()
-# write, a name re-bound to the store or record module); the journal path spelled in pieces; and
-# docstrings and comments, which are prose.
+# (`gen = homes`, `store_control_roots(gen)`), or computed rather than written as a literal; a literal
+# bound to a homes read that is not a number (`self.homes = None`), or bound by a loop target, an
+# augmented assignment, a tuple or list assignment whose value is not a display of the target's length
+# (`homes, *rest = 1, 2, 3`), or a call given the key and value as separate arguments
+# (`m.setdefault("homes", 1)`); a test that is not a comparison (`if homes:`, `not homes - 1`, a
+# mapping or index keyed by the generation), or that is a call whose callee is not named in
+# _COMPARISON_CALLS (`math.isclose(homes, 1)`, a comparison function held in a variable or a
+# functools.partial); a `== 2` test joined with any other condition, used as a while or assert
+# condition, or kept as a flag (`is2 = homes == 2`) and branched on later; an `if` with no `else` whose
+# body does not end in return, raise, continue or break (its failed path is the code after it, which the
+# passing path runs too); a raise that something other than a try body in its own function swallows (a
+# handler in a caller, a context manager such as contextlib.suppress, or a finally clause's return, break
+# or continue after an except or else clause raised); the cases after a mapping or class pattern that
+# matched a generation to 2 (they are not held to a final `case _:` that refuses), and a class pattern's
+# positional patterns (`case C(1):`); the reader of a conditional expression's None false arm; a
+# positional generation after a `*args`, or passed to a function that opf/tools does not define by a def
+# statement under the called name (a lambda or a function alias); a comparison, binding or path built at
+# run time (string joins, getattr or setattr with a computed name, patch.object, a patch or
+# monkeypatch.setattr given a dotted target string, a write to a namespace mapping such as globals(),
+# vars() or a module's __dict__, exec of source text, a name re-bound to the store or record module); the
+# journal path spelled in pieces; and docstrings and comments, which are prose.
 _HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_plan_sources",
                                   "_control_operand_findings")}
 # The comparisons, fallthroughs, literal arguments and defaults outside the record seam and the adoption
@@ -1718,9 +1748,15 @@ _LEGACY_JOURNAL_EXCLUSIONS = {
 _LEGACY_RECORD_JOURNAL = ".aiqt/record/journal"
 # The parenthesized rule each kind of homes-1 finding names.
 _COMPARE_RULE = "only `== 2` may test a generation"
-_FALLTHROUGH_RULE = "a failed `== 2` test may only raise, or yield None in a conditional expression"
+_FALLTHROUGH_RULE = ("a failed `== 2` test may only raise outside a try body, or yield None in a conditional "
+                     "expression")
 _MATCH_RULE = "a match on a generation holds only `case 2:` arms and a final `case _:` that raises"
 _LITERAL_RULE = "a generation argument or default may only be the integer 2 or HOMES"
+_BINDING_RULE = "a number bound to a generation may only be the integer 2"
+# The callees a comparison spelled as a call names (rule 1): the comparison dunders, and operator's comparison
+# functions.
+_COMPARISON_CALLS = frozenset(("__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__contains__",
+                               "eq", "ne", "lt", "le", "gt", "ge", "is_", "is_not", "contains"))
 
 
 def _names_legacy_journal(value):
@@ -1803,10 +1839,38 @@ def _generation_test(test, module):
     return bool(two) and all(p in two or (isinstance(p, ast.Compare) and _type_guard(p)) for p in parts), negated
 
 
+def _raises(stmt, module):
+    """Whether `stmt` is a raise outside the body of every try statement in its function (module["caught"])."""
+    return isinstance(stmt, ast.Raise) and id(stmt) not in module["caught"]
+
+
 def _refuses(stmts, module):
-    """Whether the path a failed generation test takes begins with `raise` or with another generation test."""
-    return bool(stmts) and (isinstance(stmts[0], ast.Raise) or (
-        isinstance(stmts[0], ast.If) and _generation_test(stmts[0].test, module)[0]))
+    """Whether the path a failed generation test takes begins with a refusal: an uncaught raise, or another
+    generation test whose own failed path (its body under `not`, its else, or else the statements after it)
+    begins with one."""
+    if not stmts:
+        return False
+    first = stmts[0]
+    if isinstance(first, ast.If):
+        only, negated = _generation_test(first.test, module)
+        return only and _refuses(first.body if negated else (first.orelse or stmts[1:]), module)
+    return _raises(first, module)
+
+
+def _caught_raises(tree):
+    """The raise statements inside the body of a try statement, which one of its handlers or its finally clause
+    may swallow; a function defined there is its own scope."""
+    caught = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            stack = list(node.body)
+            while stack:
+                inner = stack.pop()
+                if isinstance(inner, ast.Raise):
+                    caught.add(id(inner))
+                if not isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    stack.extend(ast.iter_child_nodes(inner))
+    return caught
 
 
 def _literal_generation(node):
@@ -1818,9 +1882,36 @@ def _literal_generation(node):
     return not (type(value) is int and value == 2)
 
 
+def _number_generation(node):
+    """Whether `node` is a number literal (bool, int, float or complex) other than the integer 2."""
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return type(value) in (bool, int, float, complex) and not (type(value) is int and value == 2)
+
+
+def _binds_number(target, value):
+    """Whether assigning `value` to `target` binds a number literal other than 2 to a homes read; a tuple or
+    list target pairs with a display of the same length element by element."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return (isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts)
+                and any(_binds_number(t, v) for t, v in zip(target.elts, value.elts)))
+    return _homes_read(target) and _number_generation(value)
+
+
+def _called_name(func):
+    return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+
+
 def _binds_homes(node, module):
-    """Whether `node` binds the name HOMES, or assigns an attribute HOMES, other than by _opf_store.py's
-    module-level `HOMES = 2` or `from _opf_store import HOMES`."""
+    """Whether `node` binds the name HOMES, or assigns an attribute HOMES (by a literal-name setattr too), other
+    than by _opf_store.py's module-level `HOMES = 2` or `from _opf_store import HOMES`."""
+    if isinstance(node, ast.Call):
+        name = _called_name(node.func)
+        named = (node.args[1:2] if name in ("setattr", "delattr")
+                 else node.args[:2] if name in ("__setattr__", "__delattr__") else [])
+        return any(isinstance(arg, ast.Constant) and arg.value == "HOMES" for arg in named)
     if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
         name = node.id if isinstance(node, ast.Name) else node.attr
         return name == "HOMES" and id(node) not in module["constant"]
@@ -1883,6 +1974,37 @@ def _homes_parameters(trees):
     return params
 
 
+def _two_pattern(pattern, module):
+    return isinstance(pattern, ast.MatchValue) and _two(pattern.value, module)
+
+
+def _bare_subject(subject):
+    """Whether a match subject holding a homes read holds it bare: a homes read, or a tuple or list display with
+    no starred element whose elements holding a homes read are homes reads."""
+    if not isinstance(subject, (ast.Tuple, ast.List)):
+        return _homes_read(subject)
+    return not any(isinstance(elt, ast.Starred) for elt in subject.elts) and all(
+        _homes_read(elt) for elt in subject.elts if _homes_reads(elt))
+
+
+def _match_arm(pattern, subject, module):
+    """Whether a case pattern matches 2 (or HOMES) at each homes read of a bare subject (_bare_subject)."""
+    if not isinstance(subject, (ast.Tuple, ast.List)):
+        return _two_pattern(pattern, module)
+    return (isinstance(pattern, ast.MatchSequence) and len(pattern.patterns) == len(subject.elts)
+            and all(_two_pattern(p, module) for p, elt in zip(pattern.patterns, subject.elts) if _homes_reads(elt)))
+
+
+def _literal_defaults(args, owner, module, findings):
+    positional = args.posonlyargs + args.args
+    defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+    defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+    for arg, default in defaults:
+        if arg.arg.endswith("homes") and _literal_generation(default):
+            _homes1_arm(module, owner, "{}={}".format(arg.arg, ast.unparse(default)), default.lineno, "default",
+                        _LITERAL_RULE, findings)
+
+
 def _homes1_arm(module, owner, text, line, what, rule, findings):
     if (module["rel"], owner, text) not in _HOMES_COMPARE_EXCLUSIONS:
         findings.append("{}:{}: homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every "
@@ -1915,14 +2037,10 @@ def _homes1_walk(node, owner, module, findings):
             findings.extend("{}:{}: {} names a homes generation again; it grades every row at homes 2".format(
                 rel, line, node.name) for line in sorted(reads))
         else:
-            positional = args.posonlyargs + args.args
-            defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
-            defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
-            for arg, default in defaults:
-                if arg.arg.endswith("homes") and _literal_generation(default):
-                    _homes1_arm(module, node.name, "{}={}".format(arg.arg, ast.unparse(default)), default.lineno,
-                                "default", _LITERAL_RULE, findings)
+            _literal_defaults(args, node.name, module, findings)
         owner = node.name
+    if isinstance(node, ast.Lambda):
+        _literal_defaults(node.args, owner, module, findings)
     if _binds_homes(node, module):
         findings.append("{}:{}: the HOMES constant is bound again in {}; only _opf_store.py's module-level "
                         "`HOMES = 2` defines it, and every `== HOMES` test reads it as 2".format(
@@ -1930,6 +2048,15 @@ def _homes1_walk(node, owner, module, findings):
     if isinstance(node, ast.Compare) and _homes_reads(node) and not (
             _equals_two(node, module) or _type_guard(node)):
         _homes1_arm(module, owner, ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
+    # A number other than 2 bound to a homes read, or given as a homes key's value in a dict display (one a call
+    # unpacks with ** is judged as its arguments instead).
+    if (isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None and any(
+            _binds_number(target, node.value)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))) or (
+            isinstance(node, ast.Dict) and id(node) not in module["unpacked"] and any(
+                key is not None and _homes_key(key) and _number_generation(value)
+                for key, value in zip(node.keys, node.values))):
+        _homes1_arm(module, owner, ast.unparse(node), node.lineno, "binding", _BINDING_RULE, findings)
     # A failed generation test: an if's else, or what follows an if whose body leaves, must refuse.
     for field in ("body", "orelse", "finalbody"):
         stmts = getattr(node, field, None)
@@ -1959,13 +2086,13 @@ def _homes1_walk(node, owner, module, findings):
                 _homes1_arm(module, owner, ast.unparse(value), alternative.lineno, "arm after", _FALLTHROUGH_RULE,
                             findings)
                 break
-    if isinstance(node, ast.Match) and _homes_read(node.subject):
-        for at, case in enumerate(node.cases):
+    if isinstance(node, ast.Match) and _homes_reads(node.subject):
+        # A subject that holds a generation other than bare has no arm: the match itself is red.
+        for at, case in enumerate(node.cases if _bare_subject(node.subject) else ()):
             pattern = case.pattern
-            arm = isinstance(pattern, ast.MatchValue) and _two(pattern.value, module)
             refusal = (at == len(node.cases) - 1 and isinstance(pattern, ast.MatchAs) and pattern.pattern is None
-                       and pattern.name is None and isinstance(case.body[0], ast.Raise))
-            if case.guard is not None or not (arm or refusal):
+                       and pattern.name is None and _raises(case.body[0], module))
+            if case.guard is not None or not (_match_arm(pattern, node.subject, module) or refusal):
                 _homes1_arm(module, owner, "case " + ast.unparse(pattern), pattern.lineno, "arm", _MATCH_RULE,
                             findings)
                 break
@@ -1974,10 +2101,25 @@ def _homes1_walk(node, owner, module, findings):
         else:
             _homes1_arm(module, owner, "match " + ast.unparse(node.subject), node.lineno, "arm", _MATCH_RULE,
                         findings)
+    # A mapping pattern's homes key, or a class pattern's homes keyword, is a generation test.
+    if isinstance(node, ast.MatchMapping):
+        tested = [pattern for key, pattern in zip(node.keys, node.patterns) if _homes_key(key)]
+    elif isinstance(node, ast.MatchClass):
+        tested = [pattern for attr, pattern in zip(node.kwd_attrs, node.kwd_patterns) if attr.endswith("homes")]
+    else:
+        tested = []
+    if not all(_two_pattern(pattern, module) for pattern in tested):
+        _homes1_arm(module, owner, "case " + ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
     if isinstance(node, ast.Call):
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        name = _called_name(node.func)
+        if name in _COMPARISON_CALLS and _homes_reads(node):
+            _homes1_arm(module, owner, ast.unparse(node), node.lineno, "arm", _COMPARE_RULE, findings)
         passed = [kw.value for kw in node.keywords if kw.arg is not None and kw.arg.endswith("homes")]
+        for kw in node.keywords:
+            if kw.arg is None and isinstance(kw.value, ast.Dict):
+                module["unpacked"].add(id(kw.value))
+                passed += [value for key, value in zip(kw.value.keys, kw.value.values)
+                           if key is not None and _homes_key(key)]
         for at, arg in enumerate(node.args):
             if isinstance(arg, ast.Starred):
                 break
@@ -2012,7 +2154,8 @@ def homes1_findings(tools=None):
     params = _homes_parameters(tree for _rel, tree in trees)
     for rel, tree in trees:
         module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
-                  "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params}
+                  "store": _store_names(tree), "constant": _homes_definition(rel, tree), "params": params,
+                  "caught": _caught_raises(tree), "unpacked": set()}
         _homes1_walk(tree, "<module>", module, findings)
     return findings
 
@@ -5937,13 +6080,13 @@ def _self_test_vectors():
                               store_source.count("\n") + 1, n, c)])
                 (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
     # No homes-1 path: outside self-test code the live tools tree tests a homes generation only by `== 2`
-    # with no fallthrough, passes and defaults no literal generation but 2, and binds HOMES only where it is
-    # defined (each with its documented exclusions); the adoption validators name no generation, and
-    # nothing names the deleted record journal root. In a fixture tree holding the record and adoption
-    # modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of claim_ids, or the
-    # homes-1 default of validate_op) is red at that line, as is every non-equality form of an arm; the same
-    # comparison in self-test code, or in a check_*.py module, is not (refused homes-1 inputs are still
-    # built there).
+    # with no fallthrough, passes and defaults no literal generation but 2, binds no number but 2 to one, and
+    # binds HOMES only where it is defined (each with its documented exclusions); the adoption validators
+    # name no generation, and nothing names the deleted record journal root. In a fixture tree holding the
+    # record and adoption modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of
+    # claim_ids, or the homes-1 default of validate_op) is red at that line, as is every non-equality form of
+    # an arm; the same comparison in self-test code, or in a check_*.py module, is not (refused homes-1 inputs
+    # are still built there).
     check("homes1-free-registry", lambda: _HOMES1_FREE == {"_opf_adopt.py": (
         "validate_op", "validate_plan", "_validate_plan_sources", "_control_operand_findings")})
     check("no-homes1-paths", lambda: homes1_findings() == [])
@@ -6096,7 +6239,7 @@ def _self_test_vectors():
         (tree / "_opf_store.py").unlink()
     # Each further form the scan closes, as a red module and its clean flip one edit away: the red module is
     # red with exactly its finding (module, line, kind, text, function, rule) and the clean one is not.
-    arm_after, arm, argument, default = "arm after", "arm", "argument", "default"
+    arm_after, arm, argument, default, binding = "arm after", "arm", "argument", "default", "binding"
     raises = "        raise ValueError(homes)\n"
     match_clean = ("def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n"
                    "        case _:\n            raise ValueError(homes)\n")
@@ -6134,6 +6277,49 @@ def _self_test_vectors():
         ("match-no-refusal", "planted.py",
          "def home(homes):\n    match homes:\n        case 2:\n            return 'typed'\n    return 'fallback'\n",
          match_clean, (2, arm, "match homes", "home", _MATCH_RULE)),
+        # A refusal a handler or finally clause of the same function may swallow is none, and a chained test
+        # refuses only if its own failed path does.
+        ("caught-raise", "planted.py",
+         "def home(homes):\n    try:\n        if homes == 2:\n            return 'typed'\n"
+         "        raise ValueError(homes)\n    except ValueError:\n        return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    raise ValueError(homes)\n",
+         (5, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("chained-shared", "planted.py",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    if homes == 2:\n        pass\n"
+         "    return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    if homes == 2:\n        pass\n"
+         "    raise ValueError(homes)\n", (4, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        ("chained-else-nested", "planted.py",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    else:\n        if homes == 2:\n"
+         "            pass\n    return 'fallback'\n",
+         "def home(homes):\n    if homes == 2:\n        return 'typed'\n    else:\n        if homes == 2:\n"
+         "            pass\n        raise ValueError(homes)\n    return 'fallback'\n",
+         (5, arm_after, "homes == 2", "home", _FALLTHROUGH_RULE)),
+        # A match on a tuple holding a generation, and a mapping or class pattern keyed by one.
+        ("match-tuple", "planted.py",
+         "def home(spec, homes):\n    match (spec, homes):\n        case ('2.0.0', 1):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(homes)\n",
+         "def home(spec, homes):\n    match (spec, homes):\n        case ('2.0.0', 2):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(homes)\n",
+         (3, arm, "case ['2.0.0', 1]", "home", _MATCH_RULE)),
+        ("match-mapping", "planted.py",
+         "def home(m):\n    match m:\n        case {'homes': 1}:\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         "def home(m):\n    match m:\n        case {'homes': 2}:\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         (3, arm, "case {'homes': 1}", "home", _COMPARE_RULE)),
+        ("match-class", "planted.py",
+         "def home(m):\n    match m:\n        case Manifest(homes=1):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         "def home(m):\n    match m:\n        case Manifest(homes=2):\n            return 'legacy'\n"
+         "        case _:\n            raise ValueError(m)\n",
+         (3, arm, "case Manifest(homes=1)", "home", _COMPARE_RULE)),
+        # A test spelled as a call.
+        ("call-dunder", "planted.py", "def home(homes):\n    return homes.__eq__(1)\n",
+         "def home(homes):\n    return homes == 2\n", (2, arm, "homes.__eq__(1)", "home", _COMPARE_RULE)),
+        ("call-operator", "planted.py", "import operator\n\n\ndef home(homes):\n    return operator.eq(homes, 1)\n",
+         "import operator\n\n\ndef home(homes):\n    return homes == 2\n",
+         (5, arm, "operator.eq(homes, 1)", "home", _COMPARE_RULE)),
         # A generation read through an expression, a key or a longer name in a comparison.
         ("arithmetic", "planted.py", "def home(homes):\n    return homes - 1 == 0\n",
          "def home(homes):\n    return homes == 2\n", (2, arm, "homes - 1 == 0", "home", _COMPARE_RULE)),
@@ -6171,6 +6357,14 @@ def _self_test_vectors():
          (5, arm, "homes == store.HOMES", "home", _COMPARE_RULE)),
         ("attribute-assignment", "planted.py", "import _opf_store\n\n_opf_store.HOMES = 1\n",
          "import _opf_store\n\nGENERATION = _opf_store.HOMES\n", (3, rebound)),
+        ("setattr-literal", "planted.py", "import _opf_store\n\nsetattr(_opf_store, 'HOMES', 1)\n",
+         "import _opf_store\n\nGENERATION = getattr(_opf_store, 'HOMES')\n", (3, rebound)),
+        ("setattr-dunder", "planted.py", "import _opf_store as store\n\nstore.__setattr__('HOMES', 1)\n",
+         "import _opf_store as store\n\nstore.__setattr__('HOMES_SEEN', 1)\n", (3, rebound)),
+        ("setattr-unbound-dunder", "planted.py", "import _opf_store\n\nobject.__setattr__(_opf_store, 'HOMES', 1)\n",
+         "import _opf_store\n\nobject.__setattr__(_opf_store, 'HOMES_SEEN', 1)\n", (3, rebound)),
+        ("delattr-literal", "planted.py", "import _opf_store\n\ndelattr(_opf_store, 'HOMES')\n",
+         "import _opf_store\n\ndelattr(_opf_store, 'HOMES_SEEN')\n", (3, rebound)),
         # An adoption validator reads no generation, through a key or an attribute either.
         ("validator-get", "_opf_adopt.py", "def validate_op(row):\n    return row.get('homes', 1)\n",
          "def validate_op(row):\n    return row.get('op', 1)\n", (2, names_generation.format("validate_op"))),
@@ -6186,6 +6380,18 @@ def _self_test_vectors():
          (5, argument, "roots(homes=1)", "<module>", _LITERAL_RULE)),
         ("literal-default", "planted.py", "def roots(homes=1):\n    return (homes,)\n",
          "def roots(homes=2):\n    return (homes,)\n", (1, default, "homes=1", "roots", _LITERAL_RULE)),
+        ("literal-unpacked", "planted.py", roots.format("**{'homes': 1}"), roots.format("**{'homes': 2}"),
+         (5, argument, "roots(**{'homes': 1})", "<module>", _LITERAL_RULE)),
+        ("literal-lambda-default", "planted.py", "ROOTS = lambda homes=1: (homes,)\n",
+         "ROOTS = lambda homes=2: (homes,)\n", (1, default, "homes=1", "<module>", _LITERAL_RULE)),
+        # A number other than 2 bound to a homes read, or written under a homes key.
+        ("binding-class-attribute", "planted.py", "class Store:\n    homes: int = 1\n",
+         "class Store:\n    homes: int = 2\n", (2, binding, "homes: int = 1", "<module>", _BINDING_RULE)),
+        ("binding-instance", "planted.py", "class Store:\n\n    def __init__(self):\n        self.homes = 1\n",
+         "class Store:\n\n    def __init__(self):\n        self.homes = 2\n",
+         (4, binding, "self.homes = 1", "__init__", _BINDING_RULE)),
+        ("binding-dict", "planted.py", "MANIFEST = {'opf': {'homes': 1}}\n", "MANIFEST = {'opf': {'homes': 2}}\n",
+         (1, binding, "{'homes': 1}", "<module>", _BINDING_RULE)),
         # The deleted journal root as bytes.
         ("bytes-journal", "planted.py", "def path():\n    return b'.aiqt/record/journal'\n",
          "def path():\n    return b'.working/journals/record/journal'\n",
