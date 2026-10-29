@@ -14478,17 +14478,28 @@ def _self_test_checks():
     in_root_row = dict(op="retire-file", path=in_root, preimage_digest=plan_digest(in_root_bytes))
     in_root_sources = [dict(path=in_root, disposition="retire", occupying=False,
                             digest=plan_digest(in_root_bytes), preservation=archive_rel(rid, in_root))]
+    # At homes 2 dispatch's validate_op refuses a store-control operand before any handler runs, so the
+    # three control-area vectors read that finding here; each handler's own rule is pinned below by
+    # composing the same row through its handler directly.
+    control_overlap = "adoption operand overlaps reserved store control area: {!r}".format
+    control_vectors = (
+        ("create-control-area", dict(rows=[forged_row], content={forged: fx_new_bytes}), "control area", forged),
+        ("move-into-own-archive", dict(rows=[move_row(archive_rel(rid, "legacy/MOVE.md"))],
+                                       sources=moved_to(archive_rel(rid, "legacy/MOVE.md"))), "beneath",
+         archive_rel(rid, "legacy/MOVE.md")),
+        ("retire-source-in-move-root", dict(rows=[in_root_row], sources=in_root_sources), "never removes",
+         in_root))
+    by_control = dict((label, (kwargs, control_overlap(operand))) for label, kwargs, _r, operand in control_vectors)
     for label, kwargs, reason in (
             ("create-occupied", dict(rows=[fx_create]), "occupied"),
             ("create-digest-mismatch", dict(rows=[fx_create], content={fx_new: b"unplanned\n"}),
              "content_digest"),
-            ("create-control-area", dict(rows=[forged_row], content={forged: fx_new_bytes}), "control area"),
+            ("create-control-area",) + by_control["create-control-area"],
             ("retire-unbound", dict(rows=fx_disposed[:1], sources=fx_sources[1:]), "plan source row"),
             ("retire-other-digest", dict(rows=fx_disposed[:1], sources=other_sources), "plan source row"),
             ("retire-ambiguous", dict(rows=fx_disposed[:1], sources=twice), "plan source row"),
             ("move-destination-occupied", dict(rows=fx_disposed[2:3]), "occupied"),
-            ("move-into-own-archive", dict(rows=[move_row(archive_rel(rid, "legacy/MOVE.md"))],
-                                           sources=moved_to(archive_rel(rid, "legacy/MOVE.md"))), "beneath"),
+            ("move-into-own-archive",) + by_control["move-into-own-archive"],
             # a protected move destination refuses at APPLY, through protected_destination itself (a
             # non-occupying move composes nothing there, so without this rule the base would commit)
             ("move-protected-aiqt", dict(rows=[move_row(".aiqt/x.md")], sources=moved_to(".aiqt/x.md")),
@@ -14521,7 +14532,7 @@ def _self_test_checks():
             ("move-store-tree-case-variant", dict(rows=[move_row(".Working/stuff.md")],
                                                   sources=moved_to(".Working/stuff.md")),
              "inside the store tree"),
-            ("retire-source-in-move-root", dict(rows=[in_root_row], sources=in_root_sources), "never removes"),
+            ("retire-source-in-move-root",) + by_control["retire-source-in-move-root"],
             ("move-preservation-mismatch", dict(rows=fx_disposed[2:3], sources=moved_to("adopter/elsewhere.md")),
              "records preservation")):
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -14538,6 +14549,28 @@ def _self_test_checks():
             before = tree_state(root)
             _txn, why = apply_stage(root, **kwargs)
             check("file-op-{}-refused-untouched-save-journal-dirs".format(label),
+                  why is not None and reason in why and untouched_save_journal_dirs(before, root)
+                  and lock_free(root))
+
+    def handler_stage(root, rows, sources=None, content=None):
+        """apply_stage with each row composed through its handler directly, past dispatch's validator."""
+        def compose(ops):
+            context = OpContext(ops, fx_sources if sources is None else sources,
+                                {fx_new: fx_new_bytes} if content is None else content)
+            for row in rows:
+                verdict = OP_HANDLERS[row["op"]](row, context)
+                if verdict.status != VALID:
+                    raise AdoptApplyError("; ".join(verdict.findings))
+        return attempt(run_adopt_transaction, root, rid, compose)
+    for label, kwargs, reason, _operand in control_vectors:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = file_fixture(temp)
+            if label == "retire-source-in-move-root":
+                (root / in_root).parent.mkdir(parents=True)
+                (root / in_root).write_bytes(in_root_bytes)
+            before = tree_state(root)
+            _txn, why = handler_stage(root, **kwargs)
+            check("file-op-{}-handler-refused-untouched-save-journal-dirs".format(label),
                   why is not None and reason in why and untouched_save_journal_dirs(before, root)
                   and lock_free(root))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -18424,10 +18457,25 @@ def _finish_ops_self_test(check):
         return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob("*"))
                 if p.is_file() and not p.is_symlink() and not str(p.relative_to(root)).startswith(".aiqt/")}
 
+    overlap = "adoption operand overlaps reserved store control area: {!r}".format
+
+    def execute(row, context):
+        """dispatch, save for the minted record-adoption row. Homes 2 grades that row INVALID at dispatch on
+        its one bundle-receipt operand (record-minted-row-homes2-operand-refused pins it), so a row whose
+        validate_op findings are exactly that one control-area finding reaches its handler directly: its
+        composition and every binding refusal are still judged by the handler itself, and any other
+        finding still refuses as dispatch refuses it."""
+        if isinstance(row, dict) and row.get("op") == "record-adoption":
+            graded = schema.validate_op(row)
+            if graded.status != valid and graded.findings != [overlap(receipt_rel(rid))]:
+                return graded
+            return OP_HANDLERS["record-adoption"](row, context)
+        return dispatch(row, context)
+
     def composer(rows, **context):
         def compose(ops):
             for row in rows:
-                verdict = dispatch(row, dict(context, ops=ops))
+                verdict = execute(row, dict(context, ops=ops))
                 if verdict.status != valid:
                     raise AdoptApplyError("; ".join(verdict.findings))
         return compose
@@ -18515,14 +18563,15 @@ def _finish_ops_self_test(check):
         against plan.toml, never the receipt; the doctor owns the approval binding)."""
         return (tree.get(plan_rel(rid)) == emit_checked(plan_doc).encode("utf-8")
                 and bound_digests(tree) == (plan_doc["plan_digest"],) * 4)
+    # every field of the minted row is well-formed: at homes 2 its one finding is the bundle-receipt operand
     check("finish-fixture-rows-validate", plan["run_id"] == rid and schema.validate_op(plant).status == valid
-          and schema.validate_op(record).status == valid)
+          and schema.validate_op(record).findings == [overlap(receipt_rel(rid))])
     check("finish-receipt-in-own-bundle", receipt_rel(rid) == evidence_home_rel(rid) + "/receipt.toml"
           and genesis_event_rel(rid) == evidence_home_rel(rid) + "/event-0001.toml")
     check("record-row-mint-is-the-executable-row",
           record == dict(op="record-adoption", receipt_path=receipt_rel(rid),
                          receipt_core_digest="sha256:" + _sha256(core))
-          and schema.validate_op(record).status == valid)
+          and schema.validate_op(record).findings == [overlap(receipt_rel(rid))])
     # M3: the genesis event's digest recomputes from its own canonical bytes without the event_digest key,
     # through the named helper AND an independent inline recomputation, so a minted digest that is not the
     # canonical-bytes digest is a red here and a refusal inside adoption_record itself.
@@ -18599,7 +18648,7 @@ def _finish_ops_self_test(check):
         before, seen = snapshot(root), []
 
         def probe(ops):
-            verdict = dispatch(dict(record), dict(ctx, ops=ops))
+            verdict = execute(dict(record), dict(ctx, ops=ops))
             seen.append((verdict, list(ops.ops), dict(ops.staged)))
             raise AdoptApplyError("probe")
         try:
@@ -18732,7 +18781,7 @@ def _finish_ops_self_test(check):
     with mock.patch.object(schema, "validate_event_chain", return_value=schema._invalid(["stub"])):
         refuses_untouched("record-consults-the-chain-validator", [record], "genesis outcome event is refused")
     for name in ("plant-governance", "record-adoption"):
-        res = dispatch(dict(plant if name == "plant-governance" else record), dict(ctx))
+        res = execute(dict(plant if name == "plant-governance" else record), dict(ctx))
         check("{}-without-transaction-refused".format(name), refused(res, "no ApplyOps"))
 
     # render-views composes into the journaled shell: the approved bytes land through the same adoption
