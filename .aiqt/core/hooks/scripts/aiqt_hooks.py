@@ -32922,13 +32922,177 @@ def _push_step_finding(segments, depth=0, cache=None):
     return None, bool(pushes)
 
 
+_PUSH_STEP_COMMAND_PLACES = frozenset("cspb")  # the top level, a '$(', a '(' subshell, a backquote body
+_PUSH_STEP_WORD_STARTS = frozenset(" \t\n;&|()")
+
+
+def _push_step_heredoc_word(command, j, n):
+    """(delimiter, quoted, end) for the delimiter word of a here-document operator starting at index j of
+    command: the word with its quotes and backslashes removed, whether any were present (bash then reads the
+    body as data), and the index past the word. None when the word is empty or a quote in it is left open."""
+    word = []
+    quoted = False
+    while j < n and command[j] not in " \t\n;&|<>()":
+        c = command[j]
+        if c in "'\"":
+            k = command.find(c, j + 1)
+            if k < 0:
+                return None
+            word.append(command[j + 1:k])
+            quoted = True
+            j = k + 1
+        elif c == "\\":
+            word.append(command[j + 1:j + 2])
+            quoted = True
+            j += 2
+        else:
+            word.append(c)
+            j += 1
+    delimiter = "".join(word)
+    return (delimiter, quoted, j) if delimiter else None
+
+
+def _push_step_quoted_masked(command):
+    """command with each quoted here-document body masked (_GATE_HEREDOC_BODY_MASK, one character for one, so
+    every index and line stays where it was). bash reads such a body as data wherever its operator stands, at
+    the top level or inside a '$(' a double-quoted word holds ('git commit -m "$(cat <<'EOF' ...)"'), so a
+    backquote, '$(' or quote in it starts nothing; unmasked, the shared lexer's command reading takes a
+    backquoted 'git push' there for a command. The operators are found by a walk that follows quoting, not by
+    a line pattern: a '<<' counts only where bash reads a command (_PUSH_STEP_COMMAND_PLACES), never inside
+    quotes, a '${', arithmetic or a comment, and the bodies of the operators read start after the next newline
+    read in such a place, each up to its delimiter line (after its leading tabs for '<<-'). An unquoted body,
+    which bash expands, is passed over unmasked. When the walk cannot follow command (a ')' it did not open,
+    as a case pattern writes, a quote, substitution or body still open at the end, a newline inside quotes
+    while a body is pending), command is returned unchanged, which can only keep a deny. Linear in the length
+    of command."""
+    n = len(command)
+    stack = ["c"]  # c top level, s '$(', p '(', b backquote, d double quote, e '${', A arithmetic, a its '('
+    pending = []  # (delimiter, strip_tabs, quoted) of each operator read since the last newline
+    spans = []
+    i = 0
+    while i < n:
+        c = command[i]
+        top = stack[-1]
+        command_place = top in _PUSH_STEP_COMMAND_PLACES
+        if c == "\\":
+            i += 2
+        elif c == "\n" and pending:
+            if not command_place:
+                return command
+            pos = i + 1
+            for delimiter, strip_tabs, quoted in pending:
+                start = pos
+                while True:
+                    if pos >= n:
+                        return command
+                    eol = command.find("\n", pos)
+                    eol = n if eol < 0 else eol
+                    line = command[pos:eol]
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        if quoted:
+                            spans.append((start, pos))
+                        pos = eol + 1
+                        break
+                    pos = eol + 1
+            pending = []
+            i = pos
+        elif top == "d" and c == '"':
+            stack.pop()
+            i += 1
+        elif c == "`" and top != "A" and top != "a":
+            if top == "b":
+                stack.pop()
+            else:
+                stack.append("b")
+            i += 1
+        elif c == "$" and command.startswith("((", i + 1):
+            stack.append("A")
+            i += 3
+        elif c == "$" and command.startswith("(", i + 1):
+            stack.append("s")
+            i += 2
+        elif c == "$" and command.startswith("{", i + 1):
+            stack.append("e")
+            i += 2
+        elif top == "d":
+            i += 1
+        elif top in "Aa":
+            if c == "(":
+                stack.append("a")
+                i += 1
+            elif c == ")" and top == "a":
+                stack.pop()
+                i += 1
+            elif c == ")" and command.startswith(")", i + 1):
+                stack.pop()
+                i += 2
+            elif c == ")":
+                return command
+            else:
+                i += 1
+        elif c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return command
+            i = j + 1
+        elif c == '"':
+            stack.append("d")
+            i += 1
+        elif top == "e":
+            if c == "}":
+                stack.pop()
+            i += 1
+        elif c == "#" and (i == 0 or command[i - 1] in _PUSH_STEP_WORD_STARTS):
+            j = command.find("\n", i)
+            i = n if j < 0 else j
+        elif c == "(":
+            if command.startswith("(", i + 1) and (i == 0 or command[i - 1] in _PUSH_STEP_WORD_STARTS):
+                stack.append("A")
+                i += 2
+            else:
+                stack.append("p")
+                i += 1
+        elif c == ")":
+            if top not in "sp":
+                return command
+            stack.pop()
+            i += 1
+        elif command.startswith("<<<", i):
+            i += 3
+        elif command.startswith("<<", i):
+            j = i + 2
+            strip_tabs = command.startswith("-", j)
+            j += 1 if strip_tabs else 0
+            while j < n and command[j] in " \t":
+                j += 1
+            word = _push_step_heredoc_word(command, j, n)
+            if word is None:
+                return command
+            pending.append((word[0], strip_tabs, word[1]))
+            i = word[2]
+        else:
+            i += 1
+    if stack != ["c"] or pending:
+        return command
+    out = []
+    last = 0
+    for start, end in spans:
+        out.append(command[last:start])
+        out.append(command[start:end].translate(_GATE_HEREDOC_BODY_MASK))
+        last = end
+    out.append(command[last:])
+    return "".join(out)
+
+
 def _push_step_heredoc_split(command):
     """(text, bodies) for push_then_step's fallback. text is command with each here-document body that ends at
     its delimiter line removed, that line with it (the operators found by _GATE_HEREDOC_OP_RE, as
-    _gate_heredoc_masked reads them), so a body bash reads as data names no push and no separator. bodies holds
-    the substitution bodies (_push_step_bodies, quotes read as text) of each such body whose delimiter word is
-    unquoted, which bash expands, running each as a command before the command the here-document feeds. A body
-    no delimiter line ends stays in text and is read as raw text (the safe direction). Linear in the length of
+    _gate_heredoc_masked reads them), so a body bash reads as data names no push and no separator. bodies holds,
+    read in one pass as _push_step_finding reads a segment, the substitution bodies of the whole command text
+    outside those bodies (_push_step_bodies, quotes read as bash reads them: 'step "$(git push)" <<EOF'), and
+    then those of each removed body whose delimiter word is unquoted, which bash expands (quotes read as text);
+    bash runs each as a command before the command it stands in or the here-document feeds. A body no
+    delimiter line ends stays in text and is read as raw text (the safe direction). Linear in the length of
     command."""
     out = []
     bodies = []
@@ -32952,27 +33116,32 @@ def _push_step_heredoc_split(command):
             delimiter = word.replace("'", "").replace('"', "").replace(chr(92), "")
             if delimiter:
                 pending.append((delimiter, m.group(1) == "-", delimiter != word))
-    return "\n".join(out + held), bodies
+    text = "\n".join(out + held)
+    return text, _push_step_bodies(text, True) + bodies
 
 
 def _push_step_judge(command, depth=0, cache=None):
-    """(finding, pushes) for command read as bash runs it: each reading of the shared lexer
-    (_lex_readings_read) judged on its own (_push_step_finding), or, when the lexer cannot read it, the raw
-    fallback: each substitution an unquoted here-document body expands (_push_step_heredoc_split) is judged as a
-    command, and a push in one finds the command the here-document feeds, which runs after it; then the text
-    with the here-document bodies removed denies when it names git, then push, then a separator
-    (_PUSH_STEP_RAW_RE), and counts as a push when it names git then push (_RAW_PUSH_RE). A substitution nested
-    past _PUSH_STEP_DEPTH_LIMIT is not read: it finds when its raw text names git then push. Each text is
-    judged once per call (cache)."""
+    """(finding, pushes) for command read as bash runs it, with each quoted here-document body masked as the
+    data bash reads it as (_push_step_quoted_masked): each reading of the shared lexer (_lex_readings_read)
+    judged on its own (_push_step_finding), or, when the lexer cannot read it, the raw fallback: each
+    substitution in the command text outside the here-document bodies and each one an unquoted body expands
+    (_push_step_heredoc_split) is judged as a command, and a push in one finds the command it stands in or the
+    here-document feeds, which runs after it (an assignment alone included, since the fallback cannot read
+    words); then the text with the here-document bodies removed denies when it names git, then push, then a
+    separator (_PUSH_STEP_RAW_RE), and counts as a push when it names git then push (_RAW_PUSH_RE). A
+    substitution nested past _PUSH_STEP_DEPTH_LIMIT is not read: it finds when its raw text names git then
+    push. Each text is judged once per call (cache)."""
     if cache is None:
         cache = {}
     if command in cache:
         return cache[command]
+    key = command
+    command = _push_step_quoted_masked(command)
     if depth > _PUSH_STEP_DEPTH_LIMIT:
         result = (None, False)
         if _RAW_PUSH_RE.search(command) is not None:
             result = ("a git push is named inside command substitutions nested deeper than this guard reads", True)
-        cache[command] = result
+        cache[key] = result
         return result
     try:
         readings = _lex_readings_read(command, skip_empty=True)
@@ -32987,8 +33156,9 @@ def _push_step_judge(command, depth=0, cache=None):
                 result = (how, True)
                 break
             if inner:
-                result = ("a git push runs inside a substitution in a here-document body, and the command that "
-                          "reads the here-document runs after it whatever the push's result", True)
+                result = ("a git push runs inside a command substitution of a command the shared lexer could not "
+                          "read, and the command it stands in (or the one reading the here-document that holds "
+                          "it) runs after it whatever the push's result", True)
                 break
         if result is None:
             if _PUSH_STEP_RAW_RE.search(text) is not None:
@@ -33005,7 +33175,7 @@ def _push_step_judge(command, depth=0, cache=None):
                 break
             if pushes:
                 result = (None, True)
-    cache[command] = result
+    cache[key] = result
     return result
 
 
@@ -33035,25 +33205,35 @@ def push_then_step(data):
     '$(' or backquote substitution, bare or inside a quoted word, counts as well: the command the substitution
     stands in runs after it whatever its result, so 'step $(git push)' and 'echo "$(git push)"; step' deny,
     unless that command is an assignment alone ('x=$(git push)'), whose exit status is the substitution's, and
-    is then judged as the push itself (_push_step_finding, _push_step_judge).
+    is then judged as the push itself (_push_step_finding, _push_step_judge). A quoted here-document body
+    (<<'EOF', <<"EOF", <<\\EOF) is data to bash wherever it stands, inside a substitution too, so it is masked
+    before any reading (_push_step_quoted_masked): 'git commit -m "$(cat <<'EOF'', a body naming `git push`
+    in backquotes, 'EOF', ')"' allows; an unquoted body is expanded by bash and its substitutions are read.
 
     DISCLOSED SILENT ALLOWS (the lexer does not see the push): a push inside a script or program the command
     runs, a shell function or alias, eval or an sh -c string, a variable or substituted command word ($GIT
-    push), a git alias that runs push, and a wrapper carrying its own options (env -i, sudo -u u). DISCLOSED
-    OVER-DENY: a step bash gates on the push through a compound command ('if git push; then x; fi',
-    '{ git push; } && x') reads as ';' and denies, and so does one after a subshell ('(git push) && x', the
-    ')' above _PUSH_STEP_GATED_SEPS) or after an assignment from a bare substitution ('x=$(git push) && y');
+    push), a git alias that runs push, and a wrapper carrying its own options (env -i, sudo -u u); a push in
+    a case arm inside a quoted substitution ('echo "$(case a in a) git push;; esac)"; step'), whose pattern ')'
+    the substitution reader takes for the close; and, in a command the lexer cannot read, a quoted '<<' the
+    fallback takes for an operator on a line after a real here-document (a body, then echo '<<Y', then
+    git push, then step, then Y), which removes the lines up to Y as a body. DISCLOSED OVER-DENY: a step bash
+    gates on the push through a compound command ('if git push; then x; fi', '{ git push; } && x') reads as
+    ';' and denies, and so does one after a subshell ('(git push) && x', the ')' above _PUSH_STEP_GATED_SEPS)
+    or after an assignment from a bare substitution or a backquote ('x=$(git push) && y', 'x=`git push` && y');
     so do a brace group or subshell of several steps after '&&' ('git push && { a; b; }', 'git push && (a; b)'),
     whose inner ';' reads as dropping the gate, a script that stops on the first failure ('set -e; git push;
-    x'), whose ';' still reads as ungated, and a substitution standing alone as the command ('$(git push)');
-    join the step with '&&' to a bare push instead. Fail posture: a missing tool_name denies (the shared
+    x'), whose ';' still reads as ungated, a substitution standing alone as the command ('$(git push)'), and,
+    in a command the lexer cannot read, an assignment alone from a substitution holding a push
+    ('x=$(git push) && y <<EOF'); join the step with '&&' to a bare push instead. Fail posture: a missing tool_name denies (the shared
     contract); a missing or non-string command denies (check-fails-closed-on-unreadable); an empty one runs
     nothing and allows. A command the lexer cannot read (an unbalanced quote, a here-string, an unquoted
     here-document, a '#' it cannot judge, a command reading past its budget) is read with each here-document
-    body that its delimiter line ends taken as data, except the substitutions an unquoted body expands, each
-    judged as a command (a push in one denies, since the command reading the body runs after it); the rest
-    denies when its raw text names git, then push, then any of ';', '&', '|' or a newline (_PUSH_STEP_RAW_RE),
-    an over-deny of such a command joined only by '&&', and allows otherwise."""
+    body that its delimiter line ends taken as data; every substitution in the rest of the command text
+    ('step "$(git push)" <<EOF') and every one an unquoted body expands is judged as a command, and a push in
+    one denies, since the command it stands in (an assignment alone included) or the one reading the body
+    runs after it; the rest denies when its raw text names git, then push, then any of ';', '&', '|' or a
+    newline (_PUSH_STEP_RAW_RE), an over-deny of such a command joined only by '&&' ('git push <<<x && y'),
+    and allows otherwise."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: push_then_step wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))

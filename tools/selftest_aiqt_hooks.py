@@ -2628,6 +2628,162 @@ def _pts_oracle_runs(failures, tmp):
                                                 "runs" if must_run else "does not"))
 
 
+_PTS_BQ = "`"
+_PTS_QUOTED_BODY = "\"$(cat <<'EOF'\n"
+# The real-bash table: (label, command, kind, guard). kind says what bash does with a git push that fails and
+# what the hook must decide: "deny" (bash runs a step after the failed push, the hook denies), "allow" (no
+# step runs after it, the hook allows), "over" (no step runs after it, yet the hook denies: a disclosed
+# over-deny) and "under" (a step runs after it, yet the hook allows: a disclosed wrong allow). guard names the
+# reading the row's decision rests on, "subst" for the fallback's substitutions in the whole command text and
+# "quoted" for the masking of quoted here-document bodies: with that reading reverted the decision must flip.
+_PTS_BASH_ROWS = (
+    ("(pts-b1) quoted substitution argument, unquoted here-document",
+     'step "$(git push origin br)" <<EOF\nbody\nEOF', "deny", "subst"),
+    ("(pts-b2) bare substitution argument, unquoted here-document",
+     "step $(git push origin br) <<EOF\nbody\nEOF", "deny", "subst"),
+    ("(pts-b3) quoted substitution argument, here-string", 'step "$(git push origin br)" <<<x', "deny", "subst"),
+    ("(pts-b4) substitution on the line after an unquoted here-document",
+     "git commit -F - <<EOF\nmsg\nEOF\nstep $(git push origin br)", "deny", "subst"),
+    ("(pts-b5) backquote argument, unquoted here-document",
+     "step " + _PTS_BQ + "git push origin br" + _PTS_BQ + " <<EOF\nbody\nEOF", "deny", "subst"),
+    ("(pts-b6) substitution running no push, unquoted here-document",
+     'step "$(git rev-parse HEAD)" <<EOF\nbody\nEOF', "allow", None),
+    ("(pts-b7) commit message from a quoted here-document naming a backquoted push",
+     "git commit -m " + _PTS_QUOTED_BODY + "fix: " + _PTS_BQ + "git push" + _PTS_BQ + " retry\nEOF\n)\"",
+     "allow", "quoted"),
+    ("(pts-b8) PR body from a quoted here-document naming a backquoted push",
+     "gh pr create --title x --body " + _PTS_QUOTED_BODY + "- run " + _PTS_BQ + "git push" + _PTS_BQ
+     + " then open the PR\nEOF\n)\"", "allow", "quoted"),
+    ("(pts-b9) top-level quoted here-document naming a backquoted push and ';'",
+     "cat <<'EOF'\n" + _PTS_BQ + "git push origin br" + _PTS_BQ + "; step\nEOF", "allow", None),
+    ("(pts-b10) quoted here-document message, then a push '&&' gates",
+     "git commit -m " + _PTS_QUOTED_BODY + "use " + _PTS_BQ + "git push" + _PTS_BQ
+     + "\nEOF\n)\" && git push origin br && step", "allow", "quoted"),
+    ("(pts-b11) quoted here-document naming '$(git push)' inside a substitution",
+     "git commit -m " + _PTS_QUOTED_BODY + "$(git push origin br); step\nEOF\n)\"", "allow", None),
+    ("(pts-b12) quoted here-document message, then a push and ';'",
+     "git commit -m " + _PTS_QUOTED_BODY + "use " + _PTS_BQ + "git push" + _PTS_BQ
+     + "\nEOF\n)\"; git push origin br; step", "deny", None),
+    ("(pts-b13) unquoted here-document expands a backquoted push, step after it",
+     "cat <<EOF\n" + _PTS_BQ + "git push origin br" + _PTS_BQ + "\nEOF\nstep", "deny", None),
+    ("(pts-b14) a '<<' inside quotes opens no body",
+     "echo \"<<'X'\"\nstep $(git push origin br)\nX", "deny", None),
+    ("(pts-b15) '<<-' quoted body, then a push and ';'",
+     "cat <<-'EOF'\n\t" + _PTS_BQ + "git push" + _PTS_BQ + "; step\n\tEOF\ngit push origin br; step", "deny", None),
+    ("(pts-b16) step's argument substitution", "step $(git push origin br)", "deny", None),
+    ("(pts-b17) quoted substitution, then ';'", 'echo "$(git push origin br)"; step', "deny", None),
+    ("(pts-b18) export's status is its own, then '&&'", "export x=$(git push origin br) && step", "deny", None),
+    ("(pts-b19) quoted assignment, then '&&'", 'x="$(git push origin br)" && step', "allow", None),
+    ("(pts-b20) unquoted here-document body naming a push", "cat <<EOF\ngit push origin br; step\nEOF",
+     "allow", None),
+    ("(pts-b21) unquoted body substitution runs a push, then ';'", "cat <<EOF\n$(git push origin br; step)\nEOF",
+     "deny", None),
+    ("(pts-b22) assignment from a here-string command's substitution, then '&&'",
+     "x=$(git push origin br) <<<y && step", "deny", None),
+    ("(pts-b23) step after '&&'", "git push origin br && step", "allow", None),
+    ("(pts-b24) step after ';'", "git push origin br; step", "deny", None),
+    ("(pts-b25) assignment from a bare substitution, then '&&'", "x=$(git push origin br) && step", "over", None),
+    ("(pts-b26) assignment from a backquote, then '&&'",
+     "x=" + _PTS_BQ + "git push origin br" + _PTS_BQ + " && step", "over", None),
+    ("(pts-b27) if/then", "if git push origin br; then step; fi", "over", None),
+    ("(pts-b28) brace group then '&&'", "{ git push origin br; } && step", "over", None),
+    ("(pts-b29) subshell then '&&'", "(git push origin br) && step", "over", None),
+    ("(pts-b30) brace group of steps after '&&'", "git push origin br && { step; step; }", "over", None),
+    ("(pts-b31) subshell of steps after '&&'", "git push origin br && (step; step)", "over", None),
+    ("(pts-b32) set -e script", "set -e; git push origin br; step", "over", None),
+    ("(pts-b33) substitution alone as the command, then '&&'", "$(git push origin br) && step", "over", None),
+    ("(pts-b34) here-string push, then '&&'", "git push origin br <<<x && step", "over", None),
+    ("(pts-b37) assignment alone, then '&&', in a command the lexer cannot read",
+     "x=$(git push origin br) && step <<EOF\nbody\nEOF", "over", None),
+    ("(pts-b35) case inside a quoted substitution", 'echo "$(case a in a) git push origin br;; esac)"; step',
+     "under", None),
+    ("(pts-b36) a quoted '<<' the fallback reads as an operator",
+     "cat <<EOF\nx\nEOF\necho '<<Y'\ngit push origin br\nstep\nY", "under", None),
+)
+
+
+def _pts_bash_table(failures, tmp):
+    """(pts-bash) Each _PTS_BASH_ROWS row runs under real bash (env -i, the literal /usr/bin/bash) with a git
+    fixture that records each push it is asked for and exits 1 (a push that failed) and a step fixture that
+    leaves a mark: the step ran after a failed push exactly when both marks are present, and that must match
+    the row's kind ("deny" and "under" rows run it, the others do not). The hook must deny exactly the "deny"
+    and "over" rows. Then the flips: with the finding and the fallback probe patched out every "deny" row must
+    stop denying; with both patched to always find every "allow" row must deny; with the fallback's
+    substitutions in the command text dropped, or the quoted here-document bodies left unmasked, every row
+    resting on that reading must change its decision."""
+    if not os.access(_PTS_BASH, os.X_OK):
+        failures.append("(pts-bash) {} is not executable; the real-bash table cannot run".format(_PTS_BASH))
+        return
+    handler = aiqt_hooks.push_then_step
+    root = tmp / "pts-bash"
+    bindir = root / "bin"
+    bindir.mkdir(parents=True)
+    fixtures = {
+        "git": 'for a in "$@"; do if [ "$a" = push ]; then echo push >> "$PTS_RECORD"; fi; done\nexit 1\n',
+        "step": 'echo step >> "$PTS_RECORD"\n',
+        "cat": "while IFS= read -r line; do :; done\n",
+        "gh": "exit 0\n",
+    }
+    for name, body in fixtures.items():
+        (bindir / name).write_text("#!" + _PTS_BASH + "\n" + body, encoding="utf-8")
+        os.chmod(str(bindir / name), 0o755)
+    record = root / "record.txt"
+    want_deny = {}
+    for label, command, kind, _guard in _PTS_BASH_ROWS:
+        if record.exists():
+            record.unlink()
+        env = {"PATH": str(bindir), "HOME": str(root), "PTS_RECORD": str(record)}
+        try:
+            subprocess.run([_PTS_BASH, "-c", command + "\nwait"], env=env, cwd=str(root), capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=30)
+        except subprocess.TimeoutExpired:
+            failures.append("{} (pts-bash): bash did not finish within 30 s".format(label))
+            continue
+        marks = record.read_text(encoding="utf-8").split() if record.exists() else []
+        ran = "push" in marks and "step" in marks
+        if ran != (kind in ("deny", "under")):
+            failures.append("{} (pts-bash): under real bash with a failing push the step {} after it, but the "
+                            "row's kind is {!r}".format(label, "ran" if ran else "did not run", kind))
+        want_deny[label] = kind in ("deny", "over")
+        got = _decision(handler, command)
+        if (got == "deny") != want_deny[label]:
+            failures.append("{} (pts-bash): expected {}, got {}".format(
+                label, "deny" if want_deny[label] else "allow", got))
+
+    finding, probe = aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE
+    split, masked = aiqt_hooks._push_step_heredoc_split, aiqt_hooks._push_step_quoted_masked
+
+    def split_without_text_bodies(command):
+        text, bodies = split(command)
+        return text, bodies[len(aiqt_hooks._push_step_bodies(text, True)):]
+
+    try:
+        aiqt_hooks._push_step_finding = lambda segments, depth=0, cache=None: (None, False)
+        aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"[^\s\S]")
+        for label, command, kind, _guard in _PTS_BASH_ROWS:
+            if kind == "deny" and _decision(handler, command) == "deny":
+                failures.append("{} (pts-bash-flip): still denies with the deny logic removed".format(label))
+        aiqt_hooks._push_step_finding = lambda segments, depth=0, cache=None: ("a forced finding", True)
+        aiqt_hooks._PUSH_STEP_RAW_RE = aiqt_hooks._RawSequence(r"")
+        for label, command, kind, _guard in _PTS_BASH_ROWS:
+            if kind == "allow" and _decision(handler, command) != "deny":
+                failures.append("{} (pts-bash-flip-deny): still allows under an always-deny handler".format(label))
+        aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
+        for guard, attr, reverted in (("subst", "_push_step_heredoc_split", split_without_text_bodies),
+                                      ("quoted", "_push_step_quoted_masked", lambda command: command)):
+            setattr(aiqt_hooks, attr, reverted)
+            try:
+                for label, command, _kind, row_guard in _PTS_BASH_ROWS:
+                    if row_guard == guard and (_decision(handler, command) == "deny") == want_deny.get(label):
+                        failures.append("{} (pts-bash-flip-{}): the decision does not change with that reading "
+                                        "reverted, so the row does not discriminate".format(label, guard))
+            finally:
+                aiqt_hooks._push_step_heredoc_split, aiqt_hooks._push_step_quoted_masked = split, masked
+    finally:
+        aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
+        aiqt_hooks._push_step_heredoc_split, aiqt_hooks._push_step_quoted_masked = split, masked
+
+
 def _test_push_then_step(failures, tmp):
     """Direct checks of push_then_step: each deny and allow row, the over-deny and fallback rows, the fail-closed
     payloads, the wiring, a revert flip (with the finding and the fallback probe patched out, every deny row
@@ -2696,6 +2852,7 @@ def _test_push_then_step(failures, tmp):
         aiqt_hooks._push_step_finding, aiqt_hooks._PUSH_STEP_RAW_RE = finding, probe
 
     _pts_oracle_runs(failures, tmp)
+    _pts_bash_table(failures, tmp)
 
 
 # === PreToolUse deadline posture ======================================================================
