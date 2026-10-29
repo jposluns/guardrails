@@ -18140,6 +18140,9 @@ _GENSRC_MAX_PATHS = 512  # distinct sink or restore paths resolved per Bash comm
 #                          bounded whatever the operand count
 _GENSRC_MAX_CD = 8       # directories an uncertain cd or pushd is also judged from, and directories a stack
 #                          rotation may reach (_gensrc_cd); past it a directory is only unknown
+_GENSRC_MAX_HOME = 512   # words (argv words and redirects) of the segments holding a ~ that are also read under
+#                          each value of a HOME the command spells (_bash_write_effects), in command order; past it
+#                          such a ~ is read as unknown alone, so its sink is uncleared and its cd unknown
 _GENSRC_MAX_PY = 65536   # the longest python -c program parsed (ast.parse, never executed)
 # The longest target path resolved, in filesystem-encoded bytes after lexical normalization: a RESOLUTION
 # BUDGET, not a syscall impossibility (a short relative operand in a deep working directory writes past
@@ -18157,9 +18160,12 @@ _GensrcEffect = collections.namedtuple("_GensrcEffect", ("kind", "word", "path",
 _GENSRC_REDIRECT_SINKS = frozenset((">", ">>", ">|", "&>", "&>>", "<>", ">&"))
 _GENSRC_BARE_WRAPPERS = frozenset(("command", "exec", "builtin", "sudo"))
 # The peeled wrappers that run their program as a child process (or in place of the shell): a cd under one
-# never moves the shell's directory (nor does one under a time program, _bash_write_effects).
+# never moves the shell's directory (nor does one under a time word bash reads as the time program,
+# _gensrc_time_program).
 _GENSRC_CHILD_WRAPPERS = frozenset(("env", "nice", "timeout", "sudo", "exec"))
 _GENSRC_LEADING_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "do", "while", "until"))
+# sentinel: the reading of a ~ under a HOME the command sets to a value the guard cannot name (_gensrc_cd_context)
+_GENSRC_HOME_UNKNOWN = object()
 _GENSRC_PYTHON_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
 # The programs _gensrc_program_effects reads a sink from, beside python (_GENSRC_PYTHON_RE); it reads nothing
 # from any other program, so a segment whose program is none of these adds an effect only through a redirect
@@ -18346,7 +18352,9 @@ def _gensrc_doubt_unread(command):
 def _gensrc_resolve(word, opaque, tilde, base):
     """Resolve one sink word to an absolute, lexically normalized path: (path, None), or (None, reason) when
     it cannot be judged. A word formed with an unquoted expansion, substitution, glob or brace (opaque) cannot,
-    except a clean leading tilde (~ or ~/x with nothing else opaque), which expands with os.path.expanduser; a
+    except a clean leading tilde (~ or ~/x with nothing else opaque), which expands as tilde, the reading of
+    HOME the caller judges it under (_gensrc_cd_context), says: True with os.path.expanduser (the HOME of this
+    process), a string with that literal HOME value in place of the ~, and _GENSRC_HOME_UNKNOWN not at all; a
     .. component cannot (the shell resolves it logically, the filesystem physically); a relative word with no
     known working directory cannot."""
     if not word or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in word):
@@ -18354,7 +18362,9 @@ def _gensrc_resolve(word, opaque, tilde, base):
     if opaque:
         if not (tilde and _LITERAL_TILDE_RE.match(word)) or _GENSRC_OPAQUE_RE.search(word):
             return None, "a sink whose target is opaque (a variable, substitution, glob or brace)"
-        word = os.path.expanduser(word)
+        if tilde is _GENSRC_HOME_UNKNOWN:
+            return None, "a ~ sink in a command that spells HOME, which may give ~ a value the guard cannot name"
+        word = os.path.expanduser(word) if tilde is True else tilde + word[1:]
     if ".." in word.replace("\\", "/").split("/"):
         return None, "a sink whose target has a .. component"
     if os.path.isabs(word):
@@ -18400,9 +18410,9 @@ def _gensrc_flags(word, args, aop, atl):
     """(opaque, tilde) for an option-value word of args that is not itself an argv word (a value glued to
     its option, -tDIR), read by one scan from the flags of every argv word ending with it. Operand words
     are read from the _gensrc_flag_index instead; this scan runs at most once per command (for a copy
-    destination taken from an option value)."""
+    destination taken from an option value). The tilde flag is returned as set, a reading of HOME included."""
     hits = [k for k, tok in enumerate(args) if tok == word or (word and tok.endswith(word))]
-    return any(aop[k] for k in hits), any(atl[k] for k in hits)
+    return any(aop[k] for k in hits), next((atl[k] for k in hits if atl[k]), False)
 
 
 def _gensrc_peel(argv):
@@ -18470,17 +18480,48 @@ def _gensrc_peel(argv):
     return i, chdir, outputs, None
 
 
+def _gensrc_time_program(seg, pi):
+    """True when a time word the peel passed over (seg.argv before pi) runs the time PROGRAM rather than the
+    shell keyword, so a cd it runs is a child process. It is read from the raw segment, never from the decoded
+    word (the lexer decodes \\time, 'time' and "time" to time): bash reads time as its keyword only where the
+    word is spelled exactly time, with no quote, backslash or path in it (\\time, 'time', "time", t\\ime and
+    /usr/bin/time are the program), and nothing stands before it in the segment but blanks, bare leading
+    reserved words ({, !, if, then, ...) and an earlier keyword time with its -p (after a VAR=value word, a
+    redirection, or a command or builtin word, time is a plain word). A time word whose place in the raw
+    segment cannot be found (_gate_word_start) reads as the program too, which leaves the directory unknown."""
+    argv, raw = seg.argv, seg.raw
+    for k in range(pi):
+        if _gate_word(argv[k]) != "time":
+            continue
+        at = _gate_word_start(raw, argv, k)
+        try:
+            end = None if at is None else _read_word(raw, at, len(raw))[5]
+        except ValueError:
+            end = None
+        if end is None or raw[at:end] != "time" or raw[:at].split() != argv[:k] or not all(
+                word in _GENSRC_LEADING_RESERVED or word == "time" or (word == "-p" and j and argv[j - 1] == "time")
+                for j, word in enumerate(argv[:k])):
+            return True
+    return False
+
+
 def _gensrc_cd_context(segments):
-    """What may steer the cd and pushd segments of one reading, read from the words of EVERY segment wherever
-    it stands (an over-approximation: a word after the cd or inside a subshell counts too): (lookup, entries,
-    values, physical). lookup is True when a bare relative operand may be looked up elsewhere: a word spells
-    CDPATH or cdable_vars, or this process environment carries a non-empty CDPATH (the one the shell is
-    assumed to inherit). entries lists each CDPATH entry the guard can read: those of each literal CDPATH=VALUE
-    word, then those of the environment value. values maps NAME to each literal value of a NAME=VALUE word
-    (what cdable_vars may put in place of an operand NAME). physical is True when a set or shopt segment may
-    turn on physical mode (an option cluster holding P, or a physical word)."""
+    """What may steer the cd and pushd segments of one reading, and the ~ of its sinks, read from the words of
+    EVERY segment wherever it stands (an over-approximation: a word after the cd or inside a subshell counts
+    too): (lookup, entries, values, physical, homes). lookup is True when a bare relative operand may be looked
+    up elsewhere: a word spells CDPATH or cdable_vars, or this process environment carries a non-empty CDPATH
+    (the one the shell is assumed to inherit). entries lists each CDPATH entry the guard can read: those of
+    each literal CDPATH=VALUE word, then those of the environment value. values maps NAME to each literal value
+    of a NAME=VALUE word (what cdable_vars may put in place of an operand NAME). physical is True when a set or
+    shopt segment may turn on physical mode (an option cluster holding P, or a physical word). homes lists the
+    readings of HOME a clean leading ~ is expanded under (_gensrc_resolve): (True,), the HOME of this process
+    (the one the shell is assumed to inherit), when no word spells HOME; otherwise _GENSRC_HOME_UNKNOWN (a value
+    set some other way: HOME+=, read HOME, a substitution), True (a HOME prefix on the command itself is
+    assigned only after its words expand) and each literal value of a HOME=VALUE word, at most _GENSRC_MAX_CD
+    named readings (an empty value, one starting with ~ or one carrying a control character is only unknown)."""
     lookup = False
     physical = False
+    home = False
     entries = []
     values = {}
     for seg in segments:
@@ -18488,6 +18529,8 @@ def _gensrc_cd_context(segments):
         for k, word in enumerate(argv):
             if "CDPATH" in word or "cdable_vars" in word:
                 lookup = True
+            if "HOME" in word:
+                home = True
             if not aop[k] and _ENV_ASSIGN_RE.match(word):
                 name, _eq, value = word.partition("=")
                 if name == "CDPATH":
@@ -18502,7 +18545,12 @@ def _gensrc_cd_context(segments):
     if inherited:
         lookup = True
         entries.extend(inherited.split(":"))
-    return lookup, entries, values, physical
+    homes = (True,)
+    if home:
+        named = [value for value in values.get("HOME", ()) if value and not value.startswith("~") and not any(
+            ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value)]
+        homes = (_GENSRC_HOME_UNKNOWN, True) + tuple(dict.fromkeys(named))[:_GENSRC_MAX_CD - 1]
+    return lookup, entries, values, physical, homes
 
 
 def _gensrc_cd(prog, argv, aop, atl, base, context, visited):
@@ -18520,7 +18568,9 @@ def _gensrc_cd(prog, argv, aop, atl, base, context, visited):
     .. lexically, but falls back to the physical path when the lexical one does not exist), reaching both; and
     a bare relative operand (no leading /, ./ or ../, and not . or ..) when a CDPATH or cdable_vars lookup may
     apply (context), reaching the lexical reading, the operand under each CDPATH entry and each literal value
-    of the variable the operand names. The filesystem is read (realpath) only in physical mode or for a ..
+    of the variable the operand names. A clean leading ~ operand expands under the reading of HOME its atl flag
+    carries (_gensrc_resolve; under _GENSRC_HOME_UNKNOWN it reaches no directory), and _bash_write_effects
+    gathers what each reading reaches. The filesystem is read (realpath) only in physical mode or for a ..
     component."""
     if prog == "popd":
         return (None,)
@@ -18547,7 +18597,7 @@ def _gensrc_cd(prog, argv, aop, atl, base, context, visited):
     path = os.path.normpath(joined)
     if len(os.fsencode(path)) > _GENSRC_MAX_TARGET:
         return (None,)
-    lookup, entries, values, physical = context
+    lookup, entries, values, physical, _homes = context
     flags = [tok[1:] for tok in words if tok.startswith("-") and tok != "--"]
     certain = not any(prog != "cd" or flag.strip("LP") for flag in flags)
     physical = physical or any("P" in flag for flag in flags)
@@ -19109,18 +19159,24 @@ def _bash_write_effects(segments, cwd):
     segment ending in ( saves the directory and one ending in ) restores it (an unmatched ) leaves it
     unknown), and popd, cd -, a bare cd or an opaque operand leave it unknown; an unknown directory makes
     every later relative sink uncleared, never resolved to a guessed path. A change _gensrc_cd finds UNCERTAIN
-    (CDPATH, -P, a .. across a link, a pushd option or rotation), and a cd run as a child process (under env,
-    nice, timeout, sudo, exec or a time program), which never moves the shell, leave it unknown too, and each
+    (CDPATH, -P, a .. across a link, a pushd option or rotation, a ~ operand under a HOME the command spells),
+    and a cd run as a child process (under env, nice, timeout, sudo or exec, or under a time word bash reads as
+    the time program, _gensrc_time_program), which never moves the shell, leave it unknown too, and each
     later segment is also read from every directory the change may reach (named by _gensrc_cd; for a child cd,
     the unchanged one), so a relative sink landing on a registered target from any of them is judged (and
-    denied) like any other sink; its word then names that directory. Each segment contributes every
+    denied) like any other sink; its word then names that directory. A segment holding a clean leading ~ is
+    read once under each reading of HOME (_gensrc_cd_context): when a word of the command spells HOME, its ~
+    sinks are uncleared and also judged under each value HOME may hold that the guard can name, each such
+    effect naming the value, and its ~ cd reaches each of them (within the _GENSRC_MAX_HOME word budget; past
+    it the ~ is read under the unknown value alone). Each segment contributes every
     output redirect (>, >>, >|, &>, &>>, <> and >& to a file, never only the last; a /dev or /proc target or
     a descriptor is no sink, an opaque target is uncleared), the time -o output, and its peeled program
     effects (_gensrc_program_effects); env -C makes that segment working directory unknown."""
     effects = []
     bases = (cwd,)   # the unknown directory (None) first, then each one an uncertain change may reach
     visited = [] if cwd is None else [cwd]   # every directory reached so far, what a stack rotation may reach
-    context = None   # what steers a cd (_gensrc_cd_context), read once at the first one
+    context = None   # what steers a cd or a ~ (_gensrc_cd_context), read once at the first one
+    home_budget = _GENSRC_MAX_HOME   # words left to read under each value of a spelled HOME
     anchored = True  # bases hold whatever earlier commands did; False after a cd whose success is assumed
     stack = []
     prev = ""
@@ -19131,42 +19187,66 @@ def _bash_write_effects(segments, cwd):
         # A cd in a pipeline element or a background job changes nothing (a subshell).
         moves = (prog in ("cd", "pushd", "popd") and prev not in ("|", "|&")
                  and seg.sep_after not in ("|", "|&", "&"))
-        # A time spelled as a path or with a backslash is the time program, not the shell keyword.
-        child = moves and any(word in _GENSRC_CHILD_WRAPPERS or (word == "time" and tok != "time")
-                              for tok in argv[:pi] for word in (_gate_word(tok),))
+        child = moves and (any(_gate_word(tok) in _GENSRC_CHILD_WRAPPERS for tok in argv[:pi])
+                           or _gensrc_time_program(seg, pi))
+        homes = (True,)
+        if any(atl) or any(red.target_leading_tilde for red in seg.redirects):
+            if context is None:
+                context = _gensrc_cd_context(segments)
+            homes = context[4]
+            if len(homes) > 1:
+                size = len(argv) + len(seg.redirects)
+                if size > home_budget:
+                    homes = homes[:1]   # past _GENSRC_MAX_HOME: the unknown reading alone
+                else:
+                    home_budget -= size
         reached = []
         for base in bases:
             seg_base = None if chdir else base
             start = len(effects)
-            for red in seg.redirects:
-                if red.op not in _GENSRC_REDIRECT_SINKS or red.target_class in ("descriptor", "file-dev"):
+            first = None
+            for home in homes:
+                mark = len(effects)
+                tl = atl if home is True else [home if flag else flag for flag in atl]
+                for red in seg.redirects:
+                    if red.op not in _GENSRC_REDIRECT_SINKS or red.target_class in ("descriptor", "file-dev"):
+                        continue
+                    if red.target_class == "opaque" and not red.target_leading_tilde:
+                        effects.append(_GensrcEffect(
+                            "uncleared", "a redirect whose target is opaque (a variable, substitution, glob, "
+                            "brace, .. component or relative dev or proc path)", None, None))
+                        continue
+                    _gensrc_add(effects, "sink", "a {} redirect".format(red.op), red.target,
+                                red.target_class == "opaque", red.target_leading_tilde and home, seg_base)
+                if fault is not None:
+                    effects.append(_GensrcEffect("uncleared", fault, None, None))
+                else:
+                    for at, value in outputs:
+                        _gensrc_add(effects, "sink", "the time -o output", value, aop[at], tl[at], seg_base)
+                    if moves and prev == "||":
+                        # A cd reached through || runs only when the previous command failed, so the directory
+                        # after it is one of two places: unknown, never a guessed one.
+                        reached.append(None)
+                    elif child:
+                        # An external cd (env cd, sudo cd, ...) runs as a child, or fails where none is
+                        # installed: the shell stays where it was, which an uncertain change also reaches.
+                        reached.extend((None, seg_base))
+                    elif moves:
+                        if context is None:
+                            context = _gensrc_cd_context(segments)
+                        reached.extend(_gensrc_cd(prog, argv[pi:], aop[pi:], tl[pi:], seg_base, context,
+                                                  visited))
+                    elif prog is not None and prog not in ("cd", "pushd", "popd"):
+                        _gensrc_program_effects(prog, argv, pi, aop, tl, seg_base, effects)
+                if first is None:
+                    # The first reading adds every effect; a later reading of HOME keeps only the effects its ~
+                    # changes, each naming that reading.
+                    first = set(effects[start:]) if len(homes) > 1 else set()
                     continue
-                if red.target_class == "opaque" and not red.target_leading_tilde:
-                    effects.append(_GensrcEffect(
-                        "uncleared", "a redirect whose target is opaque (a variable, substitution, glob, brace, "
-                        ".. component or relative dev or proc path)", None, None))
-                    continue
-                _gensrc_add(effects, "sink", "a {} redirect".format(red.op), red.target,
-                            red.target_class == "opaque", red.target_leading_tilde, seg_base)
-            if fault is not None:
-                effects.append(_GensrcEffect("uncleared", fault, None, None))
-            else:
-                for at, value in outputs:
-                    _gensrc_add(effects, "sink", "the time -o output", value, aop[at], atl[at], seg_base)
-                if moves and prev == "||":
-                    # A cd reached through || runs only when the previous command failed, so the directory
-                    # after it is one of two places: unknown, never a guessed one.
-                    reached.append(None)
-                elif child:
-                    # An external cd (env cd, sudo cd, ...) runs as a child, or fails where none is installed:
-                    # the shell stays where it was, which an uncertain change also reaches.
-                    reached.extend((None, seg_base))
-                elif moves:
-                    if context is None:
-                        context = _gensrc_cd_context(segments)
-                    reached.extend(_gensrc_cd(prog, argv[pi:], aop[pi:], atl[pi:], seg_base, context, visited))
-                elif prog is not None and prog not in ("cd", "pushd", "popd"):
-                    _gensrc_program_effects(prog, argv, pi, aop, atl, seg_base, effects)
+                spelled = os.path.expanduser("~") if home is True else home
+                effects[mark:] = [effect if effect.kind == "uncleared" else effect._replace(
+                    word="{}, reading ~ as {}, a value HOME may hold".format(effect.word, spelled))
+                    for effect in effects[mark:] if effect not in first]
             if base is not None and len(bases) > 1:
                 for k in range(start, len(effects)):
                     if effects[k].kind != "uncleared":

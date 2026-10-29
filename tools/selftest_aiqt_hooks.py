@@ -23699,6 +23699,8 @@ def _main_isolated(monitor):
              "pushd " + gct + " && pushd " + gcs + " && echo x > OTHER.md", gcs),
             ("(gb-cd17) a .. across a link is judged from both readings even where the shell takes the lexical one "
              "(a disclosed over-denial)", "deny", "cd d/l && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd17-flip) a cd .. out of a directory that is no link reads the same both ways, so it is certain",
+             "allow", "cd sub && cd .. && echo x > OTHER.md", gcs),
             ("(gb-cd18) env cd runs a child process that never moves the shell, so GEN.md is judged where it was",
              "deny", "env cd " + gct + " && echo x > GEN.md", gcs),
             ("(gb-cd18-flip) command cd is the builtin and moves the shell", "allow",
@@ -23707,6 +23709,41 @@ def _main_isolated(monitor):
              "/usr/bin/time cd " + gct + " && echo x > GEN.md", gcs),
             ("(gb-cd19-flip) the time keyword keeps cd the builtin", "allow",
              "time cd " + gct + " && echo x > GEN.md", gcs),
+            # bash reads time as its keyword only where the raw word is a bare time and nothing but reserved words
+            # or a keyword time stands before it; the lexer decodes \time, 'time' and "time" to time, so the raw
+            # segment decides, and any other time word is the time program, which runs cd as a child
+            ("(gb-cd20) a backslash-escaped time is the time program, so GEN.md is judged where it was", "deny",
+             "\\time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd20-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "\\time cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd21) a single-quoted time is the time program", "deny",
+             "'time' cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd21-flip) the time keyword with -p keeps cd the builtin", "allow",
+             "time -p cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd22) a double-quoted time is the time program", "deny",
+             "\"time\" cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd22-flip) the time keyword after a reserved word keeps cd the builtin", "allow",
+             "{ time cd " + gct + " && echo x > GEN.md; }", gcs),
+            ("(gb-cd23) a time with an escape inside the word is the time program", "deny",
+             "t\\ime cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd23-flip) a keyword time after a keyword time keeps cd the builtin", "allow",
+             "time time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd24) a time after a VAR=value word is the time program", "deny",
+             "X=1 time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd24-flip) a time after an assignment that ends its own segment is the keyword", "allow",
+             "X=1; time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd25) a time after command is the time program", "deny",
+             "command time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd25-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "command time cd " + gct + " && echo x > notes.txt", gcs),
+            ("(gb-cd26) a time after a redirection is the time program", "deny",
+             ">/dev/null time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd26-flip) a redirection after the keyword time keeps cd the builtin", "allow",
+             "time cd " + gct + " >/dev/null && echo x > GEN.md", gcs),
+            ("(gb-cd27) a backslash-escaped time the keyword times is still the time program", "deny",
+             "time \\time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd27-flip) the same with a sink no reachable directory registers notes", "allow-note",
+             "time \\time cd " + gct + " && echo x > notes.txt", gcs),
             # the cannot-evaluate posture (decision d): an uncleared write denies on a registered name, notes otherwise
             ("(gb-m1) an opaque redirect naming nothing notes", "allow-note", "echo x > \"$F\"", gr),
             ("(gb-m2) an opaque redirect in a command naming GEN.md denies", "deny", "F=GEN.md; echo x > \"$F\"", gr),
@@ -23853,6 +23890,53 @@ def _main_isolated(monitor):
         finally:
             os.environ.pop("CDPATH", None)
         bexpect("(gb-cd-env2) with no CDPATH the same cd is certain", "allow", "cd ogen && echo x > b.txt", gcs)
+        # (gb-home*) a word spelling HOME steers a ~: a ~ cd operand or ~ sink is then read from every value HOME may
+        # hold (each literal HOME=VALUE, the HOME of this process, and one the guard cannot name), never from the
+        # HOME of this process alone; with no such word, ~ is that HOME (the empty self-test home unless a case
+        # sets one), and the cd is certain.
+        bexpect("(gb-home1) a HOME assignment steers cd ~ into the sibling repo, so its OTHER.md denies", "deny",
+                "HOME=" + gct + "; cd ~ && echo x > OTHER.md", gcs)
+        bexpect("(gb-home1-flip) the same cd then a sink no reachable directory registers notes", "allow-note",
+                "HOME=" + gct + "; cd ~ && echo x > notes.txt", gcs)
+        bexpect("(gb-home2) an exported HOME steers cd ~/ogen into the sibling repo's ogen/ tree", "deny",
+                "export HOME=" + gct + " && cd ~/ogen && echo x > b.txt", gcs)
+        bexpect("(gb-home2-flip) the same into a directory no registry covers notes", "allow-note",
+                "export HOME=" + gct + " && cd ~/sub && echo x > b.txt", gcs)
+        bexpect("(gb-home3) a HOME assignment steers a ~ redirect onto the sibling repo's OTHER.md", "deny",
+                "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+        bexpect("(gb-home3-flip) the same redirect onto a file nothing registers notes", "allow-note",
+                "HOME=" + gct + "; echo x > ~/notes.txt", gcs)
+        bexpect("(gb-home4) a HOME assignment steers a ~ tee operand as it does a redirect", "deny",
+                "HOME=" + gct + "; tee ~/OTHER.md < /dev/null", gcs)
+        bexpect("(gb-home4-flip) the same tee onto a file nothing registers notes", "allow-note",
+                "HOME=" + gct + "; tee ~/notes.txt < /dev/null", gcs)
+        bexpect("(gb-home5-flip) a HOME prefix on cd ~ under an inherited HOME no registry covers notes",
+                "allow-note", "HOME=" + gcs + " cd ~ && echo x > OTHER.md", gcs)
+        _gb_home = os.environ["HOME"]
+        try:
+            os.environ["HOME"] = gct
+            bexpect("(gb-home5) a HOME prefix on cd is assigned only after ~ expands, so the inherited HOME is read",
+                    "deny", "HOME=" + gcs + " cd ~ && echo x > OTHER.md", gcs)
+            bexpect("(gb-home6) with no word spelling HOME, cd ~ is certain into the HOME of this process", "deny",
+                    "cd ~ && echo x > OTHER.md", gcs)
+            bexpect("(gb-home6-flip) the same certain cd then a sink nothing registers allows", "allow",
+                    "cd ~ && echo x > notes.txt", gcs)
+        finally:
+            os.environ["HOME"] = _gb_home
+        # (gb-hb*) the HOME reading budget at both ends, pinned at the size of one ~ segment (two words and one
+        # redirect): within it the segment is read under each value of the spelled HOME, so a value landing on a
+        # registered target denies; past it the ~ is read as unknown alone, an uncleared write naming no registered
+        # target of a consulted registry, so it notes.
+        _gb_real_home = aiqt_hooks._GENSRC_MAX_HOME
+        try:
+            aiqt_hooks._GENSRC_MAX_HOME = 3
+            bexpect("(gb-hb1) a ~ segment within the HOME budget is judged under each value, so OTHER.md denies",
+                    "deny", "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+            aiqt_hooks._GENSRC_MAX_HOME = 2
+            bexpect("(gb-hb1-flip) the same segment past the HOME budget is read as unknown alone, so it notes",
+                    "allow-note", "HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+        finally:
+            aiqt_hooks._GENSRC_MAX_HOME = _gb_real_home
         # (gb-01-names) the incident deny names the source and the regenerate command; (gb-s2-names) the
         # malformed-registry deny names the registry; (gb-g1-names) the restore note names the regenerate command.
         _gb_why = breason("printf x >> {gr}/GEN.md", gr)
@@ -23871,6 +23955,11 @@ def _main_isolated(monitor):
         _gb_why = breason("cd -P d/l/.. && echo x > OTHER.md", gcs)
         if "judged from {}, a directory an uncertain cd".format(gct) not in _gb_why:
             failures.append("(gb-cd2-names) the deny must name the directory it judged the sink from, got {!r}"
+                            .format(_gb_why))
+        # (gb-home3-names) a ~ sink judged under a HOME value the command spells names that value.
+        _gb_why = breason("HOME=" + gct + "; echo x > ~/OTHER.md", gcs)
+        if "reading ~ as {}, a value HOME may hold".format(gct) not in _gb_why:
+            failures.append("(gb-home3-names) the deny must name the HOME value it read ~ as, got {!r}"
                             .format(_gb_why))
         # (gb-f*) fail-closed inputs: a Bash payload whose command cannot be read, and a fault inside the
         # detector, deny (the detector never lets an unread command through).
