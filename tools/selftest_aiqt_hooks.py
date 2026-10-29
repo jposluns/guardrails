@@ -14755,14 +14755,20 @@ def _main_isolated(monitor):
         # No guard decides a reviewed shape less strictly than main (e47da1de) does: the shapes above, the two
         # commit message shapes, a body that a nested substitution's line holds (bash 5.3.9 reads its 'git
         # commit' line as body text), two here-documents on one operator line, and a top-level assignment
-        # whose here-document bash ends at 'EOF)' (main and this code allow it alike). Main's decisions were
-        # recorded by running main's module on each command, per guard in _hd_floor_guards order, and each guard
-        # must decide exactly as main does, except the seven guards _hd_retry_over names on the eleven rows of
-        # _hd_then and on two-on-operator-line, which must decide at least as strictly: there the lex starts
-        # again reading no body, one reading of the body's '#' does not lex, and those guards take their
-        # cannot-evaluate path, an over-deny kept from the commit that added the retry. The eleven rows of
-        # _hd_then fail on the code before that retry; the last five rows pass there too and are REGRESSION
-        # GUARDS.
+        # whose here-document bash ends at 'EOF)'. Main's decisions were recorded by running main's module on
+        # each command, per guard in _hd_floor_guards order, and each guard must decide exactly as main does,
+        # except the seven guards _hd_retry_over names on the eleven rows of _hd_then and on
+        # two-on-operator-line, which must decide at least as strictly: there the lex starts again reading no
+        # body, one reading of the body's '#' does not lex, and those guards take their cannot-evaluate path,
+        # an over-deny kept from the commit that added the retry; and except the top-level assignment (below).
+        # The eleven rows of _hd_then fail on the code before that retry; the next four rows pass there too and
+        # are REGRESSION GUARDS. The top-level assignment records decisions stricter than main's: bash 5.3.9
+        # ends its body at the 'EOF)' line and runs the rest of that line (with git replaced by echo it prints
+        # commit --no-verify -m x), which main's lexer read as body, so main's commit_msg_subst and
+        # protected_line allowed a commit bash runs. The lexer now fails on an untrusted body that such a
+        # 'DELIM)' or 'DELIM`' line ends early (the comment at that raise in _lex_pass), and both guards take
+        # their failed-lex fallback and deny, the fail-closed outcome; the row fails on code whose lexer reads
+        # that body to its exact delimiter line, as main's does.
         _hd_floor_guards = (aiqt_hooks.gate_weakening, aiqt_hooks.diff_source_pretool, aiqt_hooks.git_explicit_binding,
                             aiqt_hooks.commit_identity, aiqt_hooks.bash_absolute_paths, aiqt_hooks.branch_root,
                             aiqt_hooks.git_discard, aiqt_hooks.git_stash_ref, aiqt_hooks.commit_msg_subst,
@@ -14813,7 +14819,8 @@ def _main_isolated(monitor):
              ("allow",) * 9 + ("deny",), ()),
             ("two-on-operator-line", "echo \"$(cat <<'EOF'; echo $(cat <<B\n# Don't\nEOF\n$(" + _hd_nv + ")\nB\n))\"",
              _hd_main_then, _hd_retry_over),
-            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)", ("allow",) * 10, ()),
+            ("top-level-assignment", "x=$(cat <<'EOF'\nEOF); " + _hd_nv + "\nEOF\n)",
+             ("allow",) * 8 + ("deny", "deny"), ()),
         ]
         # The two commit message shapes keep main's decisions exactly: the closed literal grammar accepts the
         # form on a parsed command, so gate_weakening allows them as main does, and both rows fail on code whose
