@@ -710,10 +710,8 @@ def _counter_state(ctx, counters_model):
 
 def claim_ids(homes, high, demand, known_complete, reserved=None, imported_series=False):
     """THE allocation seam (exactly one). `demand` is the ordered list of namespaces to claim; returns
-    (ids, new_high). Homes 1: next_id per namespace from the proven-complete high-water map, with
-    `reserved` refused (the homes-1 counters path takes no reservation input); the caller publishes the
-    counters advance as an operand INSIDE the journaled transaction under the held lease, so the claim is
-    one atomic act (spec 8.2) and ids are reported only after COMPLETE. Homes 2: `reserved` is REQUIRED,
+    (ids, new_high). Only homes 2 claims; every other generation, homes 1 included, refuses
+    fail-closed (the homes-1 counters path is deleted). `reserved` is REQUIRED,
     the per-counter-key maximum over every existing reservation in every journal kind's
     journals/<kind>/allocations home (_reservation_high, each one a [claims] map, values in
     1..2**63 - 1, the reservation contract's TOML integer range), and the next id per demanded counter
@@ -729,11 +727,7 @@ def claim_ids(homes, high, demand, known_complete, reserved=None, imported_serie
     fail-closed rather than claim through the homes-1 counters path. `imported_series` is passed to
     next_id unchanged: where the manifest activates the imported series the high-water map carries the
     "imported:<NS>" rows too, which next_id refuses without the flag; this verb never demands one."""
-    if type(homes) is int and homes == 1:
-        if reserved is not None:
-            raise RecordError("the homes-1 counters path takes no reservation input; fail-closed")
-        base = {}
-    elif type(homes) is int and homes == 2:
+    if type(homes) is int and homes == 2:
         if reserved is None:
             raise RecordError("homes-2 id allocation requires the journals/<kind>/allocations "
                               "reservation scan (spec 8.2); refusing rather than claiming ids through "
@@ -2223,12 +2217,10 @@ def _postcondition(plan, req, ctx, now):
 # --- the journal: startup reconciliation and the one journaled publication ---------------------------
 
 def _record_journal_rel(homes):
-    """The record journal home of a homes generation (spec 8.8): the legacy .aiqt/record/journal at
-    homes 1, the typed capability home .working/journals/record/journal at homes 2 (spec 4.2, the
-    journal-only record kind); any other generation refuses fail-closed. The comparison is
-    type-exact: a bool or float never reads as a generation."""
-    if type(homes) is int and homes == 1:
-        return JOURNAL_REL
+    """The record journal home of a homes generation (spec 8.8): the typed capability home
+    .working/journals/record/journal at homes 2 (spec 4.2, the journal-only record kind); any other
+    generation, homes 1 included, refuses fail-closed. The comparison is type-exact: a bool or float
+    never reads as a generation."""
     if type(homes) is int and homes == 2:
         return _opf_store.journal_root("record")
     raise RecordError("unknown homes generation {} for the record journal; fail-closed".format(
@@ -3856,10 +3848,12 @@ def _self_test_units(check):
           and req.values == {"--reason": "r", "--summary": "s"})
 
     # -- the allocation seam and the completeness proof ----------------------------------------------------
-    ids, high = claim_ids(1, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True)
-    check("homes-1 claims sequential ids", ids == ["BI-5", "BI-6", "WL-1"] and high == {"BI": 6, "WL": 1})
-    check("homes-1 refuses a reservation input",
-          _refuses(lambda: claim_ids(1, {"BI": 0}, ["BI"], True, reserved={}), "no reservation input"))
+    ids, high = claim_ids(2, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True, reserved={})
+    check("homes 2 claims sequential ids", ids == ["BI-5", "BI-6", "WL-1"] and high == {"BI": 6, "WL": 1})
+    for reserved in (None, {}):
+        check("homes 1 refuses the claim fail-closed (reserved {!r})".format(reserved),
+              _refuses(lambda reserved=reserved: claim_ids(1, {"BI": 0}, ["BI"], True, reserved=reserved),
+                       "unknown to this build"))
     check("homes 2 without the reservation scan refuses fail-closed",
           _refuses(lambda: claim_ids(2, {"BI": 0}, ["BI"], True), "reservation scan"))
     ids, high = claim_ids(2, {"BI": 4, "WL": 2}, ["BI", "WL"], True, reserved={})
@@ -3896,15 +3890,17 @@ def _self_test_units(check):
     ids, _hw = claim_ids(2, {"BI": 4}, ["BI"], True, reserved={"imported:BI": 9, "WL": 7})
     check("a reserved value under another counter key never moves the claimed key (spec 8.2)",
           ids == ["BI-5"])
-    for bad in (0, 3, True, "2", None):
+    for bad in (0, 1, 3, True, "2", None):
         check("an unknown homes generation refuses the claim ({!r})".format(bad),
               _refuses(lambda bad=bad: claim_ids(bad, {"BI": 0}, ["BI"], True), "unknown"))
     check("an absent counter without the proof refuses",
-          _refuses(lambda: claim_ids(1, {"WL": 0}, ["BI"], known_complete=False), "cannot claim"))
-    check("a non-taxonomy namespace refuses", _refuses(lambda: claim_ids(1, {"ZZ": 0}, ["ZZ"], True)))
+          _refuses(lambda: claim_ids(2, {"WL": 0}, ["BI"], known_complete=False, reserved={}), "cannot claim"))
+    check("a non-taxonomy namespace refuses",
+          _refuses(lambda: claim_ids(2, {"ZZ": 0}, ["ZZ"], True, reserved={}), "cannot claim"))
 
     # -- the record journal home and run identity (spec 4.2/8.8) -----------------------------------------
-    check("the record journal home at homes 1 is the legacy root", _record_journal_rel(1) == JOURNAL_REL)
+    check("the record journal home at homes 1 refuses fail-closed",
+          _refuses(lambda: _record_journal_rel(1), "unknown homes generation"))
     check("the record journal home at homes 2 is the typed capability home",
           _record_journal_rel(2) == ".working/journals/record/journal"
           and _record_journal_rel(2) == _opf_store.journal_root("record"))
@@ -4083,7 +4079,7 @@ def _self_test_contexts(check, root_fd, now):
 
     def ctx_of(counters, version=None):
         ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", root_fd)
-        ctx.homes = 1
+        ctx.homes = 2
         ctx.types = dict(_opf_store.BASELINE_TYPES)
         counters_model = {"schema": 1, "counters": dict(counters)}
         ctx.counters = Operand(".working/toml/counters.toml", _emit_bytes(counters_model), 0o644, counters_model)

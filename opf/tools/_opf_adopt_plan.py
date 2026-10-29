@@ -581,10 +581,10 @@ def _require_no_store_manifest(root_fd, resolution):
 def _resolved_unmanaged(manifest, machine_rel):
     """The resolved manifest's [unmanaged] paths, in order, each a contained path (_path) that neither
     equals, contains nor lies within a reserved store path: the machine subtree at `machine_rel`, a store
-    control root of the manifest's homes generation, or a declared view target. Source discovery
+    control root (every homes-2 root, the only generation), or a declared view target. Source discovery
     (_opf_adopt_discover) shares this check, so it refuses an [unmanaged] entry exactly where
     investigation does."""
-    control = list(store.store_control_roots(store.homes_generation(manifest)))
+    control = list(store.store_control_roots(store.HOMES))
     paths = []
     for path in manifest.get("unmanaged", {}).get("paths", []):
         # Conservative collision check: do not let an exclusion conceal the
@@ -635,11 +635,14 @@ def _inventory(root, sources, targets):
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
             # Homes 2 reserves every store control root and excludes it from investigation (spec 14.2).
+            # Validation admits only the homes-2 declaration; any other generation still refuses here.
             homes = store.homes_generation(manifest)
+            if homes != store.HOMES:
+                raise PlanError("resolved manifest is not a homes-2 store; refusing to investigate it")
             excluded.extend({"path": path, "reason": "registered-unmanaged"}
                             for path in _resolved_unmanaged(manifest, resolution.machine_rel))
             excluded.extend({"path": path, "reason": "store-control"}
-                            for path in store.store_control_roots(homes))
+                            for path in store.store_control_roots(store.HOMES))
             manifest_digest = _digest(raw)
             traces.append(manifest_path)
             view_targets = sorted(v["target"] for v in manifest.get("views", {}).values())
@@ -955,7 +958,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         if type(ops) is not list:
             raise PlanError("ops must be an ordered list")
         for row in ops:
-            checked = schema.validate_op(row, homes=homes)
+            checked = schema.validate_op(row)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
             if row["op"] in ("register-unmanaged", "move-file", "retire-file"):
@@ -987,7 +990,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         ordered = _order_ops(disposition_ops, ops)
         _bind_registrations(ordered, doc, manifest_model)
         for row in disposition_ops:
-            checked = schema.validate_op(row, homes=homes)
+            checked = schema.validate_op(row)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         # DISCLOSED-RESIDUAL (disclose-guard-residuals): re-adoption binds the adoption kind only. Spec
@@ -1020,7 +1023,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             "ops": ordered,
         }
         frozen = _seal(proposal, "plan_digest")
-        checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")), homes=homes)
+        checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")))
         if checked.status != store.VALID:
             return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         return AdoptResult(store.VALID, observation=observed.observation,

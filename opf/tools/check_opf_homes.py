@@ -265,6 +265,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import html
 import re
 import tempfile
@@ -1607,6 +1608,59 @@ def retired_gate_name_findings(tools=None):
                 if name in line:
                     findings.append("{}:{}: retired gate name {}; read store.{} instead".format(
                         path.relative_to(tools).as_posix(), number, name, name[len("SUPPORTED_"):]))
+    return findings
+
+
+# The homes-1 paths are deleted: homes 2 is the only generation, and every other value refuses. Outside
+# self-test code no module under opf/tools may compare a homes generation (a name or attribute ending in
+# `homes`) with the integer 1, the shape of every deleted homes-1 arm (claim_ids, _record_journal_rel). The
+# adoption validators lost their generation input, whose homes-1 default graded a row without the
+# control-area refusal: each function named here may not name `homes` at all, as a parameter or a read.
+# A function whose name contains `self_test`, and a check_*.py module, is self-test code, which still
+# builds refused homes-1 inputs. What this AST scan cannot see is outside the gate: a generation compared
+# through a differently named variable, or a comparison built at run time.
+_HOMES1_FREE = {"_opf_adopt.py": ("validate_op", "validate_plan", "_validate_plan_sources",
+                                  "_control_operand_findings")}
+
+
+def _homes_operand(node):
+    return ((isinstance(node, ast.Name) and node.id.endswith("homes"))
+            or (isinstance(node, ast.Attribute) and node.attr.endswith("homes")))
+
+
+def _homes1_walk(node, rel, owner, free, findings):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if "self_test" in node.name:
+            return
+        if node.name in free:
+            args = node.args
+            named = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+            named += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+            reads = sorted({n.lineno for n in ast.walk(node) if isinstance(n, ast.Name) and n.id == "homes"})
+            if "homes" in named:
+                reads = sorted(set(reads) | {node.lineno})
+            findings.extend("{}:{}: {} names a homes generation again; it grades every row at homes 2".format(
+                rel, line, node.name) for line in reads)
+        owner = node.name
+    if isinstance(node, ast.Compare):
+        sides = [node.left] + node.comparators
+        if any(_homes_operand(s) for s in sides) and any(
+                isinstance(s, ast.Constant) and type(s.value) is int and s.value == 1 for s in sides):
+            findings.append("{}:{}: homes-1 arm `{}` in {} is reintroduced; homes 2 is the only generation "
+                            "and every other one refuses".format(rel, node.lineno, ast.unparse(node), owner))
+    for child in ast.iter_child_nodes(node):
+        _homes1_walk(child, rel, owner, free, findings)
+
+
+def homes1_findings(tools=None):
+    tools = _TOOLS if tools is None else tools
+    findings = []
+    for path in sorted(tools.rglob("*.py")):
+        rel = path.relative_to(tools).as_posix()
+        if "_vendor" in path.relative_to(tools).parts or path.name.startswith("check_"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        _homes1_walk(tree, rel, "<module>", _HOMES1_FREE.get(rel, ()), findings)
     return findings
 
 
@@ -3048,19 +3102,17 @@ def boundary_self_test():
     create = {"op": "create-file", "content_digest": "sha256:" + "0" * 64}
     for home in homes:
         check("adoption-target-" + home, lambda h=home: adopt.validate_op(
-            dict(create, path=h + "/file"), homes=2).status != store.VALID)
-        check("adoption-legacy-target-" + home, lambda h=home: adopt.validate_op(
-            dict(create, path=h + "/file")).status == store.VALID)
+            dict(create, path=h + "/file")).status != store.VALID)
     check("adoption-composed-member", lambda: adopt.validate_op(
         {"op": "render-views", "store_root": ".working", "members": [
-            {"path": "journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
+            {"path": "journals/file", "digest": "sha256:" + "0" * 64}]}).status != store.VALID)
 
     check("adoption-root-pack-preserved", lambda: adopt.validate_op(
         {"op": "render-views", "store_root": ".", "members": [
-            {"path": "notes.txt", "digest": "sha256:" + "0" * 64}]}, homes=2).status == store.VALID)
+            {"path": "notes.txt", "digest": "sha256:" + "0" * 64}]}).status == store.VALID)
     check("adoption-root-pack-journal-refused", lambda: adopt.validate_op(
         {"op": "init-store", "store_root": ".", "members": [
-            {"path": ".working/journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
+            {"path": ".working/journals/file", "digest": "sha256:" + "0" * 64}]}).status != store.VALID)
     def view_plan(model):
         view_manifest = dict(model, views=dict(VERSION=dict(kind="projection", sources=[],
                                                             target=".working/journals/file")))
@@ -3111,16 +3163,15 @@ def boundary_self_test():
         return "completed"
 
     # Homes 2 excludes and reserves every control root. A manifest without the homes-2 declaration is refused
-    # at validation (mocked VALID here) and reaches the remaining homes-1 planner branch, which still
-    # enumerates the homes-2 names as sources and reserves only imports against an [unmanaged] collision.
+    # at validation; with validation mocked VALID here the planner still refuses it before any enumeration,
+    # since the homes-1 planner branch is deleted (red when a homes-1 store is investigated again).
     for home in homes:
         check("investigation-control-" + home, lambda h=home: investigation(h, generation=2) == "refused")
         check("investigation-collision-" + home, lambda h=home: investigation(h, True, 2) == "refused")
-    for home in homes[1:]:
-        check("investigation-legacy-source-" + home, lambda h=home: investigation(h) == "enumerated")
+        check("investigation-legacy-refused-" + home, lambda h=home: investigation(h) == "refused")
+        check("investigation-legacy-unmanaged-refused-" + home,
+              lambda h=home: investigation(h, True) == "refused")
     check("investigation-legacy-imports-collision", lambda: investigation(legacy_root, True) == "refused")
-    for home in homes[1:]:
-        check("investigation-legacy-unmanaged-" + home, lambda h=home: investigation(h, True) == "enumerated")
 
     def unresolved_manifest(name):
         directory = SimpleNamespace(st_mode=stat.S_IFDIR)
@@ -3176,18 +3227,27 @@ def boundary_self_test():
             bindings = adopt.canonical_plan_bindings()
             targets = ["notes.txt", adopt.PACK_MIRROR_ROOT]
             observed = planning.investigate(Path("/store"), sources=[], targets=targets)
+            if observed.observation is None:  # investigation refused the store: no plan is built
+                return observed, [sorted(c.kwargs) for c in frozen.call_args_list]
             result = planning.plan(
                 Path("/store"), sources=[], targets=targets, product="opf", decisions=[],
                 ops=[op] + adopt.enforcement_install_ops(bindings["enforcement"]),
                 expected_observation_digest=tomllib.loads(observed.observation.decode())["observation_digest"],
                 now=utc, run_nonce="0123456789abcdef", bindings=bindings)
-        return result, [c.kwargs.get("homes") for c in frozen.call_args_list]
+        # Each frozen-plan revalidation is recorded by its keyword arguments: none, since no caller can
+        # select a homes generation any more (red when a homes argument is passed again).
+        return result, [sorted(c.kwargs) for c in frozen.call_args_list]
+
+    def legacy_refused(op):
+        # A homes-1 manifest (validation mocked VALID) is refused by the planner before any plan is built.
+        result, revalidated = planned(1, op)
+        return (result.status == store.CANNOT_EVALUATE and result.observation is None and revalidated == []
+                and any("not a homes-2 store" in f for f in result.findings))
 
     homes2_plan, _ = planned(2, control_op)
-    legacy_plan, legacy_frozen = planned(1, control_op)
     ordinary_plan, ordinary_frozen = planned(2, dict(create, path="notes.txt"))
     # Each op loop refuses on its own (its exact findings), not only through the frozen-plan revalidation.
-    refused = tuple(adopt.validate_op(control_op, homes=2).findings)
+    refused = tuple(adopt.validate_op(control_op).findings)
     check("plan-homes2-control-op-refused", lambda: homes2_plan.status == store.INVALID and homes2_plan.plan is None
           and bool(refused) and homes2_plan.findings == refused)
     control_retire = dict(op="retire-file", path=".working/journals/file", preimage_digest="sha256:" + "0" * 64)
@@ -3196,44 +3256,34 @@ def boundary_self_test():
                               "adopt-20260917T120000Z-0123456789abcdef", control_retire["path"]))
     with patch.object(planning, "_decisions", return_value=([control_retire], [control_source], [])):
         retired, _ = planned(2, dict(create, path="notes.txt"))
-        legacy_retired, _ = planned(1, dict(create, path="notes.txt"))
-    # A move strictly beneath the Move archive is the one control-area destination spec 14.2 admits, in every
-    # generation, so both generations plan it; the Move root itself stays refused by the homes-2 operand check.
+        legacy_retired = legacy_refused(dict(create, path="notes.txt"))
+    # A move strictly beneath the Move archive is the one control-area destination spec 14.2 admits; the Move
+    # root itself stays refused by the homes-2 operand check.
     control_move = dict(op="move-file", source="notes.md", destination=".working/archive/moved/notes.md",
                         source_digest="sha256:" + "0" * 64)
     move_source = dict(path="notes.md", digest=control_move["source_digest"], disposition="move", occupying=False,
                        preservation=control_move["destination"])
     with patch.object(planning, "_decisions", return_value=([control_move], [move_source], [])):
         moved, moved_frozen = planned(2, dict(create, path="notes.txt"))
-        legacy_moved, legacy_moved_frozen = planned(1, dict(create, path="notes.txt"))
+        legacy_moved = legacy_refused(dict(create, path="notes.txt"))
     root_move = dict(control_move, destination=".working/archive/moved")
     with patch.object(planning, "_decisions",
                       return_value=([root_move], [dict(move_source, preservation=root_move["destination"])], [])):
         rooted, _ = planned(2, dict(create, path="notes.txt"))
     check("plan-homes2-control-disposition-refused", lambda: retired.status == store.INVALID
-          and retired.findings == tuple(adopt.validate_op(control_retire, homes=2).findings) != ())
-    check("plan-homes2-control-move-planned", lambda: moved.status == store.VALID and moved_frozen == [2]
-          and adopt.validate_op(control_move, homes=2).status == store.VALID)
+          and retired.findings == tuple(adopt.validate_op(control_retire).findings) != ())
+    check("plan-homes2-control-move-planned", lambda: moved.status == store.VALID and moved_frozen == [[]]
+          and adopt.validate_op(control_move).status == store.VALID)
     check("plan-homes2-move-root-refused", lambda: rooted.status == store.INVALID and rooted.plan is None
-          and rooted.findings == tuple(adopt.validate_op(root_move, homes=2).findings) != ())
-    # Adoption refuses the control area in the legacy generation too (spec 14.2 carries no homes qualifier):
-    # the legacy op check admits these rows, and the frozen plan's revalidation at the store's own
-    # generation refuses them.
-    check("plan-legacy-control-disposition-refused", lambda: legacy_retired.status == store.INVALID
-          and legacy_retired.plan is None and "plan sources[0] path '.working/journals/file' selects the reserved "
-          "store control area as adoption content (spec 14.2)" in legacy_retired.findings)
-    check("plan-legacy-control-op-refused", lambda: legacy_plan.status == store.INVALID and legacy_plan.plan is None
-          and legacy_frozen == [1]
-          and "plan writes '.working/journals/file' into the reserved store control area (spec 14.2)"
-          in legacy_plan.findings)
-    check("plan-legacy-control-move-planned", lambda: legacy_moved.status == store.VALID
-          and legacy_moved_frozen == [1])
-    check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [2])
+          and rooted.findings == tuple(adopt.validate_op(root_move).findings) != ())
+    # A homes-1 manifest is refused by the planner itself, whatever the plan carries (the homes-1 planner
+    # branch and its legacy op grading are deleted), so the control area stays refused there too.
+    check("plan-legacy-control-disposition-refused", lambda: legacy_retired)
+    check("plan-legacy-control-op-refused", lambda: legacy_refused(control_op))
+    check("plan-legacy-control-move-refused", lambda: legacy_moved)
+    check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [[]])
     check("plan-validate-homes2-move-admitted", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_moved.plan.decode()), homes=2).status == store.VALID
-          and adopt.validate_plan(tomllib.loads(moved.plan.decode()), homes=2).status == store.VALID)
-    check("plan-validate-legacy-unchanged", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_moved.plan.decode())).status == store.VALID)
+        tomllib.loads(moved.plan.decode())).status == store.VALID)
 
     check("internal-api-capability-required", lambda: refuses(
         lambda: home_journal.run_transaction(object(), "import", run, [], lambda _name: b"")))
@@ -4290,7 +4340,7 @@ def self_test():
     escaping read or parse error to exit 2 exactly as `main(["--self-test"])` does."""
     try:
         return _self_test_vectors()
-    except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+    except (OSError, UnicodeError, ValueError, AttributeError, SyntaxError) as exc:
         print("check_opf_homes: cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2
 
@@ -5533,6 +5583,56 @@ def _self_test_vectors():
                           "_opf_store.py:{}: retired gate name {}; read store.{} instead".format(
                               store_source.count("\n") + 1, n, c)])
                 (tree / "_opf_store.py").write_text(store_source, encoding="utf-8")
+    # No homes-1 path: the live tools tree compares no homes generation with 1 outside self-test code,
+    # and the adoption validators name no generation. In a fixture tree holding the record and adoption
+    # modules, restoring one deleted line (the homes-1 arm of _record_journal_rel or of claim_ids, or the
+    # homes-1 default of validate_op) is red at that line; the same comparison in self-test code, or in a
+    # check_*.py module, is not (refused homes-1 inputs are still built there).
+    check("homes1-free-registry", lambda: _HOMES1_FREE == {"_opf_adopt.py": (
+        "validate_op", "validate_plan", "_validate_plan_sources", "_control_operand_findings")})
+    check("no-homes1-paths", lambda: homes1_findings() == [])
+    record_source = (_TOOLS / "_opf_record.py").read_text(encoding="utf-8")
+    adopt_source = (_TOOLS / "_opf_adopt.py").read_text(encoding="utf-8")
+    journal_home = '    if type(homes) is int and homes == 2:\n        return _opf_store.journal_root("record")\n'
+    claim_home = "    if type(homes) is int and homes == 2:\n        if reserved is None:\n"
+    validator = "def validate_op(row):\n"
+    restored = (
+        ("record-journal-arm", "_opf_record.py", record_source, journal_home,
+         "    if type(homes) is int and homes == 1:\n        return JOURNAL_REL\n" + journal_home,
+         "homes-1 arm `homes == 1` in _record_journal_rel is reintroduced"),
+        ("claim-ids-arm", "_opf_record.py", record_source, claim_home,
+         "    if type(homes) is int and homes == 1:\n        base = {}\n    el" + claim_home[4:],
+         "homes-1 arm `homes == 1` in claim_ids is reintroduced"),
+        ("validate-op-default", "_opf_adopt.py", adopt_source, validator, "def validate_op(row, homes=1):\n",
+         "validate_op names a homes generation again"))
+    with tempfile.TemporaryDirectory(prefix="opf-homes-one-") as tmp:
+        tree = Path(tmp)
+        (tree / "_opf_record.py").write_text(record_source, encoding="utf-8")
+        (tree / "_opf_adopt.py").write_text(adopt_source, encoding="utf-8")
+        check("homes1-clean-tree", lambda: homes1_findings(tree) == [])
+        for label, name, source, anchor, line, needle in restored:
+            at = source.find(anchor)
+            planted = source[:at] + line + source[at + len(anchor):] if source.count(anchor) == 1 else None
+            (tree / name).write_text(planted if planted is not None else source, encoding="utf-8")
+            check("homes1-restored-" + label, lambda p=planted, n=name, a=at, e=needle: p is not None and [
+                f.startswith("{}:{}: ".format(n, p.count("\n", 0, a) + 1)) and e in f
+                for f in homes1_findings(tree)] == [True])
+            (tree / name).write_text(source, encoding="utf-8")
+        (tree / "planted.py").write_text("def self_test(ctx):\n    return ctx.homes == 1\n\n\n"
+                                         "def _refuse(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
+        check("homes1-self-test-exempt-production-red", lambda: homes1_findings(tree) == [
+            "planted.py:6: homes-1 arm `ctx.homes == 1` in _refuse is reintroduced; homes 2 is the only "
+            "generation and every other one refuses"])
+        (tree / "planted.py").unlink()
+        (tree / "check_planted.py").write_text("def flip(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
+        check("homes1-check-module-exempt", lambda: homes1_findings(tree) == [])
+        (tree / "check_planted.py").unlink()
+        (tree / "_opf_adopt.py").write_text(adopt_source.replace(
+            "def _validate_plan_sources(rows, run_id, findings, root=\".\"):",
+            "def _validate_plan_sources(rows, run_id, findings, root=\".\", *, homes=2):"), encoding="utf-8")
+        check("homes1-validator-keyword-generation-red", lambda: len(homes1_findings(tree)) == 1
+              and "_validate_plan_sources names a homes generation again" in homes1_findings(tree)[0])
+        (tree / "_opf_adopt.py").write_text(adopt_source, encoding="utf-8")
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -7831,6 +7931,17 @@ def _self_test_vectors():
         check("main-default-entry-runs-retired-gate-names", lambda r=planted_rc, out=buf.getvalue():
               r == 1 and out == "check_opf_homes: reader.py:1: retired gate name {}; read store.HOMES "
               "instead\n".format(retired))
+    # The default entry runs the no-homes-1 scan: a tools tree whose module restores a homes-1 arm is red
+    # there with that line's finding.
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-one-") as tmp:
+        (Path(tmp) / "reader.py").write_text("def arm(ctx):\n    return ctx.homes == 1\n", encoding="utf-8")
+        with patch.object(module, "_TOOLS", Path(tmp)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-runs-no-homes1", lambda r=planted_rc, out=buf.getvalue():
+              r == 1 and out == "check_opf_homes: reader.py:2: homes-1 arm `ctx.homes == 1` in arm is "
+              "reintroduced; homes 2 is the only generation and every other one refuses\n")
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
@@ -7897,11 +8008,11 @@ def main(argv=None):
         spec_text = SPEC.read_text(encoding="utf-8")
         findings = (contract_findings(spec_text) + keyword_findings()
                     + surface_findings() + informative_findings(spec_text)
-                    + retired_gate_name_findings())
+                    + retired_gate_name_findings() + homes1_findings())
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
-    except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+    except (OSError, UnicodeError, ValueError, AttributeError, SyntaxError) as exc:
         print("check_opf_homes: cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2
 

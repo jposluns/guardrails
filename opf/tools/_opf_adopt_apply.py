@@ -3608,7 +3608,7 @@ def _init_store_sources_or_refuse(plan):
     exists (codex round 3, finding 3): a malformed row refuses with nothing written, never
     reads as non-occupying, never freezes a source, never authorizes a copy."""
     findings = []
-    short = schema._validate_plan_sources(plan["sources"], plan["run_id"], 1, findings)
+    short = schema._validate_plan_sources(plan["sources"], plan["run_id"], findings)
     if short is not None or findings:
         raise AdoptApplyError("the context plan's sources rows do not validate ({}); every "
                               "consumed sources-row field (path, digest, disposition, occupying, "
@@ -12105,7 +12105,7 @@ def _self_test_checks():
     move = pres_row("legacy/MOVE.md", "move", False, preservation=store.moved_dest("legacy/MOVE.md"))
     retire = pres_row("legacy/RETIRE.md", "retire", False)
     shape = []
-    schema._validate_plan_sources([migrate, occupying, keep, move, retire], rid, 1, shape)
+    schema._validate_plan_sources([migrate, occupying, keep, move, retire], rid, shape)
     check("preservation-vector-rows-plan-valid", shape == [])
     todo, todo_copy = ".working/TODO.md", archive_rel(rid, ".working/TODO.md")
     old_copy, retire_copy = archive_rel(rid, "legacy/OLD.md"), archive_rel(rid, "legacy/RETIRE.md")
@@ -18547,9 +18547,7 @@ def _finish_ops_self_test(check):
     # and on homes 2, this build's only generation, even validate_op refuses the minted row's receipt
     # operand, so homes-2 adoption must route the receipt through the capability-bound journal API (or land
     # its own explicit rule) before the adoption fence lifts -- the fact is pinned so it cannot drift silently.
-    check("record-minted-row-homes2-operand-refused",
-          schema.validate_op(record, homes=1).status == valid
-          and schema.validate_op(record, homes=2).status == invalid)
+    check("record-minted-row-homes2-operand-refused", schema.validate_op(record).status == invalid)
 
     # The two composing ops over a NOT-ADOPTED root: the verified member is planted create-only, and the
     # receipt core and its genesis event land in the run's own bundle, claimed by the derived inventory.

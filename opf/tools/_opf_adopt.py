@@ -966,13 +966,12 @@ def _closed_keyset(table, required, optional):
     return missing, unknown
 
 
-def validate_op(row, homes=1):
+def validate_op(row):
     """Validate ONE AdoptionPlan op row against its ADOPT_OPS definition. A non-table is CANNOT-EVALUATE; an
     op name outside ADOPT_OPS is CANNOT-EVALUATE (out-of-vocabulary refused, never a skip); a table with a
-    known op but a missing/unknown field or a malformed field shape is INVALID. `homes` is the store's
-    active homes generation: a legacy store (1, the default) keeps its legacy op-level disposition with no
-    control-area refusal; in homes 2 an operand that equals, contains, or lies within a store control
-    root is INVALID, save a move-file destination strictly beneath the Move archive root
+    known op but a missing/unknown field or a malformed field shape is INVALID. Every row is graded at
+    homes 2, the only generation this build admits: an operand that equals, contains, or lies within a
+    store control root is INVALID, save a move-file destination strictly beneath the Move archive root
     (_control_operand_findings). An adoption plan refuses the control area in every generation (spec 14.2), which
     validate_plan decides over the whole plan, since only there are its own preservation copies and Move
     archive destinations known."""
@@ -995,12 +994,11 @@ def validate_op(row, homes=1):
             continue  # an unknown key was already reported above; do not shape-check it
         if not _valid_field(field, row[field]):
             findings.append("op {!r} field {!r} has a malformed value".format(name, field))
-    if homes >= 2:
-        findings.extend(_control_operand_findings(name, row, homes))
+    findings.extend(_control_operand_findings(name, row))
     return _ok() if not findings else _invalid(findings)
 
 
-def _control_operand_findings(name, row, homes):
+def _control_operand_findings(name, row):
     """Homes-2 control-area refusal for one op row. Directory identities (store_root) are not
     mutation operands. Members are relative to their op's target or store_root, so their composed
     destinations are checked as well as ordinary file operands. Evidence receipts and retire
@@ -1023,7 +1021,7 @@ def _control_operand_findings(name, row, homes):
         moved = (name == "move-file" and field == "destination" and _is_contained_filepath(operand)
                  and _in_move_archive(operand, "."))
         try:
-            if any(overlaps_home(operand, home) for home in store_control_roots(homes)
+            if any(overlaps_home(operand, home) for home in store_control_roots(2)
                    if not (moved and home == ARCHIVE_REL)):
                 raise ValueError("adoption operand overlaps reserved store control area: {!r}".format(operand))
         except ValueError as exc:
@@ -1093,14 +1091,13 @@ def _preimage_home(run_id, path):
         return None
 
 
-def validate_plan(plan, homes=1):
+def validate_plan(plan):
     """Validate an AdoptionPlan (`opf.adoption.plan/v2`). A non-table is CANNOT-EVALUATE; an unknown
     product, a per-op out-of-vocabulary name, or an out-of-vocabulary binding token (the store's adoption
     kind, a source disposition, an enforcement platform or means, a completion check, the retirement rule,
     an import-policy token) propagates CANNOT-EVALUATE; any other schema violation is INVALID. The store
     identity's store_root must be the product root ".", the one root the planner freezes and apply resolves.
-    `homes` is the store's active homes generation, applied to every op row as validate_op applies it and to
-    every source path."""
+    Every op row and every source path is graded at homes 2, as validate_op grades a row."""
     if not isinstance(plan, dict):
         return _cannot("adoption plan is not a table")
     findings = []
@@ -1134,7 +1131,7 @@ def validate_plan(plan, homes=1):
     before = len(findings)
     if "sources" not in missing:
         frozen = _frozen_store(plan)
-        res = _validate_plan_sources(plan.get("sources"), run_id, homes, findings,
+        res = _validate_plan_sources(plan.get("sources"), run_id, findings,
                                      frozen[0] if frozen is not None else ".")
         if res is not None:
             return res
@@ -1147,7 +1144,7 @@ def validate_plan(plan, homes=1):
             findings.append("plan 'ops' is empty (a plan must carry at least one op)")
         ops_clean = True
         for i, row in enumerate(ops):
-            res = validate_op(row, homes=homes)
+            res = validate_op(row)
             if res.status == CANNOT_EVALUATE:
                 return _cannot("plan op[{}]: {}".format(i, "; ".join(res.findings)))
             if res.status == INVALID:
@@ -1164,7 +1161,7 @@ def validate_plan(plan, homes=1):
     return _ok() if not findings else _invalid(findings)
 
 
-def _validate_plan_sources(rows, run_id, homes, findings, root="."):
+def _validate_plan_sources(rows, run_id, findings, root="."):
     """Validate the per-source rows (spec 14.1: every source path, byte digest, disposition and preservation
     destination). Returns an AdoptValidation ONLY to short-circuit CANNOT-EVALUATE (an out-of-vocabulary
     disposition); otherwise appends findings and returns None. `occupying` records whether the source sits
@@ -1229,8 +1226,8 @@ def _validate_plan_sources(rows, run_id, homes, findings, root="."):
         if path is not None and _in_control_area(path, root):
             findings.append("{} path {!r} selects the reserved store control area as adoption content "
                             "(spec 14.2)".format(label, path))
-        if homes >= 2 and path is not None:
-            findings.extend(_control_operand_findings("sources", {"path": path}, homes))
+        if path is not None:
+            findings.extend(_control_operand_findings("sources", {"path": path}))
     return None
 
 
@@ -2678,13 +2675,13 @@ def self_test():
     p_v1 = canonical_plan(); p_v1["format"] = "opf.adoption.plan/v1"
     check("plan-v1-format-refused", validate_plan(p_v1).status == INVALID)
 
-    def _mutated(base, mutate, refresh=False, homes=1):
+    def _mutated(base, mutate, refresh=False):
         p = copy.deepcopy(base)
         mutate(p)
         if refresh:  # re-derive effects, so the vector isolates the one check it names
             p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")),
                                           p.get("run_id"), (_frozen_store(p) or (".",))[0])
-        return validate_plan(p, homes=homes).status
+        return validate_plan(p).status
     _D5 = "sha256:" + "5" * 64
     _extra_retire = {"op": "retire-file", "path": "legacy/OTHER.md", "preimage_digest": _D5}
     base_plan = canonical_plan()
@@ -2827,27 +2824,35 @@ def self_test():
                         p["sources"][2].update(preservation=".working/notes/MOVE.md")), True)):
         check("plan-v2-{}-invalid".format(label), _mutated(full, mutate, refresh) == INVALID)
     # 14f: a source inside a store control root, including a migrate source that has no op row, is refused
-    # in homes 2 and, since spec 14.2 carries no homes qualifier, in the legacy generation too; the same plan
-    # with ordinary sources is VALID in homes 2.
+    # (spec 14.2, which carries no homes qualifier); the same plan with ordinary sources is VALID.
     ctrl = copy.deepcopy(full)
     ctrl["sources"][3] = dict(ctrl["sources"][3], path=".working/journals/old.md",
                               preservation=home(".working/journals/old.md"))
     ctrl["effects"] = derive_effects(ctrl["ops"], ctrl["sources"], _MANIFEST)
     ctrl["import_policy"]["scope"] = [".working/FINDINGS.md", ".working/journals/old.md"]
-    check("plan-v2-homes2-ordinary-sources-valid", validate_plan(full, homes=2).status == VALID)
-    check("plan-v2-homes2-control-source-refused", validate_plan(ctrl, homes=2).status == INVALID)
+    check("plan-v2-homes2-ordinary-sources-valid", validate_plan(full).status == VALID)
+    check("plan-v2-homes2-control-source-refused", validate_plan(ctrl).status == INVALID)
     check("plan-v2-legacy-control-source-refused", validate_plan(ctrl).status == INVALID)
+    # The homes-1 grading is deleted: a caller can no longer select it, so no default grades a row
+    # without the control-operand refusal (red when a `homes` parameter or default comes back).
+    for fn, arg in ((validate_op, full["ops"][0]), (validate_plan, ctrl)):
+        try:
+            fn(arg, homes=1)
+            _graded = True
+        except TypeError:
+            _graded = False
+        check("{}-takes-no-homes-generation".format(fn.__name__), not _graded)
     # 14f-ii: homes 2 admits a move-file destination strictly beneath the Move archive root (spec 14.2), on
     # its exact normalized spelling only. The Move root itself, a sibling or another archive path, a `..`,
     # `.` or empty-segment spelling, and that same path as a move source or another op's operand are refused
     # by the control-operand rule itself, so each vector reads that rule's own finding.
-    check("plan-v2-homes2-move-beneath-moved-root-valid", _mutated(full, in_moved, True, homes=2) == VALID)
+    check("plan-v2-homes2-move-beneath-moved-root-valid", _mutated(full, in_moved, True) == VALID)
     check("plan-v2-homes2-move-onto-moved-root-invalid", _mutated(full, lambda p: (
         p["ops"][0].update(destination=ARCHIVE_REL + "/moved"),
-        p["sources"][2].update(preservation=ARCHIVE_REL + "/moved")), True, homes=2) == INVALID)
+        p["sources"][2].update(preservation=ARCHIVE_REL + "/moved")), True) == INVALID)
     _overlap = "adoption operand overlaps reserved store control area: {!r}".format
     _move_to = lambda dest: dict(full["ops"][0], destination=dest)  # noqa: E731
-    check("op-homes2-move-beneath-moved-root-valid", validate_op(_move_to(_in_moved), homes=2).status == VALID)
+    check("op-homes2-move-beneath-moved-root-valid", validate_op(_move_to(_in_moved)).status == VALID)
     for label, dest in (("moved-root", ARCHIVE_REL + "/moved"),
                         ("moved-sibling-prefix", ARCHIVE_REL + "/moved2/MOVE.md"),
                         ("archive-outside-moved", ARCHIVE_REL + "/elsewhere/MOVE.md"),
@@ -2857,11 +2862,11 @@ def self_test():
                         ("dot-segment", ARCHIVE_REL + "/moved/./MOVE.md"),
                         ("repeated-slash", ARCHIVE_REL + "/moved//MOVE.md")):
         check("op-homes2-move-{}-refused".format(label),
-              _overlap(dest) in validate_op(_move_to(dest), homes=2).findings)
+              _overlap(dest) in validate_op(_move_to(dest)).findings)
     check("op-homes2-move-source-beneath-moved-root-refused", _overlap(_in_moved) in validate_op(
-        dict(full["ops"][0], source=_in_moved), homes=2).findings)
+        dict(full["ops"][0], source=_in_moved)).findings)
     check("op-homes2-create-beneath-moved-root-refused", _overlap(_in_moved) in validate_op(
-        {"op": "create-file", "path": _in_moved, "content_digest": _D5}, homes=2).findings)
+        {"op": "create-file", "path": _in_moved, "content_digest": _D5}).findings)
     # 14g: derive_effects composes render-views members under a non-root store root only, adds a migrate
     # source's archive copy and later removal, and adds nothing for a plain move beyond its op row.
     _member = [{"path": "rules.toml", "digest": _D5}]
@@ -3248,14 +3253,15 @@ def self_test():
                 {"path": WORKING_DIRNAME + "/toml/pre-commit", "digest": _D5}),
              WORKING_DIRNAME + "/toml/pre-commit"),
             ("record-adoption", lambda p: p["ops"][-1].update(receipt_path=WORKING_DIRNAME + "/install.sh"),
-             WORKING_DIRNAME + "/install.sh"),
-            # the Move archive exception is a move-file destination's alone: a creation there is refused too
-            ("create-file", lambda p: _insert(p, [{"op": "create-file", "path": _MOVED,
-                                                   "content_digest": _D5}]), _MOVED)):
+             WORKING_DIRNAME + "/install.sh")):
         result = _validated(mutate)
-        check("launch-unnamed-launcher-by-{}{}".format(op, "-in-move-archive" if path == _MOVED else ""),
-              result.status == CANNOT_EVALUATE
+        check("launch-unnamed-launcher-by-{}".format(op), result.status == CANNOT_EVALUATE
               and "plan {} row places '{}' ".format(op, path) + _unrowed in result.findings[0])
+    # the Move archive exception is a move-file destination's alone: a creation there is refused too, now by
+    # the op row's own control-area rule, which grades every row at homes 2 before the launch clause runs
+    result = _validated(lambda p: _insert(p, [{"op": "create-file", "path": _MOVED, "content_digest": _D5}]))
+    check("launch-unnamed-launcher-by-create-file-in-move-archive", result.status == INVALID and any(
+        "adoption operand overlaps reserved store control area: {!r}".format(_MOVED) in f for f in result.findings))
     # a move-file destination under a launcher's file name outside the Move archive is refused by this clause
     # whoever built the plan (the planner refuses such a declared destination before it freezes the plan)
     result = _validated(lambda p: _moved_in(p, [(".opf/hooks/pre-commit", "legacy/hooks/pre-commit")]))
@@ -3450,7 +3456,7 @@ def self_test():
         p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]), p["run_id"],
                                       _frozen_store(p)[0])
         findings = []
-        _validate_plan_sources(p["sources"], p["run_id"], 1, findings, _frozen_store(p)[0])
+        _validate_plan_sources(p["sources"], p["run_id"], findings, _frozen_store(p)[0])
         _cross_check_plan(p, [], not findings, findings)
         return findings
     check("plan-v2-sub-store-composed-rules-clean", _sub_findings(sub_plan) == [])

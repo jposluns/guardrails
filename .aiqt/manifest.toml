@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8f13f6066865ffdddc19a993108ce1c9390c2bd5bff812ad311b919c4e90967e"
+tree-sha256 = "fd2a7f86a6b903e946939d11c98d1bca85bf574700618a1d93c8297fcf07147e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2751,13 +2751,13 @@ sha256 = "652f6d15ec58b5b6211434d3b676e00babaf49c126405c061d4d1570a2e6f462"
 
 [[sources]]
 path = "opf/tools/_opf_adopt.py"
-bytes = 257395
-sha256 = "83ee87c8d1c6f1600640a90c7e6aa13aae955a3eaaa5895fcad5af67e737df6d"
+bytes = 257667
+sha256 = "b4b602f902f5bcd12d056fddd011d507152d553d4bbdb50f74d06d467bcbe3d0"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 1229410
-sha256 = "c545b2927308b04804e39af63a5e56f2481e719fd036ca85009f30d79a0c2044"
+bytes = 1229319
+sha256 = "3a1d75f5864f607c5bac59917c4e3cb93a02e0a3bd4b45c81b19a61834be7e48"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -2781,8 +2781,8 @@ sha256 = "2eba52d47cf14d63aabed5b6d0ad24ba734fc1846c0e82aebbb32f6e0e172ba1"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
-bytes = 129619
-sha256 = "38faede9fbdb9d58455170d32bf9cbfbe6f40f7fbe12a2b991f92776e55a660d"
+bytes = 129816
+sha256 = "0c1d70e1dfc8df99ee2a2114cc9fe1736aee34144e089f0ced466835a8f60453"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
@@ -2876,8 +2876,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 373758
-sha256 = "b029449defde2698d6661ec6e457193c6603731e84e8639c5c998d3e764107c5"
+bytes = 373462
+sha256 = "602dcd635d2e6ce75bcef492e1026851bd271c86fc72f1406dbf8cc689d9a6da"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -3081,8 +3081,8 @@ sha256 = "e7bb0f23a85e5966a3dca0da5cba18fbc075ec54f24b4ae302734cb00f9cf57c"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 708498
-sha256 = "49dadbfc1b1e41819fe582bb9cc8cb3caa187752c58ea5227ae103a603a75d33"
+bytes = 715897
+sha256 = "96095658800bffc276c9cccdb93662b1f0534723d16a3e6a9c8955cb2c1bc2c4"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
