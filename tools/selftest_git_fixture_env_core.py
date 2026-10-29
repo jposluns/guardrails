@@ -1938,6 +1938,8 @@ def _member_bound_checks(roster):
                  "opf-closure-d")
     closure_e = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
                  "opf-closure-e")
+    coverage_suite = ("tools/check_selftest_execution.py", "--suite",
+                      "child-status-coverage-selftest")
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -2088,7 +2090,7 @@ def _member_bound_checks(roster):
 
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800, closure_a: 3600, closure_b: 3600, closure_c: 3600,
-                 closure_d: 3600, closure_e: 3600}
+                 closure_d: 3600, closure_e: 3600, coverage_suite: 5400}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
