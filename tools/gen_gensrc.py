@@ -244,8 +244,9 @@ def _canonical_target(target, kind, where):
     it is not already in that clean form. Rejects a backslash (a Windows separator), an absolute path, a
     '.' or '..' segment, a './' prefix, and redundant separators ('//'). A trailing '/' is allowed ONLY
     on a tree target (it is the tree marker); on a file or block target it is rejected. A .working
-    component is rejected too: the OPF store tree and its declared views are owned by the OPF deny hook, so
-    this registry never carries a second view roster. Callers
+    component is rejected too: the OPF store tree is owned by the OPF deny hook, so this registry never
+    registers a store path. An OPF declared view lies outside .working (TODO.md, docs/STATUS.md) and is not
+    checked here (this tool does not read the OPF manifests), so a generator declaring one is accepted. Callers
     deduplicate on the SLASH-STRIPPED canonical body, so a file 'X' and a tree 'X/', and 'X' and './X',
     all collide."""
     if "\\" in target:
@@ -801,7 +802,7 @@ _DEEP_READS = {
 
 
 # The OPF boundary (case t): a target with a .working component is an OPF store path, owned by the OPF deny
-# hook, and must fail closed (exit 2) so the registry never carries a second view roster.
+# hook, and must fail closed (exit 2) so the registry never registers a store path.
 _FAKE_OPF_WORKING = '''# self-test: a target inside an OPF .working store
 GENSRC_OUTPUTS = (
     {"target": "x/.working/TODO.md", "kind": "file",
@@ -1076,7 +1077,7 @@ def self_test_main():
 
         # (t) The OPF boundary: a target with a .working component fails closed (exit 2) NAMING the component
         #     and the target, so an unrelated exit 2 cannot pass this case; the OPF deny hook owns the store
-        #     tree and its declared views, so the registry never carries a second view roster.
+        #     tree, so the registry never registers a store path.
         opfdir = tmp / "opfworking"
         _build_from(opfdir, "gen_selftestopf.py", _FAKE_OPF_WORKING)
         rc, err = run_stderr(opfdir, check=True)

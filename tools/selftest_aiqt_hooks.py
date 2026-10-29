@@ -23391,12 +23391,35 @@ def _main_isolated(monitor):
             for _gs_part in ("na", "nb", "nc", "nd"):
                 _gs_deep_rel = os.path.join(_gs_deep_rel, _gs_part)
                 _gs_init(_gs_deep_rel)
+            # A directory change the guard cannot pin: the session repo gscds (the shared registry, with sub/
+            # and d/) links d/l to gscdt/sub and d/l2 to gscdt/ogen/inner, a sibling repo whose registry holds
+            # OTHER.md and ogen/. The session registry names neither, so a gb-cd deny there comes from the
+            # directory a change may reach, never from a mention.
+            gs_cds = _gs_init("gscds")
+            (gs_cds / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_cds / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            gs_cdt = _gs_init("gscdt")
+            (gs_cdt / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_cdt / ".aiqt" / "gensrc.json").write_text(json.dumps({"version": 1, "generated": [
+                {"kind": "file", "target": "OTHER.md", "sources": ["o.toml"], "regenerate": "python3 tools/gen_o.py"},
+                {"kind": "tree", "target": "ogen/", "sources": ["osrc/"],
+                 "regenerate": "python3 tools/gen_otree.py"}]}), encoding="utf-8")
+            for _gs_part in (gs_cds / "sub", gs_cds / "d", gs_cdt / "sub", gs_cdt / "ogen" / "inner"):
+                _gs_part.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(gs_cdt / "sub"), str(gs_cds / "d" / "l"))
+            os.symlink(str(gs_cdt / "ogen" / "inner"), str(gs_cds / "d" / "l2"))
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the gensrc Bash fixtures: {}".format(exc), file=sys.stderr)
             return 2
         gnest = str(gs_nest)
         gdeep = str(gs_deep)
         gdeepest = os.path.join(gdeep, "na", "nb", "nc", "nd")
+        # Real paths, so a change through no link reads the same lexically and physically wherever the
+        # temporary directory lives (a linked /tmp would make every physical reading differ).
+        gcs, gct = os.path.realpath(str(gs_cds)), os.path.realpath(str(gs_cdt))
+        # The guard reads an inherited CDPATH (_gensrc_cd_context), so every gb case is judged with none; the
+        # (gb-cd-env*) cases set one for themselves.
+        os.environ.pop("CDPATH", None)
 
         def bdata(command, cwd):
             data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
@@ -23606,6 +23629,84 @@ def _main_isolated(monitor):
              "deny", "case 1 in 1) cp a GEN.md;; esac", gr),
             ("(gb-d15) a conditional cd then a sink naming nothing notes", "allow-note",
              "false && cd {b1}; echo x >> unregistered.txt", gr2),
+            # a directory change the guard cannot pin (a stack rotation, a pushd option, -P or set -P, a ..
+            # across a link, a CDPATH or cdable_vars lookup) leaves the directory unknown, and a relative sink is
+            # also judged from each directory the change may reach: each case denies, and its flip (the same
+            # shape with the change pinned, or with a sink that reaches nothing registered) allows or notes
+            ("(gb-cd1) pushd +1 rotates back to the session repo, so a relative GEN.md append denies", "deny",
+             "pushd sub && pushd +1 && echo x > GEN.md", gcs),
+            ("(gb-cd1-flip) without the rotation the pushd is certain and lands in sub/", "allow",
+             "pushd sub && echo x > GEN.md", gcs),
+            ("(gb-cd1-note) a rotation then a sink no reachable directory registers notes", "allow-note",
+             "pushd sub && pushd +1 && echo x > notes.txt", gcs),
+            ("(gb-cd2) cd -P resolves .. physically, into the sibling repo, so its OTHER.md denies", "deny",
+             "cd -P d/l/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd2-flip) cd -P through no link reads the same physically, so it is certain", "allow",
+             "cd -P sub/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd3) a CDPATH prefix looks the operand up in the sibling repo, into its ogen/ tree", "deny",
+             "CDPATH=" + gct + " cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd3-flip) a ./ operand is never looked up in CDPATH", "allow",
+             "CDPATH=" + gct + " cd ./ogen && echo x > b.txt", gcs),
+            ("(gb-cd4) pushd -n moves only the stack, so a relative GEN.md append denies", "deny",
+             "pushd -n sub && echo x > GEN.md", gcs),
+            ("(gb-cd4-flip) pushd -n then a sink no reachable directory registers notes", "allow-note",
+             "pushd -n sub && echo x > notes.txt", gcs),
+            ("(gb-cd5) a .. across a link falls back to the physical path when the lexical one is absent",
+             "deny", "cd d/l/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd5-flip) a .. across no link reads the same both ways, so it is certain", "allow",
+             "cd sub/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd6) set -P makes a later cd physical", "deny", "set -P && cd d/l/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd6-flip) set -P then a cd through no link is certain", "allow",
+             "set -P && cd sub/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd7) set -o physical makes a later cd physical", "deny",
+             "set -o physical; cd d/l/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd7-flip) set -o physical then a cd through no link is certain", "allow",
+             "set -o physical; cd sub/.. && echo x > OTHER.md", gcs),
+            ("(gb-cd8) a CDPATH assignment segment steers a later cd", "deny",
+             "CDPATH=" + gct + "; cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd8-flip) the same with a ./ operand", "allow", "CDPATH=" + gct + "; cd ./ogen && echo x > b.txt",
+             gcs),
+            ("(gb-cd9) an exported CDPATH steers a later cd", "deny",
+             "export CDPATH=" + gct + " && cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd9-flip) the same with a ./ operand", "allow",
+             "export CDPATH=" + gct + " && cd ./ogen && echo x > b.txt", gcs),
+            ("(gb-cd10) cdable_vars puts a variable value in place of the operand", "deny",
+             "shopt -s cdable_vars; ogen=" + gct + "/ogen; cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd10-flip) the same assignment without cdable_vars is no lookup", "allow",
+             "ogen=" + gct + "/ogen; cd ogen && echo x > b.txt", gcs),
+            ("(gb-cd11) after cd -P the directory is physical, so a later cd .. leaves the sibling repo's sub/",
+             "deny", "cd -P d/l && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd11-flip) cd -P into no link, then cd .., is certain", "allow",
+             "cd -P sub && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd12) a later ../ogen from a linked directory falls back to the physical path", "deny",
+             "cd d/l && cd ../ogen && echo x > b.txt", gcs),
+            ("(gb-cd12-flip) the same from a directory that is no link is certain", "allow",
+             "cd sub && cd ../ogen && echo x > b.txt", gcs),
+            ("(gb-cd13) cd -P lands physically inside the registered ogen/ tree", "deny",
+             "cd -P d/l2/.. && echo x > b.txt", gcs),
+            ("(gb-cd13-flip) cd -P landing outside every registered tree notes", "allow-note",
+             "cd -P d/l/.. && echo x > b.txt", gcs),
+            ("(gb-cd14) pushd falls back across a link as cd does", "deny",
+             "pushd d/l/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd14-flip) pushd across no link is certain", "allow", "pushd sub/../ogen && echo x > b.txt", gcs),
+            ("(gb-cd15) a CDPATH prefix steers pushd as it does cd", "deny",
+             "CDPATH=" + gct + " pushd ogen && echo x > b.txt", gcs),
+            ("(gb-cd15-flip) the same with a ./ operand", "allow", "CDPATH=" + gct + " pushd ./ogen && echo x > b.txt",
+             gcs),
+            ("(gb-cd16) a rotation may return to a repository pushed earlier, so its OTHER.md denies", "deny",
+             "pushd " + gct + " && pushd " + gcs + " && pushd +1 && echo x > OTHER.md", gcs),
+            ("(gb-cd16-flip) without the rotation the last pushd is certain", "allow",
+             "pushd " + gct + " && pushd " + gcs + " && echo x > OTHER.md", gcs),
+            ("(gb-cd17) a .. across a link is judged from both readings even where the shell takes the lexical one "
+             "(a disclosed over-denial)", "deny", "cd d/l && cd .. && echo x > OTHER.md", gcs),
+            ("(gb-cd18) env cd runs a child process that never moves the shell, so GEN.md is judged where it was",
+             "deny", "env cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd18-flip) command cd is the builtin and moves the shell", "allow",
+             "command cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd19) a time program spelled as a path runs cd as a child too", "deny",
+             "/usr/bin/time cd " + gct + " && echo x > GEN.md", gcs),
+            ("(gb-cd19-flip) the time keyword keeps cd the builtin", "allow",
+             "time cd " + gct + " && echo x > GEN.md", gcs),
             # the cannot-evaluate posture (decision d): an uncleared write denies on a registered name, notes otherwise
             ("(gb-m1) an opaque redirect naming nothing notes", "allow-note", "echo x > \"$F\"", gr),
             ("(gb-m2) an opaque redirect in a command naming GEN.md denies", "deny", "F=GEN.md; echo x > \"$F\"", gr),
@@ -23741,6 +23842,17 @@ def _main_isolated(monitor):
                     "echo x > f1; echo x > f2; echo x > f3", gr2)
         finally:
             aiqt_hooks._GENSRC_MAX_PATHS = _gb_real_paths
+        # (gb-cd-env*) a CDPATH this process inherits (the one the shell is assumed to inherit too) steers a bare
+        # relative cd as a spelled one does; a ./ operand is never looked up, and with no CDPATH the cd is certain.
+        try:
+            os.environ["CDPATH"] = gct
+            bexpect("(gb-cd-env1) an inherited CDPATH steers cd ogen into the sibling repo's ogen/ tree", "deny",
+                    "cd ogen && echo x > b.txt", gcs)
+            bexpect("(gb-cd-env1-flip) an inherited CDPATH never looks up a ./ operand", "allow",
+                    "cd ./ogen && echo x > b.txt", gcs)
+        finally:
+            os.environ.pop("CDPATH", None)
+        bexpect("(gb-cd-env2) with no CDPATH the same cd is certain", "allow", "cd ogen && echo x > b.txt", gcs)
         # (gb-01-names) the incident deny names the source and the regenerate command; (gb-s2-names) the
         # malformed-registry deny names the registry; (gb-g1-names) the restore note names the regenerate command.
         _gb_why = breason("printf x >> {gr}/GEN.md", gr)
@@ -23755,6 +23867,11 @@ def _main_isolated(monitor):
         if "python3 tools/gen_x.py" not in str((_gb_obj or {}).get("systemMessage")):
             failures.append("(gb-g1-names) the restore note must name the regenerate command, got {!r}"
                             .format(_gb_obj))
+        # (gb-cd2-names) a sink judged from a directory an uncertain change may reach names that directory.
+        _gb_why = breason("cd -P d/l/.. && echo x > OTHER.md", gcs)
+        if "judged from {}, a directory an uncertain cd".format(gct) not in _gb_why:
+            failures.append("(gb-cd2-names) the deny must name the directory it judged the sink from, got {!r}"
+                            .format(_gb_why))
         # (gb-f*) fail-closed inputs: a Bash payload whose command cannot be read, and a fault inside the
         # detector, deny (the detector never lets an unread command through).
         for _gb_n, _gb_input in enumerate(({"command": None}, {"command": ""}, {"command": 7}, {}, "not-a-dict")):
