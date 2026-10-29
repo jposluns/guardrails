@@ -11,11 +11,12 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py and tools/check_rule_placement.py; the constant
-     and both functions) and in the hooks dispatcher and its generated plugin copy (the constant and the probe)
-     are each defined once at the top level and AST-identical (ast.dump, docstrings included) to the canonical
-     text, and each is bound nowhere else in the module (_binding_count: no import, assignment, global or other
-     binding of the name besides its copy), so a call by that name reaches the copy.
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/check_rule_placement.py and
+     tools/check_verifier_delivery.py; the constant and both functions) and in the hooks dispatcher and its
+     generated plugin copy (the constant and the probe) are each defined once at the top level and AST-identical
+     (ast.dump, docstrings included) to the canonical text, and each is bound nowhere else in the module
+     (_binding_count: no import, assignment, global or other binding of the name besides its copy), so a call by
+     that name reaches the copy.
   3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit); for each REPORT_ENTRY_NAMES entry
@@ -214,7 +215,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"),
-              ("tools/check_rule_placement.py", "check_rule_placement.py"))
+              ("tools/check_rule_placement.py", "check_rule_placement.py"),
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
